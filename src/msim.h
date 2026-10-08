@@ -143,6 +143,9 @@ typedef struct {
     int         *ai_focus;       /* per actor: the attacker it turned on (0x10012520): -1 the player, -2 none */
     int         *ai_who;
     int         *powered_down;   /* per actor: shut down by a rest / hold node (states 10 / 11, mech +0xa0 |= 3) */
+    int          sd_at_once;     /* the DOS rule for input +0x43 (self-destruct): destroyed at once (MW2.EXE 0x27785 ->
+                                    0x265f0); else the 3D editions' state 7, 0x16a ticks first (0x1001a180) */
+    int32_t     *sd_at;          /* per actor: the self-destruct's time (sim ms; 0 none) */
     int         *seen_node;      /* per actor: the star's node last applied (0x10014520 runs on a change) */         /* per actor: whom it attacks (state 3), -1 the player, -2 none */    /* PLNT payload +0x38 == 0: explosions may take the scene light (0x1003de48 -> DAT_1025a6a8) */
     float       *centre_h;       /* per actor: centre above the feet, cm (MGEO int[0]: the climbable rise) */
     float        player_centre_h;
@@ -261,6 +264,16 @@ int  msim_can_step(const msim *s, float x0, float z0, float x, float z, float y)
  * n (from its centre toward p1, unit length), its centre c, r1 + r2 (*rr) and its velocity ov (cm/tick). */
 int  msim_unit_contact(const msim *s, int self, const float p0[3], const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
 int  msim_can_step_hr(const msim *s, float x0, float z0, float x, float z, float y, float H, float R);   /* H centre height, R contact radius (MGEO) */
+/* the same sphere test without the closing rule, against unit `other` only (-1 the player): is p1 inside its sphere?
+ * (the engine's push-out of a unit set down inside another, 0x1000ba20) */
+int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
+/* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr with the surface normal n (engine 0x1000b5e0 on a world hit,
+ * then 0x10019310's second try): the unit ends a quarter of the untravelled distance off the touching point along the
+ * move reflected by the surface, or stays if that is refused too; *speed (cm/s along heading_deg, signed) becomes the
+ * reflected velocity x -0.25 (x -0.5 when it stayed), along the heading. Returns 1 when it stayed. */
+void msim_block_normal(float n[3]);   /* the normal of the surface that refused the last msim_can_step_hr move */
+int  msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n[3],
+                       float heading_deg, float *speed);
 /* Inside a type 1 obstacle's XZ box (walls, buildings: engine 0x1000d520, any height)? n = its face normal. */
 int  msim_wall_at(const msim *s, float x, float z, float n[3]);
 /* the living armed enemy closest to the aim direction (degrees, game yaw) within
@@ -272,5 +285,9 @@ int  msim_aim_target(const msim *s, float aim_yaw, float cone, float *distance);
  * else 1; drive 0 = not up / immobile (c[10] cleared); slow: a walk key flagged 0x10 has run (servo T 90.5 ticks, else
  * 36.2). top = full-throttle speed, cm/s */
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks);
+/* a mech's full-throttle speed c[0x22] / 64 (cm/s) on a planet of gravity_g, in DOS MW2.EXE's integer steps */
+float msim_top_speed(int walk_mp, float gravity_g);
+/* the player's throttle preset n (0 = STOP .. 9 = FULL) as a fraction of full: DOS n x 113 / 0x400 */
+float msim_throttle_preset(int n);
 
 #endif

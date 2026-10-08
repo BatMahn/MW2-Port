@@ -303,8 +303,10 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         s->planet = pl;
         /* top speed falls with the planet's gravity: DOSBox, the Timber Wolf at full throttle reads 75 kph on JACK (1.1 g)
          * and 90 on YELL (0.9 g) - YELL timed by its nav range: 34.6 m per 2.135 s = 58.3 km/h; both fit walk MP x
-         * 300 cm/s / g (54 / 1.1 = 49, 54 / 0.9 = 60). Engine 0x100190d0: controller +0x88 /= g x 0.0296 x 33.784. */
-        for (i = 0; i < count; i++) actors[i].speed /= pl.gravity_g;
+         * 300 cm/s / g (54 / 1.1 = 49, 54 / 0.9 = 60). Engine 0x100190d0: controller +0x88 /= g x 0.0296 x 33.784; DOS
+         * in integers (msim_top_speed) */
+        for (i = 0; i < count; i++)
+            if (actors[i].speed > 0) actors[i].speed = msim_top_speed((int)lrintf(actors[i].speed / 300.0f), pl.gravity_g);
     }
     s->units = calloc((size_t)(count > 0 ? count : 1), sizeof *s->units);
     /* the start-up (engine 0x1001a180 state 0, 0x1001ab71): every mech, the player's too, comes online after
@@ -314,6 +316,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->ai_who = malloc((size_t)(count > 0 ? count : 1) * sizeof *s->ai_who);
     for (i = 0; s->ai_focus && s->ai_who && i < count; i++) s->ai_focus[i] = s->ai_who[i] = -2;
     s->powered_down = calloc((size_t)(count > 0 ? count : 1), sizeof *s->powered_down);
+    s->sd_at = calloc((size_t)(count > 0 ? count : 1), sizeof *s->sd_at);
     s->seen_node = malloc((size_t)(count > 0 ? count : 1) * sizeof *s->seen_node);
     for (i = 0; s->seen_node && i < count; i++) s->seen_node[i] = -2;
     for (i = 0; s->online_at && i < count; i++) s->online_at[i] = (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
@@ -672,12 +675,13 @@ static int c7_pick(const msim *s, int i, float *nearest)
 /* group target sharing (0x10011c50 -> 0x10014ba0 -> 0x10014920): a sighting posted to the group's leader (condition 7
  * with its target, +0x144 / +0x146) sends ONE member at the target per event - not the leader, not commanded
  * (+0x152 & 3), not in state 2 / 3, with weapons left (0x10020880) and the engage flag +0x154 set; the leader only if no
- * member qualifies. The engine takes the member whose +0x150 (a loadout rating, 0x10041c80 - not decoded) is closest to
- * the target's: the first in lance order here. leader: actor index, -1 = the player leads (the player's star). */
+ * member qualifies. The member is the one whose loadout rating +0x150 (combat_mek_rating, 0x10041c80) is closest to
+ * the target's (|difference| as ints of the two u16s; the first in lance order on a tie; a difference of 0x7fff or more
+ * never wins). leader: actor index, -1 = the player leads (the player's star). */
 static int assign_ok(const msim *s, int q)
 {
     const ai_mind *m = &s->minds[q];
-    if (!s->armed[q] || s->units[q].destroyed || (s->cmd && s->cmd[q]) || m->fled) return 0;
+    if (!s->armed[q] || s->units[q].destroyed || (s->cmd && s->cmd[q]) || m->fled || m->lock_bits) return 0;
     if (m->state == AI_TARGET || m->state == AI_ATTACK || (s->engage && !s->engage[q])) return 0;
     if (combat_max_range(&s->units[q]) <= 0) return 0;
     return ai_allows(&s->ai, m, AI_TARGET);   /* 0x10013e00 -> 0x10013d90 */
@@ -685,16 +689,119 @@ static int assign_ok(const msim *s, int q)
 static void ai_wake(msim *s, int i);
 static void group_assign(msim *s, int table, int leader, int who)
 {
-    int q, pick = -1;
-    for (q = 0; q < s->actor_count && pick < 0; q++) {
+    int q, pick = -1, best = 0x7fff;
+    int want = who == -1 ? s->player_unit.rating : who >= 0 && who < s->actor_count ? s->units[who].rating : 0;
+    for (q = 0; q < s->actor_count; q++) {
+        int d;
         if (s->actors[q].table != table || q == leader || (leader < 0 && !s->actors[q].friendly)) continue;
-        if (assign_ok(s, q)) pick = q;
+        if (!assign_ok(s, q)) continue;
+        d = abs((int)s->units[q].rating - want);
+        if (d < best) { best = d; pick = q; }
     }
     if (pick < 0 && leader >= 0 && assign_ok(s, leader)) pick = leader;
     if (pick < 0) return;
     {
         ai_mind *m = &s->minds[pick];
         m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = who;
+        m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
+        ai_wake(s, pick);
+    }
+}
+
+/* the node's targets (0x10014ba0), each tick the group's leader runs it for its star - never the player's star: the node
+ * kind (+0x3c) must be non-zero and not 0x10 / 0x200 / 0x400 / 0x800 (mask 0xe10). The node's attached targets
+ * (+0x128 count, +0x129 ids; cb_targets' order and class test) are taken in order; a target is skipped once done
+ * (0x10013c40: kinds 1 / 2 / 4 / 0x1000 destroyed, 8 / 0x100 inspected / visited) or once covered: the node's count
+ * (+0xb3; 0 = every member, leader included, not powered down) of members already on it (+0x14e) in the kind's state
+ * (1 / 2: 2 or 3; 4: 7; 8: 2; 0x20 / 0x100 / 0x400: 8; 0x1000: any; 0x2000: 4). The first target left gets ONE member:
+ * the first in lance order, not the leader, idle (0) or following (5) with weapons left (0x10020880); else the leader if
+ * it idles with weapons; it enters the kind's state on the target (0x10013d40 -> 0x10013e00; while it has a state pushed
+ * (+0x140), that pushed state is replaced instead) and takes the node's lock bits (0x100146e0) | 0x40 in +0x152.
+ * Applied: kinds 1 / 2 / 8 on a unit (state 2 on it) and kinds 1 / 2 on a thing (state 2; the port's AI then fights the
+ * enemy it finds, as before - it can't aim at a thing). Kinds 4 (state 7, guard), 0x100 / 0x20 (8, go to) and 0x2000
+ * (4) and kind 8 on a thing are counted but not applied (the port's AI has no such tasks for enemy stars). */
+static int node_target_list(const msim *s, const mtbl_node *n, int *code, int max)
+{
+    int i, c = 0;
+    const char *t = n->target;
+    if (!t[0] || strcasecmp(t, "NULL") == 0) return 0;
+    if (strcasecmp(t, "UserStar") == 0 && (class_widen(s->player_class) & n->kind) && c < max) code[c++] = 0x20000;
+    for (i = 0; i < s->actor_count && c < max; i++)
+        if (strcasecmp(s->actors[i].group, t) == 0 && (class_widen(s->actors[i].obj_class) & n->kind)) code[c++] = 0x20000 | (i + 1);
+    for (i = 0; i < s->nav_count && c < max; i++)
+        if (strcasecmp(s->navs[i].name, t) == 0 && (class_widen(s->navs[i].cls) & n->kind)) code[c++] = 0x10000 | i;
+    for (i = 0; s->world && i < s->bld_count && c < max; i++)
+        if (strcasecmp(s->world->parts[s->bld[i].intact].rec, t) == 0 && (class_widen((unsigned)s->bld[i].type) & n->kind)) code[c++] = 0x40000 | i;
+    return c;
+}
+static int node_target_done(msim *s, int table, uint32_t kind, int code)   /* 0x10013c40 */
+{
+    int type = code >> 16, idx = code & 0xffff;
+    if (type == 2) idx--;   /* -1 = the player */
+    if (kind == 1 || kind == 2 || kind == 4 || kind == 0x1000) return type == 1 ? 0 : tgt_test(s, table, MTBL_K_DESTROY2, type, idx);
+    if (kind == 8 || kind == 0x100) return tgt_test(s, table, MTBL_K_SCAN, type, idx);
+    return 1;   /* other kinds: the engine's test bit is uninitialised (no enemy star's node uses them) */
+}
+static int node_state(uint32_t kind, int st)   /* the kind's state test in the count (0x10014ba0) */
+{
+    switch (kind) {
+    case 1: case 2: return st == AI_TARGET || st == AI_ATTACK;
+    case 4: return st == AI_PATROL;
+    case 8: return st == AI_TARGET;
+    case 0x20: case 0x100: case 0x200: case 0x400: return st == AI_GODIRECT;
+    case 0x1000: return 1;
+    case 0x2000: return st == AI_FLEE;
+    default: return 0;
+    }
+}
+static int on_target(const msim *s, int q, int code)   /* +0x14e == the target */
+{
+    const ai_mind *m = &s->minds[q];
+    if ((code >> 16) == 2) return (m->state == AI_TARGET || m->state == AI_ATTACK) ? m->tgt == (code & 0xffff) - 1 : m->node_tgt == code;
+    return m->node_tgt == code;
+}
+static void node_assign(msim *s, int table, int leader)
+{
+    int cur = table < s->logic.table_count ? s->logic.current[table] : -1;
+    const mtbl_node *n;
+    int code[40], nt, members = 0, q, k, pick = -1, tcode = 0;
+    uint32_t kind;
+    if (cur < 0) return;
+    n = &s->logic.tables[table].nodes[cur];
+    kind = n->kind;
+    if (kind == 0 || (kind & 0xe10)) return;
+    for (q = 0; q < s->actor_count; q++)
+        if (s->actors[q].table == table && s->armed[q] && !s->units[q].destroyed && !(s->powered_down && s->powered_down[q])) members++;
+    if (!members) return;
+    nt = node_target_list(s, n, code, 40);
+    for (k = 0; k < nt && !tcode; k++) {
+        int left = n->need ? n->need : members;
+        if (node_target_done(s, table, kind, code[k])) continue;
+        for (q = 0; q < s->actor_count && left; q++) {
+            if (s->actors[q].table != table || !s->armed[q] || s->units[q].destroyed || (s->powered_down && s->powered_down[q])) continue;
+            if (on_target(s, q, code[k]) && node_state(kind, s->minds[q].state)) left--;
+        }
+        if (left) tcode = code[k];
+    }
+    if (!tcode) return;
+    for (q = 0; q < s->actor_count && pick < 0; q++) {
+        const ai_mind *m = &s->minds[q];
+        if (q == leader || s->actors[q].table != table || !s->armed[q] || s->units[q].destroyed || (s->powered_down && s->powered_down[q])) continue;
+        if (m->state == AI_IDLE || (m->state == AI_FOLLOW && !combat_out_of_weapons(&s->units[q]))) pick = q;
+    }
+    if (pick < 0) {
+        if (s->minds[leader].state != AI_IDLE || combat_out_of_weapons(&s->units[leader])) return;
+        pick = leader;
+    }
+    {
+        ai_mind *m = &s->minds[pick];
+        int unit = (tcode >> 16) == 2, thing = (tcode >> 16) == 4;
+        int apply = ((kind == 1 || kind == 2) && (unit || thing)) || (kind == 8 && unit);
+        if (!apply) return;
+        m->lock_bits |= n->lock == 1 ? 2 : n->lock == 2 ? 1 : 0;
+        m->node_tgt = tcode;
+        if (m->counter) { m->prev_state = AI_TARGET; return; }   /* the pushed state is replaced (0x10013d40) */
+        m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = unit ? (tcode & 0xffff) - 1 : -2;
         m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
         ai_wake(s, pick);
     }
@@ -903,6 +1010,27 @@ static void paths_step(msim *s)
     mov_refresh(s);
 }
 
+/* 0x100174f0(c, 0) -> 0x10016280 with the unit itself as the killer (+0x114 = its own id): the ordinary death (state 4,
+ * the death sequence: wrecks), the destroyed counters (MW2CAR.CFG, as for a kill: units destroyed, a wingman lost),
+ * no kill for the player */
+static void self_destruct(msim *s, int i)
+{
+    combat_unit *u = &s->units[i];
+    char line[128];
+    if (u->destroyed) return;
+    u->destroyed = 1;
+    {
+        static const int KILLED[3] = {0x1e, 0x20, 0x22};
+        int side = s->actors[i].friendly ? 2 : s->actors[i].alliance == 2 ? 1 : 0;
+        car_inc(s, KILLED[side]);
+        if (side == 2) car_inc(s, 0x34);
+    }
+    if (s->log) {
+        snprintf(line, sizeof line, "%6.1fs %s (%s) self-destructs - DESTROYED", (double)s->now / 1000.0, s->actors[i].name, s->actors[i].group);
+        s->log(s->log_user, line);
+    }
+}
+
 void msim_step(msim *s, int32_t dt_ms)
 {
     if (dt_ms <= 0) return;   /* a sub-millisecond frame: its time is carried to the next one (glview sim_ms) */
@@ -971,6 +1099,16 @@ void msim_step(msim *s, int32_t dt_ms)
      * otherwise DEFEND), leader or follower version. */
     if (s->star_post && s->minds && s->engage && s->cmd) group_assign(s, 0, -1, s->star_post - 2);   /* the player leads: its tick */
     s->star_post = 0;
+    if (s->minds && s->ai_ok && s->seen_node) {   /* 0x10014ba0 in each leader's tick (0x10011c50), not the player's star */
+        int t, k, n = (int)(dt * 182.0f + 0.5f);
+        for (t = 0; t < s->logic.table_count; t++) {
+            world_actor *l = group_leader(s, t);
+            int li = l ? (int)(l - s->actors) : -1, cur = s->logic.current[t];
+            if (li < 0 || (l->friendly && t == 0) || !s->armed[li] || s->units[li].destroyed) continue;
+            if (s->seen_node[li] != cur) continue;   /* its node change (0x10014520) is applied first, below */
+            for (k = 0; k < (n > 0 ? n : 1); k++) node_assign(s, t, li);
+        }
+    }
     for (i = 0; s->minds && s->ai_ok && i < s->actor_count; i++) {
         world_actor *ac = &s->actors[i];
         ai_mind *m = &s->minds[i];
@@ -1000,14 +1138,14 @@ void msim_step(msim *s, int32_t dt_ms)
         }
         if (!in_star && s->seen_node && cur != s->seen_node[i]) {   /* 0x10014520 on the star's node change */
             uint32_t kn = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].kind : 0;
-            int destroy = (kn & 0xbu) != 0;   /* kinds 1 / 2 / 8 -> state 2 */
+            int lk = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].lock : 0;
             s->seen_node[i] = cur;
+            m->lock_bits = lk == 1 ? 2 : lk == 2 ? 1 : 0;   /* +0x152 = (+0x152 & ~3) | 0x100146e0(node +0xb7) | 0x40 */
             if (kn & 0x400) { m->state = AI_REST; m->target = 0; ai_power_down(s, i); }
             else if (kn & (0x800 | 0x10)) { m->state = AI_SHUTDOWN; m->target = 0; ai_power_down(s, i); }
-            else {
+            else {   /* the leader idles, the members follow; the node's targets come one a tick (node_assign) */
                 ai_wake(s, i);
-                if (!destroy) { m->state = ac->leader ? AI_IDLE : AI_FOLLOW; m->target = 0; }
-                else m->progs[1] = -99;   /* the destroy assignment below runs again */
+                m->state = ac->leader ? AI_IDLE : AI_FOLLOW; m->target = 0; m->node_tgt = 0;
             }
         }
         if (m->progs[1] != prog) {
@@ -1015,24 +1153,9 @@ void msim_step(msim *s, int32_t dt_ms)
             /* engine 0x10014520 on a node change: kind 0x400 -> rest (10), 0x800 -> shutdown (11); otherwise the leader
              * idles (0) and the members follow (5). The player's star stops there - its mates stay in formation on the
              * player (node targets are never assigned to it; the bug where JACK's mates walked off to en01Star at the
-             * start). Other stars then get the node's targets (0x10014ba0: one member a tick until the node's count is
-             * covered, 0 = all) - here all at once, the target being the enemy pick_enemy finds. */
+             * start). Other stars then get the node's targets one member a tick (0x10014ba0, node_assign). */
             uint32_t kk = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].kind : 0;
             if (in_star) { if (!(s->cmd && s->cmd[i]) && m->state != AI_REST && m->state != AI_SHUTDOWN) { m->state = AI_FOLLOW; m->target = 0; } }
-            else if ((prog == AIP_LDESTROY || prog == AIP_FDESTROY) && !s->player_unit.destroyed) {
-                /* 0x10014520 then 0x10014ba0: the leader idles (0), the members follow (5); the node's targets are then
-                 * handed out - members first (lance order), the leader last - until the node's count (L-4, 0 = all) is
-                 * covered. Those beyond the count keep following */
-                int need = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].need : 0, rank = 0, q2, members = 0;
-                for (q2 = 0; q2 < s->actor_count; q2++) {
-                    if (s->actors[q2].table != ac->table || !s->armed[q2] || s->units[q2].destroyed) continue;
-                    if (!s->actors[q2].leader) members++;
-                    if (q2 < i && !s->actors[q2].leader && !ac->leader) rank++;
-                }
-                if (ac->leader) rank = members;
-                if (need <= 0 || rank < need) { m->state = AI_TARGET; m->target = 1; }
-                else { m->state = ac->leader ? AI_IDLE : AI_FOLLOW; m->target = 0; }
-            }
             (void)kk;   /* 0x400 / 0x800 power-down (states 10 / 11) not applied yet: the port's AI has no rest / wake path */
         }
         memset(&v, 0, sizeof v);
@@ -1055,7 +1178,7 @@ void msim_step(msim *s, int32_t dt_ms)
         /* the attacker reaction (0x10012520, at the start of every rule pass unless lock bit 1): a live unit of another
          * alliance attacking this one (state 3 with this one as its target - the player only while firing at an
          * alliance-1 target, 0x10011c50 -> 0x10014110) makes this one target it */
-        if (s->ai_focus && s->ai_who && !(s->cmd && s->cmd[i]) && !(cur >= 0 && s->logic.tables[ac->table].nodes[cur].lock == 2)) {
+        if (s->ai_focus && s->ai_who && !(s->cmd && s->cmd[i]) && !(in_star ? cur >= 0 && s->logic.tables[ac->table].nodes[cur].lock == 2 : (m->lock_bits & 1))) {
             int self_al = ac->friendly ? 0 : ac->alliance, att = -2, q3;
             int pt = s->player_target;
             if (s->player_attacks && pt == i && self_al == 1 && !s->player_unit.destroyed) att = -1;
@@ -1079,7 +1202,7 @@ void msim_step(msim *s, int32_t dt_ms)
             int c7 = c7_pick(s, i, &v.c7_nearest);
             v.c7_ok = c7 != -2;
             m->post_who = c7;
-            v.commanded = s->cmd && s->cmd[i] != 0;
+            v.commanded = (s->cmd && s->cmd[i] != 0) || m->lock_bits;
             v.unit_led = !in_star;
             if (m->nav_ok) {
                 float nx = m->nav_x - (float)ac->mech.origin[0], nz = m->nav_z - (float)ac->mech.origin[2];
@@ -1093,8 +1216,9 @@ void msim_step(msim *s, int32_t dt_ms)
                 float lx = s->player[0] - (float)ac->mech.origin[0], lz = s->player[2] - (float)ac->mech.origin[2];
                 v.leader_ok = 1; v.leader_dist = sqrtf(lx * lx + lz * lz);
             }
-            v.contact = (s->bump_with && s->bump_with[i]) || s->units[i].blocked;   /* controller +0xa4 */
+            v.contact = (s->bump_with && s->bump_with[i] > 0) || s->units[i].blocked;   /* controller +0xa4 (cleared on landing on a unit) */
             v.out_of_weapons = combat_out_of_weapons(&s->units[i]);                  /* 0x10020880 */
+            v.moving = ac->speed > 0 && !fixed_unit(ac);   /* controller +0x88: the top speed (0x10041410; 0 for turrets, 0x100219c9) */
         }
         v.can_jump = s->units[i].jets > 0 && !s->units[i].no_jump && s->units[i].jet_fuel > 5.0f;
         v.height = s->units[i].y - s->units[i].ground;   /* above the terrain (ai.h): y is absolute - on raised ground the
@@ -1227,6 +1351,22 @@ void msim_step(msim *s, int32_t dt_ms)
                                                                                                * (no walking, turning, jets, dodges or fire) */
             m->throttle = 0; m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_side = 0; m->wants_fire = 0; m->reverse = 0;
         }
+        if (s->sd_at && m->self_destruct) {
+            /* input +0x43 (manoeuvre 6's charge ended within 20 m, 0x1001fb90). 3D editions (0x1001a180): taken only with
+             * the mech up (controller state 2) and cleared: state 7 with a deadline 0x16a ticks on - no fire meanwhile
+             * (0x100437a0 runs in state 2 only; it has no weapons left anyway), the AI and the legs carry on; then
+             * 0x100174f0(c, 0). The DOS game (0x27785 -> 0x265f0; its charge 0x2d4a0) destroys it at once. No message
+             * or sound for an AI unit (message 4 is the player's) */
+            int up = !s->units[i].shutdown && !(s->online_at && s->now < s->online_at[i]);
+            if (s->log && (s->sd_at_once || (up && !s->sd_at[i]))) {
+                char line[128];
+                snprintf(line, sizeof line, "%6.1fs %s (%s) self-destruct (input +0x43)", (double)s->now / 1000.0, ac->name, ac->group);
+                s->log(s->log_user, line);
+            }
+            if (s->sd_at_once) { m->self_destruct = 0; self_destruct(s, i); }
+            else if (up) { m->self_destruct = 0; if (!s->sd_at[i]) s->sd_at[i] = s->now + 0x16a * 1000 / 182; }
+        }
+        if (s->sd_at && s->sd_at[i] && s->now > s->sd_at[i]) { s->sd_at[i] = 0; self_destruct(s, i); }
         if (s->ai_who) s->ai_who[i] = m->state == AI_ATTACK && v.has_enemy ? enemy_who : -2;
         if (s->cmd && s->cmd[i] == MSIM_CMD_SHUTDOWN) { m->state = AI_SHUTDOWN; m->throttle = 0; m->turn = 0; m->wants_fire = 0; m->target = 0; }
         /* action 4 (0x100141e0 -> 0x10014270): (condition, the pick) to the leader - itself when it leads - if it has none
@@ -1287,8 +1427,8 @@ void msim_step(msim *s, int32_t dt_ms)
                 float nx = (float)ac->mech.origin[0] + sinf(h) * spd * dt, nz = (float)ac->mech.origin[2] + cosf(h) * spd * dt;
                 {   /* mech-mech contact, in 3D (engine 0x1000b5e0 -> 0x1000ba20 spheres, 0x10019310): the unit touched, the
                      * normal from its centre to this one's, the relative speed. On top of it (normal y above 0.7071) with
-                     * the feet within 10 m of the terrain: landed - no damage to either, the mover set down beside it (the
-                     * engine stands it on the terrain there and pushes it out of the sphere the next tick); else this one
+                     * the feet within 10 m of the terrain: landed - no damage to either, the mover stood on the terrain at its
+                     * projection onto the sphere and pushed out of the sphere by the next frame's move; else this one
                      * takes collision damage by the normal (0x1000c160 / 0x1000c1f0: legs from below, head from above x
                      * the tonnage ratio, else arm / torso) on every contact tick - only the mover: the other takes damage
                      * only from its own movement's contacts (0x10019d77) - and a clang once per contact (on_sound -1). Airborne, it bounces off along the normal at half the relative speed (0x1000ba20
@@ -1298,7 +1438,12 @@ void msim_step(msim *s, int32_t dt_ms)
                     float vy = air ? s->units[i].vy : 0.0f;
                     float p0[3] = {x0, s->units[i].y + ch, z0}, p1[3] = {nx, s->units[i].y + ch + vy * ticks, nz};
                     float n[3], c[3], rr = 0, ov[3], sv[3] = {sinf(h) * spd / 182.0f, vy, cosf(h) * spd / 182.0f};
-                    int hit = msim_unit_contact(s, i, p0, p1, n, c, &rr, ov);
+                    int hit = msim_unit_contact(s, i, p0, p1, n, c, &rr, ov), pushout = 0;
+                    /* set down inside the sphere of the unit it landed on (bump_with < 0): this frame's move ends inside it
+                     * whatever its direction - the engine's push-out (0x1000ba20 tests only that the end is inside) */
+                    if (hit == -2 && s->bump_with && s->bump_with[i] < 0 && msim_unit_inside(s, i, -s->bump_with[i] - 2, p1, n, c, &rr, ov)) {
+                        hit = -s->bump_with[i] - 2; pushout = 1;
+                    }
                     if (hit != -2) {
                         /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
                          * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
@@ -1309,15 +1454,19 @@ void msim_step(msim *s, int32_t dt_ms)
                         float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py);
                         if (getenv("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
                         if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
-                            float dx = hl > 1e-3f ? n[0] / hl : -sinf(h), dz = hl > 1e-3f ? n[2] / hl : -cosf(h);
-                            float rh = rr, gx, gz;
-                            gx = c[0] + dx * (rh + 1.0f); gz = c[2] + dz * (rh + 1.0f);
+                            /* the engine: the position projected onto the sphere (0x1000ba20), the feet taken as 1 cm under
+                             * the terrain there (local_5c = -1) - so it stands on the terrain at that point, inside the
+                             * sphere - vy 0, the velocity n x max(1, dv / 2) across the ground, the contact count cleared;
+                             * the next frame's move pushes it out (above) */
+                            float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
+                            if (bs < 1.0f) bs = 1.0f;
+                            (void)hl;
                             ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
-                            s->units[i].ground = msim_ground(s, gx, gz, s->units[i].y);
+                            s->units[i].ground = gnd;
                             s->units[i].y = s->units[i].ground; s->units[i].vy = 0;
                             if (s->air_speed) s->air_speed[i] = 0;
-                            m->speed = 0; spd = 0;
-                            if (s->bump_with) s->bump_with[i] = hit + 2;
+                            m->speed = spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
+                            if (s->bump_with) s->bump_with[i] = -(hit + 2);
                         } else {
                             if (s->collision_damage)   /* every contact tick, the mover only (0x10019d6a -> 0x1000c160) */
                                 combat_collision_unit(&s->units[i], dv, n, ac->mech.heading + m->twist, hit == -1 ? s->player_unit.tons : s->units[hit].tons, &s->rng);
@@ -1325,7 +1474,7 @@ void msim_step(msim *s, int32_t dt_ms)
                                 if (s->on_sound && dv > 0.5f) { float p3[3] = {(x0 + c[0]) * 0.5f, s->units[i].y, (z0 + c[2]) * 0.5f}; s->on_sound(s->shot_user, -1, p3); }
                                 s->bump_with[i] = hit + 2;
                             }
-                            if (air) {   /* bounced off: out to the sphere's surface, moving away along the normal */
+                            if (air || pushout) {   /* bounced off / pushed out: to the sphere's surface, moving away along the normal */
                                 if (bs < 1.0f) bs = 1.0f;
                                 float gx = c[0] + n[0] * (rr + 1.0f), gz = c[2] + n[2] * (rr + 1.0f);
                                 ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
@@ -1335,6 +1484,7 @@ void msim_step(msim *s, int32_t dt_ms)
                                 s->units[i].vy = n[1] * bs;
                                 spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
                                 if (s->air_speed) s->air_speed[i] = spd;
+                                if (s->units[i].y <= s->units[i].ground + 1.0f) { s->units[i].vy = 0; m->speed = spd; }   /* on the ground */
                             } else {
                                 float bx = x0 - c[0], bz = z0 - c[2], bl = sqrtf(bx * bx + bz * bz);
                                 if (bl > 1.0f) { ac->mech.origin[0] += (int32_t)lrintf(bx / bl * 60.0f); ac->mech.origin[2] += (int32_t)lrintf(bz / bl * 60.0f); }
@@ -1350,10 +1500,16 @@ void msim_step(msim *s, int32_t dt_ms)
                     if ((int32_t)lrintf(nx) != ac->mech.origin[0] || (int32_t)lrintf(nz) != ac->mech.origin[2]) s->units[i].blocked = 0;
                     ac->mech.origin[0] = (int32_t)lrintf(nx);
                     ac->mech.origin[2] = (int32_t)lrintf(nz);
-                } else {   /* blocked by the terrain: collision damage at speed (engine 0x1000c3c0) */
+                } else {   /* blocked by the terrain: collision damage at the attempted speed on every contact frame (engine
+                            * 0x10019d84 -> 0x1000c3c0), the move cut back and the velocity reflected and cut to a quarter
+                            * (msim_world_impact, 0x1000b5e0) - so pressing on, the speed stays under the damage threshold */
                     float wn[3] = {g_block_n[0], g_block_n[1], g_block_n[2]};   /* the refusing surface's normal */
+                    float bx = nx, bz = nz;
                     if (s->collision_damage)   /* Combat Variables: a global switch in the engine */
                         combat_collision(&s->units[i], spd / 182.0f, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - ac->mech.heading, &s->rng);
+                    msim_world_impact(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], &bx, &bz, s->units[i].y, s->centre_h[i], s->radius[i], wn,
+                                      ac->mech.heading, &m->speed);
+                    ac->mech.origin[0] = (int32_t)lrintf(bx); ac->mech.origin[2] = (int32_t)lrintf(bz);
                     /* the contact the AI reads (+0xa4, 0x10020e00) counts whatever the Collision Damage setting: 0x1000b5e0
                      * adds one for every refused move (0x10010530 hit), a mech or a sphere in the way */
                     s->units[i].blocked = 1;
@@ -1445,7 +1601,7 @@ void msim_free(msim *s)
     free(s->wreck_until); s->wreck_until = NULL;
     free(s->twist_limit);
     free(s->minds);
-    free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
+    free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
     free(s->bld);
     free(s->inspected);
     free(s->ai_lock);
@@ -2462,6 +2618,24 @@ void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float
     *spd = drive_servo(*spd, c10, slow ? 90.5f : 36.2f, ticks);
     *vel += (*spd - *vel) * (ticks < 45.0f ? ticks / 45.0f : 1.0f);
 }
+/* DOS MW2.EXE keeps c[0x22] as an integer (cm/tick per 1/65536 of throttle over the stop level 0x400): walk MP x
+ * 0x697e98 (105.49 in 16.16) rounded (0x4cd46), then (c22 << 16) / the gravity ratio 0x957b4, truncated (0x26973); the
+ * ratio is (0x957b0 << 16) / 0x794 (0x14f67), 0x957b0 = PLNT g (16.16) x 0x794 (0.0296) rounded (PLNT handler). Full
+ * throttle (0x400 over the stop level) = c22 / 64 cm/tick. Timber Wolf (5 MP) on YELL (0.9 g): 527 -> 585 = 9.1406
+ * cm/tick (the 3Dfx DLL's floats: 9.1575) */
+float msim_top_speed(int walk_mp, float gravity_g)
+{
+    int64_t g16 = (int64_t)lrintf(gravity_g * 65536.0f), grav = (g16 * 0x794 + 0x8000) >> 16;
+    int64_t ratio = grav > 0 ? (grav << 16) / 0x794 : 65536, c22 = ((int64_t)walk_mp * 0x697e98 + 0x8000) >> 16;
+    if (ratio <= 0) ratio = 65536;
+    c22 = (c22 << 16) / ratio;
+    return (float)c22 / 64.0f * 182.0f;
+}
+/* DOS 0x4684c: THROTTLE_STOP .. _FULL (actions 0x1a + n) set the input +8 to n x 113 (16.16), so FULL is 1017 / 1024 of
+ * the 0x400 full scale - 0.68 % short; the 3Dfx DLL (0x10038133) uses n / 576 exactly. DOSBox YELLSCN1 confirms the DOS
+ * value: the Timber Wolf's FULL top reads 90 / 84 / 82 / 91 kph at headings 158 / 142 / 128 / 193 degrees, which only
+ * 1017 x 585 / 65536 = 9.078 cm/tick (59.5 km/h) gives through the readout's estimate (60 km/h gives 91 / 84 / 84 / 91) */
+float msim_throttle_preset(int n) { return (float)(n * 113) / 1024.0f; }
 float msim_ground(const msim *s, float x, float z, float y) { return msim_ground_n(s, x, z, y, NULL); }
 
 int msim_wall_at(const msim *s, float x, float z, float n[3])
@@ -2612,40 +2786,93 @@ int msim_can_step(const msim *s, float x0, float z0, float x, float z, float y)
  * which 0x1000c1f0 takes for the collision damage: normal y over cos 45 -> the legs, else a side by direction) */
 static int refuse(const float n[3]) { g_block_n[0] = n[0]; g_block_n[1] = n[1]; g_block_n[2] = n[2]; return 0; }
 /* H = the mech's centre height above its feet (MGEO int[0]), R = its contact radius (int[6]) */
+/* unit k's contact sphere (centre q, radius *r2) and velocity ov (cm/tick); 0 when it has none (destroyed) */
+static int unit_sphere(const msim *s, int k, float q[3], float *r2, float ov[3])
+{
+    if (k < 0) {
+        if (s->player_unit.destroyed) return 0;
+        q[0] = s->player[0]; q[1] = s->player_unit.y + s->player_centre_h; q[2] = s->player[2]; *r2 = s->player_radius;
+        ov[0] = s->player_vel[0]; ov[1] = s->player_vel[1]; ov[2] = s->player_vel[2];
+    } else {
+        int air;
+        float sp, hh;
+        if (s->units[k].destroyed) return 0;
+        q[0] = (float)s->actors[k].mech.origin[0]; q[1] = s->units[k].y + (s->centre_h ? s->centre_h[k] : 550.0f);
+        q[2] = (float)s->actors[k].mech.origin[2]; *r2 = s->radius ? s->radius[k] : 450.0f;
+        air = s->units[k].y > s->units[k].ground + 1.0f;
+        sp = (air && s->air_speed ? s->air_speed[k] : s->minds ? s->minds[k].speed : 0.0f) / 182.0f;
+        hh = s->actors[k].mech.heading * 3.14159265f / 180.0f;
+        ov[0] = sinf(hh) * sp; ov[1] = air ? s->units[k].vy : 0.0f; ov[2] = cosf(hh) * sp;
+    }
+    return 1;
+}
+/* the normal from q to p (unit), the engine's (0, 0, 1) for coincident centres (0x1000ba20) */
+static void contact_normal(const float p[3], const float q[3], float d, float n[3])
+{
+    if (d > 1e-3f) { n[0] = (p[0] - q[0]) / d; n[1] = (p[1] - q[1]) / d; n[2] = (p[2] - q[2]) / d; }
+    else { n[0] = 0; n[1] = 0; n[2] = 1.0f; }
+}
 int msim_unit_contact(const msim *s, int self, const float p0[3], const float p1[3], float n[3], float c[3], float *rr, float ov[3])
 {
     float r1 = self >= 0 ? (s->radius ? s->radius[self] : 450.0f) : s->player_radius, best = 1e30f;
     int k, hit = -2;
     for (k = -1; k < s->actor_count; k++) {
-        float q[3], r2, d1, d0, rs;
-        if (k == self) continue;
-        if (k < 0) {
-            if (s->player_unit.destroyed) continue;
-            q[0] = s->player[0]; q[1] = s->player_unit.y + s->player_centre_h; q[2] = s->player[2]; r2 = s->player_radius;
-        } else {
-            if (s->units[k].destroyed) continue;
-            q[0] = (float)s->actors[k].mech.origin[0]; q[1] = s->units[k].y + (s->centre_h ? s->centre_h[k] : 550.0f);
-            q[2] = (float)s->actors[k].mech.origin[2]; r2 = s->radius ? s->radius[k] : 450.0f;
-        }
+        float q[3], r2, d1, d0, rs, v[3];
+        if (k == self || !unit_sphere(s, k, q, &r2, v)) continue;
         rs = r1 + r2;
         d1 = (p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]);
         d0 = (p0[0] - q[0]) * (p0[0] - q[0]) + (p0[1] - q[1]) * (p0[1] - q[1]) + (p0[2] - q[2]) * (p0[2] - q[2]);
         if (d1 < rs * rs && d1 < d0 && d1 < best) {
-            float d = sqrtf(d1);
             best = d1; hit = k; *rr = rs;
             c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
-            if (d > 1e-3f) { n[0] = (p1[0] - q[0]) / d; n[1] = (p1[1] - q[1]) / d; n[2] = (p1[2] - q[2]) / d; }
-            else { n[0] = 0; n[1] = 0; n[2] = 1.0f; }   /* coincident centres: the engine's (0, 0, 1) */
-            if (k < 0) { ov[0] = s->player_vel[0]; ov[1] = s->player_vel[1]; ov[2] = s->player_vel[2]; }
-            else {
-                int air = s->units[k].y > s->units[k].ground + 1.0f;
-                float sp = (air && s->air_speed ? s->air_speed[k] : s->minds ? s->minds[k].speed : 0.0f) / 182.0f;
-                float hh = s->actors[k].mech.heading * 3.14159265f / 180.0f;
-                ov[0] = sinf(hh) * sp; ov[1] = air ? s->units[k].vy : 0.0f; ov[2] = cosf(hh) * sp;
-            }
+            contact_normal(p1, q, sqrtf(d1), n);
+            ov[0] = v[0]; ov[1] = v[1]; ov[2] = v[2];
         }
     }
     return hit;
+}
+int msim_unit_inside(const msim *s, int self, int other, const float p1[3], float n[3], float c[3], float *rr, float ov[3])
+{
+    float r1 = self >= 0 ? (s->radius ? s->radius[self] : 450.0f) : s->player_radius, q[3], r2, d;
+    if (other == self || other < -1 || other >= s->actor_count || !unit_sphere(s, other, q, &r2, ov)) return 0;
+    d = sqrtf((p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]));
+    if (d >= r1 + r2) return 0;   /* 0x1000ba20: dist >= r1 + r2 -> no contact */
+    *rr = r1 + r2; c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
+    contact_normal(p1, q, d, n);
+    return 1;
+}
+
+void msim_block_normal(float n[3]) { n[0] = g_block_n[0]; n[1] = g_block_n[1]; n[2] = g_block_n[2]; }
+int msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n[3],
+                      float heading_deg, float *speed)
+{
+    /* engine 0x1000b5e0, the world hit (0x10010530): the move's segment (extended by the look-ahead) is cut back to
+     * where the unit touches; d = the move's unit direction, r = d - 2 (d . n) n its reflection by the hit normal
+     * (DAT_1024b420..428); the position = that point + r x the untravelled distance x 0.25 (0x10247148), the velocity
+     * +0xf4..0xfc = r x |attempted velocity +0x100..0x108| x -0.25 (0x10247144). 0x10019310 then tries the move from
+     * where the unit stood to that position again (second 0x1000b5e0 call, 0x10019a61): refused, the unit stays (a
+     * different object; the port the same for one) and the velocity is doubled (0x102473d4). The port finds the
+     * touching point by halving the move (msim_can_step_hr has no hit distance), and keeps the velocity along the
+     * heading (its component across the heading dropped, as the port's velocity everywhere). */
+    float dx = *x - x0, dz = *z - z0, len = sqrtf(dx * dx + dz * dz), lo = 0.0f, hi = 1.0f, ux, uz, dn, rx, rz, bx, bz, hh, k;
+    int it, stayed;
+    if (len < 1e-3f) { *x = x0; *z = z0; return 1; }
+    for (it = 0; it < 8; it++) {
+        float t = 0.5f * (lo + hi);
+        if (msim_can_step_hr(s, x0, z0, x0 + dx * t, z0 + dz * t, y, H, R)) lo = t; else hi = t;
+    }
+    ux = dx / len; uz = dz / len;
+    dn = ux * n[0] + uz * n[2];
+    rx = ux - 2.0f * dn * n[0]; rz = uz - 2.0f * dn * n[2];
+    bx = x0 + dx * lo + rx * (1.0f - lo) * len * 0.25f;
+    bz = z0 + dz * lo + rz * (1.0f - lo) * len * 0.25f;
+    stayed = !msim_can_step_hr(s, x0, z0, bx, bz, y, H, R);
+    if (stayed) { bx = x0; bz = z0; }
+    *x = bx; *z = bz;
+    k = stayed ? -0.5f : -0.25f;
+    hh = heading_deg * 3.14159265f / 180.0f;
+    *speed = k * fabsf(*speed) * (rx * sinf(hh) + rz * cosf(hh));
+    return stayed;
 }
 
 int msim_can_step_hr(const msim *s, float x0, float z0, float x, float z, float y, float H, float R)

@@ -22,6 +22,47 @@ static int rand_n(unsigned *s, int n) { return n > 0 ? (int)(rnd(s) % (unsigned)
 
 static float range_cm(int w) { return (float)sim_weapons[w].range; }   /* table +0x40 */
 
+/* The loadout rating (DOS 0x4cf20 -> object +0x14c; 3Dfx 0x10041c80 -> +0x150, called by 0x10041410 on the MEK
+ * record): a 16-bit sum (wrapping), starting at the tonnage. For each of the 8 locations in turn: every
+ * critical-slot id above 5000 counts in the band of the highest threshold below it (5000, 5050, .. 5900 in steps of
+ * 50; 6000, 7000, 8000, 9000; table DOS 0x4c6d0 / 3Dfx built on the stack, same values); the running band counts
+ * (never reset between locations) then add, for bands 0..20, count x mult x tonnage (mult >= 0) or count x -mult
+ * (mult < 0); plus the running total of those slots (doubled once band 21, > 8000, has one), the running sum of
+ * (armour + rear) x slot count, and the structure. Then, for the first item_count (at most 10) items, the short
+ * table DOS 0x9eb2c / 3Dfx 0x10259f60 [id / 100]. The DOS rule is kept: the 3Dfx DLL reads the MEK's integer armour
+ * and structure with flds before converting them (fildl after the call), so there those two terms are 0. */
+static const short rating_mult[21] = { 1, 1, -60, -60, -50, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 2, 3, 2, 1, 1 };
+static const short rating_weapon[32] = {   /* 0x10259f60 */
+    183, 137, 91, 46, 51, 34, 17, 74, 49, 25, 2, 228, 42, 82, 123, 157,
+    74, 144, 247, 329, 4, 228, 166, 51, 21, 177, 74, 16, 50, 40, 0, 0 };
+static int rating_band_min(int b) { return b <= 18 ? 5000 + 50 * b : 6000 + 1000 * (b - 19); }
+uint16_t combat_mek_rating(const mek_def *d)
+{
+    int count[23] = {0}, total = 0, l, k, b, n;
+    int32_t armor_sum = 0;
+    int16_t r = (int16_t)d->tonnage, tons = (int16_t)d->tonnage;
+    for (l = 0; l < MEK_LOC_COUNT; l++) {
+        const mek_loc *L = &d->loc[l];
+        int16_t nslots = (int16_t)L->slot_count;
+        if (nslots > 0) {
+            armor_sum += (int32_t)(L->armor + L->rear_armor) * nslots;
+            for (k = 0; k < nslots && k < MEK_SLOTS; k++)
+                for (b = 22; b >= 0; b--)
+                    if (rating_band_min(b) < (int)L->slots[k]) { count[b]++; total++; break; }
+        }
+        for (b = 20; b >= 0; b--)
+            if (count[b]) r = (int16_t)(rating_mult[b] < 0 ? r - rating_mult[b] * count[b] : r + rating_mult[b] * count[b] * tons);
+        r = (int16_t)(r + (count[21] ? total * 2 : total));
+        r = (int16_t)(r + (int16_t)armor_sum + (int16_t)L->internal);
+    }
+    n = d->item_count < 10 ? d->item_count : 10;
+    for (k = 0; k < n; k++) {
+        unsigned idx = d->items[k].id / 100;
+        r = (int16_t)(r + (idx < 32 ? rating_weapon[idx] : 0));
+    }
+    return (uint16_t)r;
+}
+
 int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
 {
     mek_def d;
@@ -47,6 +88,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     /* engine 0x10041410 (AI / normal difficulty): colder than -30 doubles it, hotter than 50 lowers it */
     u->sink_per_tick = (float)d.heat_sinking *
                        (g_planet.temperature < -30 ? 0.00152587890625f : g_planet.temperature > 50 ? 0.0006866455078125f : 0.000762939453125f);
+    u->rating = combat_mek_rating(&d);
     u->tons = (int)d.tonnage;   /* controller +0xe4 (MEK +0x00): the head-hit ratio in 0x1000c1f0 */
     u->jets = (int)d.jump_mp;
     u->jet_ddy = d.walk_mp ? (float)d.jump_mp / (float)d.walk_mp * 0.1184f : 0;
@@ -657,10 +699,9 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
 static void collide(combat_unit *u, float speed, float ny, float rel_deg, int other_tons, int latch, unsigned *rng)
 {
     float dmg = (speed - 3.0693676f) * 0.050123077f * 3.0f;
-    if (latch) {   /* terrain: the impact stops the unit - one hit per contact (port rule, see blocked) */
-        if (u->blocked) return;
-        u->blocked = 1;
-    }   /* a unit (0x10019d77 -> 0x1000c160): every contact tick, no latch */
+    if (latch) u->blocked = 1;   /* terrain (0x10019d84 -> 0x1000c3c0) and a unit (0x10019d77 -> 0x1000c160) alike: every contact
+                                  * frame - the impact cuts the velocity to a quarter (msim_world_impact), so pressing on stays
+                                  * under the threshold; blocked = the contact (the player's impact-sound latch 0x1007c338) */
     if (dmg <= 0 || u->destroyed || u->invulnerable || u->no_collision_damage || getenv("MW2_NO_COLLISION_DAMAGE")) return;   /* Combat Variables */
     if (ny < -0.8660254f) {                       /* from above: the head (0x1000c212) */
         if (other_tons > 0) {

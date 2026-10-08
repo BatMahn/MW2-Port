@@ -618,7 +618,7 @@ static int run_scene(prj_archive *a, const char *scene)
                 }
             }
         }
-        if (s.player_attacks && best >= 0) {   /* hold fire when a protected structure is on or near the line of fire */
+        if (s.player_attacks && best >= 0) {   /* hold fire when a protected structure or unit is on or near the line of fire */
             float tx, tz;
             int b2, q;
             if (s.player_target >= 0) { tx = (float)s.actors[s.player_target].mech.origin[0]; tz = (float)s.actors[s.player_target].mech.origin[2]; }
@@ -627,10 +627,24 @@ static int run_scene(prj_archive *a, const char *scene)
                 float dx = tx - s.player[0], dz = tz - s.player[2], d = sqrtf(dx * dx + dz * dz);
                 if (d > 1) { tx += dx / d * 4000.0f; tz += dz / d * 4000.0f; }
             }
+            for (b2 = 0; b2 < n && s.player_attacks; b2++) {   /* check fire: a friendly unit within 15 m of the line of fire,
+                                                                    * 600 m long (misses fly on past the target) */
+                float ux = (float)s.actors[b2].mech.origin[0] - s.player[0], uz = (float)s.actors[b2].mech.origin[2] - s.player[2];
+                float lx = tx - s.player[0], lz = tz - s.player[2], ll = lx * lx + lz * lz, u, ex, ez;
+                if (ll >= 1) { float k = 60000.0f / sqrtf(ll); lx *= k; lz *= k; ll = 60000.0f * 60000.0f; }
+                if (b2 == s.player_target || !s.armed[b2] || s.units[b2].destroyed || !(s.actors[b2].friendly || s.actors[b2].alliance == 0) || ll < 1) continue;
+                u = (ux * lx + uz * lz) / ll; u = u < 0 ? 0 : u > 1 ? 1 : u;
+                ex = ux - u * lx; ez = uz - u * lz;
+                if (ex * ex + ez * ez < 1500.0f * 1500.0f) {
+                    s.player_attacks = 0;
+                    if (at.since > 2.0f) { at.brg += 67.5f; at.since -= 1.0f; }   /* try another side */
+                    if ((at.held += DT_MS / 1000.0f) > 40.0f) { at.since = 1e9f; at.held = 0; if (g_verbose) printf("    fire held 40 s for a friendly unit\n"); }
+                }
+            }
             for (q = 0; q < t0->node_count && s.player_attacks; q++) {
                 if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) || !wanted[q] ||
                     strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0) continue;   /* (a record both to destroy and to protect: destroy wins) */
-                for (b2 = 0; b2 < s.bld_count; b2++) {
+                for (b2 = 0; b2 < s.bld_count && s.player_attacks; b2++) {
                     struct msim_building g = s.bld[b2];
                     if (g.hp <= 0 || !(widen((unsigned)g.type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;
                     g.mn[0] -= 2000; g.mn[2] -= 2000; g.mx[0] += 2000; g.mx[2] += 2000;

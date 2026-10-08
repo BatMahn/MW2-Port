@@ -68,6 +68,10 @@ void hud_tint(hud *h, int w, int hp, const float mul[3], const float add[3]);
 void hud_set_flash(hud *h, float r, float g, float b, float k);   /* takes effect at once (the HUD's program) */
 float hud_flash_level(const hud *h);
 void hud_rect(hud *h, float x, float y, float w, float hgt, const float rgba[4]);
+/* Clip the HUD drawing that follows to the virtual rectangle (x, y, w, hgt) (scissor; empty: nothing drawn), until
+ * hud_clip_off - the engine's instrument windows drawn into their animating rectangle (0x10021730 / 0x10011aa0) */
+void hud_clip(hud *h, float x, float y, float w, float hgt);
+void hud_clip_off(hud *h);
 /* The game font (FONT records "1." : 128 glyphs, height, transparent index, offsets; each glyph
  * u32 width + width x height bytes). Returns 0 on success. */
 int  hud_font_load(hud *h, prj_archive *a, const char *name);

@@ -25,6 +25,7 @@
 
 typedef struct {
     GLuint  vao, vbo;
+    GLuint  sph_vbo;   /* per vertex: its object's bounding sphere (GL centre, radius) for the view-distance cull */
     GLint   batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
     GLsizei batch_count[GLR_BATCHES];
     GLsizei vertex_count;
@@ -49,6 +50,7 @@ struct glr {
     int    dos;
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
     GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir;
+    GLint  u_far;
     GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band;
     uint8_t dos_img[17][256][4];
     /* sprites (weapon effects) */
@@ -68,7 +70,9 @@ static const char *VS =
     "layout(location=3) in vec3 a_color;\n"
     "layout(location=4) in float a_texsel;\n"
     "layout(location=5) in float a_edge;\n"
+    "layout(location=6) in vec4 a_sphere;\n"
     "uniform mat4 u_mvp, u_view;\n"
+    "uniform float u_far;\n"
     "out vec3 v_normal; out vec2 v_uv; out vec3 v_color; flat out int v_texsel; out vec3 v_viewpos; out vec3 v_world;\n"
     "out vec3 v_bary; flat out int v_emask;\n"
     "void main() {\n"
@@ -79,6 +83,12 @@ static const char *VS =
     "  vec3 p = a_pos, nrm = a_normal;\n"
     "  if (e >= 1024) { e -= 1024; p = a_pos + vec3(u_view[0][0], u_view[1][0], u_view[2][0]) * a_normal.x + vec3(0.0, a_normal.y, 0.0); nrm = vec3(cos(a_texsel), 0.0, sin(a_texsel)); }\n"
     "  gl_Position = u_mvp * vec4(p, 1.0);\n"
+    /* the view distance (the planet's VIEW far; DOS MW2.EXE 0x3f500, 3Dfx 0x1002fba0): an object whose bounding sphere
+     * lies wholly beyond it - centre distance > far + r, or depth - r > far - is not drawn (all its vertices off screen) */
+    "  if (u_far > 0.0 && a_sphere.w > 0.0) {\n"
+    "    vec3 sc = (u_view * vec4(a_sphere.xyz, 1.0)).xyz;\n"
+    "    if (dot(sc, sc) > (u_far + a_sphere.w) * (u_far + a_sphere.w) || -sc.z - a_sphere.w > u_far) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
+    "  }\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
     "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(a_texsel + 0.5);\n"
     "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
@@ -225,6 +235,7 @@ glr *glr_create(void)
         for (l = 0; l < GLR_LAYERS; l++) {
             glGenVertexArrays(1, &r->layer[l].vao);
             glGenBuffers(1, &r->layer[l].vbo);
+            glGenBuffers(1, &r->layer[l].sph_vbo);
         }
     }
     glGenTextures(GLR_SLOTS * 2, r->tex);
@@ -234,6 +245,8 @@ glr *glr_create(void)
     glGenVertexArrays(1, &r->spr_vao);
     glGenBuffers(1, &r->spr_vbo);
     glGenTextures(64, r->spr_tex);
+    r->u_far = glGetUniformLocation(r->prog, "u_far");
+    glVertexAttrib4f(6, 0, 0, 0, 0);   /* the sky, ground and sprites: no sphere, never culled */
     r->u_unlit = glGetUniformLocation(r->prog, "u_unlit");
     r->u_wire = glGetUniformLocation(r->prog, "u_wire");
     r->u_shadow = glGetUniformLocation(r->prog, "u_shadow");
@@ -270,6 +283,7 @@ void glr_destroy(glr *r)
         int l;
         for (l = 0; l < GLR_LAYERS; l++) {
             glDeleteBuffers(1, &r->layer[l].vbo);
+            glDeleteBuffers(1, &r->layer[l].sph_vbo);
             glDeleteVertexArrays(1, &r->layer[l].vao);
         }
     }
@@ -299,12 +313,45 @@ static void upload_texture(glr *r, int slot, const texture *t)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
+/* An object's bounding sphere in GL coordinates (engine 0x10029060: the centre of its vertices' box, the radius the
+ * farthest vertex from it), for the view-distance cull */
+static void part_sphere(const mech3d_part *part, float out[4])
+{
+    const wtb_object *o = &part->model.objects[0];
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f}, r2 = 0, (*w)[3];
+    float cy = cosf(part->yaw * 3.14159265f / 180.0f), sy = sinf(part->yaw * 3.14159265f / 180.0f);
+    int k, c;
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (o->vert_count <= 0 || !(w = malloc((size_t)o->vert_count * sizeof *w))) return;
+    for (k = 0; k < o->vert_count; k++) {
+        float vx = (float)o->verts[k].x, vy = (float)o->verts[k].y, vz = (float)o->verts[k].z;
+        if (part->has_rot) {
+            const float *R = part->rot;
+            w[k][0] = R[0] * vx + R[1] * vy + R[2] * vz + (float)part->pos[0];
+            w[k][1] = R[3] * vx + R[4] * vy + R[5] * vz + (float)part->pos[1];
+            w[k][2] = -(R[6] * vx + R[7] * vy + R[8] * vz + (float)part->pos[2]);
+        } else {
+            w[k][0] = cy * vx + sy * vz + (float)part->pos[0];
+            w[k][1] = vy + (float)part->pos[1];
+            w[k][2] = -(-sy * vx + cy * vz + (float)part->pos[2]);
+        }
+        for (c = 0; c < 3; c++) { if (w[k][c] < mn[c]) mn[c] = w[k][c]; if (w[k][c] > mx[c]) mx[c] = w[k][c]; }
+    }
+    for (c = 0; c < 3; c++) out[c] = (mn[c] + mx[c]) * 0.5f;
+    for (k = 0; k < o->vert_count; k++) {
+        float dx = w[k][0] - out[0], dy = w[k][1] - out[1], dz = w[k][2] - out[2], d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2) r2 = d2;
+    }
+    out[3] = sqrtf(r2) + 1.0f;   /* > 0: culled by distance */
+    free(w);
+}
+
 static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256][3],
                      texture *const slots[GLR_SLOTS], int camo, int clan, int bounds)
 {
     glr_layer *L = &r->layer[li];
     size_t cap = 0, n = 0, *count, *pos;
-    float *buf = NULL, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    float *buf = NULL, *sph = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     int pi, k, j, a, pass, b;
 
     for (pi = 0; pi < m->part_count; pi++) {
@@ -313,9 +360,10 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             if (o->polys[k].n >= 3) cap += (size_t)(o->polys[k].n - 2) * 3 + (((o->polys[k].color >> 12) & 7) == 3 ? 6 : 0);
     }
     buf = malloc((cap ? cap : 1) * FLOATS_PER_VERTEX * sizeof *buf);
+    sph = malloc((cap ? cap : 1) * 4 * sizeof *sph);
     count = calloc(GLR_BATCHES, sizeof *count);
     pos = calloc(GLR_BATCHES, sizeof *pos);
-    if (!buf || !count || !pos) { free(buf); free(count); free(pos); return -1; }
+    if (!buf || !sph || !count || !pos) { free(buf); free(sph); free(count); free(pos); return -1; }
 
     /* two passes: count triangles per texture batch, then write them grouped */
     for (pass = 0; pass < 2; pass++) {
@@ -337,6 +385,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             else if (part->objtype & 0x100) { int cn = (part->objtype & 0xf0) >> 4; wire_code = cn < 1 ? 1 : cn < 12 ? 3 : 2; }
             else if (part->wire_hi) wire_code = 1;
             if (part->hidden || part->moving) continue;   /* moving: a path-carried world part, drawn on the actor layer */
+            if (pass == 1) part_sphere(part, psph);
             for (k = 0; k < o->poly_count; k++) {
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3];
@@ -407,6 +456,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         for (a = 0; a < 6; a++) {
                             float *f = buf + pos[GLR_B0 + bs] * FLOATS_PER_VERTEX;
                             int c;
+                            memcpy(sph + pos[GLR_B0 + bs] * 4, psph, sizeof psph);
                             f[0] = foot[0]; f[1] = foot[1]; f[2] = foot[2];
                             f[3] = CX[a] * h; f[4] = CY[a] * h; f[5] = 0;
                             f[6] = (CX[a] + 0.5f) * (float)bt->w; f[7] = (1.0f - CY[a]) * (float)bt->h;
@@ -501,6 +551,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         float *f = buf + pos[batch] * FLOATS_PER_VERTEX;
                         float nx, ny, nz, rx, rz;
                         int c;
+                        memcpy(sph + pos[batch] * 4, psph, sizeof psph);
                         /* rotate (full matrix when posed, else yaw), place, then GL z = -game z */
                         if (model->extended && (v->normal[0] != 0 || v->normal[1] != 0 || v->normal[2] != 0)) {
                             nx = v->normal[0]; ny = v->normal[1]; nz = v->normal[2];
@@ -573,6 +624,10 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             off += (size_t)sizes[a];
         }
     }
+    glBindBuffer(GL_ARRAY_BUFFER, L->sph_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *sph), sph, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(6);
+    glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
     glBindVertexArray(0);
     L->vertex_count = (GLsizei)n;
     for (b = 0; b < GLR_SLOTS; b++)
@@ -583,7 +638,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         g_billboards = 0;
         for (b = 0; b < GLR_SLOTS; b++) g_billboards += (int)L->batch_count[GLR_B0 + b] / 6;
     }
-    free(buf); free(count); free(pos);
+    free(buf); free(sph); free(count); free(pos);
     return 0;
 }
 
@@ -826,6 +881,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
 
     glViewport(x0, y0, w, h);
     if (x0 || y0) { glEnable(GL_SCISSOR_TEST); glScissor(x0, y0, w, h); }
+    if (v->clip[2] > 0 && v->clip[3] > 0) { glEnable(GL_SCISSOR_TEST); glScissor(v->clip[0], v->clip[1], v->clip[2], v->clip[3]); }
     if (v->wire || v->solo) glClearColor(0, 0, 0, 1); else glClearColor(v->sky_color[0], v->sky_color[1], v->sky_color[2], 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
@@ -992,6 +1048,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform1f(r->u_ambient, v->ambient);
     glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
     glUniform3fv(r->u_fog_color, 1, v->fog_color);
+    glUniform1f(r->u_far, v->ortho_w > 0 ? 0.0f : v->far_cull);   /* the world and actor layers carry their spheres */
     glUniform1i(r->u_tex, 0);
     glUniform1i(r->u_unlit, 0);
     if (r->dos) {   /* the DOS edition's shading: the LUMA / palette table on unit 1 */
