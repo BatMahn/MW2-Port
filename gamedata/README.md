@@ -1,4 +1,3 @@
 # gamedata/3d
 
-Copy your 3D-edition data here before the first push (push_to_github.sh does it from your MW2-game/3d folder):
-models.prj, textures.prj, skygnd.par and the ati/, mga/, pvr/, s3/ folders.
+Various 3D accelerator version files are here. Copy them to your game folder *including here as they can be hard to find. May remove if I catch copyright flack.
