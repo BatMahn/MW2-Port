@@ -1,0 +1,35 @@
+//
+// Mech Mystique Specific Parameters
+//
+
+// NOTE: The maximum no of MIP levels that may be specified is currently 8
+
+// These parms control how many MIP sub-textures are generated for each MIPed texture {1..8}
+groundMIPlevels = 4
+skyMIPlevels    = 1
+
+
+// This parm controls the line height of the tesselations used in MIPing
+MIPtessheight = 15
+
+// this parm sets the maximum limit of the Z range used for mip-mapping.  The "MIPThreshold = "
+// values are multiplied by this value to get the actual Z thresholds.
+MIPmaxZ = 50000
+
+
+// this parm sets the number of MIPing thresholds {1..8}
+NoMIPThresholds = 4
+
+
+// these parameters control the MIPing thresholds and are specified (in increasing order) as a 
+// percentage of the max distance from the eye {0.0 = nearest...1.0= farthest}.  The no of
+// "MIPThreshold =" entries should equal <NoMIPThresholds>.  The starting threshold (0.00) and
+// ending threshold (1.0) are implied.
+MIPThreshold = 0.05  // {0.00 -> 0.25} = MIP 1:1
+MIPThreshold = 0.10  // {0.25 -> 0.50} = MIP 1:2
+MIPThreshold = 0.30  // {0.50 -> 0.75} = MIP 1:4
+MIPThreshold = 1.00  // {0.75 -> 1.00} = MIP 1:8
+
+
+// this parameter controls how many locked pages are allocated for the texture heap (not the cache) (1 page = 4K)
+NoHeapPages  = 350
