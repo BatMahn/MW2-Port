@@ -33,16 +33,32 @@ The port needs the original game's files in one folder (called `MW2-game` below)
       mt32/       REQUIRED for the menu music - the Roland MT-32 ROMs: MT32_CONTROL.ROM and MT32_PCM.ROM
                   (without them the menus fall back to Gravis UltraSound patches in ultrasnd/, if present)
       music/      optional - the CD soundtrack (Track02..Track27 as FLAC, MP3 or WAV; see "CD music")
-      ultrasnd/   optional - Gravis UltraSound patches (menu music without the MT-32 ROMs)
+      ultrasnd/   optional - Gravis UltraSound patches (menu music without the MT-32 ROMs; see below)
       3d/         the 3D editions' data - included in this repository under gamedata/3d/: copy that folder here
 
-Copy the 3D data from this repository:
+### The 3D data (included here)
+The textured looks come from the 3D-accelerator editions of MechWarrior 2 - the 3Dfx, ATi Rage, S3 ViRGE, PowerVR and
+Matrox Mystique bundles that shipped with graphics cards in 1996-97. Those discs are hard to find now, so their data
+files are included in this repository under `gamedata/3d/` rather than leaving you to track them down. Copy the folder
+into your game folder:
 
     cp -R gamedata/3d /path/to/MW2-game/3d
 
 `gamedata/3d/` holds models.prj (the 3Dfx edition's MW2.PRJ), textures.prj (the ATi edition's MW2.PRJ), skygnd.par, and
 the S3 / PowerVR / Matrox editions' archives and settings (s3/, pvr/, mga/, ati/) for those looks. Without 3d/ the
-game uses the DOS models only.
+game uses the DOS models only. These files are Activision's (see "Licences"); they are here only so owners of the game
+can rebuild a working setup.
+
+### Gravis UltraSound patches (optional)
+Without the MT-32 ROMs the menu music can play through the Gravis UltraSound's General MIDI patch set instead. Get the
+GUS driver / install disks (the 4.x "ULTRASND" package, easy to find on VOGONS) and extract them; what the port needs is
+the resulting `ULTRASND` folder - in particular `MIDI/ULTRAMID.INI` and the `MIDI/*.PAT` patch files. Copy the whole
+folder in as `ultrasnd/`:
+
+    MW2-game/ultrasnd/MIDI/ULTRAMID.INI
+    MW2-game/ultrasnd/MIDI/ACPIANO.PAT  ... (about 280 .PAT files)
+
+Running the DOS installer is not needed; extracting the archives is enough. With both present, the MT-32 is used.
 
 Then run the game once with the folder; it remembers it:
 
@@ -128,9 +144,9 @@ holds your copy of the game:
     install/    your settings, pilots and saves (or a complete DOS install as the folder itself)
     cd/         the disc's files (or point cd= at an .iso)
     music/      the CD soundtrack (Track02..27, FLAC/MP3/WAV)
-    ultrasnd/   Gravis UltraSound patches (menu music)
-    3d/         models.prj, textures.prj, skygnd.par from a 3D edition (3dfx / ATi), and the PowerVR edition's
-                skygnd.par copied in as skygnd_pvr.par for the fog (without 3d/: the DOS models, untextured)
+    mt32/       the MT-32 ROMs (menu music)
+    ultrasnd/   Gravis UltraSound patches (menu music without the ROMs)
+    3d/         the 3D editions' data - copy gamedata/3d/ from this repository (without 3d/: the DOS models, untextured)
 
 If no folder is given, `mw2` looks in the current folder, next to itself, one level up (`MW2-game`) and in
 `~/MW2-game`, and remembers what it found in the per-user settings file:
