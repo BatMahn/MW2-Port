@@ -63,6 +63,10 @@ typedef struct {
     int   solo;              /* the target viewer: black behind, no sky / ground / world layer / effects, no fog */
     float mono[4];           /* a > 0: the actor layer untextured in this colour, lit (the target viewer's solid mode); a = 2: in each
                               * part's own colour (mech3d_part.tint) */
+    int   clip[4];           /* clip[2] > 0: drawn only inside this window rectangle (x, y from the bottom left, w, h) - a
+                              * cockpit window opening or closing (3Dfx 0x10011aa0: the view keeps its scale, clipped) */
+    float far_cull;          /* > 0: objects wholly beyond this distance (cm) are not drawn - the planet's VIEW far
+                              * (DOS MW2.EXE 0x3f500 / 0x4e741, 3Dfx 0x1002fba0 / 0x1003dfbc); 0 = everything */
     int   mga_mip;           /* Matrox Mystique: the ground's mip level by view depth (2500 / 5000 / 15000 cm, MYSTIQUE.PAR) */
 } glr_view;
 

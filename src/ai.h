@@ -156,6 +156,13 @@ typedef struct {
     int   post_who;
     int   queue5;            /* +0x184 = 1: the out-of-weapons jump (4) is followed by 5 (0x1001f030) */
     int   fled;              /* out of weapons -> flee (0x1001f030 forced -2): +0x152 = 1, no more target choice */
+    int   lock_bits;         /* +0x152 & 3 from the star's node lock (0x100146e0: lock 1 -> 2, 2 -> 1), set for every
+                              * member on a node change (0x10014520) and on a node assignment (0x10014ba0); either bit
+                              * stops condition 7 and the group assignment (0x10012fd0, 0x10014920), bit 1 the attacker
+                              * reaction (0x10012520) */
+    int   self_destruct;     /* input +0x43, set by manoeuvre 6 within 20 m (0x1001fb90); msim takes it (0x1001a180) */
+    int   node_tgt;          /* the node target 0x10014ba0 last gave it (msim's code; 0 none) - its +0x14e for a target
+                              * the port's AI can't aim at (a thing), so the node's count still sees it */
     int   fire_locked;       /* the lock (0x80) when the weapon now firing was triggered: its missiles home */
     unsigned rng;
 } ai_mind;

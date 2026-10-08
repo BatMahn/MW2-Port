@@ -124,13 +124,14 @@ typedef struct {
     int           no_jump;          /* gyro critical */
     /* jump jets (engine 0x10041410 / 0x1001a180 / 0x10019310) */
     int           tons;             /* MEK tonnage (controller +0xe4) */
+    uint16_t      rating;           /* loadout rating, object +0x150 (0x10041c80; group member choice 0x10014920) */
     int           jets;             /* jump MP (c[0x31]) */
     float         jet_ddy;          /* thrust, cm/tick^2: jump MP / walk MP x 0.1184 (c[0x3b]) */
     float         jet_fuel;         /* ticks, max 1810 (c[0x30]); burns 1/tick, recharges 1/4 per tick */
     float         y, vy;            /* height (cm, absolute) and vertical speed (cm/tick) */
     float         ground;           /* terrain height under the unit (cm), set by the sim each step */
     float         landed_vy;        /* the vertical speed (cm/tick, < 0) it touched down with this step from a fall or jump, else 0 */
-    int           blocked;          /* pressing against terrain: collision damage once per contact */
+    int           blocked;          /* pressing against terrain (cleared by a free move): the contact count / impact-sound latch */
     int           jet_forward;      /* horizontal jet thrust on (input +0x20) */
     int           offline;          /* set by the sim: not in controller state 2 (starting up, powered down) - the fire
                                        routine 0x100437a0 runs only in state 2, so no trigger and no queued volley releases */
@@ -157,6 +158,8 @@ extern int combat_damage_live;
 void combat_set_auto_eject(int on);
 int  combat_auto_eject(void);
 int  combat_init(combat_unit *u, prj_archive *a, const char *loadout);
+/* The engine's loadout rating of a MEK (0x10041c80, stored at object +0x150 by 0x10041410). */
+uint16_t combat_mek_rating(const mek_def *d);
 /* the player's heat dissipation by difficulty (MW2DIF +5; engine 0x10041410): per tick x heat sinking, normal /
  * colder than -30 / hotter than 50: Easy 0.001068 / 0.002136 / 0.001068, Medium 0.000763 / 0.001526 / 0.000687,
  * Hard 0.000687 / 0.001030 / 0.000549 (AI 'Mechs: Medium's) */

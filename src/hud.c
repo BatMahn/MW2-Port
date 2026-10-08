@@ -358,6 +358,16 @@ void hud_rect(hud *h, float x, float y, float w, float hg, const float rgba[4])
     quad(h, x, y, x + w, y + hg, 0, 0, 1, 1);
 }
 
+void hud_clip(hud *h, float x, float y, float w, float hg)
+{
+    int X0 = (int)sx_(h, x), X1 = (int)sx_(h, x + w), Yt = (int)sy_(h, y), Yb = (int)sy_(h, y + hg);
+    if (X1 <= X0) X1 = X0 + 1;   /* the engine's windows are inclusive: a collapsed one is still a pixel line */
+    if (Yb <= Yt) Yb = Yt + 1;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(X0, h->vh - Yb, X1 - X0, Yb - Yt);
+}
+void hud_clip_off(hud *h) { (void)h; glDisable(GL_SCISSOR_TEST); }
+
 /* Whole-window colour pass: out = dst x mul + add (light amplification). Call right after hud_begin. */
 void hud_set_flash(hud *h, float r, float g, float b, float k)
 {
