@@ -1,0 +1,79 @@
+mission=pink tile_sky=4.0 tile_ground=10680.6  anim_rate=0.0004 fog=0.000148
+mission=gree tile_sky=3.8 tile_ground=10167.5  anim_rate=0.0003 fog=0.000470
+mission=red_ tile_sky=4.0 tile_ground=5000.0   anim_rate=0.0003 fog=0.000581
+mission=fuch tile_sky=3.8 tile_ground=10935.0  anim_rate=0.0005 fog=0.000000
+mission=whiz tile_sky=3.8 tile_ground=10935.0  anim_rate=0.0003 fog=0.000000
+mission=cind tile_sky=4.0 tile_ground=40000.0  anim_rate=0.0003 fog=0.000000
+mission=rico tile_sky=4.0 tile_ground=40000.0  anim_rate=0.0003 fog=0.000000
+mission=rust tile_sky=1.7 tile_ground=11855.2  anim_rate=0.0000 fog=0.000000
+mission=umbe tile_sky=2.9 tile_ground=7549.3   anim_rate=0.0005 fog=0.000001
+mission=tan_ tile_sky=4.0 tile_ground=14434.2  anim_rate=0.0002 fog=0.000423
+mission=edam tile_sky=4.0 tile_ground=14434.2  anim_rate=0.0002 fog=0.000423
+mission=heid tile_sky=4.0 tile_ground=40000.0  anim_rate=0.0003 fog=0.000000
+mission=plum tile_sky=2.0 tile_ground=10167.5  anim_rate=0.00025 fog=0.000000
+mission=whit tile_sky=4.0 tile_ground=12732.3  anim_rate=0.0004 fog=0.000286
+mission=jill tile_sky=4.0 tile_ground=40000.0  anim_rate=0.0003 fog=0.000000
+mission=puce tile_sky=2.4 tile_ground=6457.0   anim_rate=0.0007 fog=0.000000
+mission=colb tile_sky=2.4 tile_ground=6457.0   anim_rate=0.0002 fog=0.000000
+mission=blon tile_sky=4.0 tile_ground=10000.0  anim_rate=0.00035 fog=0.000000
+mission=bron tile_sky=4.0 tile_ground=1.0      anim_rate=0.00025 fog=0.000059
+mission=prov tile_sky=4.0 tile_ground=1.0      anim_rate=0.0002  fog=0.000059
+mission=mary tile_sky=4.0 tile_ground=40000.0  anim_rate=0.0003  fog=0.000000
+mission=tnj1 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+mission=tnj2 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+mission=tnj3 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+mission=tnj4 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+mission=tnj5 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+mission=tnj6 tile_sky=3.6 tile_ground=14348.9  anim_rate=0.00025 fog=0.000028
+
+mission=yell tile_sky=4.0 tile_ground=6495.4   anim_rate=0.0005 fog=0.000393
+mission=goud tile_sky=4.0 tile_ground=6495.4   anim_rate=0.0005 fog=0.000393
+mission=oran tile_sky=1.5 tile_ground=10000.0  anim_rate=0.00015 fog=0.000359
+mission=teal tile_sky=3.2 tile_ground=8105.1   anim_rate=0.00024 fog=0.000000
+mission=ched tile_sky=3.2 tile_ground=8105.1   anim_rate=0.00024 fog=0.000000
+mission=taup tile_sky=3.2 tile_ground=4457.8   anim_rate=0.00025 fog=0.000001
+mission=jenn tile_sky=4.0 tile_ground=10000.0  anim_rate=0.000275 fog=0.000000
+mission=swis tile_sky=4.0 tile_ground=10000.0  anim_rate=0.000275 fog=0.000000
+mission=sabl tile_sky=3.3 tile_ground=8000.0   anim_rate=0.0000  fog=0.000000
+mission=goat tile_sky=3.3 tile_ground=8000.0   anim_rate=0.00024 fog=0.000000
+mission=grey tile_sky=4.0 tile_ground=11118.1  anim_rate=0.0003  fog=0.000000
+mission=brow tile_sky=5.9 tile_ground=10006.3  anim_rate=0.00020 fog=0.000036
+mission=jack tile_sky=5.9 tile_ground=10006.3  anim_rate=0.00020 fog=0.000036
+mission=amy_ tile_sky=4.0 tile_ground=10000.0  anim_rate=0.000275 fog=0.000000
+mission=silv tile_sky=1.5 tile_ground=10000.0  anim_rate=0.00015 fog=0.000359
+mission=aqua tile_sky=4.0 tile_ground=9000.0   anim_rate=0.00030 fog=0.000000
+mission=kim_ tile_sky=4.0 tile_ground=10000.0  anim_rate=0.000275 fog=0.000000
+mission=cyan tile_sky=5.0 tile_ground=14348.9  anim_rate=0.00015 fog=0.000123
+mission=maro tile_sky=9.5 tile_ground=9414.3   anim_rate=0.0003  fog=0.000000
+mission=gold tile_sky=4.0 tile_ground=1.0      anim_rate=0.00035 fog=0.002415
+mission=iren tile_sky=4.0 tile_ground=10000.0  anim_rate=0.000275 fog=0.000000
+mission=tnw1 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+mission=tnw2 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+mission=tnw3 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+mission=tnw4 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+mission=tnw5 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+mission=tnw6 tile_sky=5.0 tile_ground=15496.8  anim_rate=0.00025  fog=0.000136
+
+
+mission=iroq tile_sky=2.0 tile_ground=30000.0  anim_rate=0.0004 fog=0.000470
+mission=nava tile_sky=1.0 tile_ground=30000.0  anim_rate=0.0004 fog=0.001000
+mission=siou tile_sky=4.0 tile_ground=30000.0  anim_rate=0.0003 fog=0.001000
+mission=osag tile_sky=4.0 tile_ground=1.0      anim_rate=0.00018 fog=0.000000
+mission=apac tile_sky=2.0 tile_ground=30000.0  anim_rate=0.0004 fog=0.000000
+
+mission=tabb tile_sky=4.0 tile_ground=20000.0  anim_rate=0.00032 fog=0.000470
+mission=cali tile_sky=2.0 tile_ground=10006.3  anim_rate=0.0004 fog=0.000123
+mission=siam tile_sky=4.0 tile_ground=15000.0  anim_rate=0.00031 fog=0.000000
+mission=pers tile_sky=4.0 tile_ground=5000.0   anim_rate=0.00022 fog=0.000581
+mission=terr tile_sky=1.5 tile_ground=10000.0  anim_rate=0.00025 fog=0.000359
+mission=coll tile_sky=6.0 tile_ground=60000.0  anim_rate=0.0004 fog=0.000250
+mission=husk tile_sky=2.0 tile_ground=30000.0  anim_rate=0.0004 fog=0.000000
+mission=dobe tile_sky=2.0 tile_ground=40000.0  anim_rate=0.0004 fog=0.001000
+mission=shep tile_sky=2.0 tile_ground=40000.0  anim_rate=0.000025 fog=0.000581
+mission=misc tile_sky=2.0 tile_ground=40000.0  anim_rate=0.0004 fog=0.000000
+
+
+
+
+
+
