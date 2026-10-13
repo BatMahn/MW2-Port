@@ -22,7 +22,8 @@ Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
     make && make mw2        # the tools, then the game (mw2: menus + missions in one program)
 
 ## Setting up the game folder
-The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy:
+The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy.
+**See [FOLDER_SETUP.md](FOLDER_SETUP.md) for a complete example of a working folder and the common mistakes.**
 
     MW2-game/
       install/    REQUIRED - the contents of your installed DOS game folder (C:\MECH2 after running the game's
