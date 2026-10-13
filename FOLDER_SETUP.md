@@ -88,4 +88,4 @@ From inside your game folder:
     ls cd/MECH2/MW2.PRJ    # must exist
     ls install/MW2REG.CFG  # must exist
 
-Then run `./mw2 /path/to/MW2-game` once; the port remembers the folder after that.
+Then run `./mw2 /path/to/MW2-game` once (Windows: drag the folder onto `mw2.exe`); the port remembers the folder after that.

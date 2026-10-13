@@ -1,8 +1,29 @@
-# MechWarrior 2 port - foundation modules (Linux / macOS)
+# MechWarrior 2 port - foundation modules (Linux / macOS / Windows via MinGW-w64)
 CC      ?= cc
 CFLAGS  ?= -std=c99 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wconversion
 LDLIBS  = -lpthread -lm
 UNAME_S := $(shell uname -s)
+SDL2_CONFIG ?= sdl2-config
+# Windows: MSYS2's MINGW64 shell (uname MINGW64_NT-...), or cross-compiling from Linux with
+#   make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ SDL2_CONFIG=/path/to/mingw/bin/sdl2-config
+ifneq (,$(findstring MINGW,$(UNAME_S)))
+  WINDOWS = 1
+  ifeq ($(origin CC),default)
+    CC = gcc
+  endif
+endif
+ifeq ($(WINDOWS),1)
+  UNAME_S = Windows
+  CFLAGS += -include src/wincompat.h
+  LDLIBS = -lm
+  GLLIB = -lopengl32
+  CXXLIB = -static-libgcc -Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic   # no libstdc++ / libwinpthread DLLs to ship
+  DLLIB =
+  WINSRC = src/wincompat.c src/glload.c
+else
+  DLLIB = -ldl
+  WINSRC =
+endif
 ifeq ($(UNAME_S),Linux)
   LDLIBS += -ldl
   GLLIB = -lGL
@@ -56,20 +77,20 @@ build/mt32emu/%.o: third_party/mt32emu/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) -O2 -w -DMT32EMU_WITH_INTERNAL_RESAMPLER=1 -Ithird_party/mt32emu -c $< -o $@
 build/libmt32emu.a: $(MT32_OBJ)
-	ar rcs $@ $^
+	$(AR) rcs $@ $^
 
 # mw2: one executable - the shell, and with --sim the simulation (glview built in, its main renamed)
-mw2: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(shell sdl2-config --cflags 2>/dev/null) -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(shell sdl2-config --cflags 2>/dev/null) -o build/mw2shell_one.o
+mw2: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter-out -Dmain=SDL_main,$(shell $(SDL2_CONFIG) --cflags 2>/dev/null)) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(shell $(SDL2_CONFIG) --cflags 2>/dev/null) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a -o $@ $(shell sdl2-config --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread -ldl $(CXXLIB)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB)
 
 mw2shell: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(filter %.c,$^) build/libmt32emu.a -o $@ $(shell sdl2-config --cflags --libs 2>/dev/null) -lm $(CXXLIB)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(filter %.c,$^) build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) -lm $(CXXLIB)
 
 glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o $@ $(shell sdl2-config --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread -ldl
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB)
 
 gl: $(GLBIN)
 
@@ -98,7 +119,7 @@ test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
 test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h
-	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools $$(sdl2-config --cflags) tests/test_inputmap.c $$(sdl2-config --libs) -o $@
+	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools $$($(SDL2_CONFIG) --cflags) tests/test_inputmap.c $$($(SDL2_CONFIG) --libs) -o $@
 
 # make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso] [TITANIUM=/path/to/MW2-game/titanium]
 TITANIUM ?= $(MW2)/../MW2-game/titanium
@@ -115,7 +136,7 @@ check: all
 	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 $(MW2) > /tmp/mw2lab.txt; r=$$?; tail -1 /tmp/mw2lab.txt; exit $$r
 
 clean:
-	rm -rf build $(BIN) $(GLBIN)
+	rm -rf build $(BIN) $(GLBIN) mw2 mw2.exe
 
 .PHONY: all check clean
 
@@ -157,6 +178,6 @@ test_sequences: glview
 
 # the same under AddressSanitizer / UBSan (a separate binary, build/glview_asan)
 test_sequences_asan: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
-	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(shell sdl2-config --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread -ldl
+	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB)
 	ASAN_OPTIONS=detect_leaks=0 SEQ_TIME_SCALE=6 python3 tests/sequences/run_sequences.py --glview build/glview_asan $(SEQ_ARGS)
 .PHONY: test_sequences test_sequences_asan

@@ -16,7 +16,7 @@ static void mkdirs(const char *path)
 {
     char tmp[PORTCFG_PATH], *q;
     snprintf(tmp, sizeof tmp, "%s", path);
-    for (q = tmp + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(tmp, 0755); *q = '/'; }
+    for (q = tmp + 1; *q; q++) if (*q == '/' || *q == '\\') { char sep = *q; *q = 0; mkdir(tmp, 0755); *q = sep; }
     mkdir(tmp, 0755);
 }
 /* a file in a folder, matching the name case-insensitively (DOS names) */
@@ -38,7 +38,14 @@ const char *portcfg_file(void)
     static char path[PORTCFG_PATH];
     const char *home = getenv("HOME"), *xdg = getenv("XDG_CONFIG_HOME");
     if (getenv("MW2_CONFIG")) { snprintf(path, sizeof path, "%s", getenv("MW2_CONFIG")); return path; }   /* tests */
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    {   /* %APPDATA%\mw2port\mw2port.cfg */
+        const char *appdata = getenv("APPDATA");
+        if (!appdata || !appdata[0]) appdata = getenv("USERPROFILE");
+        snprintf(path, sizeof path, "%s/mw2port/mw2port.cfg", appdata ? appdata : ".");
+        (void)home; (void)xdg;
+    }
+#elif defined(__APPLE__)
     snprintf(path, sizeof path, "%s/Library/Application Support/mw2port/mw2port.cfg", home ? home : ".");
     (void)xdg;
 #else
@@ -127,6 +134,9 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
 {
     char p[PORTCFG_PATH * 2];
     const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || !home[0]) home = getenv("USERPROFILE");   /* %USERPROFILE%\MW2-game */
+#endif
     if (hint && portcfg_is_game_dir(hint)) snprintf(c->game, sizeof c->game, "%s", hint);
     if (!c->game[0] && !c->install[0]) {   /* look for it */
         char cand[5][PORTCFG_PATH];

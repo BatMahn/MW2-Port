@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <strings.h>
+#include <ctype.h>
 #include <math.h>
 #include <time.h>
 #ifndef _WIN32
@@ -4455,6 +4456,9 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--sim") == 0) return glview_main(argc - 1, argv + 1);   /* the simulation */
     snprintf(g_exe_path, sizeof g_exe_path, "%s", argv[0]);
     if (!strchr(argv[0], '/')) { char *bp = SDL_GetBasePath(); snprintf(g_exe_path, sizeof g_exe_path, "%s%s", bp ? bp : "./", argv[0]); SDL_free(bp); }
+#ifdef _WIN32
+    mw2_exe_path(g_exe_path, sizeof g_exe_path);   /* argv[0] may be relative, or lack .exe */
+#endif
 #endif
     char p[700];
     {   /* the configuration: the per-user file; the game folder from the command line or found and remembered */
@@ -4471,6 +4475,14 @@ int main(int argc, char **argv)
                 "Run:  mw2 <folder>\n"
                 "where <folder> is either the game folder (with install/, cd/, music/, ultrasnd/, 3d/ inside)\n"
                 "or a complete MechWarrior 2 DOS install. It is remembered in %s.\n", portcfg_file());
+#ifdef _WIN32   /* started from Explorer there is no console to read that in */
+            { char m[1400]; snprintf(m, sizeof m,
+                "No game folder found.\n\n"
+                "Put your MW2-game folder (with install, cd, 3d ... inside - see FOLDER_SETUP.md) next to mw2.exe, "
+                "or in your user folder (%s\\MW2-game), or drag the folder onto mw2.exe.\n\n"
+                "It is remembered after the first run (%s).", getenv("USERPROFILE") ? getenv("USERPROFILE") : "", portcfg_file());
+              SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, NULL); }
+#endif
             return 2;
         }
         if (!had_game && argc < 2) portcfg_save(NULL, &g_cfg);   /* found on its own: remember it */
@@ -4492,7 +4504,14 @@ int main(int argc, char **argv)
         }
     }
     snprintf(p, sizeof p, "%s", gpath("DATABASE.MW2"));
-    if (shelldb_open(p, &g_db)) { fprintf(stderr, "cannot open %s\n", p); return 1; }
+    if (shelldb_open(p, &g_db)) {
+        fprintf(stderr, "cannot open %s\n", p);
+#ifdef _WIN32
+        { char m[1200]; snprintf(m, sizeof m, "Cannot open %s\n\nThe game folder is missing the original CD's files - see FOLDER_SETUP.md.", p);
+          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, NULL); }
+#endif
+        return 1;
+    }
     g_flabel.len = shelldb_entry(&g_db, 27, &g_flabel.d);
     g_flist.len = shelldb_entry(&g_db, 25, &g_flist.d);
     g_fthin.len = shelldb_entry(&g_db, 31, &g_fthin.d);   /* the Mech Lab panels */

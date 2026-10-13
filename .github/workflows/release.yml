@@ -79,8 +79,41 @@ jobs:
           name: fedora
           path: dist/*.rpm
 
+  build-windows:
+    runs-on: ubuntu-24.04   # cross-compiled with MinGW-w64; ships SDL2.dll beside mw2.exe
+    env:
+      SDL2_VERSION: 2.32.10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 and SDL2 (MinGW development package)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64 zip
+          curl -sSfL -o sdl2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-devel-${SDL2_VERSION}-mingw.tar.gz
+          tar xzf sdl2.tar.gz
+          SDL=$PWD/SDL2-${SDL2_VERSION}/x86_64-w64-mingw32
+          sed -i "s|^prefix=.*|prefix=$SDL|" $SDL/bin/sdl2-config
+          echo "SDL=$SDL" >> $GITHUB_ENV
+
+      - name: Build
+        run: make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar SDL2_CONFIG=$SDL/bin/sdl2-config
+
+      - name: Package
+        run: |
+          mkdir -p dist/MW2-Port
+          cp mw2.exe $SDL/bin/SDL2.dll dist/MW2-Port/
+          cp -r assets dist/MW2-Port/
+          cp README.md FOLDER_SETUP.md THIRD_PARTY.md dist/MW2-Port/
+          cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x64.zip MW2-Port
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
   release:
-    needs: [build-macos, build-linux, build-fedora]
+    needs: [build-macos, build-linux, build-fedora, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

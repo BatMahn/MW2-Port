@@ -4,6 +4,8 @@
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
+#elif defined(_WIN32)
+#include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
 #else
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>

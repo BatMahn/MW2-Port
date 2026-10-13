@@ -24,6 +24,8 @@
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
+#elif defined(_WIN32)
+#include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
 #else
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
@@ -3963,7 +3965,20 @@ int main(int argc, char **argv)
         }
         if (!aa) msaa = 0;
     }
-    if (!win || !(ctx = SDL_GL_CreateContext(win))) { fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError()); return 1; }
+    if (!win || !(ctx = SDL_GL_CreateContext(win))) {
+        fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError());
+#ifdef _WIN32   /* a GUI program on Windows has no console: say it in a box */
+        { char m[512]; snprintf(m, sizeof m, "Could not start OpenGL 3.3:\n%s\n\nUpdate your graphics driver and try again.", SDL_GetError());
+          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, win); }
+#endif
+        return 1;
+    }
+#ifdef _WIN32
+    if (mw2gl_load() != 0) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", "This graphics driver does not provide OpenGL 3.3.\nUpdate your graphics driver and try again.", win);
+        return 1;
+    }
+#endif
     SDL_GL_SetSwapInterval(1);
     { int dw0, dh0; SDL_GL_GetDrawableSize(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
     glr_default_view(&v);

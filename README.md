@@ -21,6 +21,16 @@ Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
 
     make && make mw2        # the tools, then the game (mw2: menus + missions in one program)
 
+Windows (64-bit) builds with MinGW-w64: in MSYS2's MINGW64 shell
+(`pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2`) just `make mw2`; or cross-compile from Linux with
+the SDL2 MinGW development package (as the release workflow does):
+
+    make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar \
+             SDL2_CONFIG=/path/to/SDL2-x.y.z/x86_64-w64-mingw32/bin/sdl2-config
+
+That gives `mw2.exe`; put `SDL2.dll` beside it. Only the game (`mw2`) is set up for Windows, not the other tools.
+Run `make clean` when switching between a Windows and a native build.
+
 ## Setting up the game folder
 The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy.
 Only the 3D editions' data (`3d/`) is included in this repository; everything else comes from your own copies.
@@ -219,6 +229,17 @@ The MW2_* environment variables remain for development and tests only.
 Unpack anywhere and run `./mw2 /path/to/MW2-game` once. Needs SDL2 and OpenGL 3.3 from the system.
 On macOS: `make mw2 && sh scripts/macos_app.sh` builds "MechWarrior 2.app" in the current folder, with its icon and
 SDL2 bundled inside (no Homebrew needed to run it).
+
+### Windows
+
+Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2.exe`, `SDL2.dll` and `assets\`
+must stay together. Then either put your `MW2-game` folder next to `mw2.exe`, put it in your user folder
+(`C:\Users\<you>\MW2-game`), or drag the folder onto `mw2.exe` once - it is remembered in
+`%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with OpenGL 3.3 (any GPU from about 2010 on, with the
+vendor's driver installed rather than Windows' basic display driver).
+
+The exe isn't code-signed, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then
+**Run anyway**.
 
 ### macOS: the app is not signed
 
