@@ -62,15 +62,41 @@ static inputmap   g_im;   /* GAMEKEY.MAP + INPUT.MAP from the game directory (th
 static float      g_hud_s = 1.0f;       /* the set's pixel scale against the 6 set (the 320x200 set: 0.5) */
 static const char *g_hud_sfx = "6";   /* the HUD sprite set: "" 320x200, "6" 640x480, "K" 1024x768 */
 static int        g_win_lines = 480;     /* the window's drawable height (the native set choice) */
+static int        g_win_cols = 640;      /* and its width */
+static float      g_hp[256][4];          /* the HUD palette's colours (hud_mission_palette) */
+#define HP(i) ((const float *)g_hp[(i) & 0xff])
 #define HUD_BEGIN(hd, w, h) (g_render_w == 320 && g_lr_fbo[0] ? hud_begin_stretched(hd, w, h) : hud_begin(hd, w, h))
 static const char *HN(const char *base) { static char b[8][16]; static int k; k = (k + 1) & 7; snprintf(b[k], 16, "%s%s", base, g_hud_sfx); return b[k]; }
 static int        g_cockpit_frame;   /* the cockpit frame (the eye's hull piece): off until its rule is solved (ASSUMPTIONS
                                       * "Cockpit frames"); MW2_COCKPIT_FRAME=1 shows the current attempt */
-/* the key ramp's acceleration, full scale per second squared: constant acceleration as in the engine
- * (0x10039ee0): 3 << shift per tick, the shift per control set with the bindings (not traced; shifts 5 / 3 fit the DOS
- * leg taps and zoom taps) */
-#define KEY_ACCEL 48.5f   /* 3 << 5 per tick^2 at 182 ticks/s on a 16.16 value: 48.5 /s^2 (DOS leg taps fit 7-9 / 21 deg) */
-#define ZOOM_ACCEL 12.1f  /* 3 << 3: the zoom (DOS: fitted 11-16) */
+/* the key ramp (engine 0x10039ee0, DOS 0x486e0), run per frame at the agreed 30 fps reference: a held _plus key sets a
+ * negative velocity to 0, adds (frame ticks x 3) << shift (16.16; 182 / 30 ticks a frame) capped at 0x8000, then adds the
+ * velocity to the value (capped at 0x10000 = 1); _minus the same downwards (applied after _plus); with neither held the
+ * velocity is zeroed. The shift is the control table's +0x18 (0x10256540, copied to the sink's +0x1e by 0x10039140):
+ * legs_pan_delta 7, pilot_pan / pilot_tilt 5, zoom_factor 6 (throttle 6, torso_pan 3, torso_tilt 4, eyepoint 4). A
+ * "_delta" control's velocity is its value (0x10039140 points +4 at +0x1a): each frame value = 2 x min(value + step,
+ * 0.5), and it drops to 0 with the keys up - legs_pan_delta reaches full turn on the 4th frame (0.13 s), so a 0.2 s
+ * tap turns ~9 degrees and 0.35 s ~22 (DOSBox: 7-9 / 21). pilot_pan / tilt reach full after ~0.5 s and keep their value
+ * (DOS: 0.15 s a few degrees, 0.6 s well round); the zoom 0.12 s 1.00 -> 1.17 (DOS 1.17) */
+typedef struct { float vel, val, acc; } key_ramp_t;
+static void key_ramp(key_ramp_t *r, int plus, int minus, int shift, int delta, float dt)
+{
+    const float step = 3.0f * (182.0f / 30.0f) * (float)(1 << shift) / 65536.0f;
+    r->acc += dt;
+    if (r->acc > 0.5f) r->acc = 0.5f;
+    while (r->acc >= 1.0f / 30.0f) {
+        r->acc -= 1.0f / 30.0f;
+        if (delta) {
+            if (plus) { if (r->val < 0) r->val = 0; r->val += step; if (r->val > 0.5f) r->val = 0.5f; r->val *= 2.0f; if (r->val > 1) r->val = 1; }
+            if (minus) { if (r->val > 0) r->val = 0; r->val -= step; if (r->val < -0.5f) r->val = -0.5f; r->val *= 2.0f; if (r->val < -1) r->val = -1; }
+            if (!plus && !minus) r->val = 0;
+            continue;
+        }
+        if (plus) { if (r->vel < 0) r->vel = 0; r->vel += step; if (r->vel > 0.5f) r->vel = 0.5f; r->val += r->vel; if (r->val > 1) r->val = 1; }
+        if (minus) { if (r->vel > 0) r->vel = 0; r->vel -= step; if (r->vel < -0.5f) r->vel = -0.5f; r->val += r->vel; if (r->val < -1) r->val = -1; }
+        if (!plus && !minus) r->vel = 0;
+    }
+}
 static int        g_lite_level;   /* the planet's LITE ambient level (<4 letters>PLT1, payload +0x14) */
 static int        g_render_w, g_render_h;   /* MW2PORT.CFG render=: 0 native, else the original's 320x200 / 640x480 / 1024x768 */
 /* the full-width bars: the set's own at the original resolutions; drawing natively between 480 and 768 lines the K
@@ -134,10 +160,18 @@ static void write_results(void)
 /* the player's mech */
 static mech3d    g_pl;
 static anim_set  g_pl_anim;
-static int       g_pl_ok, g_pilot = 1, g_cockpit = 1, g_pl_target = -1;   /* missions start in the cockpit, as the original */
+static int       g_pl_ok, g_pilot = 1, g_cockpit = 1, g_pl_target = -1, g_reverse;   /* g_reverse: REVERSE_DIRECTION's flag (input +0x2f) */   /* missions start in the cockpit, as the original */
 static int       g_frame_mech;
 static int       g_win_w = 1280, g_win_h = 720;   /* bumped whenever the player's mech is (re)loaded */
 static float     g_pl_stride = 100, g_pl_walk = 1500, g_throttle, g_pl_speed, g_pl_t, g_pitch;
+static float     g_pl_frac[2];         /* the sub-cm rest (x, z) of the player's last mech-contact projection */
+static float     g_pl_across;          /* cm/s: a mech contact's velocity across the heading (+ = to the right), easing off */
+static int       g_pl_contact = -2;    /* the mech last touched (-2 none; < -2 landed on mech -contact - 3) */
+static float     g_pl_contact_acc;     /* touching a mech or a wall: the frame time not yet run in 1/30 s moves (pl_locomote) */
+static int       g_pl_contact_hold;    /* 1/30 s moves left in contact mode without a touch (pl_locomote) */
+static float     g_jet_vx, g_jet_vz;   /* the directional jets' drift (cm/s) on top of the walking velocity */
+static anim_player g_pl_ap;            /* the player's walk animation key player (engine 0x1000dec0); g_pl_t = its pose */
+static int       g_pl_ap_ok;
 static int       g_feet_to_torso;
 static hud      *g_hud;
 static hud_sprite g_hs_rcl[6], g_hs_rcl_dos[6], g_hs_reticle_dos, g_hs_tgt_dos[3];   /* the DOS (base set) reticle and brackets */   /* RCLINOP RCLLOCK RCLNOLK RCLPLOC RCLTGT RCLGLOC */
@@ -301,10 +335,182 @@ static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist
     if (r == 0) return NULL;
     m = &g_alod[k].m[r];
     memcpy(m->origin, full->origin, sizeof m->origin);
-    m->heading = full->heading; m->twist = full->twist;
+    m->heading = full->heading; m->twist = full->twist; m->pose_off = full->pose_off;
     mech3d_pose(m, (const anim_set *)full->pose_anim, full->pose_t);
     if (full->part_count > 0) { int q; for (q = 0; q < m->part_count; q++) m->parts[q].tex_offset = full->parts[0].tex_offset; }   /* the star's camo / insignia */
     return m;
+}
+
+/* TEXTURES TITANIUM: a mech or vehicle drawn as the Titanium archive's model of its record (mech3d_ti_load: its own meshes,
+ * skeleton offsets and texture slots; the ANIM records are byte-identical, so it is posed with the actor's animation and
+ * time) at the actor's level of detail; the simulation keeps the original model. k 0-63 an actor, 64 the player. */
+static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_tiact[65];
+static mech3d *ti_actor(int k, const mech3d *full, const char *skel, int repr)
+{
+    mech3d *m;
+    int q;
+    if (!c3d_ti || k < 0 || k > 64 || !skel || !skel[0]) return NULL;
+    if (!g_tiact[k].tried || strcmp(g_tiact[k].skel, skel) != 0) {
+        for (q = 0; q < 4; q++) if (g_tiact[k].ok[q]) { mech3d_free(&g_tiact[k].m[q]); g_tiact[k].ok[q] = 0; }
+        g_tiact[k].tried = 1;
+        snprintf(g_tiact[k].skel, sizeof g_tiact[k].skel, "%s", skel);
+        for (q = 0; q < 4; q++) {
+            g_tiact[k].ok[q] = mech3d_ti_load(c3d_ti, skel, q, &g_tiact[k].m[q]) == 0 && g_tiact[k].m[q].part_count > 0;
+            if (q > 0 && g_tiact[k].ok[q] && g_tiact[k].ok[0]) mech3d_use_skeleton(&g_tiact[k].m[q], &g_tiact[k].m[0]);
+        }
+    }
+    if (repr < 0) repr = 0;
+    if (repr > 3) repr = 3;
+    while (repr > 0 && !g_tiact[k].ok[repr]) repr--;
+    if (!g_tiact[k].ok[repr]) return NULL;
+    m = &g_tiact[k].m[repr];
+    memcpy(m->origin, full->origin, sizeof m->origin);
+    m->heading = full->heading; m->twist = full->twist;
+    mech3d_pose(m, (const anim_set *)full->pose_anim, full->pose_t);
+    if (full->part_count > 0) for (q = 0; q < m->part_count; q++) m->parts[q].tex_offset = full->parts[0].tex_offset;   /* its star */
+    return m;
+}
+/* TEXTURES TITANIUM: the missile smoke (mercsw.dll's particles, its "Particles" option 0x1009dbc8 - default not traced,
+ * on here). Each projectile step of a missile (projectile kind 3 or 4 - and the Titanium-only 9, 10, 12 -, 0x10011a18)
+ * starts an emitter (0x1004df04) at its previous position: 20 puffs at i x step / 16 (i = 1..20) + (rand(10) - 5,
+ * rand(50) - 25, rand(10) - 5); refused beyond the view distance or with the pool (up to 1000 objects, 0x1004cff9) full.
+ * Each update (0x1004d6ec) moves the emitter by step / 8, plus rand(10) up; it ends past 90 ticks; its colour is the
+ * mission palette's entry {0x15, 0x15, 0x3f, 0x3f, 0x3e, 0x3e .. 0x38, 0x38}[age x 17 / 90] (0x1004d377) x 200 / 256
+ * (the vertex intensity 0xc8). Drawn (0x1004d7ba) as screen squares of 5 - z / 4000 pixels (2 at least, 2 beyond 200 m;
+ * z the emitter's depth) textured with particle.PID (a 32 x 32 PCX-RLE disc, index 244 in a grey ramp; every palette
+ * entry alpha 200 -> the plugin's inverted 4-bit alpha 3 / 15; colour key on for Render type 7, 0x10003722 state 0x29:
+ * black - index 0 - INFERRED as the key), Render type 7 (alpha blend, clamped UVs), no fog. The port steps the emitters
+ * and the emission at the 30 fps reference (the engine's per-frame update) and takes the depth as the distance. */
+#define TI_EMIT_MAX 1000
+static struct { float pos[3], v[3], off[20][3]; float born; } g_tip[TI_EMIT_MAX];
+static int g_tip_n, g_tip_state;   /* g_tip_state: 0 not loaded, 1 loaded, -1 no particle.PID */
+static texture g_tip_tex[8 + 1];    /* palette 0x15 and 0x3f..0x38 */
+static char g_ti_dir[PORTCFG_PATH];
+static const uint8_t TI_TIP_COL[18] = {0x15, 0x15, 0x3f, 0x3f, 0x3e, 0x3e, 0x3d, 0x3d, 0x3c, 0x3c, 0x3b, 0x3b, 0x3a, 0x3a, 0x39, 0x39, 0x38, 0x38};
+static int ti_tip_load(const char *mission)
+{
+    char path[PORTCFG_PATH + 16];
+    uint8_t buf[4096], img[32 * 32];
+    size_t len, i = 0x20, n = 0;
+    FILE *f;
+    uint8_t pal[256][3];
+    int k, w, h;
+    snprintf(path, sizeof path, "%s/particle.PID", g_ti_dir);
+    if (!(f = fopen(path, "rb"))) { snprintf(path, sizeof path, "%s/PARTICLE.PID", g_ti_dir); f = fopen(path, "rb"); }
+    if (!f) { printf("titanium: no particle.PID in %s: no missile smoke\n", g_ti_dir); return -1; }
+    len = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    w = len >= 16 ? buf[8] | buf[9] << 8 : 0; h = len >= 16 ? buf[12] | buf[13] << 8 : 0;   /* header +8 w, +0xc h (0x100025d4) */
+    if (w != 32 || h != 32) return -1;
+    while (n < sizeof img && i < len) {   /* PCX run-length: a byte >= 0xc0 repeats the next (b & 0x3f) times */
+        uint8_t b = buf[i++];
+        if (b >= 0xc0) { int c = b & 0x3f; uint8_t v2 = i < len ? buf[i++] : 0; while (c-- > 0 && n < sizeof img) img[n++] = v2; }
+        else img[n++] = b;
+    }
+    memcpy(pal, g_scene.palette, sizeof pal);
+    {   /* the mission's palette: the Titanium archive's (0x10286d40) */
+        prj_record rec;
+        r_target holder;
+        char nm[16];
+        snprintf(nm, sizeof nm, "%.4s_DA", mission);
+        if (c3d_ti && prj_read_named(c3d_ti, "PAL", nm, &rec) == PRJ_OK) {
+            if (r_init(&holder, 1, 1) == 0) { r_set_palette(&holder, rec.data, rec.size); memcpy(pal, holder.palette, sizeof pal); r_free(&holder); }
+            prj_record_free(&rec);
+        }
+    }
+    for (k = 0; k < 9; k++) {
+        int ix = k == 0 ? 0x15 : 0x40 - k, q;   /* 0x3f .. 0x38 */
+        texture *t = &g_tip_tex[k];
+        free(t->rgba);
+        t->w = t->h = 32;
+        if (!(t->rgba = malloc(32 * 32 * sizeof *t->rgba))) return -1;
+        for (q = 0; q < 32 * 32; q++) {
+            unsigned g = img[q], c[3], j;
+            for (j = 0; j < 3; j++) c[j] = (unsigned)pal[ix][j] * g / 255u * 200u / 256u;   /* palette x texel grey x 0xc8 */
+            t->rgba[q] = g == 0 ? 0 : (c[0] | c[1] << 8 | c[2] << 16 | 0xffu << 24);
+        }
+    }
+    return 1;
+}
+static void ti_particles(glr *r, const glr_view *v, float now_ticks, const char *mission)
+{
+    static float last = -1;
+    static glr_particle *pp;
+    static int pcap;
+    int k, q, n = 0;
+    if (!c3d_ti || !g_sim_ok || getenv("MW2_NO_PARTICLES")) { glr_set_particles(r, NULL, 0, 0); g_tip_n = 0; last = -1; return; }
+    if (g_tip_state == 0) g_tip_state = ti_tip_load(mission);
+    if (g_tip_state < 0) { glr_set_particles(r, NULL, 0, 0); return; }
+    if (last < 0 || now_ticks < last) last = now_ticks;
+    while (now_ticks - last >= 182.0f / 30.0f) {   /* the 30 fps reference steps */
+        const float dt = 182.0f / 30.0f;
+        last += dt;
+        for (k = 0; k < g_tip_n; k++) {
+            if (last - g_tip[k].born > 90.0f) { g_tip[k--] = g_tip[--g_tip_n]; continue; }
+            g_tip[k].pos[0] += g_tip[k].v[0]; g_tip[k].pos[1] += g_tip[k].v[1] + (float)(rand() % 10); g_tip[k].pos[2] += g_tip[k].v[2];
+        }
+        for (q = 0; q < g_sim.shot_count; q++) {
+            const msim_shot *sh = &g_sim.shots[q];
+            int kind = combat_weapon_kind(sh->weapon), i;
+            float d[3], o[3], dx, dy, dz;
+            if (kind != 3 && kind != 4) continue;
+            if (g_tip_n + 1 >= TI_EMIT_MAX) break;
+            d[0] = sh->vx * dt; d[1] = sh->vy * dt; d[2] = sh->vz * dt;
+            o[0] = sh->x - d[0]; o[1] = sh->y - d[1]; o[2] = sh->z - d[2];
+            dx = o[0] - v->eye[0]; dy = o[1] - v->eye[1]; dz = o[2] - v->eye[2];
+            if (v->far_cull > 0 && dx * dx + dy * dy + dz * dz > v->far_cull * v->far_cull) continue;
+            memcpy(g_tip[g_tip_n].pos, o, sizeof o);
+            for (i = 0; i < 3; i++) g_tip[g_tip_n].v[i] = d[i] / 8.0f;
+            for (i = 0; i < 20; i++) {
+                g_tip[g_tip_n].off[i][0] = d[0] * (float)(i + 1) / 16.0f + (float)(rand() % 10) - 5.0f;
+                g_tip[g_tip_n].off[i][1] = d[1] * (float)(i + 1) / 16.0f + (float)(rand() % 50) - 25.0f;
+                g_tip[g_tip_n].off[i][2] = d[2] * (float)(i + 1) / 16.0f + (float)(rand() % 10) - 5.0f;
+            }
+            g_tip[g_tip_n].born = last;
+            g_tip_n++;
+            {   /* (tests) */
+                static float said = -1;
+                if (said < 0 || last < said) { said = last; printf("titanium: missile smoke from %.1f s\n", (double)g_sim.now / 1000.0); }
+            }
+        }
+    }
+    if (pcap < g_tip_n * 20) { free(pp); pcap = g_tip_n * 20; pp = malloc((size_t)pcap * sizeof *pp); if (!pp) pcap = 0; }
+    for (k = 0; pp && k < g_tip_n; k++) {
+        float age = now_ticks - g_tip[k].born, dx = g_tip[k].pos[0] - v->eye[0], dy = g_tip[k].pos[1] - v->eye[1], dz = g_tip[k].pos[2] - v->eye[2];
+        float z = sqrtf(dx * dx + dy * dy + dz * dz), size = 3.0f;
+        int ai = (int)(age / 90.0f * 17.0f), ci;
+        if (ai < 0) ai = 0;
+        if (ai > 17) ai = 17;
+        ci = TI_TIP_COL[ai] == 0x15 ? 0 : 0x40 - TI_TIP_COL[ai];
+        if (z > 0) { size = z > 20000.0f ? 2.0f : 5.0f - z * 0.00025f; if (size < 2.0f) size = 2.0f; }
+        for (q = 0; q < 20; q++) {
+            pp[n].pos[0] = g_tip[k].pos[0] + g_tip[k].off[q][0];
+            pp[n].pos[1] = g_tip[k].pos[1] + g_tip[k].off[q][1];
+            pp[n].pos[2] = g_tip[k].pos[2] + g_tip[k].off[q][2];
+            pp[n].size_px = size;
+            pp[n].tex = &g_tip_tex[ci];
+            n++;
+        }
+    }
+    glr_set_particles(r, pp, n, 3.0f / 15.0f);   /* (the texture's alpha: 15 - (200 >> 4) = 3, dx5draw 0x10006713) */
+}
+
+/* the world objects' Titanium models (world3d_ti_attach on the world's parts) */
+static wtb_model *g_ti_world;
+static int g_ti_world_n;
+static const mech3d_part *g_ti_world_for;   /* the parts array they were attached to */
+static void ti_world_attach(mech3d *world)
+{
+    world3d_ti_free(g_ti_world, g_ti_world_n);
+    g_ti_world = NULL; g_ti_world_n = 0; g_ti_world_for = NULL;
+    if (!c3d_ti || !world) return;
+    g_ti_world_for = world->parts;
+    {
+        int got = world3d_ti_attach(c3d_ti, world, &g_ti_world), k, scrub = 0;
+        g_ti_world_n = world->part_count;
+        for (k = 0; k < world->part_count; k++) scrub += world->parts[k].scrg != 0;
+        printf("titanium: %d of %d world objects with a Titanium model, %d scrub-patch objects not drawn\n", got, world->part_count, scrub);
+    }
 }
 
 static texture *fx_texture(int cel)
@@ -316,6 +522,13 @@ static texture *fx_texture(int cel)
     t = g_fxtex[cel] = calloc(1, sizeof *t);
     if (!t) return NULL;
     if (prj_read(g_fx_ta, prj_find_type(g_fx_ta, "CEL"), cel, &r) == PRJ_OK) {
+        prj_record tr;
+        /* the Titanium look: the frame of this name in its archive (the effect frames are among the names it has) */
+        if (c3d_ti && g_fx_ati != 3 && prj_read_named(c3d_ti, "CEL", r.name, &tr) == PRJ_OK) {
+            int ok = tex_decode(tr.data, tr.size, TEX_TITANIUM, t) == 0;
+            prj_record_free(&tr);
+            if (ok) { prj_record_free(&r); return t; }
+        }
         /* ATi: one format; 3dfx/S3: effect frames carry transparency (ARGB4444) */
         if (tex_decode(r.data, r.size, g_fx_ati == 1 ? TEX_ATI : g_fx_ati == 2 ? TEX_PVR : g_fx_ati == 3 ? TEX_DOS : g_fx_ati == 4 ? TEX_MGA : TEX_3DFX_4444, t) != 0) t->rgba = NULL;
         else if (g_fx_ati == 3) {   /* DOS: the effect frames in the mission's palette (index 0xff transparent) */
@@ -441,6 +654,7 @@ static int ui_click(void) { if (g_sfx) sfx_play(g_sfx, 0xdc, 0.4f, 0.0f); return
 static float g_fade_level = 1.0f;   /* the opening palette fade: 0 black .. 1 done (see the frame end) */
 static int   g_voice_off;   /* the VOICE slider at 0: the outcome is shown as text instead (0x10031440) */
 static int   g_radio_qn;    /* radio lines waiting (the msim end sequence waits for none, DAT_1024f6bc) */
+static int   g_radio_waiting;   /* mission radio lines queued, not yet playing (the voice queue lets them go first) */
 static int   g_masc;   /* MASC engaged (engine DAT_1024c554) */
 /* mission radio messages (mtbl node start / finish SNDS names): on the voice channel, one at a time - a message that
  * arrives while another plays waits for it */
@@ -450,6 +664,7 @@ static void on_radio(void *user, const char *name)
     static int qn, qpri[8], flushed;
     (void)user;
     g_radio_qn = qn + (g_sfx && sfx_voice_busy(g_sfx));
+    g_radio_waiting = qn;
     if (!flushed && g_sim.end_flush_at && g_sim.now >= g_sim.end_flush_at) {
         /* the end sequence's flush (0x10031640(1)): queued lines below priority 0x50 dropped (the outcome line is 0x50) */
         int a = 0, b;
@@ -518,28 +733,106 @@ static float g_proj_len[3];
 static int   g_dos_lasers;
 static int   g_tex_kind;   /* 0 3Dfx / S3, 1 ATi, 2 PowerVR, 3 DOS, 4 Matrox Mystique */
 static int   g_edition;    /* PORTCFG_ED_* from MW2_EDITION (the shell's RENDERER choice) */   /* MW2_DOS_LASERS=1: the DOS edition's green balls instead of the 3D editions' bolts */   /* LASER1-3 model lengths (z extent), cm */
+static int   g_texset;     /* PORTCFG_TX_* from MW2_TEXTURES (the shell's TEXTURES choice; TITANIUM: c3d_ti is open) */
+/* Does the renderer draw fog? The PowerVR edition (its sgl fog) and the enhanced mix (which takes it); the 3Dfx, ATi,
+ * S3 and Mystique editions draw none (no fog file). With the Titanium textures that renderer draws the Titanium fog
+ * (its SKYGND.PAR colours and depths, made for its sky dome) or none. */
+static int look_fog(int ed) { return ed == PORTCFG_ED_PVR || ed == PORTCFG_ED_ENHANCED; }
 static mech3d_part g_proj[9];   /* projectile models: LASER1-3, MISSILE1, BULLET, PPCSHOT1, MISSILE2; debris CHUNKER1-2 */
+static float     g_proj_scale[7][3];   /* the pool object's OBJ scale (x, y, z) for slots 0-6 (MW2_SHT1) */
+/* the PPC (kind 6) and gauss (kind 7) cards: their pool object's colour 0x3xxx -> texture slot (w >> 4) & 0xff (3D 0x0b /
+ * 0x0d, DOS 0x52 a9ppcs01 / 0x5a a9gaus01), and half the card's height (foot to top) x its OBJ y scale */
+static int       g_card_slot[2] = {0x0b, 0x0d};
+static float     g_card_half[2] = {200.0f, 100.0f};
+static float     g_card_tri[2][3][3];   /* the card's triangle in the object's frame (x right, y up, z along the course), x its
+                                         * OBJ scale - image enhancement draws this outline (DOSBox: red triangles) */
+static int       g_card_tri_ok[2];
 static int       g_proj_ok;
 static void load_projectiles(prj_archive *a)
 {
+    /* the projectile objects come from the pool record MW2_SHT1 (engine 0x10043dc5 / DOS 0x50xxx: the first free pool
+     * entry whose BTHG kind equals the weapon table's +0x00): each OBJ (its POLY model and scale) followed by a BTHG
+     * {u16 id, u16 kind}. The archives name the models differently - the 3D ones MISSLE2 (kind 3) / MISSLE1 (kind 4),
+     * the DOS one MISSLE1 for both (no MISSILE1 / MISSILE2 records at all: DOS missiles were never drawn) - so the
+     * model is taken by the pool's id, not by a name. Slots: kind 0-2 -> 0-2, 4 -> 3, 5 -> 4, 6 -> 5, 3 -> 6. The
+     * names below are the fallback (an archive without the pool) and the debris chunks (7, 8). */
     static const char *names[9] = {"LASER1", "LASER2", "LASER3", "MISSILE1", "BULLET", "PPCSHOT1", "MISSILE2", "CHUNKER1", "CHUNKER2"};
-    int i;
+    static const int SLOT_OF_KIND[7] = {0, 1, 2, 6, 3, 4, 5};
+    int i, have[9] = {0};
+    prj_record r;
     if (g_proj_ok) return;
+    for (i = 0; i < 7; i++) g_proj_scale[i][0] = g_proj_scale[i][1] = g_proj_scale[i][2] = 1.0f;
+    g_proj_scale[0][0] = g_proj_scale[0][1] = g_proj_scale[1][0] = g_proj_scale[1][1] = g_proj_scale[2][0] = g_proj_scale[2][1] = 3.0f;
+    g_proj_scale[0][2] = g_proj_scale[1][2] = g_proj_scale[2][2] = 12.0f;   /* the lasers' (3, 3, 12) if no pool */
     for (i = 0; i < 9; i++) {
-        prj_record r;
         memset(&g_proj[i], 0, sizeof g_proj[i]);
         snprintf(g_proj[i].model_name, sizeof g_proj[i].model_name, "%s", names[i]);
         g_proj[i].node = -1;
-        if (prj_read_named(a, "POLY", names[i], &r) == PRJ_OK) {
+    }
+    if (prj_read_named(a, "BWD", "MW2_SHT1", &r) == PRJ_OK) {
+        int n = bwd_chunks(r.data, r.size, NULL, 0), k, pt = prj_find_type(a, "POLY");
+        bwd_chunk *c = n > 0 ? calloc((size_t)n, sizeof *c) : NULL;
+        bwd_obj ob;
+        int got = 0;
+        if (c) bwd_chunks(r.data, r.size, c, n);
+        for (k = 0; c && k < n; k++) {
+            if (strcmp(c[k].tag, "OBJ") == 0) got = bwd_obj_decode(&c[k], &ob) == 0;
+            else if (strcmp(c[k].tag, "BTHG") == 0 && got && c[k].size >= 4) {
+                int kind = c[k].data[2] | c[k].data[3] << 8, sl;
+                prj_record mr;
+                got = 0;
+                if (kind == 6 || kind == 7) {   /* a card: its texture slot and size (the first pool entry of the kind) */
+                    static int seen[2];
+                    wtb_model cm;
+                    if (seen[kind - 6]++ || pt < 0 || prj_read(a, pt, ob.model, &mr) != PRJ_OK) continue;
+                    if (wtb_parse(mr.data, mr.size, &cm) == 0 && cm.object_count > 0 && cm.objects[0].poly_count > 0 &&
+                        (cm.objects[0].polys[0].color & 0x7000) == 0x3000) {
+                        const wtb_object *o = &cm.objects[0];
+                        int q, lo = 1 << 30, hi = -(1 << 30);
+                        g_card_slot[kind - 6] = (o->polys[0].color >> 4) & 0xff;
+                        for (q = 0; q < o->vert_count; q++) if (o->verts[q].a == 0) { if (o->verts[q].y < lo) lo = o->verts[q].y; if (o->verts[q].y > hi) hi = o->verts[q].y; }
+                        if (hi > lo) g_card_half[kind - 6] = (float)(hi - lo) * 0.5f * (ob.scale[1] > 0 ? (float)ob.scale[1] : 1.0f);
+                        if (o->polys[0].n == 3) {
+                            for (q = 0; q < 3; q++) {
+                                const wtb_vertex *vv = &o->verts[o->polys[0].idx[q]];
+                                g_card_tri[kind - 6][q][0] = (float)vv->x * (ob.scale[0] > 0 ? (float)ob.scale[0] : 1.0f);
+                                g_card_tri[kind - 6][q][1] = (float)vv->y * (ob.scale[1] > 0 ? (float)ob.scale[1] : 1.0f);
+                                g_card_tri[kind - 6][q][2] = (float)vv->z * (ob.scale[2] > 0 ? (float)ob.scale[2] : 1.0f);
+                            }
+                            g_card_tri_ok[kind - 6] = 1;
+                        }
+                        wtb_free(&cm);
+                    }
+                    prj_record_free(&mr);
+                    continue;
+                }
+                if (kind < 0 || kind > 6 || have[sl = SLOT_OF_KIND[kind]]) continue;
+                if (pt >= 0 && prj_read(a, pt, ob.model, &mr) == PRJ_OK) {
+                    if (wtb_parse(mr.data, mr.size, &g_proj[sl].model) == 0 && g_proj[sl].model.object_count > 0) {
+                        int q;
+                        have[sl] = 1;
+                        for (q = 0; q < prj_symbol_count(a, pt); q++)
+                            if (prj_symbol_id(a, pt, q) == ob.model) { snprintf(g_proj[sl].model_name, sizeof g_proj[sl].model_name, "%s", prj_symbol_name(a, pt, q)); break; }
+                        for (q = 0; q < 3; q++) g_proj_scale[sl][q] = ob.scale[q] > 0 ? (float)ob.scale[q] : 1.0f;
+                    }
+                    prj_record_free(&mr);
+                }
+            }
+        }
+        free(c);
+        prj_record_free(&r);
+    }
+    for (i = 0; i < 9; i++) {
+        if (!have[i] && prj_read_named(a, "POLY", names[i], &r) == PRJ_OK) {
             wtb_parse(r.data, r.size, &g_proj[i].model);
             prj_record_free(&r);
-            if (i < 3 && g_proj[i].model.object_count) {
-                const wtb_object *o = &g_proj[i].model.objects[0];
-                int k2;
-                float lo = 1e9f, hi = -1e9f;
-                for (k2 = 0; k2 < o->vert_count; k2++) { if (o->verts[k2].z < lo) lo = (float)o->verts[k2].z; if (o->verts[k2].z > hi) hi = (float)o->verts[k2].z; }
-                g_proj_len[i] = hi - lo;
-            }
+        }
+        if (i < 3 && g_proj[i].model.object_count) {
+            const wtb_object *o = &g_proj[i].model.objects[0];
+            int k2;
+            float lo = 1e9f, hi = -1e9f;
+            for (k2 = 0; k2 < o->vert_count; k2++) { if (o->verts[k2].z < lo) lo = (float)o->verts[k2].z; if (o->verts[k2].z > hi) hi = (float)o->verts[k2].z; }
+            g_proj_len[i] = hi - lo;
         }
     }
     g_proj_ok = 1;
@@ -608,12 +901,37 @@ static void lowres_present(int ow, int oh)
     glBlitFramebuffer(0, 0, sw, sh, x0, y0, x0 + vw, y0 + vh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
-static int g_inspect_until;   /* sim ms: the target viewer shows the inspection (0x16a ticks, engine 0x10021xxx) */
+/* the inspection's result in the viewer's text line (0x10020e40, DAT_1024c8ac): for 0x16a ticks after an inspection
+ * (1, or 3 when inspected before) the line shows what the target holds - a mech its GPS 4th string (unit +0xfe, the
+ * pilot: "St.Cpt.Haines"), a structure its sub-name (thing +0x2a), "Contents unknown" when empty - with sound 0xdc; out of
+ * range (2) "Out of range"; then the name again. Kept for the target it was made on (0x1024d058) */
+static int32_t g_inspect_until;
+static int     g_inspect_res, g_inspect_tgt = -1, g_inspect_thing = -1;
+static const char *inspect_text(int actor, int thing);
 static void inspect_now(void)
 {
     int r = msim_inspect(&g_sim, g_tgt_sel, g_tgt_sel < 0 ? g_tgt_thing : -1);
-    if (r == 1) { hud_message_v("Inspection successful", 68); g_inspect_until = g_sim.now + 362 * 1000 / 182; }
-    else if (r == 2) hud_message_v("Target is beyond inspection radius", 69);
+    /* the message table's "Inspection successful" (entry 19, voice 68) is never posted: success shows in the viewer's
+     * line only; out of range the viewer (0x10020eac, DAT_1024c8ac == 2) posts entry 20 (0x10031870(0x14, -1)) */
+    if (r == 2) hud_message_v("Target is beyond inspection radius", 69);
+    if (r) {
+        g_inspect_res = r; g_inspect_tgt = g_tgt_sel; g_inspect_thing = g_tgt_sel < 0 ? g_tgt_thing : -1;
+        g_inspect_until = g_sim.now + 0x16a * 1000 / 182;
+        if (r != 2 && g_sfx) sfx_play(g_sfx, 0xdc, 0.5f, 0.0f);   /* 0x10032b60(0xdc, 0x64, 5, 0x32) */
+    }
+    if (getenv("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences) */
+        const char *t = r ? inspect_text(g_tgt_sel, g_tgt_sel < 0 ? g_tgt_thing : -1) : NULL;
+        printf("INSPECT r=%d text=%s\n", r, t ? t : "-");
+    }
+}
+/* the viewer's text for the current target: the inspection result while it lasts, else NULL (the name) */
+static const char *inspect_text(int actor, int thing)
+{
+    const char *t;
+    if (g_inspect_until <= g_sim.now || actor != g_inspect_tgt || thing != g_inspect_thing) return NULL;
+    if (g_inspect_res == 2) return "Out of range";
+    t = actor >= 0 ? g_actors[actor].pilot : thing >= 0 && thing < g_sim.bld_count ? g_sim.bld[thing].sub : "";
+    return t[0] ? t : "Contents unknown";
 }
 /* target upkeep, every simulated frame whatever the HUD shows (HUD hidden, target display off, shut down): a destroyed
  * mech or structure stops being the target - the engine clears the target DAT_1025a664 in the simulation, in the
@@ -694,6 +1012,66 @@ static int followed(void)   /* 0x100469b0: the followed projectile while it flie
     int k = shot_by_id(g_follow);
     if (k < 0) g_follow = 0;
     return k;
+}
+/* the player's sim events -> messages + Betty, every sim step (the engine posts them from the simulation, 0x10015f50 /
+ * 0x100167b0 / 0x1001e4fe - not from the HUD: they had waited for the HUD to be drawn, so the F11 HUD-off and the outside
+ * views held them back) */
+static void hud_message_v2(const char *m, int voice, int suffix);
+static void player_messages(void)
+{
+    const combat_unit *pu = &g_sim.player_unit;
+    /* events -> messages + Betty (message table 0x1024f144) */
+    /* 0x10015f50: "Heat level critical" once per latch (65-80, net gain), "Shutting down" (message 0xd) when the
+     * sequence shuts the mech down */
+    /* DOS 0x00024f90 also sounds MECOVHW1 with this warning (FUN_00040c50(0xe9, 100, 0x40, 5, 0x50) after message
+     * 0); the 3Dfx 0x10015f50 dropped the call (only 0x100161cf message 0). DOSBox YELLSCN1 (held group fire, SB16
+     * via the AVI): MECOVHW1 at the warning AND 1.2 s later at the sequence (shutdown 6.0 s after the second) -
+     * so the DOS look plays both, the 3D looks the 3Dfx rule */
+    if (pu->heat_warning) { hud_message_v("Heat level critical", 64); if (g_tex_kind == 3 && g_sfx) sfx_play(g_sfx, 0xe9, SFX_V64, 0.0f); g_sim.player_unit.heat_warning = 0; }
+    if (pu->auto_shutdown) { hud_message_v("Shutting down", 14); g_sim.player_unit.auto_shutdown = 0; }
+    /* 0x10016175: with message 3 the overheat alarm MECOVHW1 0xe9 (0x10032b60: edx 0x64 volume, pan 0x40 centre,
+     * 0x50 the channel priority; latch 0x1000, cleared below 65 with no sequence pending - the same edge) */
+    if (pu->shutdown_pending && !g_last_pending) { hud_message_v("Shutdown sequence initiated", 15); if (g_sfx) sfx_play(g_sfx, 0xe9, SFX_V64, 0.0f); }   /* message 3 (DOS) */
+    /* 0x1001e4fe: OVERRIDE while a sequence is pending (flag 4, not 8) and not shut down: MECBSOXX 0xcd (0x32) */
+    if (pu->override && !g_last_override) { hud_message_v("Shutdown sequence overridden", 78); if (g_sfx) sfx_play(g_sfx, 0xcd, 0.5f, 0.0f); }
+    /* critical hits on the player (0x100167b0 -> 0x100318a0(part)): "Critical hit : " (voice 54, 0x1024f1c4) and
+     * the part from table 0x1024f4e8 {voice, text} - both said, the texts joined by a space and a "." (so a double
+     * space after the colon, as the engine's strcat) */
+    if (pu->ammo_blown && g_sfx && !pu->shutdown && !pu->offline) sfx_play(g_sfx, 0xd0, 0.6f, 0.0f);   /* 0x10016afc (state 2) */
+    if (pu->ammo_blown) { hud_message_v2("Critical hit :  internal ammo explosion detected.", 54, 48); g_sim.player_unit.ammo_blown = 0; }   /* entry 1 (0x10016b5d) */
+    {
+        static const struct { short v; const char *t; } PART[0x24] = {
+            {20, "weapon destroyed"}, {48, "internal ammo explosion detected"}, {58, "NARC missle probe"}, {59, "anti-missle suite"},
+            {21, "jump-jet exhaust port"}, {22, "heat-sink"}, {23, "life-support"}, {24, "engine"}, {25, "gyro"}, {26, "sensors"},
+            {27, "leg"}, {28, "hip"}, {29, "arm"}, {30, "torso"}, {31, "left leg"}, {32, "right leg"}, {33, "left arm"},
+            {36, "right arm"}, {37, "left torso"}, {38, "right torso"}, {39, "center torso"}, {40, "head"}, {41, "LRM"},
+            {43, "SRM"}, {44, "streak SRM"}, {45, "machine gun"}, {46, "gauss rifle"}, {47, "LBX auto cannon"},
+            {49, "Ultra auto cannon"}, {50, "particle cannon"}, {51, "ER large laser"}, {52, "ER medium laser"},
+            {53, "ER small laser"}, {55, "large pulse laser"}, {56, "medium pulse laser"}, {57, "small pulse laser"}};
+        /* a weapon (item / 100 < 50): its type (byte table 0x100171ac -> 0x16..0x23; -1 none), then "weapon destroyed";
+         * equipment by item / 10 x 10: 5300 sensors, 5350-5450 arm, 5500 hip, 5550-5650 leg, 5700 sensors, 5800 gyro,
+         * 5850 engine, 5900 life-support, 6000 heat-sink, 7000 jump-jet exhaust port (0x100167b0's branches) */
+        static const signed char WPN[28] = {0x16, 0x16, 0x16, 0x16, 0x17, 0x17, 0x17, 0x18, 0x18, 0x18, 0x19, 0x1a, 0x1b, 0x1b,
+                                            0x1b, 0x1b, 0x1c, 0x1c, 0x1c, 0x1c, -1, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23};
+        int q;
+        for (q = 0; q < pu->crit_said_n && q < 8; q++) {
+            uint32_t id = pu->crit_said[q], eq = id / 10 * 10;
+            int parts[2] = {-1, -1}, np, j;
+            if (id / 100 < 50) { if (id / 100 < 28) parts[0] = WPN[id / 100]; parts[1] = 0; }
+            else parts[0] = eq == 5300 || eq == 5700 ? 9 : eq <= 5450 ? 0xc : eq == 5500 ? 0xb : eq <= 5650 ? 0xa :
+                            eq == 5800 ? 8 : eq == 5850 ? 7 : eq == 5900 ? 6 : eq == 6000 ? 5 : eq == 7000 ? 4 : -1;
+            for (np = 0; np < 2; np++) {
+                char line[80];
+                if ((j = parts[np]) < 0) continue;
+                if (np == 1 || parts[1] < 0)   /* the alarm 0x10032b60(0xd0) before the last call, mech up (state 2) */
+                    if (g_sfx && !pu->shutdown && !pu->offline) sfx_play(g_sfx, 0xd0, 0.6f, 0.0f);
+                snprintf(line, sizeof line, "Critical hit :  %s.", PART[j].t);
+                hud_message_v2(line, 54, PART[j].v);
+            }
+        }
+        g_sim.player_unit.crit_said_n = 0;
+    }
+    g_last_pending = pu->shutdown_pending; g_last_override = pu->override;
 }
 /* per simulated frame: the self-destruct countdown (state 7); the ejection's messages (0x10016280: state 5 on a
  * breathable planet message 0xc "Ejecting", end status 2; automatic ejection on a hostile one message 0x20, status 4)
@@ -851,19 +1229,93 @@ static void flash_upkeep(void)
     if (last_now < 0 || now < last_now) { g_flash_t0 = -1; g_flash_n = 0; dead_done = 0; }   /* a new mission */
     if (now > last_now && last_now >= 0) g_frame_ticks = (float)(now - last_now) * 0.182f;
     last_now = now;
-    if (pu->red_flash) {   /* 0x1001e6c0 -> 0x1001bda0 (DOS 0x32fc0 -> 0x28930) */
+    /* 0x1001e6c0 -> 0x1001bda0 (DOS 0x32fc0 -> 0x28930): taken by the cockpit update (0x1001e340 / DOS 0x32c50), which
+     * runs only while the controller state is neither 4 (destroyed) nor 5 (ejected) - a flash pending as the player dies
+     * is never shown (nor counted); the death's own fade below is the only one */
+    if (pu->red_flash && pu->destroyed) pu->red_flash = 0;
+    if (pu->red_flash) {
         int n = 3 * ++g_flash_n, dur;
         pu->red_flash = 0;
         if (g_tex_kind == 3) dur = n < 16 ? (int)(((int64_t)((n << 16) / 15) * 0x16c + 0x8000) >> 16) : 0x16c;
         else dur = n < 16 ? (int)((float)n * 0.06666667f * 362.0f) : 0x16a;
         red_flash(dur, now);
     }
-    /* the death's fade after a flash asked for in the same frame (ASSUMED order: the killing hit's short flash would
-     * otherwise cut the death's second-long fade to its own length) */
+    /* the death's fade: controller state 4's first frame (0x1001adf0 -> 0x1001bd80) */
     if (pu->destroyed && !pu->intact_out && !dead_done) {   /* state 4: 0x1001bd80 (DOS 0x28910) */
         dead_done = 1;
         red_flash(g_tex_kind == 3 ? 0x16c : 0x16a, now);
     }
+}
+/* The 3D editions' palette fades on the 3D world (engine 0x1002ad50: DAT_1024e494 / DAT_10160cf0 for the textured
+ * polygons, the palette fade for the palette-coloured ones, 0x100613c0):
+ *  - the red flash (slot 0x11): while it fades in, every textured polygon (objects, ground, sky, billboards, effects) in
+ *    the colour (255, 8, 8) x its texels - at once; the palette colours k of the way to slot 0x11's (every colour pure
+ *    red but the grey ramp), both ways (flash_level);
+ *  - light amplification (0x10007a50 -> 0x1002b090(0xc, 0xb5)): the textured polygons x (0, 255, 8) at once, the palette
+ *    to slot 0xc (INFRARED) over 0xb5 ticks; off (0x1002b090(0, 0xb5)): the textures at once, the palette back over 0xb5.
+ * The DOS look fades its palette instead (dos_time_of_day, the red flash's palette tint). */
+static int g_vision;   /* (defined with the DOS time of day) */
+static void world_fade(glr *r)
+{
+    static int amp;
+    static int32_t amp_t0 = -1;
+    static float amp_from;
+    static uint8_t red[256][3];
+    int in_ph, want = g_vision == 1 && g_cockpit && g_sim_ok && g_world;
+    float k = g_sim_ok && g_world ? flash_level(g_sim.now, &in_ph) : 0.0f, ak;
+    if (g_tex_kind == 3) { glr_set_world_fade(r, NULL, 0, NULL); return; }
+    if (!red[0xf0][0] && !red[0][0]) {   /* slot 0x11 when the mission has none: (63, 0, 0) but the grey ramp 0xf0-0xff */
+        int i;
+        for (i = 0; i < 256; i++) { red[i][0] = 255; red[i][1] = red[i][2] = 0; }
+        for (i = 0xf0; i < 256; i++) memcpy(red[i], g_scene.palette[i], 3);
+    }
+    if (amp_t0 >= 0 && g_sim.now < amp_t0) { amp = 0; amp_t0 = -1; }   /* a new mission */
+    ak = amp_t0 < 0 ? 0.0f : amp_from + ((amp ? 1.0f : 0.0f) - amp_from) * fminf(1.0f, (float)(g_sim.now - amp_t0) * 0.182f / 0xb5);
+    if (want != amp) { amp_from = ak; amp = want; amp_t0 = g_sim.now; }
+    if (k > 0 && in_ph) {
+        static const float t[3] = {1.0f, 8.0f / 255.0f, 8.0f / 255.0f};
+        glr_set_world_fade(r, g_scene.slot_ok[0x11] ? (const uint8_t (*)[3])g_scene.slotpal[0x11] : (const uint8_t (*)[3])red, k, t);
+    } else if (k > 0) glr_set_world_fade(r, g_scene.slot_ok[0x11] ? (const uint8_t (*)[3])g_scene.slotpal[0x11] : (const uint8_t (*)[3])red, k, NULL);
+    else {
+        static const float t[3] = {0.0f, 1.0f, 8.0f / 255.0f};
+        glr_set_world_fade(r, g_scene.slot_ok[0xc] ? (const uint8_t (*)[3])g_scene.slotpal[0xc] : NULL, ak, amp ? t : NULL);
+    }
+}
+/* The scrub patch (a record's SCRG object, e.g. TNJ1SCRI: 3 x 3 tiles of TNJ1SCR1 sprites; engine 0x10011570 every frame,
+ * DOS 0x1f270): it follows the camera on a grid of world3d_scrg_step - once the camera is more than (step / 8 + step) / 2
+ * from the patch's position on either axis, the patch moves to the camera's nearest grid point (rounded half away from
+ * zero). TERRAIN TEXTURES off (0x100116d0 / 0x10065340): the patch is unlinked (not drawn) and stops following; on again:
+ * linked and following. The rounding branch is the object's +4 non-zero one (INFERRED); a patch has no collision. */
+static void scrub_follow(glr *r, float camx, float camz)
+{
+    static const mech3d_part *seen;
+    static int gx, gz, cellx, cellz, off;
+    int k, any = 0, step = world3d_scrg_step, h, x = (int)camx, z = (int)camz, nx, nz, moved = 0;
+    if (seen != g_mech.parts) { seen = g_mech.parts; gx = gz = cellx = cellz = 0; off = 0; }   /* a new world */
+    for (k = 0; k < g_mech.part_count; k++) if (g_mech.parts[k].scrg) { any = 1; break; }
+    if (!any || step <= 0) return;
+    if (g_notex_world != off) {   /* detach / attach */
+        off = g_notex_world;
+        for (k = 0; k < g_mech.part_count; k++) if (g_mech.parts[k].scrg) g_mech.parts[k].hidden = off;
+        moved = 1;
+    }
+    if (!off) {
+        h = ((step >> 3) + step) >> 1;
+        nx = cellx; nz = cellz;
+        if (abs(x - gx) > h || abs(z - gz) > h) {
+            nx = (x + (x < 0 ? -step : step) / 2) / step;
+            nz = (z + (z < 0 ? -step : step) / 2) / step;
+        }
+        if (nx != cellx || nz != cellz) {
+            int dx = nx * step - gx, dz = nz * step - gz;
+            for (k = 0; k < g_mech.part_count; k++)
+                if (g_mech.parts[k].scrg) { g_mech.parts[k].pos[0] += dx; g_mech.parts[k].pos[2] += dz; }
+            gx += dx; gz += dz; cellx = nx; cellz = nz;
+            moved = 1;
+            if (getenv("MW2_STATE_DUMP")) printf("SCRG now=%d at %d,%d\n", (int)g_sim.now, gx, gz);   /* TEST hook */
+        }
+    }
+    if (moved) glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
 }
 /* the camera modes, after the cockpit / chase camera is set (engine 0x1002dc90) */
 static void camera_modes(glr_view *v)
@@ -948,26 +1400,115 @@ static void camera_modes(glr_view *v)
     memcpy(g_cam_eye, v->eye, sizeof g_cam_eye);
     g_cam_yaw = v->look_yaw; g_cam_pitch = v->look_pitch;
 }
-static int g_voice_q[8], g_voice_qn;   /* voiced messages waiting for the voice channel */
-static int g_voice_next;   /* a suffix line (engaged 80 / disengaged 84) to say once the voice channel is free */
-/* a voiced message (the voice queue's text, 0x10031440: 0x712 ticks at priority 0x32); an unvoiced key / toggle
- * acknowledgement: 0x16a ticks (2 s) at 0x32 */
-static void hud_message_v(const char *m, int voice)
-{   /* DOSBox (SB16 on / off, the S key): "Shutting down" is spoken without text when voices play, shown when silent -
-     * engine 0x10031440 posts a voiced line's text only when it cannot be played (MW2_VOICE_TEXT=1: always show it) */
-    if (getenv("MW2_STATE_DUMP")) printf("MSGV now=%d voice=%d %s\n", (int)g_sim.now, voice, m);   /* TEST hook (tests/sequences) */
-    if (voice > 0 && sfx_voice_audible(g_sfx, voice)) {
-        /* one voice at a time (the engine's voice queue, 0x10031870): DOSBox YELLSCN1 - "Shutting down" (BET11_1) said
-         * at s waited for the 16 s opener to end */
-        if (sfx_voice_busy(g_sfx) || g_voice_qn) { if (g_voice_qn < 8) g_voice_q[g_voice_qn++] = voice; }
-        else sfx_play_voice(g_sfx, voice, 0.9f);
-        if (!getenv("MW2_VOICE_TEXT")) return;
-    }
-    hud_message_ex(m, voice > 0 ? 0x712 : 0x16a, 0x32);
+/* The voice queue (engine 0x10031150 posts, 0x100313d0 advances, 0x10031440 starts; head DAT_1024f6bc): an entry is one
+ * message = up to two voice lines said back to back - a message-table line and its suffix ("Autopilot" + "disengaged",
+ * 0x10031870), a point and an order ("Point 2" + "destroyed", 0x10031810), "Critical hit :" + the part (0x100318a0).
+ * Priority (entry +0x18) and a duplicate limit from the first voice's record (table 0x1024e6a8 {id, priority, limit}, loaded
+ * by 0x10030590 over 0xffff: a voice not listed has priority -1 and limit -1); a new entry goes in before the first queued
+ * one of lower priority. Walking the queued entries (the playing head excluded) up to that point, one with the same first
+ * voice and the same second (or none) drops the new one when the limit is -1, or when it is the limit-th such (asm
+ * 0x1003135b: 0xffff -> drop). The end sequence's flush (0x10031640(1), 264 ticks in) drops queued entries below 0x50,
+ * cuts a playing one below 0x50, and from then on nothing is posted (DAT_1024f6c4). */
+static const short VQ_TBL[][3] = {   /* 0x1024e6a8 (the later of two records for one voice wins: 64 -> limit -1) */
+    {3,80,-1}, {4,80,-1}, {5,80,-1}, {9,80,-1}, {12,80,-1}, {14,80,1}, {15,80,1}, {16,80,-1}, {62,80,-1}, {64,80,-1},
+    {68,80,-1}, {75,80,-1}, {88,80,-1}, {89,80,-1}, {90,80,-1}, {91,80,-1}, {92,80,-1}, {93,80,-1}, {95,80,-1},
+    {96,80,-1}, {97,80,-1}, {98,80,-1}, {99,80,-1}, {100,80,-1}, {101,80,-1}, {102,80,-1}, {103,80,-1}, {104,80,-1},
+    {105,80,-1}, {106,80,-1}, {107,80,-1}, {108,80,-1}, {109,80,-1}, {110,100,-1}, {112,80,-1}, {114,80,-1},
+    {115,80,-1}, {116,80,-1}, {117,80,-1}, {118,80,-1}, {120,80,-1}, {121,80,-1}, {131,80,-1}, {135,80,-1},
+    {136,80,-1}, {165,80,-1}, {166,80,-1}, {168,80,-1}, {169,80,-1}, {170,80,-1}, {171,80,-1}, {174,80,-1},
+    {175,80,-1}, {176,80,-1}, {177,80,-1}, {181,-1,1}, {182,80,-1}, {183,80,-1}, {184,80,-1}, {185,80,-1}, {186,80,-1},
+    {188,80,2}, {189,80,-1}, {197,100,1}, {200,80,-1}, {208,100,-1}, {209,80,2}, {210,80,2}, {211,80,2}, {223,0,-1},
+    {226,-1,-1}, {227,100,4}, {231,80,-1}, {233,80,-1}, {235,80,2}, {236,80,-1}, {240,80,-1}, {246,80,2}, {249,80,-1},
+    {252,80,-1}, {254,80,-1}, {255,80,-1}, {258,80,-1}, {261,80,-1}, {262,80,-1}, {263,80,-1}, {267,80,-1},
+    {268,80,-1}, {269,80,-1}, {270,80,-1}, {271,80,-1}, {272,80,-1}, {273,80,-1}, {274,80,-1}, {275,80,-1},
+    {276,80,-1}, {279,80,-1}, {280,80,-1}, {283,80,-1}, {284,80,-1}, {285,80,-1}, {286,80,-1}, {287,80,-1},
+    {288,80,-1}, {289,80,-1}, {290,80,-1}, {292,80,-1}, {293,80,-1}, {294,80,-1}, {295,80,-1}, {296,80,-1},
+    {297,80,-1}, {298,80,2}, {299,80,2}, {307,80,-1}, {308,80,-1}, {309,80,-1}, {310,80,-1}, {311,80,-1}, {312,80,-1},
+    {313,80,-1}, {314,80,-1}, {315,80,-1}, {316,0,1}, {320,80,-1}, {321,80,-1}, {322,80,-1}, {323,80,-1}, {324,80,-1},
+    {326,80,-1}, {327,10,1}, {330,80,-1}, {331,80,-1}, {332,80,-1}, {333,80,-1}, {334,80,-1}, {336,80,-1}, {337,80,-1},
+    {338,80,-1}
+};
+static int vq_rec(int v, int field)
+{
+    int lo = 0, hi = (int)(sizeof VQ_TBL / sizeof VQ_TBL[0]) - 1;
+    while (lo <= hi) { int m = (lo + hi) / 2; if (VQ_TBL[m][0] == v) return VQ_TBL[m][field]; if (VQ_TBL[m][0] < v) lo = m + 1; else hi = m - 1; }
+    return -1;
 }
-/* message table 0x1024f140 {voice, text, 0} + suffix table 0x1024edb8 {voice, "engaged" / "disengaged"} (engine
- * 0x10031870(message, suffix): the two lines queued) */
-static void hud_message_v2(const char *m, int voice, int suffix) { hud_message_v(m, voice); g_voice_next = suffix; }   /* the VOICE slider */
+static struct { int v1, v2, pri; } g_vq[16];
+static int g_vq_n;          /* entries; g_vq[0] is the head once started */
+static int g_vq_phase;      /* the head: 0 not started, 1 its first line playing, 2 its second */
+static int32_t g_vq_flush_done;   /* the end_flush_at the flush was done for */
+static int vq_flushed(void) { return g_sim.end_flush_at && g_sim.now >= g_sim.end_flush_at; }
+static void vq_pop(void) { if (g_vq_n > 0) { memmove(g_vq, g_vq + 1, sizeof g_vq[0] * (size_t)(g_vq_n - 1)); g_vq_n--; } g_vq_phase = 0; }
+/* once a frame: 0x100313d0 - the head done (its lines said) -> the next one starts */
+static void vq_drain(void)
+{
+    static int32_t last_now;
+    if (g_sim.now < last_now) { g_vq_n = 0; g_vq_phase = 0; }   /* a new mission's clock: the old queue goes */
+    last_now = g_sim.now;
+    if (!g_sfx) return;
+    if (vq_flushed() && g_vq_flush_done != g_sim.end_flush_at) {   /* 0x10031640(1) */
+        int a = 0, b;
+        g_vq_flush_done = g_sim.end_flush_at;
+        if (g_vq_n && g_vq_phase && g_vq[0].pri < 0x50) {
+            if (sfx_voice_busy(g_sfx)) sfx_stop_voice(g_sfx, g_vq_phase == 2 ? g_vq[0].v2 : g_vq[0].v1);
+            vq_pop();
+        }
+        for (b = 0; b < g_vq_n; b++) if ((b == 0 && g_vq_phase) || g_vq[b].pri >= 0x50) g_vq[a++] = g_vq[b];
+        g_vq_n = a;
+    }
+    if (!g_vq_n || sfx_voice_busy(g_sfx)) return;
+    if (g_vq_phase == 1 && g_vq[0].v2 > 0) { sfx_play_voice(g_sfx, g_vq[0].v2, 0.9f); g_vq_phase = 2; return; }   /* the second line (sample user data 3) */
+    if (g_vq_phase) vq_pop();
+    if (!g_vq_n || (g_radio_waiting && g_vq[0].pri < 0x50)) return;   /* queued radio (0x50) goes first */
+    if (g_vq[0].v1 > 0) { sfx_play_voice(g_sfx, g_vq[0].v1, 0.9f); g_vq_phase = 1; }
+    else { sfx_play_voice(g_sfx, g_vq[0].v2, 0.9f); g_vq_phase = 2; }
+}
+/* 0x10031150 for a voiced message: text (the parts joined, "." added) shown only when the voice can't play (0x10031440:
+ * 0x712 ticks at priority 0x32, MW2_VOICE_TEXT=1 always); the voices queued */
+static void hud_message_v2(const char *m, int voice, int suffix)
+{
+    char txt[96];
+    int pri, lim, k, n = 0, at, v1 = voice > 0 ? voice : 0, v2 = suffix > 0 ? suffix : 0;
+    size_t l = strlen(m);
+    snprintf(txt, sizeof txt, "%s%s", m, l && m[l - 1] != '.' && (v1 || v2) ? "." : "");
+    if (getenv("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences): the text as posted, " +N" the second voice */
+        if (v2) printf("MSGV now=%d voice=%d %s +%d\n", (int)g_sim.now, v1, m, v2);
+        else printf("MSGV now=%d voice=%d %s\n", (int)g_sim.now, v1, m);
+    }
+    if (vq_flushed()) return;   /* DAT_1024f6c4: nothing posted once the end sequence has flushed the queue */
+    if (!(v1 || v2) || !sfx_voice_audible(g_sfx, v1 ? v1 : v2)) {
+        /* DOSBox (SB16 on / off, the S key): "Shutting down" is spoken without text when voices play, shown when silent */
+        hud_message_ex(txt, v1 || v2 ? 0x712 : 0x16a, 0x32);
+        return;
+    }
+    if (getenv("MW2_VOICE_TEXT")) hud_message_ex(txt, 0x712, 0x32);
+    pri = v1 ? vq_rec(v1, 1) : -1;   /* +0x18 from the first voice's record (param -1) */
+    lim = v1 ? vq_rec(v1, 2) : -1;
+    for (k = g_vq_phase ? 1 : 0, at = g_vq_n; k < g_vq_n; k++) {
+        if (v1 && g_vq[k].v1 == v1 && (g_vq[k].v2 == 0 || g_vq[k].v2 == v2) && (lim == -1 || lim <= ++n)) {
+            if (getenv("MW2_STATE_DUMP")) printf("VQDROP now=%d voice=%d suffix=%d\n", (int)g_sim.now, v1, v2);   /* TEST hook */
+            return;
+        }
+        if (g_vq[k].pri < pri) { at = k; break; }
+    }
+    if (g_vq_n >= 16) return;
+    memmove(g_vq + at + 1, g_vq + at, sizeof g_vq[0] * (size_t)(g_vq_n - at));
+    g_vq[at].v1 = v1; g_vq[at].v2 = v2; g_vq[at].pri = pri;
+    g_vq_n++;
+    g_sim.radio_busy = 1;   /* posted inside a sim step (a kill): the mission's end waits for it this step too (0x1000a9b0) */
+    vq_drain();   /* an empty queue starts it at once (0x10031150 -> 0x10031440) */
+}
+/* a message with one voice line (0 = none: a plain acknowledgement, 0x16a ticks at 0x32) */
+static void hud_message_v(const char *m, int voice)
+{
+    if (voice <= 0) {
+        if (getenv("MW2_STATE_DUMP")) printf("MSGV now=%d voice=0 %s\n", (int)g_sim.now, m);   /* TEST hook (tests/sequences) */
+        hud_message_ex(m, 0x16a, 0x32);
+        return;
+    }
+    hud_message_v2(m, voice, 0);
+}
 
 /* The cockpit's power state as the HUD sees it (engine 0x1001e340, DAT_101de868 = controller c[0x28]): 1 starting (the
  * instruments' +0x78 callbacks), 2 up (+0x7c, everything), 3 shut down (+0x80). Only three things draw while not up:
@@ -1011,11 +1552,75 @@ static int pow_window(int two_phase, float *wf, float *hf)
     return 1;
 }
 
-/* ---- the COMMAND COMPUTER (3D edition menu table 0x10260950..0x10261600; keys USER_MENU u, ALL_PT_MENU b / Ctrl+F1,
- * PT_2_MENU Ctrl+F2, PT_3_MENU Ctrl+F3; navigation 0x10065df0: a digit picks an item, Esc goes back). Pages: -1 closed,
- * 0 the root, 1 Change Formation, 2 + p the commands for point p (0 = all). The panel's look (MBAR / MENDL / MENDR
- * sprites) is not reproduced yet: plain boxed text, ASSUMED. */
-static int g_cc_page = -1;
+/* ---- the COMMAND COMPUTER and SYSTEMS STATUS panels (3D edition menu table 0x102653f0: menu 1 the COMMAND COMPUTER
+ * root, 7 / 8 points 2 / 3, 5 SYSTEMS STATUS; pages 0x10260950..0x10261600 and 0x10264cb8). Keys: ALL_PT_MENU b /
+ * Ctrl+F1 the root, PT_2_MENU / PT_3_MENU Ctrl+F2 / F3 the point pages, USER_MENU u SYSTEMS STATUS - each opens its
+ * menu or, when that one is up, closes it (0x10065470; the 3Dfx action table 0x1003827c sends USER_MENU 0x34 to menu 5,
+ * STARMATE_MENU / _ONE / _TWO 0x42-0x44 to menus 1 / 7 / 8; DOSBox YELLSCN1: u SYSTEMS STATUS, b COMMAND COMPUTER, Ctrl+F2
+ * COMMAND POINT 2). Navigation 0x10065df0: a digit picks the numbered item, 0 the "(Esc to exit)" row, Esc goes back.
+ * Pages: -1 closed, 0 the root, 1 Change Formation, 2 + p the commands for point p (0 = all), CC_SYSTEMS. */
+#define CC_SYSTEMS 100
+static const int CC_ORDER[5] = {MSIM_CMD_ATTACK, MSIM_CMD_DEFEND, MSIM_CMD_JOIN, MSIM_CMD_ENGAGE, MSIM_CMD_SHUTDOWN};
+static const char *const CC_ORDER_TEXT[5] = {"Attack My Target", "Defend My Target", "Join Formation", "Engage at Will", "Shutdown"};
+static const char *const CC_LAST_TEXT[8] = {"Change Formation", "Engage at Will", "Attack", "Join Formation", "Defend",
+                                            "Disengage", "Shutdown", "No Cmd"};   /* 0x10260998 */
+static int g_cc_page = -1, g_cc_from_root;   /* g_cc_from_root: the page was opened from the root (Esc goes back to it) */
+static int g_vision;
+/* one page's rows as the engine builds them (0x10064390 the root, 0x10064480 a point page): type 3 rows are labels
+ * (no number), the accept row "(Esc to exit)" is numbered 0, the rest 1, 2, ... in order; act: 1 + page to open,
+ * -(1 + order / formation / system item) to apply, 0 for labels and the Esc row */
+typedef struct { int num, act; char text[40], val[24]; } cc_row;
+static int cc_rows(int page, char *title, size_t tn, cc_row *r, int *rows, float *rect, float *vfrac)
+{
+    int n = 0, q, m = 0, alive = 0, k = 1;
+    static const float CC_RECT[4] = {0.22f, 0.30f, 1.0f, 0.60f}, SYS_RECT[4] = {0.55f, 0.33f, 1.0f, 0.62f};
+    memcpy(rect, page == CC_SYSTEMS ? SYS_RECT : CC_RECT, sizeof CC_RECT);
+    *rows = page == CC_SYSTEMS ? 6 : 8; *vfrac = page == CC_SYSTEMS ? 0.8f : 0.4f;   /* records +0x3c, +0x60 */
+    memset(r, 0, sizeof(cc_row) * 10);
+#define ROW(nm, a, tx, vl) do { r[n].num = (nm); r[n].act = (a); snprintf(r[n].text, 40, "%s", (tx)); snprintf(r[n].val, 24, "%s", (vl)); n++; } while (0)
+    if (page == CC_SYSTEMS) {   /* 0x10264cb8: four toggles (On / Off), then the Esc row - at the bottom (flags 0x2) */
+        snprintf(title, tn, "SYSTEMS STATUS");
+        ROW(1, -1, "Light Amplification", g_vision == 1 ? "On" : "Off");
+        ROW(2, -2, "Image Enhancement", g_vision == 2 ? "On" : "Off");
+        ROW(3, -3, "HUD", g_hud_off ? "Off" : "On");
+        ROW(4, -4, "Auto Eject", combat_auto_eject() ? "On" : "Off");
+        ROW(0, 0, "(Esc to exit)", "");
+        return n;
+    }
+    for (q = 1; q <= 4; q++) if (msim_point_status(&g_sim, q) != 0) { m = q; if (msim_point_actor(&g_sim, q) >= 0) alive++; }
+    if (page == 0) {   /* 0x10064390: Change Formation, the star's points, Command All, Esc; no live mate: NO STAR MATES */
+        snprintf(title, tn, "COMMAND COMPUTER");
+        if (!alive) { ROW(0, 0, "NO STAR MATES", ""); ROW(0, 0, "(Esc to exit)", ""); return n; }
+        ROW(k++, 2, "Change Formation", MSIM_FORMATION_TEXT[g_sim.star_formation >= 0 ? g_sim.star_formation : 6]);
+        for (q = 1; q <= m; q++) {
+            char t[40];
+            snprintf(t, sizeof t, "Command Point %d", q + 1);
+            ROW(k++, 3 + q, t, MSIM_STATUS_TEXT[msim_point_status(&g_sim, q)]);
+        }
+        ROW(k++, 3, "Command All", CC_LAST_TEXT[g_sim.last_cmd[0]]);
+        ROW(0, 0, "(Esc to exit)", "");
+        return n;
+    }
+    if (page == 1) {   /* 0x10260d40 */
+        snprintf(title, tn, "CHANGE FORMATION");
+        ROW(0, 0, "Current Form:", MSIM_FORMATION_TEXT[g_sim.star_formation >= 0 ? g_sim.star_formation : 6]);
+        for (q = 0; q < 6; q++) ROW(q + 1, -(1 + q), MSIM_FORMATION_TEXT[q], "");
+        ROW(0, 0, "(Esc to exit)", "");
+        return n;
+    }
+    {   /* 0x10260e98 COMMAND ALL / 0x10260ff0.. COMMAND POINT n; a point that is not there or destroyed: NOT AVAILABLE
+         * (0x10064480) */
+        int pt = page - 2;
+        if (pt == 0) snprintf(title, tn, "COMMAND ALL");
+        else snprintf(title, tn, "COMMAND POINT %d", pt + 1);
+        if (pt > 0 && msim_point_actor(&g_sim, pt) < 0) { ROW(0, 0, "NOT AVAILABLE", ""); ROW(0, 0, "(Esc to exit)", ""); return n; }
+        ROW(0, 0, "Status:", pt == 0 ? CC_LAST_TEXT[g_sim.last_cmd[0]] : MSIM_STATUS_TEXT[msim_point_status(&g_sim, pt)]);
+        for (q = 0; q < 5; q++) ROW(q + 1, -(1 + q), CC_ORDER_TEXT[q], "");
+        ROW(0, 0, "(Esc to exit)", "");
+        return n;
+    }
+#undef ROW
+}
 static void hud_message_v2(const char *m, int voice, int suffix);
 static void cc_message(void *u, const char *t, int voice)
 {
@@ -1024,10 +1629,6 @@ static void cc_message(void *u, const char *t, int voice)
     else if (voice >> 16) hud_message_v2(t, voice & 0xffff, voice >> 16);
     else hud_message_v(t, voice);
 }
-static const int CC_ORDER[5] = {MSIM_CMD_ATTACK, MSIM_CMD_DEFEND, MSIM_CMD_JOIN, MSIM_CMD_ENGAGE, MSIM_CMD_SHUTDOWN};
-static const char *const CC_ORDER_TEXT[5] = {"Attack My Target", "Defend My Target", "Join Formation", "Engage at Will", "Shutdown"};
-static const char *const CC_LAST_TEXT[8] = {"Change Formation", "Engage at Will", "Attack", "Join Formation", "Defend",
-                                            "Disengage", "Shutdown", "No Cmd"};   /* 0x10260998 */
 static void on_shot(void *u, int weapon, int owner, int first, float x, float z);
 static int       g_dmg_regions[15][4];
 /* damage outlines of other mechs (the target viewer shows the target's): xxxxDMG6 remapped per level */
@@ -1205,6 +1806,22 @@ static int current_nav(const char **label)
         if (g_sim.navs[nv].selectable) { if (label) *label = nav_label(nv); return nv; }
     return -1;
 }
+/* the damage outline's SHP name for a skeleton: HUD record value 11 (+0x28) is the outline's SHP resource ID in the
+ * 320x200 set, the 640x480 and 1024x768 sets at ID + 1 / + 2 (loader 0x100403a0 -> 0x101de8e0; 0x1001b230 /
+ * 0x1001b620 load ID + the set index 0x102453c8). Values 12 / 13 (0x101de8e4 / e8) are 0 in every record and nothing
+ * reads them. -1 when the ID names no shape (ELEMENTA 295, TARANTUL / ELEMENTL -1: the engine draws no outline) */
+static int outline_shp_name(prj_archive *ma, const char *skel, char *out, size_t n)
+{
+    prj_record hr;
+    int id, t, i, set = g_hud_sfx[0] == 'K' ? 2 : g_hud_sfx[0] == '6' ? 1 : 0;
+    if (prj_read_named(ma, "HUD", skel, &hr) != PRJ_OK) return -1;
+    id = hr.size >= 44 ? (int)(int32_t)(hr.data[40] | (hr.data[41] << 8) | (hr.data[42] << 16) | ((uint32_t)hr.data[43] << 24)) : -1;
+    prj_record_free(&hr);
+    if (id < 0 || (t = prj_find_type(ma, "SHP")) < 0) return -1;
+    for (i = 0; i < prj_symbol_count(ma, t); i++)
+        if (prj_symbol_id(ma, t, i) == id + set) { snprintf(out, n, "%s", prj_symbol_name(ma, t, i)); return 0; }
+    return -1;
+}
 static dmg_set *target_outline(prj_archive *ma, const char *skel)
 {
     static const int to[4] = {6, 3, 11, 0};   /* engine 0x1001b620: colour 6 by damage level */
@@ -1214,8 +1831,7 @@ static dmg_set *target_outline(prj_archive *ma, const char *skel)
     for (k = 0; k < 16 && g_tdmg[k].skel[0]; k++) if (strcmp(g_tdmg[k].skel, skel) == 0) return g_tdmg[k].ok ? &g_tdmg[k] : NULL;
     if (k == 16 || !g_hud) return NULL;
     snprintf(g_tdmg[k].skel, sizeof g_tdmg[k].skel, "%s", skel);
-    if (strncmp(skel, "WARHAWK", 7) == 0) snprintf(dmg, sizeof dmg, "WARKDMG%s", g_hud_sfx);
-    else snprintf(dmg, sizeof dmg, "%.4sDMG%s", skel, g_hud_sfx);
+    if (outline_shp_name(ma, skel, dmg, sizeof dmg) != 0) return NULL;
     for (q = 0; q < 4; q++) {
         if (hud_sprite_load_remap(g_hud, ma, dmg, 0, 6, to[q], &g_tdmg[k].lvl[q]) != 0) return NULL;
         hud_sprite_smooth(&g_tdmg[k].lvl[q], 1);
@@ -1267,12 +1883,13 @@ static float     g_twist_limit = 90.0f;   /* MGEO +0x14 (16.16 deg): 90 most mec
 
 static int   g_auto_on, g_auto_fire, g_auto_cockpit, g_auto_jet;
 static float g_auto_secs, g_auto_throttle, g_auto_twist, g_auto_elapsed;
+static float g_auto_dt = 1.0f / 30.0f;   /* the autopilot's frame time (TEST ONLY: MW2_TEST_FPS=N runs 1/N s frames) */
 static char  g_auto_out[256];
 
 static void sim_log(void *u, const char *line)
 {
     (void)u;
-    if (strstr(line, "player hits") && strstr(line, "- DESTROYED")) hud_message_v("Enemy mech destroyed", 70);
+    /* (the kill messages come from msim's unit_messages: every enemy unit's death, by its class - 0x10016280) */
     printf("%s\n", line);
     fflush(stdout);
 }
@@ -1455,6 +2072,21 @@ static void range_text(char *out, size_t n, float cm)
  * turning as you move round it): the model's polygon edges, seen from the player's bearing, a little from above,
  * scaled to fit the box. view_yaw: the player's bearing from the target, relative to the target's heading (degrees) */
 static float g_wire_r[2] = {1, 0}, g_wire_f[2] = {0, 1};   /* the camera's right / forward on the ground (x, z), set per frame */
+/* the viewer's camera (DOS 0x30220 -> 0x28810(7, 0x20000, camera, object); 3Dfx 0x10021300 -> 0x1001bc50(2.0f, object)):
+ * the target's point (a mech: its object position +0x50..+0x58 copied to the player's +0xc8..+0xd0 by 0x1001d050; a
+ * structure: its bounding sphere's centre, 0x10029890) less 3 x its radius (+0xe8 / the sphere's, 0x102475d4 = 3.0) along
+ * the bearing from the player (+0xd4, 0x1001d970), at that point's height, heading the bearing, pitch and roll 0 (level),
+ * zoom 2: focal length = 2 x half the window's width (0x1002f740). g_wire_persp: draw_target_wire projects through it */
+static float g_wire_eye[3];
+static int   g_wire_persp;
+static void wire_camera(float tx, float ty, float tz, float R)
+{
+    float lx = tx - (float)g_pl.origin[0], lz = tz - (float)g_pl.origin[2], ll = sqrtf(lx * lx + lz * lz);
+    if (ll < 1.0f) { lx = 0; lz = 1; ll = 1; }
+    g_wire_f[0] = lx / ll; g_wire_f[1] = lz / ll; g_wire_r[0] = g_wire_f[1]; g_wire_r[1] = -g_wire_f[0];
+    g_wire_eye[0] = tx - g_wire_f[0] * 3.0f * R; g_wire_eye[1] = ty; g_wire_eye[2] = tz - g_wire_f[1] * 3.0f * R;
+    g_wire_persp = 1;
+}
 /* the target viewer's mech: its blown-off locations left out, as the view draws it (the engine renders the object
  * itself, 0x10021300, so lost limbs are gone there too) */
 static const combat_unit *g_wire_unit;
@@ -1473,6 +2105,79 @@ static int loc_level(const combat_unit *tu, int gq)
     return lv >= 12 ? 2 : lv > 0 ? 1 : 0;
 }
 static const unsigned LOC_RGB[4] = {0x0030D7u, 0xFFCE00u, 0xFF1818u, 0x000000u};
+/* the viewer's model through its camera (wire_camera; DOS 0x28810 with colour 7): each polygon filled with the window's
+ * black and outlined in the colour, drawn back to front (by its mean depth) - so the edges behind are hidden, as DOSBox
+ * YELLSCN1 shows the Nova: its outline and front faces only, not every edge (the port had drawn every edge, seen
+ * through) - clipped to the window. A location's outline colour by its damage (loc_level), a destroyed centre torso black */
+typedef struct { float d; int n, lvl; float xy[2 * WTB_MAX_POLY_VERTS]; } wire_poly;
+static int wire_poly_cmp(const void *a, const void *b)
+{
+    float da = ((const wire_poly *)a)->d, db = ((const wire_poly *)b)->d;
+    return da < db ? 1 : da > db ? -1 : 0;
+}
+static void draw_target_view(const mech3d *m, int part_lo, int part_hi, float bx, float by, float bw, float bh, const float col[4])
+{
+    static wire_poly *P;
+    static int cap;
+    int np = 0, pi, q, a, i;
+    const float *bg = HP(0);
+    for (pi = part_lo; pi < part_hi; pi++) {
+        const mech3d_part *pt = &m->parts[pi];
+        const wtb_object *o;
+        int lvl;
+        if (pt->hidden || pt->model.object_count <= 0) continue;
+        if (g_wire_unit && pt->group >= 1 && pt->group <= 8 && pt->group != 3 && g_wire_unit->loc_gone[pt->group - 1]) continue;
+        lvl = loc_level(g_wire_unit, pt->group);
+        o = &pt->model.objects[0];
+        for (q = 0; q < o->poly_count; q++) {
+            const wtb_poly *pg = &o->polys[q];
+            wire_poly *w;
+            float dsum = 0;
+            if (pg->n < 2) continue;
+            if (np == cap) { wire_poly *g2 = realloc(P, (size_t)(cap ? cap * 2 : 1024) * sizeof *g2); if (!g2) break; P = g2; cap = cap ? cap * 2 : 1024; }
+            w = &P[np];
+            w->n = pg->n < WTB_MAX_POLY_VERTS ? pg->n : WTB_MAX_POLY_VERTS; w->lvl = lvl;
+            for (a = 0; a < w->n; a++) {
+                const wtb_vertex *v = &o->verts[pg->idx[a]];
+                float x, y, z, dx, dy, dz, dep;
+                if (pt->has_rot) {
+                    const float *R = pt->rot;
+                    x = R[0] * (float)v->x + R[1] * (float)v->y + R[2] * (float)v->z + (float)pt->pos[0];
+                    y = R[3] * (float)v->x + R[4] * (float)v->y + R[5] * (float)v->z + (float)pt->pos[1];
+                    z = R[6] * (float)v->x + R[7] * (float)v->y + R[8] * (float)v->z + (float)pt->pos[2];
+                } else {
+                    float c2 = cosf(pt->yaw * 3.14159265f / 180.0f), s2 = sinf(pt->yaw * 3.14159265f / 180.0f);
+                    x = c2 * (float)v->x + s2 * (float)v->z + (float)pt->pos[0];
+                    y = (float)v->y + (float)pt->pos[1];
+                    z = -s2 * (float)v->x + c2 * (float)v->z + (float)pt->pos[2];
+                }
+                dx = x - g_wire_eye[0]; dy = y - g_wire_eye[1]; dz = z - g_wire_eye[2];
+                dep = g_wire_f[0] * dx + g_wire_f[1] * dz;
+                if (dep < 10.0f) dep = 10.0f;
+                dsum += dep;
+                w->xy[a * 2] = bx + bw * 0.5f + bw * (g_wire_r[0] * dx + g_wire_r[1] * dz) / dep;   /* focal = 2 x half the width */
+                w->xy[a * 2 + 1] = by + bh * 0.5f - bw * dy / dep;
+            }
+            w->d = dsum / (float)w->n;
+            np++;
+        }
+    }
+    qsort(P, (size_t)np, sizeof *P, wire_poly_cmp);
+    hud_clip(g_hud, bx, by, bw, bh);
+    for (i = 0; i < np; i++) {
+        float seg[4 * WTB_MAX_POLY_VERTS], c[4];
+        const float *cc = col;
+        if (P[i].n >= 3) hud_poly(g_hud, P[i].xy, P[i].n, bg);
+        if (P[i].lvl == 3) continue;
+        if (P[i].lvl) { c[0] = (float)(LOC_RGB[P[i].lvl] >> 16) / 255.0f; c[1] = (float)((LOC_RGB[P[i].lvl] >> 8) & 255) / 255.0f; c[2] = (float)(LOC_RGB[P[i].lvl] & 255) / 255.0f; c[3] = 1.0f; cc = c; }
+        for (a = 0; a < P[i].n; a++) {
+            int b2 = (a + 1) % P[i].n;
+            seg[a * 4] = P[i].xy[a * 2]; seg[a * 4 + 1] = P[i].xy[a * 2 + 1]; seg[a * 4 + 2] = P[i].xy[b2 * 2]; seg[a * 4 + 3] = P[i].xy[b2 * 2 + 1];
+        }
+        hud_lines(g_hud, seg, P[i].n, 1.0f, cc);
+    }
+    hud_clip_off(g_hud);
+}
 static void draw_target_wire(const mech3d *m, int part_lo, int part_hi, float view_yaw, float bx, float by, float bw, float bh, const float col[4])
 {
     float cy = cosf(view_yaw * 3.14159265f / 180.0f), sy = sinf(view_yaw * 3.14159265f / 180.0f);
@@ -1483,6 +2188,7 @@ static void draw_target_wire(const mech3d *m, int part_lo, int part_hi, float vi
     int pass, pi, nsegs[4] = {0, 0, 0, 0}, lvl = 0;
     if (!m || m->part_count <= 0) return;
     if (part_hi > m->part_count) part_hi = m->part_count;
+    if (g_wire_persp) { draw_target_view(m, part_lo, part_hi, bx, by, bw, bh, col); return; }
     for (pass = 0; pass < 2; pass++) {   /* bounds, then lines */
         for (pi = part_lo; pi < part_hi; pi++) {
             const mech3d_part *pt = &m->parts[pi];
@@ -1689,6 +2395,100 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
     glr_set_dos(r, (const uint8_t (*)[3])g_scene.palette, have_luma ? luma : NULL);
 }
 
+/* the HUD's palette (both editions): the 3D editions draw every HUD sprite and fill through the 16-bit table 0x10260324,
+ * filled only by 0x1002ac40 (RGB555 of the PAL record in the mission's current PALG slot; 0x101b0d20 holds the slots'
+ * record ids, set from the PALG chunk by 0x1003e104), so the HUD takes the mission's palette - YELL_DA's indices 6 / 7 / 13
+ * are (0,0,49) / (0,12,53) / (0,39,0) where the COCKPIT record has (0,0,47) / (15,15,63) / (0,31,0); the DOS edition draws
+ * the HUD in the VGA palette, the same records (DOSBox YELLSCN1: viewport frame 0,0,199 and the bars' light blue
+ * 0,48,215 = YELL_DA 6 / 7). The slot: StartPalettes (0x1002b0c0) shows slot 0x10 (BLACK), then the first time-of-day
+ * evaluation (0x10007900 -> 0x100079d0 -> 0x1002b090) fades to the start time's slot - dawn 4, day 0, dusk 4, night 8
+ * (the same rule as the DOS look's dos_time_of_day) - and loads the table when the fade ends (0x1002ac00). The later
+ * time-of-day and light-amplification slots are not followed (sprites are converted once). g_hp: the palette's colours
+ * for the HUD's fills (the band painters 0x1001c810 / 0x1001c960 take indices c-1, c, c-1, c-2) */
+static void hud_mission_palette(prj_archive *ma, const char *mission)
+{
+    bwd_mission bm;
+    char name[16];
+    int k, c, q, slot = 0, t0 = 0, day = 0;
+    uint8_t pal[20][768];
+    int ok[20];
+    memset(ok, 0, sizeof ok);
+    snprintf(name, sizeof name, "%.4sSCN1", mission);
+    if (mission && bwd_mission_load(ma, name, &bm) == 0) {
+        for (k = 0; k < bm.record_count; k++)
+            for (c = 0; c < bm.records[k].chunk_count; c++) {
+                const bwd_chunk *ch = &bm.records[k].chunks[c];
+                if (strcmp(ch->tag, "PALG") == 0 && !ok[0]) {
+                    int pt = prj_find_type(ma, "PAL");
+                    for (q = 0; q < 20 && (size_t)(q * 2 + 1) < ch->size; q++) {
+                        prj_record sp;
+                        if (pt >= 0 && prj_read(ma, pt, ch->data[q * 2] | ch->data[q * 2 + 1] << 8, &sp) == PRJ_OK) {
+                            if (sp.size >= 768) { memcpy(pal[q], sp.data + sp.size - 768, 768); ok[q] = 1; }
+                            prj_record_free(&sp);
+                        }
+                    }
+                }
+                else if (strcmp(ch->tag, "INIT") == 0 && ch->size >= 12) t0 = (int32_t)(ch->data[8] | ch->data[9] << 8 | ch->data[10] << 16 | (uint32_t)ch->data[11] << 24);
+                else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 16) day = (int32_t)(ch->data[12] | ch->data[13] << 8 | ch->data[14] << 16 | (uint32_t)ch->data[15] << 24);
+            }
+        bwd_mission_free(&bm);
+    }
+    if (day > 0) {   /* the time of day at the start (0x10007900: (ticks / 0xb5 + start) % day; hour = day / 24) */
+        static const int SLOT[4] = {4, 0, 4, 8};
+        int tt = ((t0 % day) + day) % day, H = day / 24;
+        slot = SLOT[tt < 5 * H ? 3 : tt < 7 * H ? 0 : tt < 17 * H ? 1 : tt < 19 * H ? 2 : 3];
+        if (!ok[slot]) slot = 0;
+    }
+    if (ok[slot]) hud_set_palette(g_hud, pal[slot]);
+    for (k = 0; k < 256; k++) hud_pal_color(g_hud, k, g_hp[k]);
+    if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud palette: %s slot %d (%s)\n", name, slot, ok[slot] ? "PALG" : "COCKPIT");
+}
+
+/* the panel (0x10065cb0 -> 0x10065df0), laid out by 0x10065580 from the menu record: rect -> pixels (0x10005b70: fraction
+ * x (w - 1), rounded); row pitch = rect height x 0x10000 / (rows + 2) (16.16, rounded, 0x100654f0); the title at the
+ * rect's left, half a pitch down, underlined in colour 1 one font height down for its width (0x10006520); the rows from
+ * two pitches down, numbers at 0.02 of the rect's width (+0x58), texts after the width of '.' + 2 x '0' (labels too),
+ * values at +0x60 (0.4; SYSTEMS STATUS 0.8); text colour 0xe (+0x34 / +0x38); the Esc row on the last row when the flags
+ * lack 8 (SYSTEMS STATUS 0x2), else next (0x0a). DOSBox YELLSCN1 1024 x 768: COMMAND POINT 2 title 225,241, underline
+ * y 255, NOT AVAILABLE 261,276, "0" 241,299; SYSTEMS STATUS 563,267, rows from 309 every 28, Esc row 449 - all as
+ * computed here. The 3Dfx DLL scales the offsets x 0.8 and adds 0x1e px on screens wider than 701 px (its 800 x 600);
+ * the DOS layout is kept at every size (the in-game MAIN MENU follows the DOS capture as well) */
+static void cc_draw(void)
+{
+    cc_row r[10];
+    char title[32];
+    float rect[4], vf;
+    int rows, n = cc_rows(g_cc_page, title, sizeof title, r, &rows, rect, &vf), q, num = 0;
+    float SH = g_render_w ? (float)g_render_h : (float)g_win_lines, SW = g_render_w ? (float)g_render_w : SH * 4.0f / 3.0f;
+    float rx0 = floorf(rect[0] * (SW - 1.0f) + 0.5f), ry0 = floorf(rect[1] * (SH - 1.0f) + 0.5f);
+    float rw = floorf(rect[2] * (SW - 1.0f) + 0.5f) - rx0, rh = floorf(rect[3] * (SH - 1.0f) + 0.5f) - ry0;
+    int32_t step = 0x10000 / (rows + 2);
+#define OFS(len, f16) floorf((float)(((int64_t)(len) * (f16) + 0x8000) >> 16))
+    float pitch = OFS(rh, step), ux = 640.0f / SW, uy = 480.0f / SH;
+    float tx = rx0 * ux, ty = (ry0 + OFS(rh, step / 2)) * uy, nx = (rx0 + OFS(rw, 0x51f)) * ux, vx = (rx0 + OFS(rw, (int32_t)(vf * 65536.0f + 0.5f))) * ux;
+    float iy = ry0 + OFS(rh, step * 2), lx = hud_text_width(g_hud, ".") + 2.0f * hud_text_width(g_hud, "0"), fh = hud_text_height(g_hud);
+#undef OFS
+    const float *col = HP(0xe);
+    hud_text(g_hud, tx, ty, title, col);
+    hud_line(g_hud, tx, ty + fh, tx + hud_text_width(g_hud, title), ty + fh, 1.0f, HP(1));
+    for (q = 0; q < n; q++) {
+        int esc = r[q].num == 0 && strcmp(r[q].text, "(Esc to exit)") == 0, line = q;
+        float y;
+        if (esc && g_cc_page == CC_SYSTEMS) line = rows - 1;   /* flags without 8: the accept row at the bottom */
+        y = (iy + (float)line * pitch) * uy;
+        if (r[q].num > 0 || esc) {
+            char nb[12];
+            snprintf(nb, sizeof nb, "%d", r[q].num);
+            hud_text(g_hud, nx, y, nb, col);
+            num++;
+        }
+        hud_text(g_hud, nx + lx, y, r[q].text, col);
+        if (r[q].val[0]) hud_text(g_hud, vx, y, r[q].val, col);
+    }
+    (void)num;
+    if (getenv("MW2_CC_TRACE")) fprintf(stderr, "cc layout: title %.1f,%.1f rows %.1f,%.1f pitch %.2f value x %.1f\n", tx, ty, nx, iy * uy, pitch * uy, vx);
+}
+
 /* ---- the in-game MAIN MENU (GAMEKEY.MAP MAIN_MENU, Esc). The 3D editions' menu system (MW2.DLL 0x10065xxx): menu 4,
  * table 0x10264980 - MAIN MENU: 1 Abort Mission, 2 Graphics, 3 Audio Ctrl, 4 Combat Variables, 5 Flee to Windows,
  * 0 Accept (Esc to cancel); flags 0x11 (the controls off while open, 0x1003a3c0); while it is open the game is paused
@@ -1697,7 +2497,8 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
  *   ABORT MISSION  0x102646d0: "Confirmation requested", 1 Accept -> 0x10064280: action 0x3b (EXIT_SIM)
  *   FLEE TO WINDOWS 0x10264828: "Confirm your cowardice", 1 Accept -> 0x100642e0: leave the game
  *   GRAPHICS 0x10265570: Textured Sky, Textured Ground (Off / On; off = flat in the texture's average colour,
- *            0x10027c80 / 0x1002d330), Resolution 800x600 (No / Yes; its commit is empty) - the port: Video mode
+ *            0x10027c80 / 0x1002d330), Resolution 800x600 (No / Yes; its commit is empty) - the port: Renderer and
+ *            Textures in its place (the shell's RENDERER / TEXTURES; Accept stays on the sixth row)
  *   SET AUDIO VOLUME 0x10265290: Music, Sound Effects, Voice - sliders 0..1 in 0x199a steps (0x10064780), applied as
  *            they move (0x10031960), restored by Esc (0x10031b50)
  *   COMBAT VARIABLES 0x10265068: Object textmaps, Terrain textmaps (Off / On), Display detail, Object density
@@ -1711,15 +2512,15 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
  * MENDL, MBAR, MENDR with the MSLIDE knob, centred on the row. */
 enum { MI_SUB, MI_VAL, MI_ACCEPT, MI_LABEL, MI_CONFIRM, MI_SLIDER };
 enum { MP_MAIN, MP_ABORT, MP_GRAPHICS, MP_AUDIO, MP_COMBAT, MP_FLEE, MP_COUNT };
-enum { MV_SKY, MV_GROUND, MV_VIDEO, MV_MUSIC, MV_EFFECTS, MV_VOICE, MV_OBJTEX, MV_TERTEX, MV_DETAIL, MV_DENSITY, MV_CHUNKS, MV_COUNT };
+enum { MV_SKY, MV_GROUND, MV_VIDEO, MV_TEXSET, MV_MUSIC, MV_EFFECTS, MV_VOICE, MV_OBJTEX, MV_TERTEX, MV_DETAIL, MV_DENSITY, MV_CHUNKS, MV_COUNT };
 typedef struct { int type; const char *text; int arg; } mm_item;
 typedef struct { const char *title; int n; mm_item it[6]; } mm_page;
 static const mm_page MM_PAGE[MP_COUNT] = {
     {"MAIN MENU", 6, {{MI_SUB, "Abort Mission", MP_ABORT}, {MI_SUB, "Graphics", MP_GRAPHICS}, {MI_SUB, "Audio Ctrl", MP_AUDIO},
                       {MI_SUB, "Combat Variables", MP_COMBAT}, {MI_SUB, "Flee to Windows", MP_FLEE}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"ABORT MISSION", 2, {{MI_LABEL, "Confirmation requested", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 0}}},
-    {"GRAPHICS", 4, {{MI_VAL, "Textured Sky", MV_SKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Video mode", MV_VIDEO},
-                     {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
+    {"GRAPHICS", 5, {{MI_VAL, "Textured Sky", MV_SKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},
+                     {MI_VAL, "Textures", MV_TEXSET}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"SET AUDIO VOLUME", 4, {{MI_SLIDER, "Music", MV_MUSIC}, {MI_SLIDER, "Sound Effects", MV_EFFECTS}, {MI_SLIDER, "Voice", MV_VOICE},
                              {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"COMBAT VARIABLES", 6, {{MI_VAL, "Object textmaps", MV_OBJTEX}, {MI_VAL, "Terrain textmaps", MV_TERTEX}, {MI_VAL, "Display detail", MV_DETAIL},
@@ -1728,12 +2529,14 @@ static const mm_page MM_PAGE[MP_COUNT] = {
 };
 static const char *const MM_OFFON[2] = {"Off", "On"}, *const MM_LOWHIGH[2] = {"Low", "High"};
 static const char *const MM_ED_TEXT[PORTCFG_ED_COUNT] = {"Enhanced", "DOS", "3Dfx", "ATi", "S3", "PowerVR", "Matrox"};
+static const char *const MM_TX_TEXT[PORTCFG_TX_COUNT] = {"Original", "Titanium"};
 static int  g_mm_stack[8], g_mm_depth;          /* open pages; empty = closed */
 static int  g_mm_sel;                           /* the chosen item of the top page */
 static int  g_mm_v[MV_COUNT], g_mm_old[MV_COUNT];   /* the pages' values (sliders 0..0x10000), as opened */
-static int  g_mm_eds[PORTCFG_ED_COUNT], g_mm_ned = -1;   /* the editions the Video mode offers */
+static int  g_mm_eds[PORTCFG_ED_COUNT], g_mm_ned = -1;   /* the renderers the Renderer item offers */
+static int  g_mm_tx_lock = -1;                  /* Textures locked to Original: a DOS mission, or no titanium/ folder */
 static int  g_mm_vol[3] = {-1, -1, -1};         /* music, effects, voice in force (16.16; -1 = not read yet) */
-static int  g_mm_ed_req = -1, g_mm_world_dirty, g_mm_quit;
+static int  g_mm_ed_req = -1, g_mm_tx_req = -1, g_mm_world_dirty, g_mm_quit;
 static void mm_read_volumes(void)
 {
     unsigned char snd[60];
@@ -1778,10 +2581,13 @@ static void mm_apply_volumes(const int *mus_fx_vo)
     if (g_cd) { int v = mus_fx_vo[0] * 255 / 0x10000; sfx_lock(g_sfx); cdaudio_set_volume(g_cd, (uint8_t)v, (uint8_t)v); sfx_unlock(g_sfx); }
     g_voice_off = mus_fx_vo[2] <= 0;
 }
-static int mm_value_count(int mv) { return mv == MV_VIDEO ? (g_mm_ned > 0 ? g_mm_ned : 1) : 2; }
+static int mm_value_count(int mv) { return mv == MV_VIDEO ? (g_mm_ned > 0 ? g_mm_ned : 1) : mv == MV_TEXSET && g_mm_tx_lock ? 1 : 2; }
+/* an item that can't change here (the port's Textures when locked): drawn dim, passed over by the arrows */
+static int mm_locked(const mm_item *it) { return it->type == MI_VAL && it->arg == MV_TEXSET && g_mm_tx_lock; }
 static const char *mm_value_text(int mv)
 {
     if (mv == MV_VIDEO) return MM_ED_TEXT[g_mm_ned > 0 ? g_mm_eds[g_mm_v[mv]] : g_edition];
+    if (mv == MV_TEXSET) return MM_TX_TEXT[g_mm_v[mv] ? 1 : 0];
     return (mv == MV_DETAIL || mv == MV_DENSITY ? MM_LOWHIGH : MM_OFFON)[g_mm_v[mv] ? 1 : 0];
 }
 /* a page's values as they stand (0x10064d90 state 1: each item's getter) */
@@ -1802,6 +2608,13 @@ static void mm_load_page(int pg)
         }
         g_mm_v[MV_VIDEO] = 0;
         for (k = 0; k < g_mm_ned; k++) if (g_mm_eds[k] == g_edition) g_mm_v[MV_VIDEO] = k;
+        if (g_mm_tx_lock < 0) {   /* the Titanium textures: not in a DOS mission, only with the titanium/ folder */
+            portcfg pc;
+            char *bp = SDL_GetBasePath();
+            portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+            g_mm_tx_lock = g_tex_kind == 3 || !portcfg_texset_ok(&pc, g_edition, PORTCFG_TX_TITANIUM);
+        }
+        g_mm_v[MV_TEXSET] = g_texset == PORTCFG_TX_TITANIUM && !g_mm_tx_lock;
     } else if (pg == MP_AUDIO) {
         if (g_mm_vol[0] < 0) mm_read_volumes();
         g_mm_v[MV_MUSIC] = g_mm_vol[0]; g_mm_v[MV_EFFECTS] = g_mm_vol[1]; g_mm_v[MV_VOICE] = g_mm_vol[2];
@@ -1818,6 +2631,7 @@ static void mm_commit_page(int pg)
     if (pg == MP_GRAPHICS) {
         if (g_view) { g_view->flat_sky = !g_mm_v[MV_SKY]; g_view->flat_ground = !g_mm_v[MV_GROUND]; }
         if (g_mm_ned > 0 && g_mm_eds[g_mm_v[MV_VIDEO]] != g_edition) g_mm_ed_req = g_mm_eds[g_mm_v[MV_VIDEO]];
+        if (!g_mm_tx_lock && g_mm_v[MV_TEXSET] != (g_texset == PORTCFG_TX_TITANIUM)) g_mm_tx_req = g_mm_v[MV_TEXSET] ? PORTCFG_TX_TITANIUM : PORTCFG_TX_ORIGINAL;
     } else if (pg == MP_AUDIO) {
         static const int OFS[3] = {12, 4, 8};
         g_mm_vol[0] = g_mm_v[MV_MUSIC]; g_mm_vol[1] = g_mm_v[MV_EFFECTS]; g_mm_vol[2] = g_mm_v[MV_VOICE];
@@ -1860,7 +2674,7 @@ static int mm_item_of_digit(const mm_page *p, int d)
     for (k = 0; k < p->n; k++) {
         if (p->it[k].type == MI_LABEL) continue;
         if (p->it[k].type == MI_ACCEPT) { if (d == 0) return k; continue; }
-        if (++n == d) return k;
+        if (++n == d) return mm_locked(&p->it[k]) ? -1 : k;
     }
     return -1;
 }
@@ -1911,7 +2725,7 @@ static void mm_key(SDL_Keycode k, Uint16 mod)
         int dir = k == SDLK_UP || (k == SDLK_TAB && (mod & KMOD_SHIFT)) ? -1 : 1, n;
         for (n = 0; n < p->n; n++) {
             g_mm_sel = (g_mm_sel + dir + p->n) % p->n;
-            if (p->it[g_mm_sel].type != MI_LABEL) break;
+            if (p->it[g_mm_sel].type != MI_LABEL && !mm_locked(&p->it[g_mm_sel])) break;
         }
     } else if (k == SDLK_RIGHT || k == SDLK_SPACE || k == SDLK_LEFT) mm_step(&p->it[g_mm_sel], k == SDLK_LEFT ? -1 : 1);
     if (g_mm_depth && g_mm_sel != prev && g_mm_stack[g_mm_depth - 1] == pg && g_sfx) sfx_play(g_sfx, 0xdb, 1.0f, 0.0f);
@@ -1921,7 +2735,8 @@ static void mm_draw(void)
     static hud_sprite frame, endl, bar, endr, knob;
     static int loaded;
     static const float grey[4] = {170 / 255.0f, 170 / 255.0f, 170 / 255.0f, 1}, red[4] = {211 / 255.0f, 0, 0, 1},
-                       gold[4] = {121 / 255.0f, 97 / 255.0f, 0, 1};
+                       gold[4] = {121 / 255.0f, 97 / 255.0f, 0, 1},
+                       dim[4] = {85 / 255.0f, 85 / 255.0f, 85 / 255.0f, 1};   /* the port's locked item (half the text grey) */
     int pg, k, num = 0;
     const mm_page *p;
     if (!g_mm_depth || !g_hud) return;
@@ -1941,7 +2756,7 @@ static void mm_draw(void)
     for (k = 0; k < p->n; k++) {
         const mm_item *it = &p->it[k];
         float y = 167.5f + 36.25f * (float)(it->type == MI_ACCEPT ? 5 : k);
-        const float *c = k == g_mm_sel ? red : grey;
+        const float *c = mm_locked(it) ? dim : k == g_mm_sel ? red : grey;
         char d[12];
         if (it->type == MI_LABEL) { hud_text(g_hud, 192.0f, y, it->text, grey); continue; }
         snprintf(d, sizeof d, "%d", it->type == MI_ACCEPT ? 0 : ++num);
@@ -1996,7 +2811,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
-        g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on */
+        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on */
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
@@ -2051,7 +2866,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
-            g_throttle = 0; g_pl_speed = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0;
+            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
             if (getenv("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
@@ -2067,14 +2882,19 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             if (g_sim_ok && g_sim.planet.gravity_g > 0) g_pl_walk = msim_top_speed((int)lrintf(g_pl_walk / 300.0f), g_sim.planet.gravity_g);   /* speed / gravity in DOS's integers (see msim) */
             mech3d_pose(&g_pl, &g_pl_anim, 0);
             {   /* HUD sprites and the CPIT layout. Each piece exists three times: <name> (the 320x200 set), <name>6 (640x480) and
-                 * <name>K (1024x768), the font too (BASE6X7, BASE6X76, BASE6X7K); the set follows the picture's lines -
-                 * render=320x200 the plain set drawn 1:1 into the 320x200 frame, 640x480 and native below 768 lines the 6
-                 * set, 1024x768 and native from 768 lines the K set (the 6 and K art are the same size apart from the
-                 * full-width bars) */
+                 * <name>K (1024x768), the font too (BASE6X7, BASE6X76, BASE6X7K) - SHP resource IDs n, n + 1, n + 2. The
+                 * engine (0x100024b0, at the screen's set-up 0x10004910) takes the set index 0x102453c8 = the entry of
+                 * {319,199}, {639,479}, {1023,767} (0x102492a0) nearest the screen's w x h: |(ew + 1) - w| + |(eh + 1) - h|,
+                 * the first of equals; every SHP load adds it to the ID. render=320x200 the plain set drawn 1:1 into the
+                 * 320x200 frame, 640x480 the 6 set, 1024x768 the K set; native the same rule on the drawable size, the
+                 * 320x200 set's own layout only with render=320x200 (port: native windows nearer 320x200 take the 6 set) */
                 char dmg[16];
                 if (!g_hud) g_hud = hud_create(ma);
+                hud_mission_palette(ma, mission);   /* the mission's palette for the HUD (0x10260324, see there) */
                 g_hud_s = g_render_w == 320 ? 0.5f : 1.0f;
-                g_hud_sfx = g_render_w == 320 ? "" : g_render_w == 640 ? "6" : g_render_w == 1024 ? "K" : g_win_lines >= 768 ? "K" : "6";
+                g_hud_sfx = g_render_w == 320 ? "" : g_render_w == 640 ? "6" : g_render_w == 1024 ? "K" :
+                            abs(1024 - g_win_cols) + abs(768 - g_win_lines) < abs(640 - g_win_cols) + abs(480 - g_win_lines) ? "K" : "6";
+                if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud set: '%s' for %dx%d\n", g_hud_sfx, g_win_cols, g_win_lines);
                 if (g_hud) {
                     hud_sprite_free(&g_hs_compass); hud_sprite_free(&g_hs_reticle); hud_sprite_free(&g_hs_damage);
                     hud_sprite_load(g_hud, ma, HN("COMPASS"), 0, &g_hs_compass);
@@ -2090,10 +2910,9 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                             for (q = 0; q < 3; q++) { hud_sprite_free(&g_hs_tgt_dos[q]); hud_sprite_load(g_hud, ma, TB[q], 0, &g_hs_tgt_dos[q]); }
                         }
                     }
-                    /* damage outline: first 4 letters + DMG (Warhawk: WARKDMG) */
-                    if (strncmp(g_sim.player_skel, "WARHAWK", 7) == 0) snprintf(dmg, sizeof dmg, "%s", HN("WARKDMG"));
-                    else snprintf(dmg, sizeof dmg, "%.4sDMG%s", g_sim.player_skel, g_hud_sfx);
-                    if (hud_sprite_load(g_hud, ma, dmg, 0, &g_hs_damage) != 0) { snprintf(dmg, sizeof dmg, "%s", HN("TIMBDMG")); hud_sprite_load(g_hud, ma, dmg, 0, &g_hs_damage); }
+                    /* damage outline: the SHP named by the HUD record's value 11 (TIMBDMG6 ...; see outline_shp_name) */
+                    if (outline_shp_name(ma, g_sim.player_skel, dmg, sizeof dmg) != 0) dmg[0] = 0;
+                    if (hud_sprite_load(g_hud, ma, dmg, 0, &g_hs_damage) != 0) dmg[0] = 0;
                     {   /* engine 0x1001b620: the outline's colour 6 remapped by damage level: 6 / 3 / 11 / 0 */
                         static const int to[4] = {6, 3, 11, 0};
                         int q;
@@ -2235,6 +3054,11 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
      * light colour; the fog colour's ambient term is the same value) */
     if (g_view && g_world && g_lite_level > 0) g_view->ambient = (float)g_lite_level * 3.0f / 256.0f;
     if (g_view) c3d_environment(r, &g_scene, mission, g_view, -1.0f);
+    if (g_view && c3d_ti && ati != 3) {   /* the Titanium textures */
+        c3d_ti_environment(r, &g_scene, mission, g_view, look_fog(g_edition));
+        printf("titanium: %d textures from the Titanium archive, %d from the mission's texture archive\n", c3d_ti_hits, c3d_ti_miss);
+        if (g_world) { ti_world_attach(&m); glr_set_mech(r, &m, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, camo, clan); }
+    }
     if (g_view && ati == 3) {   /* DOS (MW2.EXE 0x3c000): the view split at the horizon, sky palette 0xE0 above, ground 0xEF
                                  * below, flat and unlit; no fog colour (distance only darkens the shading) */
         static texture skyt, gndt;
@@ -2281,12 +3105,15 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
     return 0;
 }
 
-/* the edition's look on the view: lasers, texture filtering, the PowerVR veil (at start, and the in-game Video mode) */
+/* the renderer's look on the view: lasers, texture filtering, the PowerVR veil, the effects' blending (at start, and the
+ * in-game Renderer / Textures) */
 static void edition_look(glr_view *v)
 {
     v->tex_min = v->tex_mag = v->env_min = v->env_mag = 0; v->mga_mip = 0;
-    /* the 3D editions' laser bolts by default (user choice); the DOS edition's green balls with it, or MW2_DOS_LASERS=1 */
-    g_dos_lasers = getenv("MW2_DOS_LASERS") != NULL || g_edition == PORTCFG_ED_DOS;
+    /* the 3D editions' laser bolts by default (user choice); MW2_DOS_LASERS=1: glowing balls (a port option). The DOS
+     * edition draws its own LASER1-3 objects (DOS MW2_SHT1: scale 3, 3, 12; Gouraud vertices a 33 / 37, 13 / 15, 45 / 47 -
+     * all under 48, so drawn as those palette indices unscaled, 0x3bb80) like any object */
+    g_dos_lasers = getenv("MW2_DOS_LASERS") != NULL;
     /* each edition's texture filtering (traced in its renderer DLL):
      *   3Dfx  guTexAllocateMemory(min = mag = bilinear, GR_MIPMAP_NEAREST_DITHER): linear, nearest mip
      *   ATi   "Filter Textures" on (the default): C3D_ETFILT_MINPNT_MAG2BY2 - point minification, bilinear magnification,
@@ -2303,32 +3130,68 @@ static void edition_look(glr_view *v)
          * MYSTIQUE.PAR: thresholds x MIPmaxZ), the sky one level */
         v->tex_min = GL_NEAREST; v->tex_mag = GL_NEAREST; v->env_min = GL_NEAREST_MIPMAP_NEAREST; v->env_mag = GL_NEAREST; v->mga_mip = 1;
     }
-    /* the PowerVR fog's veil over the sky: with the PowerVR edition and the enhanced mix (which takes its fog) */
-    v->pvr_veil = g_edition == PORTCFG_ED_PVR || g_edition == PORTCFG_ED_ENHANCED;
+    /* (the Titanium edition's own filtering - dx5draw 0x100034a0 D3DFILTER_LINEAR, no mips 0x100056ae - belongs to its
+     * renderer plugins, not a renderer here: with TEXTURES TITANIUM the chosen renderer's filtering applies) */
+    /* the PowerVR fog's veil over the sky: with the PowerVR edition and the enhanced mix (which takes its fog); not over
+     * the Titanium sky dome (drawn unfogged, mercsw) */
+    v->pvr_veil = (g_edition == PORTCFG_ED_PVR || g_edition == PORTCFG_ED_ENHANCED) && !c3d_ti;
+    /* the Titanium textures: the effect frames (textures of type > 0, with their alpha) alpha-blended - the engine picks
+     * Render type 8 by the texture's type (mercsw 0x1000131e; dx5draw 0x100044ff), whatever the plugin */
+    v->fx_blend = c3d_ti != NULL;
 }
 
-/* The in-game Video mode (the GRAPHICS menu; a port addition in place of the 3Dfx edition's "Resolution 800x600", whose
- * commit 0x10066520 -> 0x100667e0 does nothing): another 3D edition's look mid-mission - its texture archive, sky file,
- * fog and filtering. The mission keeps the archive it was started with for models and data (an edition's archive
+/* The Titanium textures' archive (portcfg_titanium: the game folder's titanium/, or titanium= in the configuration): opened
+ * beside the mission's archives, its textures taken by name (common3d.h c3d_ti). Returns 0 if it is open. */
+static int titanium_open(int on)
+{
+    char prj[PORTCFG_PATH], err[256], *bp;
+    portcfg pc;
+    if (!on) { if (c3d_ti) prj_close(c3d_ti); c3d_ti = NULL; return 0; }
+    if (c3d_ti) return 0;
+    bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+    if (portcfg_titanium(&pc, prj, NULL) != 0) { fprintf(stderr, "titanium: no Titanium archive (the game folder's titanium/)\n"); return -1; }
+    if (!(c3d_ti = prj_open(prj, err, sizeof err))) { fprintf(stderr, "titanium: %s\n", err); return -1; }
+    {   /* the folder, for particle.PID beside MW2.PRJ */
+        char *sl = strrchr(prj, '/');
+        snprintf(g_ti_dir, sizeof g_ti_dir, "%.*s", sl ? (int)(sl - prj) : 1, sl ? prj : ".");
+        g_tip_state = 0;
+    }
+    c3d_ti_hits = c3d_ti_miss = 0;
+    return 0;
+}
+/* the effect frames decoded so far (their archive changed): decoded again on use */
+static void fx_flush(void)
+{
+    int k;
+    for (k = 0; k < 4096; k++) if (g_fxtex[k]) { tex_free(g_fxtex[k]); free(g_fxtex[k]); g_fxtex[k] = NULL; }
+}
+
+/* The in-game Renderer and Textures (the GRAPHICS menu; a port addition in place of the 3Dfx edition's "Resolution
+ * 800x600", whose commit 0x10066520 -> 0x100667e0 does nothing): another 3D edition's look and / or the other texture
+ * set mid-mission - the renderer's texture archive, sky file, fog and filtering, the Titanium textures, sky dome and
+ * ground beside it. The mission keeps the archive it was started with for models and data (an edition's archive
  * differs in record ids, and the simulation lives on them); textures are found by name. The DOS look has its own
- * palette-indexed archive and stays a shell choice. The choice is saved as the next mission's edition. */
-static int switch_look(glr *r, glr_view *v, prj_archive *ma, prj_archive **ta, int *ati, const char *mission, int ed)
+ * palette-indexed archive and stays a shell choice. The choice is saved as the next mission's renderer= / textures=. */
+static int switch_look(glr *r, glr_view *v, prj_archive *ma, prj_archive **ta, int *ati, const char *mission, int ed, int ts)
 {
     static char mo[PORTCFG_PATH], tx[PORTCFG_PATH], kind[PORTCFG_PATH], sky[PORTCFG_PATH], fog[PORTCFG_PATH];
     char err[256], *bp;
     portcfg pc, raw;
     prj_archive *nt;
     int k;
-    if (ed == PORTCFG_ED_DOS || g_tex_kind == 3 || ed == g_edition) return -1;
+    if (ed == PORTCFG_ED_DOS || g_tex_kind == 3 || (ed == g_edition && ts == g_texset)) return -1;
     bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
-    if (portcfg_edition(&pc, ed, mo, tx, kind, sky, fog) != 0) return -1;
-    if (!(nt = prj_open(tx, err, sizeof err))) { fprintf(stderr, "video mode: %s\n", err); return -1; }
+    if (portcfg_look(&pc, ed, ts, mo, tx, kind, sky, fog) != 0) return -1;
+    if (titanium_open(ts == PORTCFG_TX_TITANIUM) != 0) return -1;   /* (the Titanium textures: their archive beside) */
+    if (!(nt = prj_open(tx, err, sizeof err))) { fprintf(stderr, "video mode: %s\n", err); titanium_open(g_texset == PORTCFG_TX_TITANIUM); return -1; }
+    fx_flush();
     k = strcmp(kind, "ati") == 0 ? 1 : strcmp(kind, "pvr") == 0 ? 2 : strcmp(kind, "mga") == 0 ? 4 : 0;
     if (sky[0]) setenv("MW2_SKYGND", sky, 1); else unsetenv("MW2_SKYGND");
     if (fog[0]) setenv("MW2_SKYGND_FOG", fog, 1); else unsetenv("MW2_SKYGND_FOG");
     setenv("MW2_EDITION", PORTCFG_ED_NAME[ed], 1);
+    setenv("MW2_TEXTURES", PORTCFG_TX_NAME[ts], 1);
     if (*ta != g_fx_ta) prj_close(*ta);   /* the effect frames stay with the mission's first texture archive (CEL ids) */
-    *ta = nt; *ati = k; g_tex_kind = k; g_edition = ed;
+    *ta = nt; *ati = k; g_tex_kind = k; g_edition = ed; g_texset = ts;
     edition_look(v);
     c3d_free_scene(&g_scene);
     {   /* the texture maps (BMID) of the edition's own archive when it has one: its sky and ground can differ */
@@ -2340,11 +3203,15 @@ static int switch_look(glr *r, glr_view *v, prj_archive *ma, prj_archive **ta, i
     glr_flush_textures(r);
     glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
     c3d_environment(r, &g_scene, mission, v, -1.0f);
+    if (c3d_ti) c3d_ti_environment(r, &g_scene, mission, v, look_fog(ed)); else glr_set_skydome(r, NULL, g_scene.slot);
+    if (c3d_ti && g_world && g_ti_world_for != g_mech.parts) ti_world_attach(&g_mech);
+    glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);   /* (with / without the Titanium models) */
     if (g_lite_level > 0) v->ambient = (float)g_lite_level * 3.0f / 256.0f;
-    portcfg_load(NULL, &raw);   /* the file's own values (unresolved), the edition changed: the next mission's */
-    raw.edition = ed;
+    if (c3d_ti) printf("titanium: %d textures from the Titanium archive, %d from %s\n", c3d_ti_hits, c3d_ti_miss, tx);
+    portcfg_load(NULL, &raw);   /* the file's own values (unresolved), the look changed: the next mission's */
+    raw.renderer = ed; raw.texset = ts;
     portcfg_save(NULL, &raw);
-    printf("video mode: %s (%s)\n", PORTCFG_ED_NAME[ed], tx);
+    printf("video mode: %s, textures %s (%s)\n", PORTCFG_ED_NAME[ed], PORTCFG_TX_NAME[ts], tx);
     return 0;
 }
 
@@ -2378,6 +3245,11 @@ static void wt_block(float x0, float z0, float nx, float nz)
     wt_boxes();
     g = msim_ground_n(&g_sim, nx, nz, y, n);
     fprintf(stderr, "walkblk %.2f at %.0f,%.0f y %.0f ground %.0f H %.0f R %.0f:", g_sim.now / 1000.0, x0, z0, y, g, H, R);
+    if (!msim_can_step_hr(&g_sim, x0, z0, nx, nz, y, H, R)) {   /* what the collision list hit (msim clist) */
+        float bn[3];
+        msim_block_normal(bn);
+        fprintf(stderr, " hit '%s' n %.2f,%.2f,%.2f", msim_block_what() ? msim_block_what() : "?", bn[0], bn[1], bn[2]); why = 1;
+    }
     if (n[1] < 0.70710677f && g - y > H && n[0] * dx + n[2] * dz < 0) { fprintf(stderr, " steep_here n %.2f,%.2f,%.2f rise %.0f", n[0], n[1], n[2], g - y); why = 1; }
     if (dl > 1e-3f) { float ax = nx + dx / dl * R, az = nz + dz / dl * R; g2 = msim_ground_n(&g_sim, ax, az, y, n2);
         if (n2[1] < 0.70710677f && g2 - y > H && n2[0] * dx + n2[2] * dz < 0) { fprintf(stderr, " steep_ahead n %.2f,%.2f,%.2f rise %.0f", n2[0], n2[1], n2[2], g2 - y); why = 1; } }
@@ -2412,6 +3284,172 @@ static void wt_on(float x, float z, float y)   /* the type 0 box tops / type 5 p
 }
 /* ---- end TEST ONLY ---- */
 
+/* one move of the player's locomotion: the drive (throttle -> speed), the move by the mean velocity, mech contact and
+ * the terrain / object impact (engine 0x10019310, 0x1000b5e0); 1 when it touched a mech or was refused */
+static int pl_move(float dt, float top)
+{
+    float speed0 = g_pl_speed, h = g_pl.heading * 3.14159265f / 180.0f;
+    int touched = 0;
+    msim_drive_step(&g_thr_srv, &g_spd_srv, &g_pl_speed, g_throttle_eff, 1.0f, top,
+                    !(g_sim_ok && (g_sim.player_unit.shutdown || g_sim.player_unit.immobile)), g_drive_slow, dt * 182.0f);
+    {   /* locomotion on the terrain (engine 0x10019310): steep or out-of-window steps refused */
+        /* the move is the frame's mean velocity x dt - the engine's (v + a dt / 2) dt (0x10019310 local_40) */
+        float nx, nz, along = 0.5f * (speed0 + g_pl_speed), across = g_pl_across;
+        if (g_pl_across != 0.0f) {   /* a mech contact's or wall impact's velocity across the heading (below), on the ground: x (1 - ticks / 45),
+                                      * zero under 0.0625 cm/tick (0x10019310, 0x102473b4 / 0x102473d0) */
+            float k = dt * 182.0f / 45.0f;
+            g_pl_across *= k < 1.0f ? 1.0f - k : 0.0f;
+            across = 0.5f * (across + g_pl_across);
+            if (fabsf(g_pl_across) < 0.0625f * 182.0f || g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f) g_pl_across = 0;
+        }
+        nx = (float)g_pl.origin[0] + (sinf(h) * along + cosf(h) * across) * dt + g_pl_frac[0];
+        nz = (float)g_pl.origin[2] + (cosf(h) * along - sinf(h) * across) * dt + g_pl_frac[1];
+        float fx = g_pl_frac[0], fz = g_pl_frac[1];   /* the sub-cm rest of the last move, used once */
+        g_pl_frac[0] = g_pl_frac[1] = 0;
+        {   /* mech-mech contact in 3D, as the AI's (msim.c; engine 0x1000ba20 spheres, 0x1000c160 / 0x1000c1f0):
+             * landing on top of a mech (normal y above 0.7071, feet within 10 m of the terrain) sets the player
+             * down beside it, no damage; any other contact damages the player by the normal (head from above x
+             * the tonnage ratio, legs from below, else arm / torso) at the engine's relative speed on every
+             * contact tick - the player only: the other mech is damaged only by its own movement's contacts
+             * (0x10019d6a -> 0x1000c160 takes the mover alone) - and clangs once per contact (latch 0x1007c338); walking or airborne the player
+             * is set on the contact sphere and bounces off along the normal at half that speed (at least 1 cm/tick) */
+            float ticks = dt * 182.0f, air = g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f, vy = air ? g_sim.player_unit.vy : 0.0f;
+            float ch = g_sim.player_centre_h, x0 = (float)g_pl.origin[0], z0 = (float)g_pl.origin[2];
+            float p0[3] = {x0, g_sim.player_unit.y + ch, z0}, p1[3] = {nx, g_sim.player_unit.y + ch + vy * ticks, nz};
+            float n[3], c[3], rr = 0, ov[3], sv[3] = {(sinf(h) * g_pl_speed + cosf(h) * g_pl_across) / 182.0f, vy, (cosf(h) * g_pl_speed - sinf(h) * g_pl_across) / 182.0f};
+            int hit = g_sim_ok ? msim_unit_contact(&g_sim, -1, p0, p1, n, c, &rr, ov) : -2, pushout = 0;
+            g_sim.player_vel[0] = sv[0]; g_sim.player_vel[1] = sv[1]; g_sim.player_vel[2] = sv[2];
+            /* set down inside the sphere of the mech it landed on (contact < -2): the move ends inside it, whatever
+             * its direction - the engine's push-out (0x1000ba20) */
+            if (hit == -2 && g_sim_ok && g_pl_contact < -2 && msim_unit_inside(&g_sim, -1, -g_pl_contact - 3, p1, n, c, &rr, ov)) { hit = -g_pl_contact - 3; pushout = 1; }
+            if (hit >= 0) {
+                touched = 1;
+                /* the engine's speeds (0x1000ba20 copies the other's z velocity over its own): damage at
+                 * |(dvx, dvy)|, bounce at half |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
+                float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], sp = sqrtf(dvx * dvx + dvy * dvy), bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
+                float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);
+                float gnd = msim_ground(&g_sim, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
+                if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
+                    /* the engine: projected onto the sphere (0x1000ba20), the feet taken as 1 cm under the terrain
+                     * there (local_5c = -1): stood on the terrain at that point, inside the sphere, vy 0, the
+                     * velocity n x max(1, dv / 2); the next frame's move pushes it out (above) */
+                    float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
+                    (void)hl;
+                    if (bs < 1.0f) bs = 1.0f;
+                    g_pl.origin[0] = (int32_t)lrintf(gx); g_pl.origin[2] = (int32_t)lrintf(gz);
+                    g_sim.player_unit.ground = gnd;
+                    g_sim.player_unit.y = g_sim.player_unit.ground; g_sim.player_unit.vy = 0;
+                    g_pl_speed = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
+                    g_pl_contact = -hit - 3;   /* landed on it: pushed out next frame */
+                } else {
+                    if (g_sim.collision_damage)   /* every contact tick, the player only */
+                        combat_collision_unit(&g_sim.player_unit, sp, n, g_pl.heading + g_pl.twist, g_sim.units[hit].tons, &g_sim.rng);
+                    if (g_pl_contact != hit) {
+                        if (g_sfx && sp > 0.5f) {
+                            static int kid = -2;
+                            if (kid == -2) { int st = g_ma ? prj_find_type(g_ma, "SNDS") : -1; kid = st >= 0 ? prj_find_id(g_ma, st, "MECBLDC1") : -1; }
+                            if (kid > 0) sfx_play(g_sfx, kid, sp > 23.02f ? 1.0f : sp / 23.02f, 0.0f);   /* 0x10019d10: full above 23 cm/tick */
+                        }
+                        g_pl_contact = hit;
+                    }
+                    {   /* bounced off / pushed out along the normal, walking or airborne alike (0x1000ba20: the
+                         * end of the move projected onto the r1 + r2 sphere, the velocity n x max(1, dv / 2)) -
+                         * pressing on, each frame's move slides round the other mech, so how long it takes depends
+                         * on the frame rate (DOSBox TNJ1, the Firemoth at full into the instructor: 8 s at ~32 fps,
+                         * 1.5 s at ~5 fps; the port at 30 fps 8 s, its moves in contact run in 1/30 s steps at any frame
+                         * rate - pl_locomote); the port had pushed a walking player back 60 cm
+                         * at -30 % speed (ASSUMED). Walking, the velocity's part across the heading is kept too
+                         * (g_pl_across), as are the projection's fractions of a cm (g_pl_frac) */
+                        float rp = air || pushout ? rr + 1.0f : rr;   /* walking: onto the sphere itself (0x1000ba20) */
+                        float gx = c[0] + n[0] * rp, gz = c[2] + n[2] * rp;
+                        if (bs < 1.0f) bs = 1.0f;
+                        g_pl.origin[0] = (int32_t)lrintf(gx); g_pl.origin[2] = (int32_t)lrintf(gz);
+                        /* the engine's positions are not whole cm: kept, the slide's fraction of a cm a frame adds up
+                         * (rounded away, a nearly head-on contact - TNJ6's Mad Dog - never got round) */
+                        g_pl_frac[0] = gx - (float)g_pl.origin[0]; g_pl_frac[1] = gz - (float)g_pl.origin[2];
+                        /* the projection is in 3D (0x1000ba20): walking too the centre goes to the sphere's surface,
+                         * lifted by n.y x the penetration (or lowered: back on the ground) - with the velocity's n.y
+                         * part a small hop when the other's centre is lower */
+                        g_sim.player_unit.y = c[1] + n[1] * rp - ch;
+                        g_sim.player_unit.ground = msim_ground(&g_sim, gx, gz, g_sim.player_unit.y + ch);
+                        if (g_sim.player_unit.y < g_sim.player_unit.ground) g_sim.player_unit.y = g_sim.player_unit.ground;
+                        g_sim.player_unit.vy = g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f ? 0.0f : n[1] * bs;   /* on the ground: vy 0 */
+                        g_pl_speed = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;
+                        {   /* the velocity's part across the heading (the engine sets its one velocity vector to n x
+                             * bs): carried into the next moves, easing at 1/45 a tick toward the walking velocity as
+                             * the engine's does (0x10019310) - the slide round a nearly head-on contact */
+                            float across = n[0] * cosf(h) - n[2] * sinf(h);
+                            g_pl_across = !air && !pushout ? across * bs * 182.0f : 0.0f;
+                        }
+                    }
+                }
+                nx = (float)g_pl.origin[0]; nz = (float)g_pl.origin[2];
+            } else g_pl_contact = -2;
+        }
+        /* tested airborne too (0x10019310 runs 0x1000b5e0 on every move; the port's move is level: at the present height) */
+        if (msim_can_step_hr(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz, g_sim.player_unit.y, g_sim.player_centre_h, g_sim.player_radius)) {
+            g_pl.origin[0] = (int32_t)lrintf(nx);
+            g_pl.origin[2] = (int32_t)lrintf(nz);
+            /* the engine's positions are floats: the fraction of a cm is kept for the next move (a wall slide moves a cm
+             * or less a frame, rounded away it had crept or stuck) */
+            if (!touched) { g_pl_frac[0] = nx - (float)g_pl.origin[0]; g_pl_frac[1] = nz - (float)g_pl.origin[2]; }   /* a mech contact keeps its own */
+            g_sim.player_unit.blocked = 0;
+        } else {   /* walked into the world (engine 0x10019310 -> 0x1000b5e0): the move cut back to the touching point and the
+                    * velocity reflected and cut to a quarter (msim_world_impact) - the whole vector, its part across the
+                    * heading kept in g_pl_across (easing off at 1/45 a tick, above); unless harmless (a climbable face, the
+                    * feet in the ground window: 0x10019c4e), collision damage at the attempted speed on every contact frame
+                    * (0x10019d84 -> 0x1000c3c0 / 0x1000c1f0), the object walked into takes its share and the impact sounds */
+            float wn[3], sp3 = sqrtf(g_pl_speed * g_pl_speed + across * across) / 182.0f;   /* |the attempted velocity|, cm/tick */
+            float x0 = (float)g_pl.origin[0] + (touched ? g_pl_frac[0] : fx), z0 = (float)g_pl.origin[2] + (touched ? g_pl_frac[1] : fz), bx = nx, bz = nz;
+            int imp;
+            if (getenv("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
+            imp = msim_world_impact(&g_sim, x0, z0, &bx, &bz, g_sim.player_unit.y, g_sim.player_centre_h,
+                                    g_sim.player_radius, NULL, g_pl.heading, &g_pl_speed, &g_pl_across);
+            msim_block_normal(wn);   /* the hit's normal (the second try's when refused): the engine's DAT_1024b420.. */
+            g_pl.origin[0] = (int32_t)lrintf(bx); g_pl.origin[2] = (int32_t)lrintf(bz);
+            g_pl_frac[0] = bx - (float)g_pl.origin[0]; g_pl_frac[1] = bz - (float)g_pl.origin[2];
+            if (imp & 2) g_sim.player_unit.blocked = 0;   /* harmless: the contact cleared */
+            else {
+                if (!g_sim.player_unit.blocked && g_sfx && sp3 > 3.0693676f) {
+                    /* engine 0x10019cf8: the impact sound - 0xc8 MECBLDC1 against a destructible object, 0xe5 MECMTNHD
+                     * against anything else; volume speed / 23 cm/tick, full above; once per contact (0x1007c338) */
+                    sfx_play(g_sfx, msim_impact_destructible(&g_sim) ? 0xc8 : 0xe5, sp3 > 23.02f ? 1.0f : sp3 / 23.02f, 0.0f);
+                }
+                combat_collision(&g_sim.player_unit, sp3, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - (g_pl.heading + g_pl.twist), &g_sim.rng);
+                msim_impact_damage(&g_sim, -1, sp3);
+            }
+            touched = 1;
+        }
+    }
+    return touched;
+}
+/* the player's locomotion for a frame of dt seconds. The engine's contact responses run per frame and their result
+ * depends on the frame rate (0x1000ba20's projection and n x max(1, dv / 2), 0x1000b5e0's r x untravelled x 0.25 and
+ * r x |v| x -0.25, each restored at 1/45 a tick - DOSBox TNJ1 slides round the instructor in ~8 s at ~32 fps, 4.6 s at
+ * ~60); the port's frame-rate rule takes the 30 fps reference, so in contact the moves run in 1/30 s steps, the
+ * remainder carried to the next frame (a frame shorter than the rest moves nothing), until CONTACT_HOLD steps in a row
+ * have touched nothing (sliding round a mech, a few steps between touches are free: TNJ1 at most 3) - the slide is the
+ * 30 fps one at 60 / 120 / 144 Hz. Out of contact the frame is one move (the mean-velocity move is exact at any rate). */
+#define CONTACT_HOLD 10
+static void pl_locomote(float dt, float top)
+{
+    const float step = 1.0f / 30.0f;
+    if (g_pl_contact_hold <= 0) {   /* free: one move */
+        g_pl_contact_acc = 0;
+        if (pl_move(dt, top)) g_pl_contact_hold = CONTACT_HOLD;
+        return;
+    }
+    g_pl_contact_acc += dt;
+    while (g_pl_contact_acc >= step - 1e-5f) {
+        g_pl_contact_acc -= step;
+        if (pl_move(step, top)) g_pl_contact_hold = CONTACT_HOLD;
+        else if (--g_pl_contact_hold <= 0) {   /* out of contact: the rest of the frame as one move */
+            if (g_pl_contact_acc > 1e-5f) pl_move(g_pl_contact_acc, top);
+            g_pl_contact_acc = 0;
+            return;
+        }
+    }
+}
 /* the frame's time for msim_step in whole milliseconds, the fractions carried over (truncating each frame's dt made the
  * simulation run slower than the clock at high frame rates: 6.94 ms -> 6 at 144 fps, 13 % slow) */
 static int32_t sim_ms(float dt)
@@ -2458,22 +3496,54 @@ static void inst_update(int aux_on, int tgt_on)
     if (!aux_on) g_snow_show[0] = 0;
     if (!tgt_on) g_snow_show[1] = 0;
 }
-/* the static in a window whose top-left is (x, y) in 640x480 units: SNOWCLR frame (ticks since its first draw / 18) % 10 */
-static void draw_snow(float x, float y)
+/* the static in the window (x, y, w, h) (640x480 units; while it opens / closes the moving box): SNOWCLR frame
+ * (ticks since its first draw / 18) % 10 at the window's top-left, clipped to it (0x10021710 / 0x10011a40 ->
+ * 0x1001e800 -> 0x100022f0 with the window record +0x30, which 0x10021730 / 0x10011aa0 set to the moving rectangle;
+ * the draw 0x10062241 clips to the window). Screens wider than 701 pixels (800x600, 1024x768) tile the frame across
+ * the window (0x10002250: steps of the frame's width / height from its left / top edge) */
+static void draw_snow(float x, float y, float w, float h)
 {
     int f;
+    float tx, ty, sw, sh;
     if (g_snow_t0 < 0) g_snow_t0 = g_sim.now;
     f = (int)(((int64_t)(g_sim.now - g_snow_t0) * 182 / 1000) / 18) % 10;
     if (f < 0) f = 0;
-    if (g_hs_snow[f].tex) hud_draw(g_hud, &g_hs_snow[f], x, y, NULL);
+    if (!g_hs_snow[f].tex || w <= 0 || h <= 0) return;
+    hud_clip(g_hud, x, y, w, h);
+    if ((g_render_w ? g_render_w : g_win_cols) - 1 > 700) {   /* DAT_10244c64 = the screen's width - 1 (0x10004870) */
+        sw = hud_px_x(g_hud, (float)g_hs_snow[f].w); sh = hud_px_y(g_hud, (float)g_hs_snow[f].h);   /* the frame's size */
+        if (sw < 1.0f || sh < 1.0f) sw = sh = 1e9f;
+        for (ty = y; ty < y + h; ty += sh)
+            for (tx = x; tx < x + w; tx += sw) hud_draw(g_hud, &g_hs_snow[f], tx, ty, NULL);
+    } else hud_draw(g_hud, &g_hs_snow[f], x, y, NULL);
+    hud_clip_off(g_hud);
 }
 
+/* TARGET_AT_RETICLE (engine 0x1001d870): the unit the player's aim ray last struck (msim reticle_actor / reticle_bld,
+ * 0x10044810 -> DAT_1025a664 - kept while the ray strikes nothing, cleared when that unit goes) becomes the target when
+ * it may be targeted (a mech 0x1001d050 / a thing 0x1001d2d0: not destroyed, within 1750 m - 0x482ae600); otherwise the
+ * target stays as it was */
+static void target_at_reticle(void)
+{
+    int a = g_sim.reticle_actor, b = g_sim.reticle_bld;
+    if (a >= 0 && a < g_actor_count && g_sim.armed[a] && !g_sim.units[a].destroyed) {
+        float dx = (float)g_actors[a].mech.origin[0] - (float)g_pl.origin[0], dz = (float)g_actors[a].mech.origin[2] - (float)g_pl.origin[2];
+        float dy = g_sim.units[a].y - g_sim.player_unit.y;
+        if (dx * dx + dy * dy + dz * dz <= 175000.0f * 175000.0f) { g_tgt_sel = a; g_tgt_thing = -1; }
+    } else if (b >= 0 && b < g_sim.bld_count && g_sim.bld[b].hp > 0) {
+        const struct msim_building *gb = &g_sim.bld[b];
+        float dx = (gb->mn[0] + gb->mx[0]) * 0.5f - (float)g_pl.origin[0], dz = (gb->mn[2] + gb->mx[2]) * 0.5f - (float)g_pl.origin[2];
+        if (dx * dx + dz * dz <= 175000.0f * 175000.0f) { g_tgt_sel = -1; g_tgt_thing = b; }
+    }
+}
 /* ---- TEST ONLY (tests/sequences): held keys, a machine-readable state dump, timed screenshots, player hits ----
  * MW2_HOLD="t0-t1:key,..."  keys held between autopilot times t0 and t1 (names as MW2_KEYS, + shift+/ctrl+/alt+)
  * MW2_STATE_DUMP="1,2.5,..." or "/0.5"  print "STATE ..." lines at those autopilot times (or every 0.5 s), and at exit;
  *                                        hud messages print as "MSG ..." lines
  * MW2_SHOT="t:file.ppm,..."  write the frame at those times
  * MW2_TEST_AHIT="t:actor:loc:weapon:count,..."  the same for an actor (stops once it is destroyed)
+ * MW2_TEST_PARMOR="t:factor"  the player's armour x factor at t (0.25: the MEK's points, as before the loader's x 4)
+ * MW2_TEST_WATCH="t:actor"  the actor's state dumped as a_* (a_armor: armour + structure per location 1-8)
  * MW2_TEST_PHIT="t:loc:weapon:count,..."  the player takes `count` hits of weapon `weapon` on location loc (1-8) at t
  * MW2_TEST_HEAT="t:value,..."  set the player's heat at t
  * MW2_TEST_RNG="t:value"  set the simulation's random state at t (deterministic criticals)
@@ -2487,6 +3557,7 @@ static void draw_snow(float x, float y)
  *                                        window, 13 target viewer); the dump adds lvl= (0/2/13), snow= / snow_n= counts
  * MW2_TEST_KILL_ALL="t:0"  destroy every armed enemy (not friendly, not neutral) at t
  * MW2_TEST_THING="t:bld,..." target structure bld at t;  MW2_TEST_BLD_KILL="t:bld,..." destroy structure bld at t
+ * MW2_TEST_NODE_OK="t:node,t:node,..."  table-0 node succeeds at t; the dump's objs= lists the F12 rows (node:priority:state)
  * MW2_TEST_DROP="t:actor:dz:height:vy:hspeed[:dx]"  put an actor over / beside the player in the air (see test_drop); the
  *                                        dump then adds a_* fields for it, and parmor= (the player's armour + structure) */
 static SDL_Keycode test_keycode(const char *kn, int *mods)
@@ -2584,6 +3655,10 @@ static void test_heat(const char *r) { g_sim.player_unit.heat = g_sim.player_uni
 static void test_thing(const char *r) { g_tgt_sel = -1; g_tgt_thing = atoi(r); }
 static void test_bld_kill(const char *r) { int b = atoi(r); if (b >= 0 && b < g_sim.bld_count) msim_damage_building(&g_sim, b, 1e6f); }
 static int test_drop_actor = -1;   /* MW2_TEST_DROP's actor (its state is dumped as a_*) */
+/* MW2_TEST_PARMOR="t:factor"  the player's armour (front and rear) x factor at t (0.25: back to the MEK's points) */
+static void test_parmor(const char *r) { float f = (float)atof(r); if (f > 0) combat_set_armor_mult(&g_sim.player_unit, f); }
+/* MW2_TEST_WATCH="t:actor"  dump that actor's state as a_* (as MW2_TEST_DROP's) without moving it */
+static void test_watch(const char *r) { int a = atoi(r); if (a >= 0 && a < g_actor_count) test_drop_actor = a; }
 /* MW2_TEST_DROP="t:actor:dz:height:vy:hspeed"  actor put dz cm ahead (+z) of the player, its feet `height` cm above the
  * player's, falling at vy cm/tick (negative down), carrying hspeed cm/s toward the player */
 static void test_drop(const char *r)
@@ -2600,6 +3675,15 @@ static void test_drop(const char *r)
     g_sim.units[a].vy = vy;
     if (g_sim.air_speed) g_sim.air_speed[a] = hs;
     if (g_sim.minds) g_sim.minds[a].speed = hs;
+}
+/* MW2_TEST_NODE_OK="t:node,..."  (one t:node per entry) table-0 node `node` succeeds at t (state 5, as its condition passing would - the nodes
+ * depending on it run in the next logic step: objectives_dustoff_shown) */
+static void test_node_ok(const char *r)
+{
+    int n = atoi(r);
+    if (n < 0 || n >= g_sim.logic.tables[0].node_count) return;
+    g_sim.logic.state[0][n] = MTBL_OK;
+    g_sim.logic.ended[0][n] = g_sim.now;
 }
 static int test_fired;   /* volleys the player has fired (a weapon leaving READY for FIRING / REPEAT / RECYCLE) */
 static void test_dump(const char *tag)
@@ -2641,11 +3725,33 @@ static void test_dump(const char *tag)
     }
     /* the walk-cycle keys: the player's and MW2_KILL_ACTOR's actor's (a destroyed mech keeps its pose: standing_wreck_frozen) */
     printf(" pkey=%.3f", (double)g_pl_t);
+    {   /* the player's carried pose offset (anim_player_step): the largest track's, and its track */
+        int q, qm = -1; float om = 0;
+        for (q = 0; q < ANIM_MAX_TRACKS; q++) if (fabsf(g_pl_ap.off[q]) > om) { om = fabsf(g_pl_ap.off[q]); qm = q; }
+        printf(" poff=%.2f poff_tr=%d pseq=%d", (double)om, qm, g_pl_ap.cur);
+    }
+    if (getenv("MW2_WATCH_ACTOR") && g_sim_ok && g_sim.anim_pl) {   /* TEST ONLY: an actor's walk animation (idle_mech_rests) */
+        int wa = atoi(getenv("MW2_WATCH_ACTOR"));
+        if (wa >= 0 && wa < g_actor_count)
+            printf(" w_key=%.3f w_seq=%d w_on=%d w_thr=%.3f w_x=%d w_z=%d", (double)g_actors[wa].t, g_sim.anim_pl[wa].cur, g_sim.anim_pl[wa].on,
+                   (double)(g_sim.minds ? g_sim.minds[wa].thr_servo : 0.0f), g_actors[wa].mech.origin[0], g_actors[wa].mech.origin[2]);
+    }
     if (getenv("MW2_KILL_ACTOR")) {
         int ka = atoi(getenv("MW2_KILL_ACTOR"));
         if (ka >= 0 && ka < g_actor_count)
             printf(" k_key=%.3f k_dead=%d k_gone=0x%02x", (double)g_actors[ka].t, g_sim.units[ka].destroyed,
                    (g_sim.units[ka].loc_gone[0] != 0) | (g_sim.units[ka].loc_gone[2] != 0) << 2);
+    }
+    {   /* the F12 objectives list in display order (engine 0x10017b80: priorities 1, 2, 4, 0, 8; shown flag +0x74):
+         * node:priority:state per row */
+        static const int ORDER[5] = {1, 2, 4, 0, 8};
+        int p, n, k = 0;
+        printf(" objs=");
+        for (p = 0; p < 5; p++)
+            for (n = 0; n < g_sim.logic.tables[0].node_count; n++)
+                if (g_sim.logic.shown[0][n] && g_sim.logic.tables[0].nodes[n].priority == ORDER[p])
+                    printf("%s%d:%d:%d", k++ ? ";" : "", n, ORDER[p], g_sim.logic.state[0][n]);
+        if (!k) printf("-");
     }
     printf(" parmor=");   /* armour + structure per location 1-8 */
     for (i = 0; i < 8; i++) printf("%s%.1f", i ? "," : "", (double)(pu->armor[i] + pu->internal[i]));
@@ -2662,7 +3768,7 @@ static void test_dump(const char *tag)
 }
 static void test_frame(int w, int h)
 {
-    static int d_phit, d_heat, d_thing, d_bld, d_shot, dump_idx;
+    static int d_phit, d_heat, d_thing, d_bld, d_shot, dump_idx, d_node;
     static float next_every = -1;
     const char *sd = getenv("MW2_STATE_DUMP"), *sh = getenv("MW2_SHOT");
     if (!g_auto_on || !g_sim_ok || !g_world) return;
@@ -2684,7 +3790,10 @@ static void test_frame(int w, int h)
         listed = 1;
     }
     test_timed("MW2_TEST_PHIT", &d_phit, test_phit);
+    test_timed("MW2_TEST_NODE_OK", &d_node, test_node_ok);
     { static int d_ahit; test_timed("MW2_TEST_AHIT", &d_ahit, test_ahit); }
+    { static int d_watch; test_timed("MW2_TEST_WATCH", &d_watch, test_watch); }
+    { static int d_parmor; test_timed("MW2_TEST_PARMOR", &d_parmor, test_parmor); }
     test_timed("MW2_TEST_HEAT", &d_heat, test_heat);
     { static int d_ka; test_timed("MW2_TEST_KILL_ALL", &d_ka, test_kill_all); }
     { static int d_rng; test_timed("MW2_TEST_RNG", &d_rng, test_rng); }
@@ -2808,7 +3917,7 @@ int main(int argc, char **argv)
     }
     if (!win || !(ctx = SDL_GL_CreateContext(win))) { fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError()); return 1; }
     SDL_GL_SetSwapInterval(1);
-    { int dw0, dh0; SDL_GL_GetDrawableSize(win, &dw0, &dh0); g_win_lines = dh0; }   /* the HUD set for native rendering */
+    { int dw0, dh0; SDL_GL_GetDrawableSize(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
     glr_default_view(&v);
     g_view = &v;
     if (rec[0] == '@') { g_world = 1; rec = MECHS[0]; SDL_SetRelativeMouseMode(SDL_TRUE); }
@@ -2818,6 +3927,7 @@ int main(int argc, char **argv)
         int jt = 0;
         if (sscanf(getenv("MW2_AUTOPILOT"), "%f,%f,%f,%d,%255[^,],%d,%d", &g_auto_secs, &g_auto_throttle, &g_auto_twist, &fire, out, &ck, &jt) >= 4) {
             g_auto_on = 1; g_auto_fire = fire; g_auto_cockpit = ck; g_auto_jet = jt;
+            if (getenv("MW2_TEST_FPS") && atof(getenv("MW2_TEST_FPS")) >= 1.0) g_auto_dt = (float)(1.0 / atof(getenv("MW2_TEST_FPS")));   /* TEST ONLY */
             snprintf(g_auto_out, sizeof g_auto_out, "%s", out);
         }
     }
@@ -2863,6 +3973,19 @@ int main(int argc, char **argv)
             for (q = 0; q < 8; q++) { SDL_PumpEvents(); drop_screen_draw(win); SDL_Delay(16); }
         }
     }
+    {   /* the look (the shell's Combat Variables RENDERER and TEXTURES, mw2port.cfg renderer= / textures=): known before
+         * the mission loads (the Titanium textures are taken as it does) */
+        const char *e = getenv("MW2_EDITION"), *t = getenv("MW2_TEXTURES");
+        int k;
+        g_edition = g_tex_kind == 3 ? PORTCFG_ED_DOS : PORTCFG_ED_ENHANCED;
+        for (k = 0; e && k < PORTCFG_ED_COUNT; k++) if (strcmp(e, PORTCFG_ED_NAME[k]) == 0) g_edition = k;
+        if (g_tex_kind == 3) g_edition = PORTCFG_ED_DOS;   /* the DOS renderer is the DOS edition, whatever MW2_EDITION says: its
+                                                            * rules follow (CT spread rand(2), MW2.EXE 0x263c8; the self-destruct
+                                                            * at once) - the shell sets both together (portcfg_edition) */
+        /* (MW2_EDITION=titanium: the old single look - the enhanced mix with the Titanium textures) */
+        g_texset = (t && strcmp(t, "titanium") == 0) || (e && strcmp(e, "titanium") == 0) ? PORTCFG_TX_TITANIUM : PORTCFG_TX_ORIGINAL;
+        if (ati == 3 || (g_texset == PORTCFG_TX_TITANIUM && titanium_open(1) != 0)) g_texset = PORTCFG_TX_ORIGINAL;   /* (DOS; no folder) */
+    }
     if (!(r = glr_create()) || load(r, ma, ta, ati, rec, mission, camo, clan) != 0) return 1;
     g_sfx = sfx_create(ma);   /* NULL without an audio device: silent */
     if (g_world && g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* the mission was loaded before the mixer existed (with the drop screen: as it fades) */
@@ -2881,13 +4004,7 @@ int main(int argc, char **argv)
         }
     }
     g_show_objectives = getenv("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
-    {   /* the edition (the shell's Combat Variables RENDERER, mw2port.cfg edition=): which look the simulation takes */
-        const char *e = getenv("MW2_EDITION");
-        int k;
-        g_edition = g_tex_kind == 3 ? PORTCFG_ED_DOS : PORTCFG_ED_ENHANCED;
-        for (k = 0; e && k < PORTCFG_ED_COUNT; k++) if (strcmp(e, PORTCFG_ED_NAME[k]) == 0) g_edition = k;
-        g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS;   /* (the mission is loaded before the edition is known) */
-    }
+    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3;
     edition_look(&v);
     if (getenv("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
         const char *p = getenv("MW2_GROUPS");
@@ -2911,7 +4028,8 @@ int main(int argc, char **argv)
         if (g_drop_tex) {   /* hold the drop screen until 2 s after launch (user choice; was 5 s); the mission waits. Then
                              * as the original: the mission's CD track starts and the drop screen fades to black over 0.86 s
                              * before the first mission frame (DOSBox YELLSCN1 / TNJ1SCN1: the music from the start of the
-                             * fade, linear in brightness; the fade's code not traced - ASSUMED linear) */
+                             * fade). DOS MW2.EXE 0x15d49 -> 0x3eb10(0) -> VFX 0x58e0d(window 0xa46bc, palette, 0x3c): a DDA
+                             * fade, every colour linear to its target over 0x3c steps - 60 / 70 Hz retraces = 0.857 s */
             Uint32 el = SDL_GetTicks() - g_drop_t0;
             static int music_on;
             if (el >= 2000 && !music_on) { music_on = 1; if (g_world && g_sim_ok) music_start(g_sim.music_track); }
@@ -2926,8 +4044,7 @@ int main(int argc, char **argv)
             glDeleteTextures(5, g_drop_texs); memset(g_drop_texs, 0, sizeof g_drop_texs);
         }
         sfx_log_time = g_sim_ok && g_world ? g_sim.now / 1000.0 : -1;   /* TEST ONLY (MW2_SFX_LOG) */
-        if (g_voice_qn && g_sfx && !sfx_voice_busy(g_sfx)) { sfx_play_voice(g_sfx, g_voice_q[0], 0.9f); memmove(g_voice_q, g_voice_q + 1, sizeof g_voice_q[0] * 7); g_voice_qn--; }
-        if (g_voice_next && g_sfx && !g_voice_qn && !sfx_voice_busy(g_sfx)) { sfx_play_voice(g_sfx, g_voice_next, 0.9f); g_voice_next = 0; }
+        vq_drain();   /* the voice queue (0x100313d0) */
         if (g_sim_ok && g_world && g_sfx) {   /* missile lock tones: the tracking tone while a guided weapon is acquiring
                                                * (on target, 0x8000), the lock beep when it locks (0x80) - MISLTRCK /
                                                * MECXLOCK by their names */
@@ -3044,26 +4161,48 @@ int main(int argc, char **argv)
                     continue;
                 }
                 if (g_world && g_sim_ok && g_cc_page >= 0 && (k == SDLK_ESCAPE || (k >= SDLK_0 && k <= SDLK_9))) {
-                    int item = k == SDLK_ESCAPE ? -1 : (int)(k - SDLK_0);
-                    if (item <= 0) g_cc_page = g_cc_page == 0 ? -1 : 0;                        /* Esc / 0: back */
-                    else if (g_cc_page == 0) {
-                        if (item == 1) g_cc_page = 2;                                             /* Command All */
-                        else if (item == 2) g_cc_page = 1;                                        /* Change Formation */
-                        else if (item <= 6 && msim_point_actor(&g_sim, item - 2) >= 0) g_cc_page = 2 + item - 2;
-                    } else if (g_cc_page == 1) {
-                        if (item <= 6 && msim_set_formation(&g_sim, item - 1) == 0) g_cc_page = -1;
-                    } else if (item <= 5) {
-                        msim_command(&g_sim, g_cc_page - 2, CC_ORDER[item - 1], g_tgt_sel);   /* the menu closes (0x100659a0) */
+                    /* 0x10065df0: a digit picks the row with that number (0 the Esc row); Esc / the Esc row go back a page
+                     * (0x10066330), from the first page close the menu */
+                    cc_row rr[10];
+                    char tt[32];
+                    float rc[4], vf;
+                    int nrow, nr = cc_rows(g_cc_page, tt, sizeof tt, rr, &nrow, rc, &vf), item = k == SDLK_ESCAPE ? -1 : (int)(k - SDLK_0), q, act = 0;
+                    for (q = 0; q < nr && item > 0; q++) if (rr[q].num == item) act = rr[q].act;
+                    if (item <= 0) g_cc_page = g_cc_page == 1 || (g_cc_page >= 2 && g_cc_page < CC_SYSTEMS && g_cc_from_root) ? 0 : -1;
+                    else if (act > 0) { g_cc_page = act - 1; g_cc_from_root = 1; }
+                    else if (act < 0 && g_cc_page == CC_SYSTEMS) {   /* the toggles (0x10064d90 -> the value record's setter); the panel stays */
+                        int it = -act;
+                        if (it <= 2) {   /* as INFRARED / ENHANCED_VISION (0x10007a50) */
+                            int want = it, was = g_vision;
+                            if (want == 1 && g_inst_lvl[INST_RADAR] > 0 && g_vision != 1) want = 0;
+                            if (want) g_vision = g_vision == want ? 0 : want;
+                            if (g_vision == 1 && was != 1 && g_sfx) sfx_play(g_sfx, 0xb2, 0.8f, 0.0f);
+                            if (g_vision == 1 && was != 1) hud_message_v2("Light amplification engaged.", 77, 80);
+                            else if (g_vision == 2 && was != 2) hud_message_v2("Image enhancement engaged.", 76, 80);
+                        } else if (it == 3) g_hud_off = !g_hud_off;
+                        else if (!g_sim.player_unit.destroyed) {
+                            combat_set_auto_eject(!combat_auto_eject());
+                            hud_message_ex(combat_auto_eject() ? "Automatic ejection ON" : "Automatic ejection OFF", 0x16a, 0x32);
+                        }
+                    }
+                    else if (act < 0 && g_cc_page == 1) { if (msim_set_formation(&g_sim, -act - 1) == 0) g_cc_page = -1; }
+                    else if (act < 0) {
+                        msim_command(&g_sim, g_cc_page - 2, CC_ORDER[-act - 1], g_tgt_sel);   /* the menu closes (0x100659a0) */
                         g_cc_page = -1;
                     }
                     continue;
                 }
                 if (g_world && g_sim_ok && (A("USER_MENU") || A("ALL_PT_MENU") || A("PT_2_MENU") || A("PT_3_MENU"))) {
-                    int pt = A("PT_2_MENU") ? 1 : A("PT_3_MENU") ? 2 : 0;
-                    if (A("USER_MENU")) g_cc_page = g_cc_page == 0 ? -1 : 0;
-                    else if (pt == 0) g_cc_page = g_cc_page == 2 ? -1 : 2;
-                    else if (msim_point_actor(&g_sim, pt) >= 0) g_cc_page = 2 + pt;
-                    else hud_message_v("NO STAR MATES", 0);
+                    /* each key's own menu: opened, or closed when it is the one up (0x10065470) */
+                    int want = A("USER_MENU") ? CC_SYSTEMS : A("PT_2_MENU") ? 3 : A("PT_3_MENU") ? 4 : 0;
+                    int up = g_cc_page < 0 ? -1 : g_cc_page == CC_SYSTEMS ? CC_SYSTEMS : g_cc_from_root ? 0 : g_cc_page;
+                    if (up == want) g_cc_page = -1;
+                    else if (g_cc_page < 0) { g_cc_page = want; g_cc_from_root = 0; }   /* one menu at a time (0x10065440) */
+                    continue;
+                }
+                if (g_sim_ok && g_world && g_sim.dos_prompted && !g_sim.over && k != SDLK_LSHIFT && k != SDLK_RSHIFT && k != SDLK_LCTRL &&
+                    k != SDLK_RCTRL && k != SDLK_LALT && k != SDLK_RALT && k != SDLK_LGUI && k != SDLK_RGUI && k != SDLK_CAPSLOCK) {
+                    msim_end_now(&g_sim);   /* DOS 0x45d80: the prompt up (DAT_000982f4), any key ends the mission */
                     continue;
                 }
                 if (g_sim_ok && g_world && g_sim.ending && !g_sim.over && k == SDLK_ESCAPE && !A("EXIT_SIM")) continue;   /* the end phase: key dispatch off (0x100374e0) */
@@ -3083,13 +4222,10 @@ int main(int argc, char **argv)
                                                  A("TARGET_FRIENDLY") || A("TARGET_AT_RETICLE"))) {
                     int q, n2 = g_actor_count, best = -1, nxt = A("NEXT_TARGET");
                     float bd = 1e30f;
-                    g_tgt_thing = -1;
+                    if (A("TARGET_AT_RETICLE")) target_at_reticle();   /* keeps the target when nothing may be taken */
+                    else g_tgt_thing = -1;
                     if (A("RESET_TARGETTING")) g_tgt_sel = -1;
-                    else if (A("TARGET_AT_RETICLE")) {   /* a mech under the reticle, else a structure there */
-                        float dd2;
-                        g_tgt_sel = g_pl_target;
-                        if (g_tgt_sel < 0) g_tgt_thing = msim_aim_thing(&g_sim, g_pl.heading + g_pl.twist, 5.0f, &dd2);
-                    }
+                    else if (A("TARGET_AT_RETICLE")) {}
                     else if (A("TARGET_NEAREST_ENEMY") || A("TARGET_FRIENDLY")) {
                         int fr = A("TARGET_FRIENDLY");
                         for (q = 0; q < n2; q++) {
@@ -3154,7 +4290,10 @@ int main(int argc, char **argv)
                 }
                 else if (g_world && A("RADAR_MAP_TOGGLE")) {
                     g_satmap = !g_satmap;
+                    /* 0x100034ea: on - message 0x12 "Satellite link established" (67); 0x10003597: off - in camera mode 1
+                     * (DAT_1024e660, the external view) message 0x11 "External camera engaged" (66) again */
                     if (g_satmap) hud_message_v("Satellite link established.", 67);
+                    else if (!g_cockpit && g_camode == 0) hud_message_v("External camera engaged.", 66);
                 }
                 else if (g_world && ((A("TOGGLE_REAR_VIEW") && ui_click()) || (A("TOGGLE_DOWN_VIEW") && ui_click()) || (A("TOGGLE_WEAPON_DISPLAY") && ui_click()))) {
                     int want = A("TOGGLE_REAR_VIEW") ? 1 : A("TOGGLE_DOWN_VIEW") ? 2 : 3;
@@ -3210,9 +4349,11 @@ int main(int argc, char **argv)
                     }
                 }
                 else if (g_world && g_sim_ok && A("TOGGLE_MASC")) {
-                    /* engine 0x1001adf0: not fitted -> the message; else MASC on (sound 0xca) / off (0xcb) */
+                    /* engine 0x1001aef0: not fitted -> the message (0x16a ticks at 0x32); else MASC off: MECBMAOF 0xca and
+                     * 0x10031870(0x1f, 0) - suffix 0 posts nothing (0x10031872); MASC on: MECBMAON 0xcb and "MASC" (61)
+                     * "engaged" (80). (The port had the two sounds swapped and said "MASC disengaged") */
                     if (!combat_has_masc(&g_sim.player_unit)) hud_message_v("Not equipped with MASC.", 0);
-                    else { g_masc = !g_masc; if (g_sfx) sfx_play(g_sfx, g_masc ? 0xca : 0xcb, 0.7f, 0.0f); hud_message_v2(g_masc ? "MASC engaged." : "MASC disengaged.", 61, g_masc ? 80 : 84); }
+                    else { g_masc = !g_masc; if (g_sfx) sfx_play(g_sfx, g_masc ? 0xcb : 0xca, 0.7f, 0.0f); if (g_masc) hud_message_v2("MASC engaged.", 61, 80); }
                 }
                 else if (g_world && g_sim_ok && A("JETTISON_AMMO")) {
                     /* engine 0x10044220: the selected weapon's ammunition, if it has any: sound 0xb3, the message */
@@ -3223,9 +4364,12 @@ int main(int argc, char **argv)
                 }   /* engine: zoom_factor_reset -> 1 (DOS Ctrl+Z) */
                 else if (g_world && A("FEET_TO_TORSO")) g_feet_to_torso = 1;
                 else if (g_world && g_sim_ok && A("INSPECT_TARGET")) inspect_now();
-                else if (g_world && A("TOGGLE_GROUP_FIRE")) {   /* \ : chain fire <-> group fire (messages 6 / 7, voices 18 / 19) */
+                else if (g_world && A("TOGGLE_GROUP_FIRE")) {
+                    /* \ : chain fire <-> group fire - engine 0x100437d4 (DAT_1025a668 = chain): 0x10031870(7 or 6, 1),
+                     * message "Group fire" (voice 19) / "Chain fire" (18) with suffix 1 "engaged" (80) - both ways;
+                     * DOSBox YELLSCN1 (no sound): "Group fire engaged." then "Chain fire engaged." */
                     g_group_fire = !g_group_fire;
-                    hud_message_v(g_group_fire ? "Group fire" : "Chain fire", g_group_fire ? 19 : 18);
+                    hud_message_v2(g_group_fire ? "Group fire engaged." : "Chain fire engaged.", g_group_fire ? 19 : 18, 80);
                 }
                 else if (g_world && A("NEXT_WEAPON_GROUP")) g_cur_group = (g_cur_group + 1) % 3;
                 else if (g_world && A("COCKPIT_VIEW") && !(g_sim_ok && g_sim.player_unit.destroyed)) {   /* action 9: not once dead (+0x14 & 2) */
@@ -3241,9 +4385,14 @@ int main(int argc, char **argv)
                     static const char *const TH[10] = {"THROTTLE_STOP", "THROTTLE_2", "THROTTLE_3", "THROTTLE_4", "THROTTLE_5",
                                                        "THROTTLE_6", "THROTTLE_7", "THROTTLE_8", "THROTTLE_9", "THROTTLE_FULL"};
                     int q;
-                    for (q = 0; q < 10; q++) if (A(TH[q])) g_throttle = msim_throttle_preset(q);   /* action 0x1a + q: DOS 0x4684c q x 113 / 0x400 of full (the 3Dfx DLL q / 576 = q/9); DOS bar: THROTTLE_6 = 5/9 */
+                    for (q = 0; q < 10; q++) if (A(TH[q])) g_throttle = (g_reverse ? -1.0f : 1.0f) * msim_throttle_preset(q);   /* action 0x1a + q: DOS 0x4684c q x 113 / 0x400 of full (the 3Dfx DLL q / 576 = q/9); DOS bar: THROTTLE_6 = 5/9 */
                 }
-                else if (g_world && A("REVERSE_DIRECTION")) g_throttle = -g_throttle;   /* ASSUMED: flips the throttle's sign */
+                else if (g_world && A("REVERSE_DIRECTION")) {   /* action 0x3f (0x10037d36): toggles the reverse flag, input +0x2f -
+                                                                * the drive runs backwards at half (0x1001a180, x -0.5), the reverse
+                                                                * walk (0x1000b3a0), the bar fills down (0x1001c5b0); the throttle
+                                                                * setting stays (here its sign) */
+                    g_reverse = !g_reverse; g_throttle = -g_throttle;
+                }
                 else if (g_world && A("OVERRIDE_SHUTDOWN") && g_sim_ok) combat_override(&g_sim.player_unit);
                 else if ((k == SDLK_f && !g_world) || (k == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
                     Uint32 fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
@@ -3274,7 +4423,7 @@ int main(int argc, char **argv)
             static Uint32 aprev;
             Uint32 now = SDL_GetTicks();
             float dt = aprev ? (float)(now - aprev) / 1000.0f : 0;
-            if (g_auto_on) dt = 1.0f / 30.0f;
+            if (g_auto_on) dt = g_auto_dt;
             else {   /* the game speed (mw2port.cfg speed=, default 0.85): the original ran slower than real time on its
                       * period hardware (a Pentium MMX), and the port's pace felt quick */
                 static float speed = -1;
@@ -3307,6 +4456,31 @@ int main(int argc, char **argv)
                     if (kc && g_sim.now >= (int32_t)(atof(kc + 1) * 1000) && !g_sim.units[ka].destroyed) g_sim.units[ka].destroyed = 1;
                 }
             }
+            if (g_sim_ok && getenv("MW2_TEST_STRAFE")) {   /* TEST ONLY: "k,cm_per_s,t0,t1" - actor k slides sideways (world +x)
+                                                             * at cm_per_s from t0 to t1 s (with MW2_TEST_HOLD_ACTOR: no own moves) */
+                static int32_t x0;
+                static int have;
+                int ka = atoi(getenv("MW2_TEST_STRAFE"));
+                float v = 0, t0 = 0, t1 = 1e9f, tn = (float)g_sim.now / 1000.0f;
+                sscanf(getenv("MW2_TEST_STRAFE"), "%*d,%f,%f,%f", &v, &t0, &t1);
+                if (ka >= 0 && ka < g_actor_count && g_sim.armed[ka] && !g_sim.units[ka].destroyed) {
+                    if (!have || tn < t0) { have = 1; x0 = g_actors[ka].mech.origin[0]; }
+                    else g_actors[ka].mech.origin[0] = x0 + (int32_t)lrintf(v * ((tn < t1 ? tn : t1) - t0));
+                }
+            }
+            if (g_sim_ok && getenv("MW2_MISSILE_TRACE")) {   /* TEST ONLY: the player's missiles in flight (table types 3 / 4) */
+                int q;
+                for (q = 0; q < g_sim.shot_count; q++) {
+                    const msim_shot *ms = &g_sim.shots[q];
+                    int kd = combat_weapon_kind(ms->weapon);
+                    if (ms->owner == -1 && (kd == 3 || kd == 4) && ms->life > 0 && ms->y >= 0)
+                        fprintf(stderr, "missile %.3f id %u w %d at %.0f %.0f %.0f v %.1f %.1f %.1f homing %d\n", g_sim.now / 1000.0, ms->id, ms->weapon,
+                                ms->x, ms->y, ms->z, ms->vx, ms->vy, ms->vz, ms->homing);
+                }
+                if (g_tgt_sel >= 0 && g_tgt_sel < g_actor_count)
+                    fprintf(stderr, "mtarget %.3f %d at %d %.0f %d destroyed %d lock %#x\n", g_sim.now / 1000.0, g_tgt_sel, g_actors[g_tgt_sel].mech.origin[0],
+                            g_sim.units[g_tgt_sel].y, g_actors[g_tgt_sel].mech.origin[2], g_sim.units[g_tgt_sel].destroyed, g_sim.player_lock);
+            }
             if (g_sim_ok && getenv("MW2_HIT_BUILDINGS") && g_sim.now >= 1000 && !g_sim.buildings_destroyed) {   /* tests */
                 int b3;
                 for (b3 = 0; b3 < g_sim.bld_count; b3++) msim_damage_building(&g_sim, b3, 50.0f);
@@ -3324,7 +4498,7 @@ int main(int argc, char **argv)
                 g_sim.world_dirty = 0;
             }
             if (g_auto_on && g_pl_ok) {   /* the held controls (a twist demand is discarded while the mech is down, as the keys') */
-                if (g_auto_throttle >= -1.5f) g_throttle = g_auto_throttle;   /* TEST hook: throttle -9 = the keys drive it */
+                if (g_auto_throttle >= -1.5f) { g_throttle = g_auto_throttle; g_reverse = g_throttle < 0; }   /* TEST hook: throttle -9 = the keys drive it */
                 g_cockpit = g_auto_cockpit;
                 if (g_auto_twist > -900.0f && !(g_sim_ok && (g_sim.player_unit.shutdown || (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))))) g_pl.twist = g_auto_twist;   /* twist -999 = free */
             }
@@ -3345,7 +4519,7 @@ int main(int argc, char **argv)
                  * swings back to the centre within ~0.5 s */
                 int offline = starting || (g_sim_ok && g_sim.player_unit.shutdown);
                 float heading_before = g_pl.heading, twist_before = g_pl.twist, pitch_before = g_pitch;
-                float top = g_pl_walk * (g_sim_ok ? g_sim.player_unit.speed_gain : 1.0f) * (g_masc ? 1.5f : 1.0f), h, kmh, turn;
+                float top = g_pl_walk * (g_sim_ok ? g_sim.player_unit.speed_gain : 1.0f) * (g_masc ? 1.5f : 1.0f), kmh, turn;
                 if (g_masc && g_sim_ok) {
                     /* engine 0x1001a180: MASC raises the target speed by half; while it runs and the mech moves forward,
                      * every 0xb5 ticks rand() % 60 == 12 is a malfunction (not for an invulnerable player, only while up -
@@ -3363,17 +4537,20 @@ int main(int argc, char **argv)
                         }
                     }
                 }
-                int first = 0, cnt = 12;
                 /* the original KEYBOARD.MAP: throttle_plus / minus on = - and keypad + -; legs pan on the arrows;
                  * torso tilt on Up / Down; torso pan on , . and End / PgDn (rates of the held keys ASSUMED) */
                 {   /* DOSBox (holding =): the throttle bar from 0 reaches 35 % at 0.5 s and full before 1 s - an
                      * accelerating ramp, throttle = a t^2 / 2 with a = 2.76 / s^2; it starts again from rest on release */
                     static float tv;
                     int up = H("throttle_plus"), dn = H("throttle_minus");
-                    if (up != dn) {
+                    if (up != dn) {   /* the control spans 0..1024 (table 0x10256540): the setting's size, 0 at least; its sign
+                                       * the reverse flag's */
+                        float mg = fabsf(g_throttle);
                         if ((up && tv < 0) || (dn && tv > 0)) tv = 0;
                         tv += (up ? 2.76f : -2.76f) * dt;
-                        g_throttle += tv * dt;
+                        mg += tv * dt;
+                        mg = mg < 0 ? 0 : mg > 1 ? 1 : mg;
+                        g_throttle = g_reverse ? -mg : mg;
                     } else tv = 0;
                 }
                 /* keys reversed (user request, flight style: up arrow tilts down); the mouse is unchanged */
@@ -3405,21 +4582,25 @@ int main(int argc, char **argv)
                         else if (playing && still > 0.12f) { sfx_stop_pcm(g_sfx, loop_pcm); playing = 0; }
                     }
                 }
-                {   /* analog controls (INPUT.MAP axis blocks): a stick sets the position, the mouse moves it (scales ASSUMED) */
+                {   /* analog controls (INPUT.MAP axis blocks): a stick sets the position over the control's range (control
+                     * table 0x10256540: torso_pan -90..90, then the mech's twist limit; torso_tilt -60..60, then the port's
+                     * +-30; pilot_pan -70..70; pilot_tilt -60..60), shaped as the joystick driver does (im_stick_shape);
+                     * the mouse moves it (the mouse driver reports a position in a 1024 x 1024 box, MOUSE.DLL 0x10350; its
+                     * counts per mouse movement are the DOS mouse driver's - here 0.2 / 0.15 degrees a pixel, ASSUMED) */
                     int pr = 0;
                     float a;
                     a = g_im_ok ? im_axis(&g_im, "throttle", ks, 1, &pr) : 0;
-                    if (pr && g_im_dev.joy) g_throttle = -a;                                      /* stick forward = ahead */
+                    if (pr && g_im_dev.joy) g_throttle = -a;                                      /* stick forward = ahead (ASSUMED) */
                     a = g_im_ok ? im_axis(&g_im, "torso_pan", ks, 1, &pr) : 0;
-                    if (pr && g_im_dev.joy) g_pl.twist = a * (g_twist_limit < 360.0f ? g_twist_limit : 90.0f);
+                    if (pr && g_im_dev.joy) g_pl.twist = a * 90.0f;
                     a = g_im_ok ? im_axis(&g_im, "torso_tilt", ks, 1, &pr) : 0;
-                    if (pr && g_im_dev.joy) g_pitch = a * 30.0f;
+                    if (pr && g_im_dev.joy) g_pitch = a * 60.0f;
                     g_pl.twist += (g_im_ok ? im_axis(&g_im, "torso_pan", ks, 2, &pr) : 0) * 0.2f;
                     g_pitch += (g_im_ok ? im_axis(&g_im, "torso_tilt", ks, 2, &pr) : 0) * 0.15f;
                     a = g_im_ok ? im_axis(&g_im, "pilot_pan", ks, 1, &pr) : 0;
-                    if (pr && g_im_dev.joy) g_eye_pan = a * 90.0f;
+                    if (pr && g_im_dev.joy) g_eye_pan = a * 70.0f;
                     a = g_im_ok ? im_axis(&g_im, "pilot_tilt", ks, 1, &pr) : 0;
-                    if (pr && g_im_dev.joy) g_eye_tilt = a * 45.0f;
+                    if (pr && g_im_dev.joy) g_eye_tilt = a * 60.0f;
                     g_im_dev.mouse_dx = g_im_dev.mouse_dy = 0;
                 }
                 /* the pilot's view: pan / tilt keys, glances (held: 90 degrees aside, ASSUMED), recentre, zoom */
@@ -3427,29 +4608,26 @@ int main(int argc, char **argv)
                 /* the engine's key-driven controls (0x10039ee0): while a _plus / _minus key is held the control's velocity
                  * grows at a constant acceleration (3 << shift per tick, velocity capped at half scale per tick) and the
                  * value (-1..1) moves by it; the velocity drops to 0 on release. pilot_pan spans -70..70, pilot_tilt
-                 * -60..60 (control table 0x10256540) and keeps its value after release (DOS capture); acceleration
-                 * fitted to the DOS leg taps (KEY_ACCEL) */
+                 * -60..60 (control table 0x10256540) and keeps its value after release (DOS capture); shift 5 (key_ramp) */
                 {
-                    static float ppv, ptv;
+                    static key_ramp_t rp, rt;
                     int pm = H("pilot_pan_minus"), pp = H("pilot_pan_plus"), tm = H("pilot_tilt_minus"), tp = H("pilot_tilt_plus");
-                    float pv = g_eye_pan / 70.0f, tv = g_eye_tilt / 60.0f;
-                    if (pp || pm) { ppv += (pp ? KEY_ACCEL : -KEY_ACCEL) * dt; pv += ppv * dt; } else ppv = 0;
-                    if (tp || tm) { ptv += (tp ? KEY_ACCEL : -KEY_ACCEL) * dt; tv += ptv * dt; } else ptv = 0;
-                    pv = pv > 1 ? 1 : pv < -1 ? -1 : pv;
-                    tv = tv > 1 ? 1 : tv < -1 ? -1 : tv;
-                    g_eye_pan = pv * 70.0f; g_eye_tilt = tv * 60.0f;
+                    rp.val = g_eye_pan / 70.0f; rt.val = g_eye_tilt / 60.0f;   /* the value may be set elsewhere (glances, resets) */
+                    key_ramp(&rp, pp, pm, 5, 0, dt);
+                    key_ramp(&rt, tp, tm, 5, 0, dt);
+                    g_eye_pan = rp.val * 70.0f; g_eye_tilt = rt.val * 60.0f;
                 }
                 if (H("pilot_pan_reset") || H("pilot_tilt_reset")) g_eye_pan = g_eye_tilt = 0;
                 {   /* zoom_factor (control table: 1..4, camera +0x18 -> the projection's zoom): the same key ramp at
-                     * shift 3 (12.1 /s^2 on the -1..1 control value; DOS: a 0.12 s tap of Z 1.00 -> 1.17, then 1.39;
+                     * shift 6 (16 /s^2 on the -1..1 control value at 30 fps: a 0.12 s tap 1.00 -> 1.17; DOS: 1.17, then 1.39;
                      * 1.5 s -> 4; Shift+Z 0.25 s 3.97 -> 3.47, measured from the radar's view cone); COCKPIT_RESET_ZOOM
                      * (Ctrl+Z) -> 1 */
-                    static float zvel;
+                    static key_ramp_t rz;
                     int zp = H("zoom_factor_plus"), zm = H("zoom_factor_minus");
-                    float zv = (g_zoom - 1.0f) / 1.5f - 1.0f;
-                    if (zp != zm) { zvel += (zp ? ZOOM_ACCEL : -ZOOM_ACCEL) * dt; zv += zvel * dt; } else zvel = 0;
-                    zv = zv > 1 ? 1 : zv < -1 ? -1 : zv;
-                    g_zoom = 1.0f + (zv + 1.0f) * 1.5f;
+                    rz.val = (g_zoom - 1.0f) / 1.5f - 1.0f;
+                    key_ramp(&rz, zp, zm, 6, 0, dt);
+                    g_zoom = 1.0f + (rz.val + 1.0f) * 1.5f;
+                    if (getenv("MW2_RAMP_TRACE")) printf("RAMP t=%.3f pan=%.2f tilt=%.2f zoom=%.3f\n", g_sim.now / 1000.0, (double)g_eye_pan, (double)g_eye_tilt, (double)g_zoom);   /* tests */
                 }
                 if (g_eye_pan > 180) g_eye_pan = 180;
                 if (g_eye_pan < -180) g_eye_pan = -180;
@@ -3466,7 +4644,18 @@ int main(int argc, char **argv)
                 kmh = fabsf(g_spd_srv) * 0.036f;   /* c[0xb] x 6.516 (0x1001a180) */
                 /* engine turn = input/1024 x 90 x cos(min(80, km/h)); full key deflection taken as 1024 (inferred from the AI's 819.2 cap) */
                 turn = 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);
-                if (g_autopilot && (H("legs_pan_minus") || H("legs_pan_plus"))) g_autopilot = 0;   /* manual leg turn cancels it */
+                {   /* a manual turn cancels the autopilot, announced as the key does (engine 0x1001a480..0x1001a4fc): in
+                     * state 2, a leg-turn input (|input +0x10| >= 1e-7, 0x102473bc) or FEET_TO_TORSO (DAT_1025051c, key
+                     * action 0x11) with the autopilot on (+0xbc) raises the toggle request (+0x42) the TOGGLE_AUTOPILOT key
+                     * raises; it turns the autopilot off and, for the player, posts message 0x1d with suffix 2
+                     * (0x10031870): "Autopilot" (voice 65, table 0x1024f140) "disengaged" (voice 84, table 0x1024edb8) */
+                    int prt = 0;
+                    float axt = g_im_ok ? im_axis(&g_im, "legs_pan_delta", ks, 1, &prt) : 0;
+                    if (g_autopilot && !offline && (H("legs_pan_minus") || H("legs_pan_plus") || (prt && fabsf(axt) >= 1e-7f) || g_feet_to_torso)) {
+                        g_autopilot = 0;
+                        hud_message_v2("Autopilot disengaged.", 65, 84);
+                    }
+                }
                 if (g_autopilot) {   /* engine 0x10015c00: steer to the selected nav (else the next not visited); the pilot's
                                       * throttle stays; turn = (bearing error x 18.2044, at most 819.2) / 1024 of full - 0.8 of
                                       * full beyond 45 degrees; on arrival MECNAVPT (0xe7), the nav marked visited and the next
@@ -3478,7 +4667,7 @@ int main(int argc, char **argv)
                         int k3;
                         if (g_nav_sel == nv) g_nav_sel = -1;
                         for (k3 = nv + 1; k3 < g_sim.nav_count && k3 < 256 && (visited[k3] || !g_sim.navs[k3].selectable); k3++) {}
-                        if (k3 >= g_sim.nav_count || k3 >= 256) { g_autopilot = 0; g_throttle = 0; ap_nav = -1; nv = -2; hud_message_v("Autopilot disengaged.", 0); }
+                        if (k3 >= g_sim.nav_count || k3 >= 256) { g_autopilot = 0; g_throttle = 0; ap_nav = -1; nv = -2; }   /* 0x10015d5c: silently (no message call in 0x10015c00) */
                         else nv = k3;
                     }
                     if (nv == -1 || nv >= g_sim.nav_count) {
@@ -3499,16 +4688,10 @@ int main(int argc, char **argv)
                         g_pl.heading += turn * (c / 1024.0f) * dt;
                     }
                 }
-                {   /* keyboard turning builds up (the engine's key ramp, see KEY_ACCEL) and stops on release */
-                    static float lv, lx;
-                    int lm = H("legs_pan_minus"), lp = H("legs_pan_plus");
-                    if (lm != lp) {
-                        if ((lp && lv < 0) || (lm && lv > 0)) lv = 0;
-                        lv += (lp ? KEY_ACCEL : -KEY_ACCEL) * dt;
-                        lx += lv * dt;
-                        lx = lx > 1 ? 1 : lx < -1 ? -1 : lx;
-                    } else lv = lx = 0;
-                    g_pl.heading += turn * lx * dt;
+                {   /* keyboard turning builds up (legs_pan_delta's key ramp, see key_ramp) and stops on release */
+                    static key_ramp_t rl;
+                    key_ramp(&rl, H("legs_pan_plus"), H("legs_pan_minus"), 7, 1, dt);
+                    g_pl.heading += turn * rl.val * dt;
                 }
                 { int pr = 0; float a = g_im_ok ? im_axis(&g_im, "legs_pan_delta", ks, 1, &pr) : 0; if (pr) g_pl.heading += a * turn * dt; }
                 if (g_feet_to_torso) {
@@ -3540,180 +4723,76 @@ int main(int argc, char **argv)
                 if (g_sim_ok) g_sim.player_unit.throttle_frac = fabsf(g_thr_srv) > 1.0f ? 1.0f : fabsf(g_thr_srv);
                 /* the engine's throttle -> speed chain (msim_drive_step: throttle servo T 36.2 ticks, drive servo T 90.5 ticks,
                  * velocity approach 1/45 per tick; 0x1001a180 / 0x100190d0), the throttle signed here (reverse at half) */
-                msim_drive_step(&g_thr_srv, &g_spd_srv, &g_pl_speed, g_throttle_eff, 1.0f, top,
-                                !(g_sim_ok && (g_sim.player_unit.shutdown || g_sim.player_unit.immobile)), g_drive_slow, dt * 182.0f);
-                h = g_pl.heading * 3.14159265f / 180.0f;
-                {   /* locomotion on the terrain (engine 0x10019310): steep or out-of-window steps refused */
-                    float nx = (float)g_pl.origin[0] + sinf(h) * g_pl_speed * dt, nz = (float)g_pl.origin[2] + cosf(h) * g_pl_speed * dt;
-                    {   /* mech-mech contact in 3D, as the AI's (msim.c; engine 0x1000ba20 spheres, 0x1000c160 / 0x1000c1f0):
-                         * landing on top of a mech (normal y above 0.7071, feet within 10 m of the terrain) sets the player
-                         * down beside it, no damage; any other contact damages the player by the normal (head from above x
-                         * the tonnage ratio, legs from below, else arm / torso) at the engine's relative speed on every
-                         * contact tick - the player only: the other mech is damaged only by its own movement's contacts
-                         * (0x10019d6a -> 0x1000c160 takes the mover alone) - and clangs once per contact (latch 0x1007c338); airborne the player bounces off
-                         * along the normal at half that speed, walking it bounces back 60 cm at -30 % speed */
-                        static int contact = -2;
-                        float ticks = dt * 182.0f, air = g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f, vy = air ? g_sim.player_unit.vy : 0.0f;
-                        float ch = g_sim.player_centre_h, x0 = (float)g_pl.origin[0], z0 = (float)g_pl.origin[2];
-                        float p0[3] = {x0, g_sim.player_unit.y + ch, z0}, p1[3] = {nx, g_sim.player_unit.y + ch + vy * ticks, nz};
-                        float n[3], c[3], rr = 0, ov[3], sv[3] = {sinf(h) * g_pl_speed / 182.0f, vy, cosf(h) * g_pl_speed / 182.0f};
-                        int hit = g_sim_ok ? msim_unit_contact(&g_sim, -1, p0, p1, n, c, &rr, ov) : -2, pushout = 0;
-                        g_sim.player_vel[0] = sv[0]; g_sim.player_vel[1] = sv[1]; g_sim.player_vel[2] = sv[2];
-                        /* set down inside the sphere of the mech it landed on (contact < -2): the move ends inside it, whatever
-                         * its direction - the engine's push-out (0x1000ba20) */
-                        if (hit == -2 && g_sim_ok && contact < -2 && msim_unit_inside(&g_sim, -1, -contact - 3, p1, n, c, &rr, ov)) { hit = -contact - 3; pushout = 1; }
-                        if (hit >= 0) {
-                            /* the engine's speeds (0x1000ba20 copies the other's z velocity over its own): damage at
-                             * |(dvx, dvy)|, bounce at half |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
-                            float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], sp = sqrtf(dvx * dvx + dvy * dvy), bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
-                            float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);
-                            float gnd = msim_ground(&g_sim, c[0] + n[0] * rr, c[2] + n[2] * rr, py);
-                            if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
-                                /* the engine: projected onto the sphere (0x1000ba20), the feet taken as 1 cm under the terrain
-                                 * there (local_5c = -1): stood on the terrain at that point, inside the sphere, vy 0, the
-                                 * velocity n x max(1, dv / 2); the next frame's move pushes it out (above) */
-                                float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
-                                (void)hl;
-                                if (bs < 1.0f) bs = 1.0f;
-                                g_pl.origin[0] = (int32_t)lrintf(gx); g_pl.origin[2] = (int32_t)lrintf(gz);
-                                g_sim.player_unit.ground = gnd;
-                                g_sim.player_unit.y = g_sim.player_unit.ground; g_sim.player_unit.vy = 0;
-                                g_pl_speed = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
-                                contact = -hit - 3;   /* landed on it: pushed out next frame */
-                            } else {
-                                if (g_sim.collision_damage)   /* every contact tick, the player only */
-                                    combat_collision_unit(&g_sim.player_unit, sp, n, g_pl.heading + g_pl.twist, g_sim.units[hit].tons, &g_sim.rng);
-                                if (contact != hit) {
-                                    if (g_sfx && sp > 0.5f) {
-                                        static int kid = -2;
-                                        if (kid == -2) { int st = g_ma ? prj_find_type(g_ma, "SNDS") : -1; kid = st >= 0 ? prj_find_id(g_ma, st, "MECBLDC1") : -1; }
-                                        if (kid > 0) sfx_play(g_sfx, kid, sp > 23.02f ? 1.0f : sp / 23.02f, 0.0f);   /* 0x10019d10: full above 23 cm/tick */
-                                    }
-                                    contact = hit;
-                                }
-                                if (air || pushout) {   /* bounced off / pushed out along the normal */
-                                    float gx = c[0] + n[0] * (rr + 1.0f), gz = c[2] + n[2] * (rr + 1.0f);
-                                    if (bs < 1.0f) bs = 1.0f;
-                                    g_pl.origin[0] = (int32_t)lrintf(gx); g_pl.origin[2] = (int32_t)lrintf(gz);
-                                    g_sim.player_unit.y = c[1] + n[1] * (rr + 1.0f) - ch;
-                                    g_sim.player_unit.ground = msim_ground(&g_sim, gx, gz, g_sim.player_unit.y);
-                                    if (g_sim.player_unit.y < g_sim.player_unit.ground) g_sim.player_unit.y = g_sim.player_unit.ground;
-                                    g_sim.player_unit.vy = g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f ? 0.0f : n[1] * bs;   /* on the ground: vy 0 */
-                                    g_pl_speed = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;
-                                } else {
-                                    float bx = x0 - c[0], bz = z0 - c[2], bl = sqrtf(bx * bx + bz * bz);
-                                    if (bl > 1.0f) { g_pl.origin[0] += (int32_t)lrintf(bx / bl * 60.0f); g_pl.origin[2] += (int32_t)lrintf(bz / bl * 60.0f); }   /* bounced back */
-                                    g_pl_speed *= -0.3f;
-                                }
-                            }
-                            nx = (float)g_pl.origin[0]; nz = (float)g_pl.origin[2];
-                        } else contact = -2;
-                    }
-                    if (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f || msim_can_step_hr(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz, g_sim.player_unit.y, g_sim.player_centre_h, g_sim.player_radius)) {
-                        g_pl.origin[0] = (int32_t)lrintf(nx);
-                        g_pl.origin[2] = (int32_t)lrintf(nz);
-                        g_sim.player_unit.blocked = 0;
-                    } else {   /* walked into steep terrain: collision damage at speed (engine 0x1000c3c0 / 0x1000c1f0) */
-                        float wn[3];
-                        msim_block_normal(wn);   /* the refusing surface's normal (the engine's hit normal), as the AI's - the
-                                                  * ground's normal at the target had sent an object's face hit to the legs */
-                        if (getenv("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
-                        if (!g_sim.player_unit.blocked && g_sfx && fabsf(g_pl_speed) / 182.0f > 3.07f) {
-                            /* engine 0x10019cf8: the impact sound - 0xc8 MECBLDC1 against an object, 0xe5 MECMTNHD against
-                             * the terrain; volume speed / 23 cm/tick, full above */
-                            float sp3 = fabsf(g_pl_speed) / 182.0f;
-                            int wall = msim_wall_at(&g_sim, nx, nz, NULL);
-                            sfx_play(g_sfx, wall ? 0xc8 : 0xe5, sp3 > 23.02f ? 1.0f : sp3 / 23.02f, 0.0f);
-                        }
-                        /* every contact frame at the attempted speed (0x10019d84 -> 0x1000c3c0); the impact itself cuts
-                         * the move back and reflects the velocity at a quarter (0x1000b5e0, msim_world_impact) */
-                        combat_collision(&g_sim.player_unit, fabsf(g_pl_speed) / 182.0f, wn[1],
-                                         atan2f(-wn[0], -wn[2]) * 57.29578f - (g_pl.heading + g_pl.twist), &g_sim.rng);
-                        {
-                            float bx = nx, bz = nz;
-                            msim_world_impact(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], &bx, &bz, g_sim.player_unit.y, g_sim.player_centre_h,
-                                              g_sim.player_radius, wn, g_pl.heading, &g_pl_speed);
-                            g_pl.origin[0] = (int32_t)lrintf(bx); g_pl.origin[2] = (int32_t)lrintf(bz);
-                        }
-                    }
-                }
-                {   /* gait by throttle (engine 0x1000b3a0): < 25% seq 0, 25-75% seq 1, >= 75% seq 2 (run).
-                     * Key timing (engine 0x1000dec0 / 0x1000e600): every key lasts the TSK duration
-                     * (Timber Wolf 70 ticks) x 1.5 / 1 / 0.75 for gait 1 / 2 / 3; not tied to ground speed. */
-                    static const float MOD[3] = {1.5f, 1.0f, 0.75f};
+                pl_locomote(dt, top);
+                {   /* the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13]; the key player
+                     * (0x1000dec0, anim_player_step - the AI's the same, msim.c) walks the keys toward it. c[0x13] more than
+                     * 1/32 of full over the stop level: gait 1 under 1/4, 2 under 3/4, else 3 (key time r x 1.5 / 1 / 0.75,
+                     * 0x1000e600); sequence 0 walk, 1 run at gait 3, 2 reverse (gait at most 2). At or under it: stop (-1,
+                     * gait 0) - the stride runs on to its end key and the feet come together in the standing pose at the
+                     * plain key time; it had frozen mid-stride whenever the ground speed fell under 1 cm/s */
                     float frac = fabsf(g_thr_srv);   /* the current throttle c[0x13] (0x1000b3a0) */
-                    /* the three sequences are walk, run and REVERSE (their strides: Nova +101 / +211 / -105 cm) - the
-                     * fastest throttles had picked the backwards walk. Forward: walk below half speed, run above
-                     * (threshold ASSUMED); backing up: sequence 2 */
-                    /* engine 0x1000b3a0: speed over the stop level, as a fraction of full: gait 1 under 1/4, 2 under
-                     * 3/4, else 3; the sequence is the walk below gait 3, the run at gait 3, the reverse walk backing up */
-                    int gait = frac < 0.25f ? 0 : frac < 0.75f ? 1 : 2;
-                    int seq = g_pl_speed < -1.0f ? 2 : gait == 2 ? 1 : 0;
-                    static int last_seq = -1;
                     int r0 = g_pl.anim_rate > 0 ? g_pl.anim_rate : 70;
-                    float dur = (float)(gait == 0 ? r0 + (r0 >> 1) : gait == 1 ? r0 : r0 - (r0 >> 2));   /* key time by gait, integer (0x1000e600) */
-                    (void)MOD;
-                    if (anim_sequence(&g_pl_anim, seq, &first, &cnt) != 0) { seq = 0; anim_sequence(&g_pl_anim, 0, &first, &cnt); }
-                    if (seq != last_seq) { g_pl_t = 0; last_seq = seq; }
-                    if (fabsf(g_pl_speed) > 1.0f) {
-                        /* footsteps (engine 0x1000b3a0 / 0x1000e600): entering a key whose flags carry 0x800 (a foot
-                         * coming down) raises the mech's footstep flag, and the controller plays its footstep sound -
-                         * 0x103 for every mech but the player, whose comes from its record (ASSUMED the same here) -
-                         * at the mech; the gait (1 walk, 2 trot, 3 run by speed) sets the key time, so the steps
-                         * follow the speed */
-                        int k0 = (int)g_pl_t, k1;
-                        {   /* the walk cycle loops from the key before its first footfall: wrapping to the sequence's
-                             * first key replayed the lead-in from standing - walk, walk, pause */
-                            /* the stride loops left - right - left: from the first footfall over two footfalls' worth of
-                             * keys (the keys after them return to standing and were the "stop"); the lead-in plays once.
-                             * Step rate: footfalls 1 + 1.4 x (speed / top) a second, at least the engine's key time */
-                            int ls, le;
-                            anim_loop_range(&g_pl_anim, first, cnt, &ls, &le);
-                            if (getenv("MW2_STEP_TRACE")) { static int lq = -1; if (lq != seq) { lq = seq; fprintf(stderr, "seq %d first %d count %d loop %d..%d\n", seq, first, cnt, ls, le); } }
-                            g_pl_t += dt * 182.0f / dur;   /* the engine's key time only: no coupling to ground speed */
-                            if (g_pl_t >= (float)le) g_pl_t = (float)ls + fmodf(g_pl_t - (float)le, (float)(le - ls > 0 ? le - ls : 1));
-                        }
-                        k1 = (int)g_pl_t;
-                        if (first + k1 < g_pl_anim.key_count && (g_pl_anim.key_flags[first + k1] & 0x10)) g_drive_slow = 1;   /* 0x1001a180: T 90.5 from now on */
-                        if (k1 != k0 && first + k1 < g_pl_anim.key_count && (g_pl_anim.key_flags[first + k1] & 0x800) && g_sfx && !g_sim.player_unit.destroyed)
-                        {   /* the player's own footstep: the mech record's ASND chunk {u16 sound, name} (Mad Dog, Nova, Timber
-                             * Wolf MECFSMED 0xd6; Jenner, Kit Fox MECLIGHT 0xe0) - engine 0x1000b3a0 plays object +0x90, set
-                             * from it (+0x44) for the player; other mechs NONFOOT 0x103 */
-                            static int fs = -1;
-                            if (fs < 0) {
-                                prj_record ar;
-                                fs = 0xd6;
-                                if (g_ma && prj_read_named(g_ma, "BWD", g_sim.player_skel, &ar) == PRJ_OK) {
-                                    bwd_chunk ch[256];
-                                    int nc = bwd_chunks(ar.data, ar.size, ch, 256), q;
-                                    for (q = 0; q < nc; q++) if (strcmp(ch[q].tag, "ASND") == 0 && ch[q].size >= 2) { fs = ch[q].data[0] | ch[q].data[1] << 8; break; }
-                                    prj_record_free(&ar);
-                                }
-                            }
-                            sfx_play(g_sfx, fs, VIEW_IN_COCKPIT ? 0.5f : 1.0f, 0.0f);   /* 0x10032ad0: halved in the cockpit view (DAT_1024e678) */
-                            if (getenv("MW2_STEP_TRACE")) fprintf(stderr, "footstep key %d sound %d\n", first + k1, fs);
-                        }
+                    int gait = 0, seq = -1, ev;
+                    static int gs_st = -2;   /* the gait sound state (DAT_10207f00[unit], below) */
+                    if (!g_pl_ap_ok) { anim_player_init(&g_pl_ap, r0); g_pl_ap_ok = 1; gs_st = -2; }   /* a new mission: standing, nothing playing (0x1000b5a0) */
+                    if (frac > 1.0f / 32.0f) {
+                        gait = frac < 0.25f ? 1 : frac < 0.75f ? 2 : 3;
+                        seq = gait == 3 ? 1 : 0;
+                        if (g_pl_ap.cur == 2 && gait > 2) gait = 2;
+                        if (g_thr_srv < 0) seq = 2;   /* reversing (input +0x2f): the player's throttle is signed */
                     }
-                    {   /* gait sounds (engine 0x1000b4e0, the player only): the samples name the changes - STOP2WLK 302,
-                         * WLK2STOP 335, WALK2RUN 328, RUN2WLK 282, STOP2REV 301, REV2STOP 281 - played when the gait
-                         * changes between stopped, walking (or trotting), running and reversing */
-                        static int prev_cls = 0;
-                        int cls = fabsf(g_pl_speed) < 1.0f ? 0 : g_pl_speed < 0 ? 3 : seq == 1 ? 2 : 1, snd2 = -1;
-                        if (cls != prev_cls) {
-                            if (prev_cls == 0) snd2 = cls == 3 ? 301 : 302;
-                            else if (cls == 0) snd2 = prev_cls == 3 ? 281 : 335;
-                            else if (prev_cls == 1 && cls == 2) snd2 = 328;
-                            else if (prev_cls == 2 && cls == 1) snd2 = 282;
+                    const int seq_req = seq;   /* +0x88 as asked this frame (-1 stop) */
+                    ev = anim_player_step(&g_pl_anim, &g_pl_ap, seq, gait, r0, dt * 182.0f);
+                    g_pl_t = g_pl_ap.t;
+                    if (seq < 0) seq = 0;
+                    if (getenv("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
+                    if (ev & ANIM_EV_SLOW) g_drive_slow = 1;   /* a key flagged 0x10: 0x1001a180: T 90.5 from now on */
+                    if ((ev & ANIM_EV_STEP) && g_sfx && !g_sim.player_unit.destroyed)
+                    {   /* the player's own footstep (a key flagged 0x800: +0x80 bit 3): the mech record's ASND chunk {u16
+                         * sound, name} (Mad Dog, Nova, Timber Wolf MECFSMED 0xd6; Jenner, Kit Fox MECLIGHT 0xe0) - engine
+                         * 0x1000b3a0 plays object +0x90, set from it (+0x44) for the player; other mechs NONFOOT 0x103 */
+                        static int fs = -1;
+                        if (fs < 0) {
+                            prj_record ar;
+                            fs = 0xd6;
+                            if (g_ma && prj_read_named(g_ma, "BWD", g_sim.player_skel, &ar) == PRJ_OK) {
+                                bwd_chunk ch[256];
+                                int nc = bwd_chunks(ar.data, ar.size, ch, 256), q;
+                                for (q = 0; q < nc; q++) if (strcmp(ch[q].tag, "ASND") == 0 && ch[q].size >= 2) { fs = ch[q].data[0] | ch[q].data[1] << 8; break; }
+                                prj_record_free(&ar);
+                            }
                         }
-                        if (snd2 > 0 && g_sfx && !g_sim.player_unit.destroyed) sfx_play(g_sfx, snd2, 0.7f, 0.0f);
-                        prev_cls = cls;
+                        sfx_play(g_sfx, fs, VIEW_IN_COCKPIT ? 0.5f : 1.0f, 0.0f);   /* 0x10032ad0: halved in the cockpit view (DAT_1024e678) */
+                        if (getenv("MW2_STEP_TRACE")) fprintf(stderr, "footstep key %d sound %d\n", g_pl_ap.key, fs);
+                    }
+                    {   /* gait sounds (engine 0x1000b4e0, from the gait code 0x1000b3a0 every frame, the player only): by the
+                         * sequence playing cur (+0x84, -1 none) and the one asked for req (+0x88: -1 stop, 0 walk, 1 run
+                         * at gait 3, 2 reverse - input +0x2f) the sound table[5 + req + 4 x cur] (0x1024b2b8, +0x14):
+                         *   cur -1: -1, STOP2WLK 302, 302, -1   cur 0: WLK2STOP 335, -1, -1, 335
+                         *   cur  1: RUN2WLK 282, 282, WALK2RUN 328, 282   cur 2: REV2STOP 281, 281, 281, STOP2REV 301
+                         * (req -1 / 0 / 1 / 2). The last state st (DAT_10207f00[unit], -2 at load 0x1000b300): req != cur
+                         * plays the change sound once per cur (st = cur); req == cur plays the steady entry (WALK2RUN as
+                         * the run starts, STOP2REV as the reverse starts; cur 0 after st 2 - from reverse into the walk -
+                         * table[1] STOP2WLK) once (st = -2). At the mech (0x10032bf0, positional: the port's 0.8 as MECTURX2) */
+                        static const short tbl[16] = {-1, 302, 302, -1, 335, -1, -1, 335, 282, 282, 328, 282, 281, 281, 281, 301};
+                        int st = gs_st;
+                        const int cur = g_pl_ap.cur, req = seq_req;
+                        int go = 0, snd2 = -1;
+                        if (cur != req) go = st != cur;
+                        else go = st != -2;
+                        if (go && cur >= -1 && cur <= 2 && req >= -1 && req <= 2) {
+                            snd2 = cur == 0 && st == 2 ? tbl[1] : tbl[5 + req + 4 * cur];
+                            gs_st = cur == req ? -2 : cur;
+                        }
+                        if (snd2 > 0 && g_sfx && !g_sim.player_unit.destroyed) sfx_play(g_sfx, snd2, VIEW_IN_COCKPIT ? 0.4f : 0.8f, 0.0f);   /* 0x1000b567: halved in the cockpit (edx DAT_1024e678) */
                     }
                 }
-                mech3d_pose(&g_pl, &g_pl_anim, (float)first + g_pl_t);
+                g_pl.pose_off = g_pl_ap.off;   /* the carried offset (anim_player_step) */
+                mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);   /* g_pl_t: the absolute key time (anim_player) */
                 if (g_plpit_ok) {
                     memcpy(g_plpit.origin, g_pl.origin, sizeof g_pl.origin);
-                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist;
-                    mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, (float)first + g_pl_t);
+                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.pose_off = g_pl_ap.off;
+                    mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
                 }
                 if (g_sim_ok) {   /* the mounts as drawn (walk animation, torso twist) for the shots and jet flames */
                     memcpy(g_sim.pl_shown.mount_pos, g_pl.mount_pos, sizeof g_pl.mount_pos);
@@ -3721,11 +4800,21 @@ int main(int argc, char **argv)
                     g_sim.pl_shown.mount_ok = g_pl.mount_ok;
                     g_sim.pl_shown_ok = 1;
                 }
+            } else if (g_pl_ok && g_pilot && g_sim_ok) {
+                /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 that is on
+                 * the ground (object +0x78, set on every ground contact and by the wreck's landing 0x1000c4d0) - no move, no
+                 * servo, the velocity left as it was: it stops dead where it died. Killed in the air it flies on, its velocity
+                 * unchanged (no drive: the controller cleared it, LAB_1001aae9), falls, and freezes on touching down */
+                if (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f) {
+                    float h = g_pl.heading * 3.14159265f / 180.0f;
+                    g_pl.origin[0] = (int32_t)lrintf((float)g_pl.origin[0] + sinf(h) * g_pl_speed * dt);
+                    g_pl.origin[2] = (int32_t)lrintf((float)g_pl.origin[2] + cosf(h) * g_pl_speed * dt);
+                } else g_pl_speed = 0, g_pl_across = 0;
             }
             if (g_sim_ok && g_pl_ok && g_pilot) {
                 float d;
                 /* jump jets (hold J): engine physics in combat_jets */
-                g_sim.player_unit.ground = msim_ground(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], g_sim.player_unit.y);
+                g_sim.player_unit.ground = msim_ground(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], g_sim.player_unit.y + g_sim.player_centre_h);   /* 0x10010080 at the centre */
                 {
                     const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
@@ -3735,7 +4824,7 @@ int main(int argc, char **argv)
                          * forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile. On the
                          * ground the drift eases toward the walking velocity at 1/45 per tick (0x102473b4) and snaps to
                          * zero under 0.0625 cm/tick - it does not stop dead on landing. Drag only while thrusting directionally (below). */
-                        static float jvx, jvz;
+                        float jvx = g_jet_vx, jvz = g_jet_vz;
                         int l2 = H("jumpjet_fire_left"), r2 = !l2 && H("jumpjet_fire_right"), f2 = !l2 && !r2 && H("jumpjet_fire_forward");
                         int b2 = !l2 && !r2 && !f2 && H("jumpjet_fire_backward");
                         int legs_turning = H("legs_pan_minus") || H("legs_pan_plus");
@@ -3749,15 +4838,18 @@ int main(int argc, char **argv)
                         jvx += dx * dv * 182.0f; jvz += dz * dv * 182.0f;                      /* cm/tick -> cm/s */
                         if (dv > 0) {   /* the drag inside the directional branch (0x100194fa..0x10019618), cm/tick: T thrust,
                                          * L = 2.5 x top ground speed (+0x88 x 0.0390625), S speed; terminal speed = L */
-                            float ticks = dt * 182.0f, T = dv / (ticks > 1e-6f ? ticks : 1e-6f), L = 2.5f * g_pl_walk / 182.0f;
-                            float vx = jvx / 182.0f, vz = jvz / 182.0f, S = sqrtf(vx * vx + vz * vz);
-                            if (S > 1e-7f && L > 1e-7f && T > 1e-7f) {
-                                float kq = T * (1.0f - 1.0f / (3.0f * L)) / (L * L - 0.75f * L), B = (T - kq * L * L) / L, f = kq * S + B;
+                            float ticks = dt * 182.0f, T = dv / (ticks > 1e-6f ? ticks : 1e-6f), kq, B;
+                            float vx = jvx / 182.0f, vz = jvz / 182.0f, ax = fabsf(vx), az = fabsf(vz);
+                            float S = ax > az ? ax + az * 0.25f : az + ax * 0.25f;   /* DOS 0x26ba2: (4 max + min) >> 2 */
+                            msim_jet_drag(T, g_pl_walk, &kq, &B);   /* L = 2.5 x the top walking speed, the DOS integers */
+                            if (S > 1e-7f && (kq != 0 || B != 0)) {
+                                float f = kq * S + B;
                                 jvx -= vx * f * ticks * 182.0f; jvz -= vz * f * ticks * 182.0f;
                             }
                             if (fabsf(jvx) < 0.0625f * 182.0f) jvx = 0;
                             if (fabsf(jvz) < 0.0625f * 182.0f) jvz = 0;
                         }
+                        if (g_sim.player_unit.destroyed && g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f) jvx = jvz = 0;   /* state 4 on the ground: no physics (0x10019310) */
                         if (g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f && !jet) {
                             float k = dt * 182.0f / 45.0f;
                             if (k > 1) k = 1;
@@ -3769,24 +4861,22 @@ int main(int argc, char **argv)
                             if (msim_can_step_hr(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz, g_sim.player_unit.y, g_sim.player_centre_h, g_sim.player_radius)) { g_pl.origin[0] = (int32_t)lrintf(nx); g_pl.origin[2] = (int32_t)lrintf(nz); }
                             else jvx = jvz = 0;
                         }
+                        g_jet_vx = jvx; g_jet_vz = jvz;
                     }
                     combat_jets(&g_sim.player_unit, jet, dt, &g_sim.rng);
                     if (jet && g_sim.player_unit.jet_fuel > 0) msim_jet_flames_at(&g_sim, &g_pl, (float)g_pl.origin[0], g_sim.player_unit.y, (float)g_pl.origin[2], g_pl.heading);
-                    {   /* the player's damage alarms (engine 0x100167b0: a critical hit to a component or a location lost
-                         * sounds 0xd0) */
-                        static int prev_slots = -1, prev_gone = -1;
-                        int lq, sq, nslots = 0, ngone = 0;
-                        for (lq = 0; lq < 8; lq++) { ngone += g_sim.player_unit.loc_gone[lq] != 0; for (sq = 0; sq < MEK_SLOTS; sq++) nslots += g_sim.player_unit.slots[lq][sq] != 0; }
-                        if (g_sfx && prev_slots >= 0 && !g_sim.player_unit.destroyed && (nslots < prev_slots || ngone > prev_gone)) sfx_play(g_sfx, 0xd0, 0.6f, 0.0f);
-                        prev_slots = nslots; prev_gone = ngone;
-                    }
+                    /* the damage alarm 0xd0: with each announced critical (below, by the messages: 0x100167b0 is its only caller) */
                     /* touching down on the terrain from a fall or a jump (engine 0x10019310 at 0x10019e28: faster than 5.384
                      * cm/tick -> 0x1001c0a0): MECMTNSF 0xe6 up to 16.154 cm/tick, MECMTNHD 0xe5 faster (0xe5 + (vy >= -16.154)),
                      * at the mech (0x10032bf0, positional), and for the player the camera jolt 0x1001c120(0, -vy, 0); a
                      * destroyed mech lands as a wreck (0x1000c4d0) without either. The port had sounded 0xf0 (that is the
                      * object-landing branch, 0x10019c1d) */
                     if (g_sim.player_unit.landed_vy < -5.384f && !g_sim.player_unit.destroyed) {
-                        if (g_sfx) sfx_play(g_sfx, g_sim.player_unit.landed_vy >= -16.154f ? 0xe6 : 0xe5, 0.8f, 0.0f);
+                        /* the call passes DAT_1024e678 (set in camera mode 0, 0x1002e673) as 0x10032ad0's halving flag: half
+                         * volume in the cockpit view; at the feet (+0xcc below the origin) ~10 m from the eye -> 0x10032f60
+                         * 100. DOSBox WHITSCN1 / PLUMSCN1 drops: MECMTNHD 0.49 / 0.50x the start's MECTURX2 (which passes
+                         * the flag inverted: full in the cockpit) */
+                        if (g_sfx) sfx_play(g_sfx, g_sim.player_unit.landed_vy >= -16.154f ? 0xe6 : 0xe5, VIEW_IN_COCKPIT ? 0.4f : 0.8f, 0.0f);
                         jolt_start(0.0f, -g_sim.player_unit.landed_vy, 0.0f, g_sim.now);
                     }
                     {   /* reaching a nav point (engine 0x10009b80: the player inside an area's radius the first time sets its
@@ -3858,7 +4948,7 @@ int main(int argc, char **argv)
                                         if (g_sfx) sfx_play(g_sfx, 0xfd, 0.4f, 0.0f);   /* engine 0x1001adf0: the selector click */
                                         break;
                                 case 1: g_cur_group = (g_cur_group + 1) % 3; break;
-                                case 2: g_group_fire = !g_group_fire; hud_message_v(g_group_fire ? "Group fire" : "Chain fire", g_group_fire ? 19 : 18); break;
+                                case 2: g_group_fire = !g_group_fire; hud_message_v2(g_group_fire ? "Group fire engaged." : "Chain fire engaged.", g_group_fire ? 19 : 18, 80); break;   /* as \ (0x100437d4) */
                                 case 3: case 4: {
                                     int i2, qq, step = q == 3 ? 1 : n2 - 1;
                                     for (i2 = 1; i2 <= n2; i2++) {
@@ -3866,13 +4956,7 @@ int main(int argc, char **argv)
                                         if (g_sim.armed[qq] && !g_sim.units[qq].destroyed && !g_actors[qq].friendly) { g_tgt_sel = qq; break; }
                                     }
                                     break; }
-                                case 5: {   /* TARGET_AT_RETICLE (q): whatever is closest to the reticle within a few degrees -
-                                             * a mech, else a structure; nothing there clears the target (back to the nav point) */
-                                    float dd2, dd3;
-                                    g_tgt_thing = -1;
-                                    g_tgt_sel = msim_aim_target(&g_sim, g_pl.heading + g_pl.twist, 5.0f, &dd3);
-                                    if (g_tgt_sel < 0) g_tgt_thing = msim_aim_thing(&g_sim, g_pl.heading + g_pl.twist, 5.0f, &dd2);
-                                } break;
+                                case 5: target_at_reticle(); break;   /* TARGET_AT_RETICLE (q) */
                                 case 6: case 7: {
                                     int qq, best = -1;
                                     float bd = 1e30f;
@@ -3954,15 +5038,18 @@ int main(int argc, char **argv)
                 }
                 g_sim.player_aim_yaw = g_pl.heading + g_pl.twist;
                 g_sim.player_aim_pitch = g_pitch;
+                g_sim.player_twist = g_pl.twist;   /* poses the player's collision pieces */
+                g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");   /* 0x100267d0: LOD 4 in camera mode 0 (TEST ONLY: MW2_HULL_FULL the full model) */
                 {   /* the aim ray's origin: the eye the cockpit camera rides (repr 4's EYEO, else the full model's) */
                     float ep[3];
                     g_sim.player_eye_ok = (g_plpit_ok && !getenv("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, ep) == 0) || mech3d_head_point(&g_pl, ep) == 0;
                     if (g_sim.player_eye_ok) memcpy(g_sim.player_eye, ep, sizeof ep);
                 }
                 g_sim.player_lock_target = g_tgt_sel;   /* the lock works on the selected target (T / E / Q) */
-                g_sim.radio_busy = g_radio_qn > 0;
+                g_sim.radio_busy = g_radio_qn > 0 || g_vq_n > 0;   /* the engine's one queue (DAT_1024f6bc): radio and messages */
                 if (!g_mm_depth && !g_paused) msim_step(&g_sim, sim_ms(dt));
                 if (!g_mm_depth && !g_paused) player_upkeep();   /* self-destruct countdown, automatic ejection */
+                if (!g_mm_depth && !g_paused) player_messages();   /* heat, shutdown, criticals: messages + voices */
                 if (!g_mm_depth && !g_paused) flash_upkeep();   /* the red palette flash */
                 if (!g_mm_depth && !g_paused) obj_sounds();    /* object sound tasks (TSK type 4) */
                 target_upkeep();   /* the sim drops destroyed targets (0x10016280 / 0x10046a90), HUD or not */
@@ -4061,6 +5148,13 @@ int main(int argc, char **argv)
                             if (grown) { all.parts = grown; total += lm->part_count; } else lm = NULL;
                         }
                         if (lm) src = lm;
+                        if (c3d_ti && g_tex_kind != 3) {   /* TEXTURES TITANIUM: its Titanium model, at the same level of detail */
+                            mech3d *tm = ti_actor(k, &g_actors[k].mech, g_actors[k].skel, lm ? (int)(lm - g_alod[k].m) : 0);
+                            if (tm) {
+                                mech3d_part *grown = realloc(all.parts, (size_t)(total + tm->part_count) * sizeof *all.parts);
+                                if (grown) { all.parts = grown; total += tm->part_count; src = tm; }
+                            }
+                        }
                         for (q = 0; q < src->part_count; q++) {   /* blown-off locations aren't drawn */
                             int gq = src->parts[q].group;
                             if (mech3d_fly_loc(src, q, fly)) continue;
@@ -4083,9 +5177,15 @@ int main(int argc, char **argv)
                 if (show_pl && all.parts) {
                     int q;
                     const unsigned fly = mech3d_fly_mask(g_sim.player_unit.loc_gone);
-                    for (q = 0; q < g_pl.part_count; q++) {
-                        if (mech3d_fly_loc(&g_pl, q, fly)) continue;
-                        all.parts[all.part_count++] = g_pl.parts[q];
+                    const mech3d *pm = &g_pl;
+                    if (c3d_ti && g_tex_kind != 3) {   /* TEXTURES TITANIUM: the player's mech as its Titanium model */
+                        mech3d *tm = ti_actor(64, &g_pl, g_sim.player_skel, 0);
+                        mech3d_part *grown = tm ? realloc(all.parts, (size_t)(total + tm->part_count) * sizeof *all.parts) : NULL;
+                        if (grown) { all.parts = grown; total += tm->part_count; pm = tm; }
+                    }
+                    for (q = 0; q < pm->part_count; q++) {
+                        if (mech3d_fly_loc(pm, q, fly)) continue;
+                        all.parts[all.part_count++] = pm->parts[q];
                     }
                 }
                 for (k = 0; all.parts && g_proj_ok && k < g_sim.shot_count; k++) {
@@ -4106,15 +5206,21 @@ int main(int argc, char **argv)
                     pp.rot[0] = cy;  pp.rot[1] = -sy * sp; pp.rot[2] = sy * cp;
                     pp.rot[3] = 0;   pp.rot[4] = cp;       pp.rot[5] = sp;
                     pp.rot[6] = -sy; pp.rot[7] = -cy * sp; pp.rot[8] = cy * cp;
+                    {   /* the pool object's OBJ scale (MW2_SHT1: lasers 3, 3, 12; missiles 1, 1, 2; bullet 1) */
+                        int q;
+                        for (q = 0; q < 3; q++) { pp.rot[q * 3 + 0] *= g_proj_scale[ps][0]; pp.rot[q * 3 + 1] *= g_proj_scale[ps][1]; pp.rot[q * 3 + 2] *= g_proj_scale[ps][2]; }
+                    }
                     if (ps <= 2) {
                         /* the 3D editions' laser bolt (engine 0x10043cc0 / 0x10044ac0): the LASER1-3 mesh with its MW2_SHT1
                          * OBJ scale (3, 3, 12) - long thin bolts, 43 / 30 / 19 m - set along the velocity at launch, no glow;
                          * the model lies behind its origin (nose at z 0), and the engine puts that origin one model length
                          * ahead of the muzzle, so the bolt's tail leaves the muzzle: drawn here one scaled length ahead of
                          * the shot point (the shot itself, and its hits, still start at the muzzle) */
-                        int q;
-                        float L = (g_proj_len[ps] > 0 ? g_proj_len[ps] : 300.0f) * 12.0f, vl = sqrtf(sh->vx * sh->vx + sh->vy * sh->vy + sh->vz * sh->vz);
-                        for (q = 0; q < 3; q++) { pp.rot[q * 3 + 0] *= 3.0f; pp.rot[q * 3 + 1] *= 3.0f; pp.rot[q * 3 + 2] *= 12.0f; }
+                        float L = (g_proj_len[ps] > 0 ? g_proj_len[ps] : 300.0f) * g_proj_scale[ps][2], vl = sqrtf(sh->vx * sh->vx + sh->vy * sh->vy + sh->vz * sh->vz);
+                        /* the DOS edition (its own LASER1-3, scale 3, 3, 12): DOSBox YELLSCN1 shows the large pulse laser's
+                         * streak reaching back to the window's edge from the muzzle - the nose at the shot, the model
+                         * trailing (INFERRED from DOSBox, docs/reference/dos_lasers_dos_vs_port.png; the DOS code not traced) */
+                        if (g_edition == PORTCFG_ED_DOS) vl = 0;
                         if (vl > 0) {
                             pp.pos[0] = (int32_t)(sh->x + sh->vx / vl * L);
                             pp.pos[1] = (int32_t)(sh->y + sh->vy / vl * L);
@@ -4122,6 +5228,11 @@ int main(int argc, char **argv)
                         }
                     }
                     pp.group = 0;
+                    /* the pool's projectile objects get type word 0x400 when loaded (BTHG handler: 3D 0x1003ed54 ->
+                     * 0x1000fb20, DOS 0x4f3e8 -> 0x1e300): image enhancement draws them red (0x1002a4b0 / DOS 0x38ae3, mode
+                     * 0: 0x400 -> colour 0xb; DOSBox YELLSCN1: missiles and lasers red outlines); their textures stay on with
+                     * OBJECT TEXTURES off (0x1002a768 switches only 0x100 / 0x200 / 0x800 objects) */
+                    pp.objtype = 0x400;
                     all.parts[all.part_count++] = pp;
                 }
                 for (k = 0; all.parts && g_proj_ok && k < g_sim.debris_count; k++) {   /* debris: tumbling chunks */
@@ -4251,11 +5362,21 @@ int main(int argc, char **argv)
             skygnd_defaults(&sg);
             skygnd_lookup(getenv("MW2_SKYGND"), mission, &sg);
             if (last && !g_mm_depth && !g_paused) v.sky_scroll += sg.tile_sky * sg.anim_rate * (float)(now - last) * 0.03f;   /* held while paused */
+            if (c3d_ti) {   /* Titanium (mercsw 0x1005580d): each tick adds skyAnim / 181 to the clouds' U and V, wrapped
+                             * past 1; the camera-height fog terms (with a renderer that fogs) */
+                int k2;
+                if (last && !g_mm_depth && !g_paused)
+                    for (k2 = 0; k2 < 2; k2++) {
+                        v.ti_scroll[k2] += c3d_ti_sg.anim[k2] * (float)(now - last) * 0.182f;
+                        v.ti_scroll[k2] -= floorf(v.ti_scroll[k2]);
+                    }
+                c3d_ti_frame(&v, v.free_cam ? v.eye[1] : 1000.0f);
+            }
             last = now;
         }
         SDL_GL_GetDrawableSize(win, &w, &h);   /* real pixels, incl. HiDPI */
         g_out_w = w; g_out_h = h;
-        g_win_lines = h;
+        g_win_lines = h; g_win_cols = w;
         if (g_render_w && g_world) {
             /* the original resolutions: the frame is drawn at 640 x 480 (1024 x 768 for that choice) - the scale the HUD
              * art and layout are made for - then, for 320 x 200, point-sampled down to 320 x 200; the result is shown
@@ -4264,7 +5385,34 @@ int main(int argc, char **argv)
             if (lowres_target(dw, dh) == 0) { w = dw; h = dh; glBindFramebuffer(GL_FRAMEBUFFER, g_lr_fbo[0]); }
         }
         music_poll();
-        if (g_mm_ed_req >= 0) { switch_look(r, &v, ma, &ta, &ati, mission, g_mm_ed_req); g_mm_ed_req = -1; }   /* Video mode */
+        {   /* TEST ONLY: MW2_TEST_VIDEO=t:look[,t:look] - the GRAPHICS menu's choice at t autopilot seconds; look = a
+             * renderer (enhanced, 3dfx, ...), a texture set (original, titanium) or renderer+textures */
+            static int vdone;
+            const char *q = getenv("MW2_TEST_VIDEO");
+            int idx = 0;
+            while (q && *q) {
+                char nm[32] = "", *plus;
+                float t = (float)atof(q);
+                const char *c2 = strchr(q, ':');
+                if (!c2) break;
+                sscanf(c2 + 1, "%31[^,]", nm);
+                if (!(vdone & (1 << idx)) && g_auto_on && g_auto_elapsed >= t) {
+                    int k;
+                    vdone |= 1 << idx;
+                    if ((plus = strchr(nm, '+'))) *plus++ = 0;
+                    for (k = 0; k < PORTCFG_ED_COUNT; k++) if (strcmp(nm, PORTCFG_ED_NAME[k]) == 0) g_mm_ed_req = k;
+                    for (k = 0; k < PORTCFG_TX_COUNT; k++) if (strcmp(plus ? plus : nm, PORTCFG_TX_NAME[k]) == 0) g_mm_tx_req = k;
+                    break;
+                }
+                idx++;
+                q = strchr(c2, ',');
+                if (q) q++;
+            }
+        }
+        if (g_mm_ed_req >= 0 || g_mm_tx_req >= 0) {   /* Renderer / Textures */
+            switch_look(r, &v, ma, &ta, &ati, mission, g_mm_ed_req >= 0 ? g_mm_ed_req : g_edition, g_mm_tx_req >= 0 ? g_mm_tx_req : g_texset);
+            g_mm_ed_req = g_mm_tx_req = -1;
+        }
         if (g_mm_world_dirty) {   /* OBJECT DENSITY changed: the world layer again */
             glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
             g_mm_world_dirty = 0;
@@ -4303,6 +5451,12 @@ int main(int argc, char **argv)
                 spr[n].half_w = g_fxd.half_w[e->type];
                 spr[n].half_h = g_fxd.half_h[e->type];
                 spr[n].tex = t;
+                spr[n].bb = g_fxd.bb[e->type];   /* type 3 cards: the engine billboard from the card's own corners */
+                spr[n].wire_code = 0; spr[n].has_tri = 0;   /* image enhancement: dark red (the effect pool's type 0x20, DOS 0x4f4a6) */
+                if (spr[n].bb) {
+                    int c;
+                    for (c = 0; c < 3; c++) { spr[n].top[c] = e->pos[c] + g_fxd.bb_top[e->type][c]; spr[n].pos[c] = e->pos[c] + g_fxd.bb_foot[e->type][c]; }
+                }
                 n++;
             }
             /* the PPC and gauss projectiles: cards (type 0x3000 -> 0x1002a8e0): texture slot (w & 0xff0) >> 4 of bank 0 -
@@ -4314,14 +5468,35 @@ int main(int argc, char **argv)
                 const fx_anim *an;
                 texture *t;
                 if ((kind != 6 && kind != 7) || !combat_weapon_has_object(sh->weapon)) continue;
-                slot = kind == 6 ? 0x0b : 0x0d;
+                slot = g_card_slot[kind == 6 ? 0 : 1];   /* from the pool object (load_projectiles) */
                 an = &g_fxd.tex[slot];
                 if (an->frames <= 0) continue;
                 f = an->rate > 0 ? (int)((now / an->rate) % an->frames) : 0;
                 if (!(t = fx_texture(an->cel[f]))) continue;
                 spr[n].pos[0] = sh->x; spr[n].pos[1] = sh->y; spr[n].pos[2] = sh->z;
-                spr[n].half_w = spr[n].half_h = kind == 6 ? 200.0f : 100.0f;
+                spr[n].half_w = spr[n].half_h = g_card_half[kind == 6 ? 0 : 1];
                 spr[n].tex = t;
+                {   /* the card's foot (0, -100) and top (0, 100) x its scale (PPCSHOT1 2, GAS0_0 1) on the shot's own up axis
+                     * (the projectile object turned to its course: up = the course's normal in its vertical plane) */
+                    float hl = spr[n].half_w, vl = sqrtf(sh->vx * sh->vx + sh->vy * sh->vy + sh->vz * sh->vz), up[3] = {0, 1, 0};
+                    float hz = sqrtf(sh->vx * sh->vx + sh->vz * sh->vz);
+                    int c;
+                    if (vl > 0 && hz > 0) { up[0] = -sh->vx / hz * sh->vy / vl; up[1] = hz / vl; up[2] = -sh->vz / hz * sh->vy / vl; }
+                    spr[n].bb = 1;
+                    spr[n].wire_code = 2;   /* image enhancement: red (type word 0x400) */
+                    spr[n].has_tri = g_card_tri_ok[kind == 6 ? 0 : 1];
+                    if (spr[n].has_tri) {   /* the card's triangle on the object turned to the course: x right, y up, z ahead */
+                        float zx = vl > 0 ? sh->vx / vl : 0, zy = vl > 0 ? sh->vy / vl : 0, zz = vl > 0 ? sh->vz / vl : 1;
+                        float xr[3] = {hz > 0 ? sh->vz / hz : 1, 0, hz > 0 ? -sh->vx / hz : 0};
+                        int q2;
+                        for (q2 = 0; q2 < 3; q2++) {
+                            const float *cv = g_card_tri[kind == 6 ? 0 : 1][q2];
+                            for (c = 0; c < 3; c++)
+                                spr[n].tri[q2][c] = spr[n].pos[c] + xr[c] * cv[0] + up[c] * cv[1] + (c == 0 ? zx : c == 1 ? zy : zz) * cv[2];
+                        }
+                    }
+                    for (c = 0; c < 3; c++) { spr[n].top[c] = spr[n].pos[c] + up[c] * hl; spr[n].pos[c] -= up[c] * hl; }
+                }
                 n++;
             }
             if (g_dos_lasers) {   /* MW2_DOS_LASERS=1 - the lasers as glowing beams: a row of camera-facing cards along the beam (1 per 75 cm, 12 m at least).
@@ -4360,11 +5535,14 @@ int main(int argc, char **argv)
                         spr[n].pos[0] = sh->x - sh->vx * b; spr[n].pos[1] = sh->y - sh->vy * b; spr[n].pos[2] = sh->z - sh->vz * b;
                         spr[n].half_w = hw; spr[n].half_h = hw;
                         spr[n].tex = &glow[kind];
+                        spr[n].bb = 0;
+                        spr[n].wire_code = 2; spr[n].has_tri = 0;
                         n++;
                     }
                 }
             }
             glr_set_sprites(r, spr, n);
+            ti_particles(r, &v, (float)((double)g_sim.now * 182.0 / 1000.0), mission);
             {   /* engine 0x10045d00 (3Dfx; the PowerVR edition the same at 0x1003e770): an effect whose type lights takes the
                  * scene light - the planet's LITE {position, ambient level, a camera-relative flag, a range} - to its
                  * position (the nearest to the camera when several are alive), clears the flag and the range (a world-fixed
@@ -4385,11 +5563,13 @@ int main(int argc, char **argv)
                     if (seen[k]) continue;
                     seen[k] = 1;
                     if (!fx_light(e->type) || !(g_sim_ok ? g_sim.fx_light_ok : 1)) continue;
-                    dx = e->pos[0] - v.eye[0]; dy = e->pos[1] - v.eye[1]; dz = e->pos[2] - v.eye[2];
+                    /* nearer on the ground plane: 0x10045d00 compares (light - camera) and (effect - camera) by x and z
+                     * only (PTR_DAT_1024e1cc +0 / +8 camera, +0x1c / +0x24 the light) */
+                    dx = e->pos[0] - v.eye[0]; dy = 0.0f; dz = e->pos[2] - v.eye[2];
                     d2 = dx * dx + dy * dy + dz * dz;
                     if (li >= 0) {
-                        float ex = g_fxw.e[li].pos[0] - v.eye[0], ey = g_fxw.e[li].pos[1] - v.eye[1], ez = g_fxw.e[li].pos[2] - v.eye[2];
-                        if (d2 >= ex * ex + ey * ey + ez * ez) continue;
+                        float ex = g_fxw.e[li].pos[0] - v.eye[0], ez = g_fxw.e[li].pos[2] - v.eye[2];
+                        if (d2 >= ex * ex + ez * ez) continue;
                     }
                     li = k;
                 }
@@ -4411,17 +5591,53 @@ int main(int argc, char **argv)
                     v.ambient = g_lite_level > 0 ? (float)lvl * 3.0f / 256.0f : base_ambient * 54.0f / 64.0f;
                 }
                 else v.ambient = base_ambient;
+                /* TEXTURES TITANIUM: its explosion lights instead (mercsw 0x10011f58 -> 0x100123cd): an effect started with
+                 * projectile visual 3 or 6 (and 0x22 / 0x23, Titanium-only weapons) - whatever it hit - makes a point
+                 * light at the blast, radius 20000 (+-200 m box), colour (0.6, 0.6, 0.2), for the effect's duration
+                 * (+0x38 life = the type's ticks), every one alive lighting the objects in its box (0x1002f238), none
+                 * the ground; with the engine's "Multiple Lights" option (0x10097cb8, default not traced - on here).
+                 * The port's effects keep only the resulting type: 3, 6, 0x13, 0x15 come from visual 3 / 6 alone, 0x0c and
+                 * 0x11 also from visual 4 (which does not light) - taken as lighting (ASSUMED). The 4 nearest the eye. */
+                v.ti_dyn_n = 0;
+                if (c3d_ti && v.ti_light && !getenv("MW2_NO_FXLIGHT")) {
+                    float dist2[GLR_TI_DYN];
+                    for (k = 0; k < FX_LIVE; k++) {
+                        const fx_live *e = &g_fxw.e[k];
+                        float dx, dy, dz, d2;
+                        int t = e->type, j, at;
+                        if (!e->alive || !(t == 3 || t == 6 || t == 0x0c || t == 0x11 || t == 0x13 || t == 0x15)) continue;
+                        dx = e->pos[0] - v.eye[0]; dy = e->pos[1] - v.eye[1]; dz = e->pos[2] - v.eye[2];
+                        d2 = dx * dx + dy * dy + dz * dz;
+                        at = v.ti_dyn_n < GLR_TI_DYN ? v.ti_dyn_n++ : -1;
+                        if (at < 0) {   /* full: replace the farthest if nearer */
+                            for (j = 0, at = 0; j < GLR_TI_DYN; j++) if (dist2[j] > dist2[at]) at = j;
+                            if (d2 >= dist2[at]) continue;
+                        }
+                        dist2[at] = d2;
+                        v.ti_dyn[at][0] = e->pos[0]; v.ti_dyn[at][1] = e->pos[1]; v.ti_dyn[at][2] = e->pos[2];
+                        v.ti_dyn[at][3] = 20000.0f;
+                        v.ti_dyn[at][4] = 0.6f; v.ti_dyn[at][5] = 0.6f; v.ti_dyn[at][6] = 0.2f;
+                    }
+                    {   /* (tests) */
+                        static int said;
+                        if (v.ti_dyn_n > 0 && !said) { said = 1; printf("titanium: explosion light at %.1f s\n", (double)g_sim.now / 1000.0); }
+                    }
+                }
             }
         }
         /* cockpit: 90 degrees horizontal at 4:3 = 73.74 vertical (DOS, measured against the same scene); chase: 40 */
         if (g_world) v.vfov = g_cockpit ? 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / g_zoom) * 180.0f / 3.14159265f : 40.0f;   /* zoom_factor narrows the cockpit view */
-        {   /* 0x1002df60 (each frame from 0x1002dc90): the camera's zoom (+0x18) changed - VIEWZOOM 0x147 (0x50); the
-             * cockpit zoom factor only here (the engine's other view zooms, 0x1002e210's 2.0, not tracked) */
-            static float last_zoom = 1.0f;
-            if (g_world && g_cockpit && g_zoom != last_zoom && g_sfx) sfx_play(g_sfx, 0x147, 0.8f, 0.0f);
-            last_zoom = g_zoom;
-        }
         if (g_world && g_sim_ok && g_pl_ok && g_pilot) camera_modes(&v);   /* ordnance (3) / ejection (4) camera */
+        {   /* 0x1002df60 (each frame from 0x1002dc90, and on entering a camera mode): the camera's zoom (+0x18) changed -
+             * VIEWZOOM 0x147 (0x10032b60 edx 0x64, pan 0x40, priority 0x50). The zoom is DAT_1024e658 (the cockpit zoom
+             * factor) in mode 0 (the cockpit) and DAT_1024e65c in the others: mode 1 (external / death orbit, 0x1002e280)
+             * sets it to 1.0, mode 3 (ordnance, 0x1002e210) 2.0, mode 4 (ejection, 0x1002e7d0) keeps it - so leaving a
+             * zoomed cockpit, the ordnance camera and coming back all sound it */
+            static float last_zoom = 1.0f;
+            const float zoom = g_camode == 0 && g_cockpit ? g_zoom : g_cam_zoom;
+            if (g_world && zoom != last_zoom && g_sfx) sfx_play(g_sfx, 0x147, SFX_V64, 0.0f);
+            last_zoom = zoom;
+        }
         v.ortho_w = 0;
         if (g_world && g_satmap && g_pl_ok) {   /* F3, radar mode 4 (0x100267d0): straight down, NORTH up, the window's width =
                                                 * the range (1 km, halved by the zoom down to 62.5 m), orthographic as the engine's */
@@ -4473,6 +5689,8 @@ int main(int argc, char **argv)
         v.notex_world = g_notex_world; v.notex_actors = g_notex_actors;
         v.far_cull = g_world ? g_view_far : 0.0f;   /* the planet's VIEW far (load_view_far) */
         if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
+        world_fade(r);
+        if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
         glr_draw(r, &v, w, h);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
@@ -4483,11 +5701,19 @@ int main(int argc, char **argv)
              * after a restart) sounds 0xce MECBSYRX (0x10032b60(0xce, 0x64, 0x2f, 5, 0x32)). DOSBox: YELLSCN1 / TNJ1SCN1,
              * at the frame the full HUD appears; relative to MECTURX2 0.4x as loud, right of centre (L 61 : R 95) */
             if (prev_st == 1 && st == 2 && g_sfx) sfx_play(g_sfx, 0xce, 0.38f, 0.36f);
+            /* a restart (shut down -> starting: the s key, 0x1001adf0 "Powering up..." -> state 0, or the heat restart
+             * 0x10015f50 -> state 0) passes state 0 -> 1 again (0x1001ab71), which sounds the player's MECTURX2 0xf7 at
+             * the mech as at the mission start (0x10032bf0; alliance-1 path 0x104 not the player's). DOSBox YELLSCN1 (SB16
+             * capture, s / s): BET11_1 at the shutdown, MECTURX2 0.1 s after the restart key, MECBSYRX 6.4 s later */
+            /* (0x1001ac19: the halving flag passed inverted - edx = (DAT_1024e678 == 0) - full in the cockpit, half outside) */
+            if (prev_st == 3 && (st == 1 || st == 2) && g_sfx) sfx_play(g_sfx, 0xf7, VIEW_IN_COCKPIT ? 0.8f : 0.4f, 0.0f);
             /* ... and to 4 (destroyed) - or 0, the restart request, which the mech's own update turns into 1 before the
-             * HUD sees it (DOSBox: no MECTRDXX on Ctrl+s) - 0xf6 MECTRDXX (0x10032b60(0xf6, pan 0x64, volume 0x40):
-             * the arguments read as pan 0..127 / volume 0..127, as MECBSYRX's 0x64 / 0x2f match DOSBox's L 61 : R 95 and
-             * 0.4x level) */
-            if (prev_st >= 0 && prev_st != 4 && st == 4 && g_sfx) sfx_play(g_sfx, 0xf6, 0.40f, 0.36f);
+             * HUD sees it (DOSBox: no MECTRDXX on Ctrl+s) - 0xf6 MECTRDXX: 0x10032b60 with edx 0x64 = the volume (0x100328e0
+             * stores edx x the effects level at +0x468 -> AIL_set_sample_volume), the first stack word 0x40 = the pan
+             * (+0x428 -> AIL_set_sample_pan; 0x40 centre, as 0x10032c10's positional pans), 0x32 the channel priority;
+             * DOS 0x3310d the same (FUN_00040c50(0xf6, 0x64, 0x40, 5, 0x32)). DOSBox YELLSCN1 overheat death (SB16, AVI):
+             * MECTRDXX 10 s after the heat shutdown, centred (L 96 : R 93), 0.58x the start's MECTURX2 */
+            if (prev_st >= 0 && prev_st != 4 && st == 4 && g_sfx) sfx_play(g_sfx, 0xf6, SFX_V64, 0.0f);
             prev_st = st;
         }
         if (g_sim_ok && g_world) {   /* display damage: levels and the per-frame static rolls (0x1001e670, 0x10011720, 0x10021300) */
@@ -4618,10 +5844,7 @@ int main(int argc, char **argv)
             if (k > 0 && g_tex_kind == 3) {   /* DOS: the palette - every colour toward (63, 0, 0) */
                 const float mul[3] = {1.0f - k, 1.0f - k, 1.0f - k}, add[3] = {k, 0, 0};
                 HUD_BEGIN(g_hud, w, h); hud_tint(g_hud, w, h, mul, add); hud_end(g_hud);
-            } else if (in_ph) {   /* 3D editions: the textured world in the fog colour (255, 8, 8) while fading in */
-                static const float mul[3] = {1.0f, 8.0f / 255.0f, 8.0f / 255.0f}, add[3] = {0, 0, 0};
-                HUD_BEGIN(g_hud, w, h); hud_tint(g_hud, w, h, mul, add); hud_end(g_hud);
-            }
+            }   /* 3D editions: the world's own fade (world_fade, before the 3D draw) */
             hud_set_flash(g_hud, 1.0f, 0.0f, 0.0f, k);
         }
         if (g_hud && g_world && g_pl_ok && g_pilot && !g_hud_off && (HUD_VIEW || (getenv("MW2_HUD") && g_camode != 4))) {   /* F11: TOGGLE_HUD */
@@ -4629,7 +5852,10 @@ int main(int argc, char **argv)
              * 320x200 units mapped x2 across and x2.4 down (480 / 200), as the engine scales them (0x10005db0). */
 #define LX(x) ((float)(x) * 2.0f)
 #define LY(y) ((float)(y) * 2.4f)
-            static const float green[4] = {0.3f, 1.0f, 0.35f, 1.0f}, red[4] = {1.0f, 0.22f, 0.15f, 1.0f}, white[4] = {1.0f, 1.0f, 1.0f, 1.0f},
+            /* text: the engine's colour 0xe (0x10062226(0xe) before and after every HUD string; DOSBox YELLSCN1 "Heat" /
+             * "dH/dT" 0,211,0), red texts 0xb, in the mission palette (0x10260324) */
+            const float *green = HP(0xe), *red = HP(0xb);
+            static const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f},
                                grey[4] = {0.28f, 0.28f, 0.28f, 1.0f}, yellow[4] = {0.95f, 0.72f, 0.25f, 1.0f},
                                black[4] = {0.0f, 0.0f, 0.0f, 0.9f}, blipc[4] = {1.0f, 0.9f, 0.3f, 1.0f};
             const combat_unit *pu = &g_sim.player_unit;
@@ -4650,22 +5876,9 @@ int main(int argc, char **argv)
             const int rad_on = pow_window(0, &rad_wf, &rad_hf) && rad_wf > 0;
             HUD_BEGIN(g_hud, w, h);
             if (g_vision == 1 && g_inst_lvl[INST_RADAR] > 0) g_vision = 0;   /* 0x10007900: off when the radar (instrument 0) is damaged */
-            if (g_vision == 1 && g_cockpit && g_tex_kind != 3) {   /* light amplification, 3D editions: (16,32,8)/255 + in x (0.5, 1.0, 0.6),
-                                                                     * fitted to DOS (the DOS edition fades its palette, dos_time_of_day) */
-                static const float mul[3] = {0.5f, 1.0f, 0.6f}, add[3] = {16.0f / 255.0f, 32.0f / 255.0f, 8.0f / 255.0f};
-                hud_tint(g_hud, w, h, mul, add);
-            }
+            /* light amplification, 3D editions: the world's fade (world_fade); the DOS edition fades its palette
+             * (dos_time_of_day) */
 
-            /* events -> messages + Betty (message table 0x1024f144) */
-            /* 0x10015f50: "Heat level critical" once per latch (65-80, net gain), "Shutting down" (message 0xd) when the
-             * sequence shuts the mech down */
-            if (pu->heat_warning) { hud_message_v("Heat level critical", 64); g_sim.player_unit.heat_warning = 0; }
-            if (pu->auto_shutdown) { hud_message_v("Shutting down", 14); g_sim.player_unit.auto_shutdown = 0; }
-            /* 0x10016175: with message 3 the overheat alarm MECOVHW1 0xe9 (volume 0x50; latch 0x1000, cleared below 65
-             * with no sequence pending - the same edge) */
-            if (pu->shutdown_pending && !g_last_pending) { hud_message_v("Shutdown sequence initiated", 15); if (g_sfx) sfx_play(g_sfx, 0xe9, 0.8f, 0.0f); }   /* message 3 (DOS) */
-            /* 0x1001e4fe: OVERRIDE while a sequence is pending (flag 4, not 8) and not shut down: MECBSOXX 0xcd (0x32) */
-            if (pu->override && !g_last_override) { hud_message_v("Shutdown sequence overridden", 78); if (g_sfx) sfx_play(g_sfx, 0xcd, 0.5f, 0.0f); }
             /* 0x1001732e: a location's armour used up for the first time: MECRDWA1 0xec (0x50) */
             if (pu->breach_sound) { if (g_sfx) sfx_play(g_sfx, 0xec, 0.8f, 0.0f); g_sim.player_unit.breach_sound = 0; }
             {   /* 0x10031e30: every 0x389 ticks (from the program's start) - the player not destroyed - a unit in state 2 /
@@ -4686,8 +5899,7 @@ int main(int argc, char **argv)
                     }
                 }
             }
-            if (pu->ammo_blown) { hud_message_v("Internal ammo explosion detected", 48); g_sim.player_unit.ammo_blown = 0; }
-            g_last_pending = pu->shutdown_pending; g_last_override = pu->override;
+            /* (the player's messages: player_messages, every sim step whatever the view) */
             if (!hud_dead) {   /* the instruments (dark while shut down) */
             /* target: the selected one only (the DOS footage shows the nav point with no selection) */
             if (tgt >= g_actor_count || (tgt >= 0 && g_sim.armed[tgt] && g_sim.units[tgt].destroyed)) tgt = g_tgt_sel = -1;
@@ -4719,7 +5931,7 @@ int main(int argc, char **argv)
                     hud_draw_window(g_hud, &g_hs_compass, centre, 181.0f / ux, 320.5f, cyu + uy * (float)g_hs_compass.top, NULL);
                     if (g_hs_cmpmk[2].tex) hud_draw(g_hud, &g_hs_cmpmk[2], cxu, cyu, NULL);
                     if (fabsf(twist) >= 1e-7f) {
-                        static const float b0[4] = {0, 210 / 255.0f, 0, 1}, b1[4] = {0, 1, 85 / 255.0f, 1}, b2[4] = {0, 125 / 255.0f, 0, 1};
+                        const float *b0 = HP(14), *b1 = HP(15), *b2 = HP(13);   /* green bands (0xf) in the mission palette */
                         float wv = ux * (float)(int)fabsf(twist), x0 = twist > 0 ? cxu : cxu - wv, y0 = cyu - 5.0f * uy;
                         hud_rect(g_hud, x0, y0, wv, 1.25f * uy, b0); hud_rect(g_hud, x0, y0 + 1.25f * uy, wv, 1.25f * uy, b1);
                         hud_rect(g_hud, x0, y0 + 2.5f * uy, wv, 1.25f * uy, b0); hud_rect(g_hud, x0, y0 + 3.75f * uy, wv, 1.25f * uy, b2);
@@ -4953,7 +6165,7 @@ int main(int argc, char **argv)
                     if (hud_dead) {   /* start-up (LAB_1001e9a0): the name alone, green, once the mission reaches its window's
                                        * time (0x1024cce8); a destroyed slot not at all */
                         static const int APPEAR[10] = {543, 573, 603, 633, 663, 814, 784, 754, 724, 693};
-                        static const float sgreen[4] = {0, 210 / 255.0f, 0, 1};
+                        const float *sgreen = HP(14);
                         if (cw->state >= 0 && (float)g_sim.now * 0.182f >= (float)APPEAR[win - 3])
                             hud_text(g_hud, LX(rr[0]), LY(rr[1]), sim_weapon_short[cw->weapon], sgreen);
                         continue;
@@ -4961,9 +6173,8 @@ int main(int argc, char **argv)
                     /* engine 0x1001e820, by the slot's state: destroyed / out of ammunition (-1) dark red (index 8);
                      * recycling red (0xb); a burst being fired green (0xe); ready: by its fire group - 1 green (0xe),
                      * 2 white (0xfe), 3 yellow (3) */
-                    static const float wdark[4] = {60 / 255.0f, 0, 0, 1}, wred[4] = {1, 24 / 255.0f, 24 / 255.0f, 1},
-                                       wgreen[4] = {0, 210 / 255.0f, 0, 1}, wwhite[4] = {238 / 255.0f, 238 / 255.0f, 238 / 255.0f, 1},
-                                       wyellow[4] = {1, 206 / 255.0f, 0, 1};
+                    const float *wdark = HP(8), *wred = HP(0xb), *wgreen = HP(14), *wwhite = HP(0xfe), *wyellow = HP(3);   /* the mission
+                                       * palette (0x10260324); the 0xe green drawn as 14 here (as before) */
                     (void)grey; (void)white;
                     if (cw->ammo == 0 || pu->loc_gone[cw->location]) col = wdark;
                     else if (cw->state == CW_FIRING) col = wgreen;
@@ -4984,17 +6195,18 @@ int main(int argc, char **argv)
             }
             /* damage outline, bottom right (CPIT rect 2), per location (engine 0x1001b620); F5 hides it */
             if (g_vport) {   /* the viewport box: blue frame, label sprite at the top centre (DOS) */
-                static const float vblue[4] = {0.1f, 0.1f, 0.9f, 1};
+                const float *vblue = HP(6);   /* DOSBox YELLSCN1: 0,0,199 = YELL_DA 6 */
                 float x0 = 516.9f, y0 = 349.4f, x1 = 619.4f, y1 = 428.8f, vwf = 1, vhf = 1;
                 if (pow_window(1, &vwf, &vhf)) {   /* powering up / down: window 2 about its centre (0x10011aa0 / 0x10011b70) */
                     float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f, hw = (x1 - x0) * 0.5f * vwf, hh = (y1 - y0) * 0.5f * vhf;
                     int full = vwf >= 1.0f && vhf >= 1.0f;
                     x0 = mx - hw; x1 = mx + hw; y0 = my - hh; y1 = my + hh;
                     if (g_vport == 3 && !g_wcam_live) hud_rect(g_hud, x0, y0, x1 - x0, y1 - y0, black);   /* weapon view, nothing in flight: black (DOS) */
-                    if (full && g_snow_show[0]) draw_snow(x0, y0);   /* display damage: SNOWCLR instead of the view (0x10011a40) */
+                    if (g_snow_show[0]) draw_snow(x0, y0, x1 - x0, y1 - y0);   /* display damage: SNOWCLR instead of the view (0x10011a40),
+                                                                                  * in the moving box while it opens / closes */
                     hud_line(g_hud, x0, y0, x1, y0, 1.0f, vblue); hud_line(g_hud, x1, y0, x1, y1, 1.0f, vblue);
                     hud_line(g_hud, x1, y1, x0, y1, 1.0f, vblue); hud_line(g_hud, x0, y1, x0, y0, 1.0f, vblue);
-                    if (!(full && g_snow_show[0]) && g_hs_vp[g_vport - 1].tex) {
+                    if (!g_snow_show[0] && g_hs_vp[g_vport - 1].tex) {
                         /* the label (0x10011a70 -> 0x10023120: x = the window's left edge + half the instrument's full width
                          * (+0x44 / 2), y = its top + 2): while the window opens / closes it rides the moving left and top
                          * edges, clipped to the box */
@@ -5011,16 +6223,19 @@ int main(int argc, char **argv)
                 static const struct { int loc, rear; float x, w; } B[11] = {
                     {0, 0, 531.3f, 8.1f}, {1, 0, 543.1f, 3.75f}, {1, 1, 546.9f, 3.75f}, {2, 0, 553.1f, 3.75f}, {2, 1, 556.9f, 3.75f},
                     {3, 0, 563.1f, 3.75f}, {3, 1, 566.9f, 3.75f}, {4, 0, 575.0f, 8.1f}, {5, 0, 585.0f, 8.1f}, {6, 0, 597.5f, 8.1f}, {7, 0, 607.5f, 8.1f}};
-                static const float hb[4] = {0, 210 / 255.0f, 0, 1}, hl[4] = {0, 1.0f, 85 / 255.0f, 1}, hd[4] = {0, 125 / 255.0f, 0, 1};
-                static const float yb[4] = {190 / 255.0f, 145 / 255.0f, 0, 1}, yl[4] = {1, 206 / 255.0f, 0, 1}, ydk[4] = {121 / 255.0f, 97 / 255.0f, 0, 1};
-                static const float rb[4] = {210 / 255.0f, 0, 0, 1}, rl[4] = {1, 24 / 255.0f, 24 / 255.0f, 1}, rd[4] = {125 / 255.0f, 0, 0, 1};
-                static const float gb2[4] = {32 / 255.0f, 32 / 255.0f, 32 / 255.0f, 1}, gl2[4] = {52 / 255.0f, 52 / 255.0f, 52 / 255.0f, 1}, gd2[4] = {16 / 255.0f, 16 / 255.0f, 16 / 255.0f, 1};
-                static const float hblue[4] = {0, 0, 190 / 255.0f, 1};
+                const float *hb = HP(14), *hl = HP(15), *hd = HP(13);   /* the band colours in the mission palette (0x10260324) */
+                const float *yb = HP(2), *yl = HP(3), *ydk = HP(1);
+                const float *rb = HP(10), *rl = HP(11), *rd = HP(9);
+                const float *gb2 = HP(0xf2), *gl2 = HP(0xf3), *gd2 = HP(0xf1);
+                const float *hblue = HP(6);
                 int b2;
                 hud_text(g_hud, 528.8f, 357.5f, "H", hblue); hud_text(g_hud, 549.4f, 357.5f, "T", hblue);
                 hud_text(g_hud, 577.5f, 357.5f, "A", hblue); hud_text(g_hud, 601.3f, 357.5f, "L", hblue);
                 for (b2 = 0; b2 < 11; b2++) {
-                    int loc = B[b2].loc, cur = (int)(B[b2].rear ? pu->rear[loc] : pu->armor[loc]), mx = B[b2].rear ? pu->rear_max[loc] : pu->armor_max[loc];
+                    /* in MEK points: the loader's armour factor (x 4 for the player, 0x10041410) divided out */
+                    float am = pu->armor_mult > 0 ? pu->armor_mult : 1.0f;
+                    int loc = B[b2].loc, cur = (int)((B[b2].rear ? pu->rear[loc] : pu->armor[loc]) / am),
+                        mx = (int)((float)(B[b2].rear ? pu->rear_max[loc] : pu->armor_max[loc]) / am);
                     float len = (float)(cur > 0 ? cur : 0) * 1.125f, full = (float)(mx > 0 ? mx : 0) * 1.125f, w3 = B[b2].w / 3.0f;
                     const float *mb = cur * 4 > mx ? yb : rb, *ml = cur * 4 > mx ? yl : rl, *md = cur * 4 > mx ? ydk : rd;
                     if (pu->loc_gone[loc]) { len = 0; mb = gb2; ml = gl2; md = gd2; }
@@ -5049,6 +6264,10 @@ int main(int argc, char **argv)
                     hud_draw_region(g_hud, &g_hs_dmg_lvl[pick], dx, dy, (float)rg[0] * 2.0f * g_hud_s, (float)rg[1] * 2.0f * g_hud_s, (float)rg[2] * 2.0f * g_hud_s, (float)rg[3] * 2.0f * g_hud_s);
                 }
             }
+            if (!hud_dead && g_autopilot)   /* engine 0x100183d0: "AUTOPILOT" (0x1024c2d0 / 0x1024c2dc) in the HUD font's
+                                             * colour (0xe) while the player's autopilot (controller +0xbc) is 1 or 2; DOSBox
+                                             * YELLSCN1 a: caps 177-240 x 732-742 at 1024x768, gone once a turn cancels it */
+                hud_text(g_hud, 110.0f, 456.0f, "AUTOPILOT", green);
             if (!hud_dead) {   /* the instruments (dark while shut down) */
             /* tall bar, right edge of CPIT rect 1 (engine 0x1001c5b0, geometry 0x1001c250): the THROTTLE SETTING, its
              * shown value easing halfway to the setting on every draw (cur += (target - cur) >> 1; the DOS ramp 57 / 67 /
@@ -5062,8 +6281,8 @@ int main(int argc, char **argv)
                 float bar_dt = shown_t ? (float)(SDL_GetTicks() - (Uint32)shown_t) / 1000.0f : 0;
                 float bx = 625.6f, by = 338.75f, bh = 131.25f, u = 9.375f / 15.0f;
                 float zy = by + bh * (1.0f - 0.34f), th2 = g_throttle, hgt;
-                static const float fg0[4] = {0, 210 / 255.0f, 0, 1}, fg1[4] = {0, 1.0f, 85 / 255.0f, 1}, fg2[4] = {0, 125 / 255.0f, 0, 1};
-                static const float fb0[4] = {0, 0, 190 / 255.0f, 1}, fb1[4] = {60 / 255.0f, 60 / 255.0f, 1, 1}, fb2[4] = {0, 0, 125 / 255.0f, 1};
+                const float *fg0 = HP(14), *fg1 = HP(15), *fg2 = HP(13);   /* green 0xf / blue 7 bands in the mission palette */
+                const float *fb0 = HP(6), *fb1 = HP(7), *fb2 = HP(5);
                 const float *c0, *c1, *c2;
                 if (th2 > 1) th2 = 1;
                 if (th2 < -1) th2 = -1;
@@ -5078,7 +6297,7 @@ int main(int argc, char **argv)
                     hud_rect(g_hud, bx + 1.0f + 2 * w4, y0, w4, hh, c0); hud_rect(g_hud, bx + 1.0f + 3 * w4, y0, w4, hh, c2);
                 }
                 {
-                    static const float fr[4] = {210 / 255.0f, 0, 0, 1};
+                    const float *fr = HP(10);   /* frame colour 0xa (0x1001c5b0) */
                     hud_line(g_hud, bx, by, bx + 10.0f, by, 1.2f, fr); hud_line(g_hud, bx + 10.0f, by, bx + 10.0f, by + bh, 1.2f, fr);
                     hud_line(g_hud, bx + 10.0f, by + bh, bx, by + bh, 1.2f, fr); hud_line(g_hud, bx, by + bh, bx, by, 1.2f, fr);
                 }
@@ -5087,9 +6306,14 @@ int main(int argc, char **argv)
                     /* engine 0x10018470: |v| in cm/tick x 6.516 x 1.5, truncated; minus when reversing */
                     {   /* DOS 0x32085 (3Dfx 0x10018470 the same 1.5): |v| estimated as (4 max + mid + min) >> 2 of the velocity's
                          * |x|, |y|, |z| (16.16 cm/tick), / 10002 (= 1 km/h) truncated, x 1.5 truncated (0x5c3c2: frndint with
-                         * the control word's rounding set to chop) - the port had rounded the last step (91.5 -> 92) */
-                        float hh = g_pl.heading * 3.14159265f / 180.0f, kv = g_pl_speed / 182.0f * 65536.0f;
-                        int32_t ax = (int32_t)fabsf(sinf(hh) * kv), az = (int32_t)fabsf(cosf(hh) * kv), ay = (int32_t)(fabsf(g_sim.player_unit.vy) * 65536.0f), t3;
+                         * the control word's rounding set to chop) - the port had rounded the last step (91.5 -> 92). The
+                         * vector is the controller's whole velocity +0xf4 / +0xf8 / +0xfc (c[0x3d..0x3f]), the sign c[0xb]'s
+                         * (+0x2c): the walking velocity plus the directional jets' drift plus the vertical speed - DOSBox
+                         * ORANSCN1 Nova, forward jets (GreyHome) from a standstill: 60 / 141 / 232 / 298 / 364 / 391 kph
+                         * (the port had left the drift out and read 0) */
+                        float hh = g_pl.heading * 3.14159265f / 180.0f, k16 = 65536.0f / 182.0f;
+                        float vx = (sinf(hh) * g_pl_speed + g_jet_vx) * k16, vz = (cosf(hh) * g_pl_speed + g_jet_vz) * k16;
+                        int32_t ax = (int32_t)fabsf(vx), az = (int32_t)fabsf(vz), ay = (int32_t)(fabsf(g_sim.player_unit.vy) * 65536.0f), t3;
                         if (ax < az) { t3 = ax; ax = az; az = t3; }
                         if (ax < ay) { t3 = ax; ax = ay; ay = t3; }
                         snprintf(kph, sizeof kph, "%d kph", (int)((double)(((4 * ax + az + ay) >> 2) / 10002) * 1.5) * (g_pl_speed < 0 ? -1 : 1));
@@ -5108,9 +6332,9 @@ int main(int argc, char **argv)
                 int shaded = (g_tgtdisp == 2 || (g_tgtdisp == 1 && g_tex_kind != 3)) && tgt >= 0 && g_cockpit && g_pow == 2;   /* drawn in 3D before the HUD */
                 int full = tv_wf >= 1.0f && tv_hf >= 1.0f;
                 if (!full) { bx += bw * (1.0f - tv_wf) * 0.5f; by += bh * (1.0f - tv_hf) * 0.5f; bw *= tv_wf; bh *= tv_hf; }
-                const int snow = full && g_snow_show[1];   /* display damage: SNOWCLR instead of the contents (0x10021710) */
-                if (!shaded) hud_rect(g_hud, bx, by, bw, bh, black);
-                if (snow) draw_snow(bx, by);
+                const int snow = g_snow_show[1];   /* display damage: SNOWCLR instead of the contents (0x10021710), also in the moving box */
+                if (!shaded) hud_rect(g_hud, bx, by, bw, bh, HP(0));   /* cleared to colour 0, opaque (0x100628a1; DOSBox 0,0,0) */
+                if (snow) draw_snow(bx, by, bw, bh);
                 if (g_pow != 2 && tgt < 0 && g_nav_sel >= 0 && current_nav(NULL) >= 0 && g_hs_vtgt_nav.tex && !snow) {
                     /* starting up / shut down (0x10021730 / 0x100217f0 -> 0x10021300 with the window set to the moving
                      * rectangle): a selected nav point's emblem (0x109 / 0x106 at half the rectangle's width and height,
@@ -5119,8 +6343,11 @@ int main(int argc, char **argv)
                     hud_draw(g_hud, &g_hs_vtgt_nav, bx + bw * 0.5f, by + bh * 0.5f, NULL);
                     hud_clip_off(g_hud);
                 }
-                hud_line(g_hud, bx, by, bx + bw, by, 1.2f, red); hud_line(g_hud, bx + bw, by, bx + bw, by + bh, 1.2f, red);
-                hud_line(g_hud, bx + bw, by + bh, bx, by + bh, 1.2f, red); hud_line(g_hud, bx, by + bh, bx, by, 1.2f, red);
+                {   /* the frame in colour 8 (0x10006450 with edx 8 on every 0x10021300 path; DOSBox 60,0,0) */
+                    const float *tfr = HP(8);
+                    hud_line(g_hud, bx, by, bx + bw, by, 1.2f, tfr); hud_line(g_hud, bx + bw, by, bx + bw, by + bh, 1.2f, tfr);
+                    hud_line(g_hud, bx + bw, by + bh, bx, by + bh, 1.2f, tfr); hud_line(g_hud, bx, by + bh, bx, by, 1.2f, tfr);
+                }
                 if (full && g_pow == 2) {   /* (not while starting up / shut down: the box alone - DOSBox YELLSCN1 / TNJ1SCN1 start-up)
                      * DOS footage: a mech target shows its damage outline, name below in red, range in green;
                      * otherwise the current nav point: VTGT_NP6 emblem, name and range below in yellow */
@@ -5135,15 +6362,14 @@ int main(int argc, char **argv)
                             float brg = atan2f(ddx, ddz) * 180.0f / 3.14159265f;
                             static const float wblue[4] = {0.0f, 48.0f / 255.0f, 215.0f / 255.0f, 1.0f};
                             /* the posed parts are already in the world (heading applied): only the viewing direction turns */
-                            {   /* seen along the line of sight from the eye to the target (a mech off to one side is seen
-                                 * turned by that angle, as on screen), not along the camera's axis */
-                                float lx = (float)ta2->mech.origin[0] - v.eye[0], lz = (float)ta2->mech.origin[2] - v.eye[2], ll = sqrtf(lx * lx + lz * lz);
+                            {   /* the viewer's camera (wire_camera): level at the mech's centre, 3 R back along the bearing */
                                 float sr0 = g_wire_r[0], sr1 = g_wire_r[1], sf0 = g_wire_f[0], sf1 = g_wire_f[1];
-                                if (ll > 1.0f) { g_wire_f[0] = lx / ll; g_wire_f[1] = lz / ll; g_wire_r[0] = g_wire_f[1]; g_wire_r[1] = -g_wire_f[0]; }
-                                (void)brg;
+                                float R = g_sim.radius ? g_sim.radius[tgt] : 545.0f, ch = g_sim.centre_h ? g_sim.centre_h[tgt] : 550.0f;
+                                (void)brg; (void)wblue;
+                                wire_camera((float)ta2->mech.origin[0], (float)ta2->mech.origin[1] + ch, (float)ta2->mech.origin[2], R);
                                 g_wire_unit = g_sim.armed[tgt] ? &g_sim.units[tgt] : NULL;
-                                draw_target_wire(&ta2->mech, 0, ta2->mech.part_count, head, bx, by, bw, bh, wblue);
-                                g_wire_unit = NULL;
+                                draw_target_wire(&ta2->mech, 0, ta2->mech.part_count, head, bx, by, bw, bh, HP(7));   /* colour 7 (0x28810's first argument) */
+                                g_wire_unit = NULL; g_wire_persp = 0;
                                 g_wire_r[0] = sr0; g_wire_r[1] = sr1; g_wire_f[0] = sf0; g_wire_f[1] = sf1;
                             }
                         }
@@ -5151,10 +6377,11 @@ int main(int argc, char **argv)
                             float ow = hud_px_x(g_hud, (float)ds->lvl[0].w), oh = hud_px_y(g_hud, (float)ds->lvl[0].h);
                             draw_outline((const hud_sprite *)ds->lvl, (const int (*)[4])ds->regions, &g_sim.units[tgt], bx + (bw - ow) * 0.5f, by + (bh - oh) * 0.5f);
                         }
-                        {   /* the name in the side's colour: enemy red, neutral blue (DOS footage: "Instructor" in blue), friendly green */
-                            static const float nblue[4] = {0.0f, 48.0f / 255.0f, 215.0f / 255.0f, 1.0f};
-                            hud_text(g_hud, bx, ty, g_actors[tgt].name[0] ? g_actors[tgt].name : g_actors[tgt].skel,
-                                     g_actors[tgt].alliance == 2 ? nblue : g_actors[tgt].friendly ? green : red);
+                        {   /* the text line (0x10020e40): the inspection result for 0x16a ticks, else the name (unit +0xe8,
+                             * "Mech" when empty), in the side's colour (0x1002119f: alliance 0 colour 0xe, 1 0xa, 2 6) */
+                            const char *it = inspect_text(tgt, -1);
+                            hud_text(g_hud, bx, ty, it ? it : g_actors[tgt].name[0] ? g_actors[tgt].name : "Mech",
+                                     g_actors[tgt].alliance == 2 ? HP(6) : g_actors[tgt].friendly ? HP(0xe) : HP(0xa));
                         }
                         range_text(info, sizeof info, tdist);
                         hud_text(g_hud, bx, ty + lh2, info, green);
@@ -5172,17 +6399,24 @@ int main(int argc, char **argv)
                             mech3d one;
                             memset(&one, 0, sizeof one);
                             one.parts = (mech3d_part *)bp; one.part_count = 1;
-                            {   /* centred on itself: the part's own placement dropped */
+                            {   /* world placed; the camera on the structure's centre, its radius the box's half diagonal
+                                 * (the engine's bounding sphere +0x34..+0x40, 0x10029890 - the port keeps a box) */
                                 mech3d_part tmp = *bp;
-                                tmp.pos[0] = tmp.pos[1] = tmp.pos[2] = 0;
+                                float sr0 = g_wire_r[0], sr1 = g_wire_r[1], sf0 = g_wire_f[0], sf1 = g_wire_f[1];
+                                float hx = (gb->mx[0] - gb->mn[0]) * 0.5f, hy = (gb->mx[1] - gb->mn[1]) * 0.5f, hz = (gb->mx[2] - gb->mn[2]) * 0.5f;
                                 one.parts = &tmp;
-                                (void)brg;
-                                tmp.pos[0] = bp->pos[0]; tmp.pos[2] = bp->pos[2];   /* world placed, like the view; framing re-centres it */
-                                draw_target_wire(&one, 0, 1, head, bx, by, bw, bh, wblue);
+                                (void)brg; (void)wblue;
+                                wire_camera((gb->mn[0] + gb->mx[0]) * 0.5f, (gb->mn[1] + gb->mx[1]) * 0.5f, (gb->mn[2] + gb->mx[2]) * 0.5f, sqrtf(hx * hx + hy * hy + hz * hz));
+                                draw_target_wire(&one, 0, 1, head, bx, by, bw, bh, HP(7));
+                                g_wire_persp = 0;
+                                g_wire_r[0] = sr0; g_wire_r[1] = sr1; g_wire_f[0] = sf0; g_wire_f[1] = sf1;
                             }
                         }
-                        hud_text(g_hud, bx, ty, gb->name, red);
-                        if (gb->inspected && gb->sub[0]) { hud_text(g_hud, bx, ty + lh2, gb->sub, green); ty += lh2; }
+                        {   /* one text line (0x10020e40): the inspection result for 0x16a ticks, else the name ("Installation"
+                             * when empty); its colour by the thing's alliance (0x10021167) - not kept by the port: red */
+                            const char *it = inspect_text(-1, g_tgt_thing);
+                            hud_text(g_hud, bx, ty, it ? it : gb->name[0] ? gb->name : "Installation", red);
+                        }
                         range_text(info, sizeof info, sqrtf(cx * cx + cz * cz));
                         hud_text(g_hud, bx, ty + lh2, info, green);
                     } else {
@@ -5193,10 +6427,10 @@ int main(int argc, char **argv)
                         int nv = g_nav_sel >= 0 ? current_nav(&label) : -1;
                         if (nv >= 0) {
                             if (g_hs_vtgt_nav.tex && !snow) hud_draw(g_hud, &g_hs_vtgt_nav, bx + bw * 0.5f, by + bh * 0.5f, NULL);
-                            hud_text(g_hud, bx, ty, label, yellow);
+                            hud_text(g_hud, bx, ty, label, HP(2));   /* DOSBox YELLSCN1 "Nav Epsilon": 190,146,0 = index 2 */
                             snprintf(info, sizeof info, " %.0fm", (double)(sqrtf((g_sim.navs[nv].x - (float)g_pl.origin[0]) * (g_sim.navs[nv].x - (float)g_pl.origin[0]) +
                                                                                     (g_sim.navs[nv].z - (float)g_pl.origin[2]) * (g_sim.navs[nv].z - (float)g_pl.origin[2])) / 100.0f));
-                            hud_text(g_hud, bx, ty + lh2, info, yellow);
+                            hud_text(g_hud, bx, ty + lh2, info, HP(2));
                         }
                     }
                 }
@@ -5218,14 +6452,15 @@ int main(int argc, char **argv)
                 if (rt > 1) rt = 1;
                 if (rt < 0) rt = 0;
                 {   /* DOS colours: blue 0,0,199 / 0,48,215 / 0,0,125; green 0,211,0 / 0,255,85 / 0,125,0; yellow ASSUMED */
-                    static const float bb[4] = {0, 0, 0.78f, 1}, bl[4] = {0, 0.19f, 0.84f, 1}, bd[4] = {0, 0, 0.49f, 1};
-                    /* COCKPIT palette bands (c-1, c, c-1, c-2): yellow 3 = 2 / 3 / 1, red 0xb = 0xa / 0xb / 9 */
-                    static const float yb[4] = {190 / 255.0f, 145 / 255.0f, 0, 1}, yl[4] = {1, 206 / 255.0f, 0, 1}, yd[4] = {121 / 255.0f, 97 / 255.0f, 0, 1};
+                    const float *bb = HP(6), *bl = HP(7), *bd = HP(5);
+                    /* bands (c-1, c, c-1, c-2) in the mission palette (0x10260324): blue 7 = 6 / 7 / 5, yellow 3 = 2 / 3 / 1
+                     * (0x1001c350 passes 3 for the ends), red 0xb = 0xa / 0xb / 9 */
+                    const float *yb = HP(2), *yl = HP(3), *yd = HP(1);
                     /* engine 0x1001c350: p = heat x width / 100. p <= 0: all blue (colour 7); p >= width: all red (0xb);
                      * under half: yellow (3) p wide at each end, blue between; from half on: yellow (width - p) at each
                      * end, red between - the yellow ends meet at 50 %, then the red grows out of the middle (DOSBox:
                      * matches the sustained-fire captures) */
-                    static const float rb[4] = {210 / 255.0f, 0, 0, 1}, rl[4] = {1, 24 / 255.0f, 24 / 255.0f, 1}, rd[4] = {125 / 255.0f, 0, 0, 1};
+                    const float *rb = HP(10), *rl = HP(11), *rd = HP(9);
                     const float W = 110.0f;
                     float p = ht * W;
                     if (p <= 0) hud_bar(219.5f, by, W, bb, bl, bd);
@@ -5253,7 +6488,7 @@ int main(int argc, char **argv)
                             if (g_sim.now - acc_t > 1000) acc_t = g_sim.now;
                         }
                         r2 = sm < 1 ? 0.0f : (float)sm / 768.0f;
-                        static const float rb2[4] = {210 / 255.0f, 0, 0, 1}, rl2[4] = {1, 24 / 255.0f, 24 / 255.0f, 1}, rd2[4] = {125 / 255.0f, 0, 0, 1};
+                        const float *rb2 = HP(10), *rl2 = HP(11), *rd2 = HP(9);
                         if (r2 > 2) r2 = 2;
                         if (r2 <= 1.0f) { hud_bar(340.5f, by, 68.0f, bb, bl, bd); if (r2 > 0) hud_bar(340.5f, by, 68.0f * r2, yb, yl, yd); }
                         else { hud_bar(340.5f, by, 68.0f, yb, yl, yd); hud_bar(340.5f, by, 68.0f * (r2 - 1.0f), rb2, rl2, rd2); }
@@ -5270,8 +6505,8 @@ int main(int argc, char **argv)
                      * fuel x (W + 1) / 0x712 capped at W in green bands (0xf), the empty part red bands (0xb) */
                     static float jshown = -1;
                     float jf = pu->jet_fuel * (69.0f + 1.0f) / 1810.0f;
-                    static const float rb3[4] = {210 / 255.0f, 0, 0, 1}, rl3[4] = {1, 24 / 255.0f, 24 / 255.0f, 1}, rd3[4] = {125 / 255.0f, 0, 0, 1};
-                    static const float gb[4] = {0, 210 / 255.0f, 0, 1}, gl[4] = {0, 1.0f, 85 / 255.0f, 1}, gd[4] = {0, 125 / 255.0f, 0, 1};
+                    const float *rb3 = HP(10), *rl3 = HP(11), *rd3 = HP(9);
+                    const float *gb = HP(14), *gl = HP(15), *gd = HP(13);
                     if (jf < 0) jf = 0;
                     if (jf > 69.0f) jf = 69.0f;
                     jshown = jshown < 0 ? jf : jshown + (jf - jshown) * 0.5f;
@@ -5283,24 +6518,46 @@ int main(int argc, char **argv)
             }
             /* the MISSION OBJECTIVES display: on demand (F12), not part of the end sequence */
             if (g_show_objectives) {   /* DOS footage: blue / green text over the view, no panel */
+                /* engine 0x10017b80: the title, then 0x100176d0 once per objective priority - 1 Primary, 2 Secondary,
+                 * 4 Tertiary, 0 (default, labelled Tertiary), 8 Return - each listing the player's table nodes whose
+                 * runtime "shown" flag (node +0x74, set at load from the 'V' byte and flipped by toggle nodes,
+                 * 0x1000a1d0 kind 0x40000) is set, so an objective toggled on mid-mission (the dustoff) appears at once.
+                 * Rows: label colour 6, text 0xe (a text of 32+ characters on two lines: its first 32, then the rest),
+                 * status right-aligned on the first line: "In progress" 0xe, "Successful" 7, "Failed" 0xb. Spacing:
+                 * title + h + h/2, h/2 before the 2, 4 and 8 groups (none before 0), h per row (2h for two lines), the
+                 * time line h + h/2 below. DOSBox YELLSCN1 F12 (dustoff made visible in a PRJ copy): Primary x2,
+                 * Secondary, Tertiary, Return, all "In progress" in green */
                 static const float oblue[4] = {0.15f, 0.25f, 0.85f, 1.0f};
+                static const int ORDER[5] = {1, 2, 4, 0, 8};
                 const mtbl_table *t0 = &g_sim.logic.tables[0];
-                float y = 193.0f;
+                const float lh = hud_text_height(g_hud), half = floorf(lh * 0.5f);
+                const float tx = 60.0f + hud_text_width(g_hud, "Secondary: ");   /* text column (0x100176a0) */
+                float y = 165.0f;
                 int q2, pass;
-                hud_text(g_hud, 60.0f, 165.0f, "MISSION OBJECTIVES", oblue);
-                hud_line(g_hud, 60.0f, 181.0f, 60.0f + hud_text_width(g_hud, "MISSION OBJECTIVES"), 181.0f, 1.0f, oblue);
-                for (pass = 0; pass < 3; pass++)   /* primary, secondary, tertiary (the node's priority 1 / 2 / 0) */
+                hud_text(g_hud, 60.0f, y, "MISSION OBJECTIVES", oblue);
+                hud_line(g_hud, 60.0f, y + lh + 1.0f, 60.0f + hud_text_width(g_hud, "MISSION OBJECTIVES"), y + lh + 1.0f, 1.0f, oblue);
+                y += lh;
+                for (pass = 0; pass < 5; pass++) {
+                    if (ORDER[pass] != 0) y += half;
                     for (q2 = 0; q2 < t0->node_count; q2++) {
                         const mtbl_node *nd = &t0->nodes[q2];
-                        const char *st;
-                        static const int ORDER[3] = {1, 2, 0};
+                        int stv = g_sim.logic.state[0][q2];
+                        const char *st = stv == MTBL_OK ? "Successful" : stv == MTBL_FAILED ? "Failed" : "In progress";
+                        const float *sc = stv == MTBL_OK ? oblue : stv == MTBL_FAILED ? red : green;
                         if (!g_sim.logic.shown[0][q2] || nd->priority != ORDER[pass]) continue;
-                        st = g_sim.logic.state[0][q2] == MTBL_OK ? "Successful" : g_sim.logic.state[0][q2] == MTBL_FAILED ? "Failed" : "";
-                        hud_text(g_hud, 60.0f, y, nd->priority == 1 ? "Primary:" : nd->priority == 2 ? "Secondary:" : "Tertiary:", oblue);
-                        hud_text(g_hud, 130.0f, y, nd->text, green);
-                        hud_text(g_hud, 600.0f - hud_text_width(g_hud, st), y, st, oblue);
-                        y += 29.0f;
+                        hud_text(g_hud, 60.0f, y, nd->priority == 1 ? "Primary:" : nd->priority == 2 ? "Secondary:" : nd->priority == 8 ? "Return:" : "Tertiary:", oblue);
+                        if (strlen(nd->text) < 32) hud_text(g_hud, tx, y, nd->text, green);
+                        else {
+                            char l1[33];
+                            memcpy(l1, nd->text, 32); l1[32] = '\0';
+                            hud_text(g_hud, tx, y, l1, green);
+                            hud_text(g_hud, tx, y + lh, nd->text + 32, green);
+                        }
+                        hud_text(g_hud, 600.0f - hud_text_width(g_hud, st), y, st, sc);
+                        y += strlen(nd->text) < 32 ? lh : 2.0f * lh;
                     }
+                }
+                y += lh + half - 12.0f;   /* the time line h + h/2 below the next row (drawn at y + 12 below) */
                 if ((int32_t)t0->time_limit > 0) {
                     char tr[48];
                     double left = (double)(int32_t)t0->time_limit - g_sim.now / 1000.0;
@@ -5313,42 +6570,7 @@ int main(int argc, char **argv)
                     hud_text(g_hud, 60.0f, y + 34.0f, res, g_sim.outcome == 2 ? green : red);
                 }
             }
-            if (g_cc_page >= 0 && g_sim_ok) {   /* the COMMAND COMPUTER panel */
-                char lines[10][64];
-                int nl = 0, q;
-                const float bg[4] = {0.0f, 0.0f, 0.0f, 0.6f};
-                float py = 120.0f;
-                if (g_cc_page == 0) {
-                    snprintf(lines[nl++], 64, "COMMAND COMPUTER");
-                    snprintf(lines[nl++], 64, "1 Command All     %s", CC_LAST_TEXT[g_sim.last_cmd[0]]);
-                    snprintf(lines[nl++], 64, "2 Change Formation");
-                    if (msim_point_actor(&g_sim, 1) < 0 && msim_point_status(&g_sim, 1) == 0) snprintf(lines[nl++], 64, "NO STAR MATES");
-                    for (q = 1; q <= 4; q++) {
-                        int st = msim_point_status(&g_sim, q);
-                        if (st == 0) snprintf(lines[nl++], 64, "%d Command Point %d  NOT AVAILABLE", q + 2, q + 1);
-                        else snprintf(lines[nl++], 64, "%d Command Point %d  %s", q + 2, q + 1, MSIM_STATUS_TEXT[st]);
-                    }
-                } else if (g_cc_page == 1) {
-                    snprintf(lines[nl++], 64, "CHANGE FORMATION");
-                    snprintf(lines[nl++], 64, "Current Form: %s", MSIM_FORMATION_TEXT[g_sim.star_formation >= 0 ? g_sim.star_formation : 6]);
-                    for (q = 0; q < 6; q++) snprintf(lines[nl++], 64, "%d %s", q + 1, MSIM_FORMATION_TEXT[q]);
-                } else {
-                    int pt = g_cc_page - 2;
-                    if (pt == 0) snprintf(lines[nl++], 64, "COMMAND ALL");
-                    else {
-                        snprintf(lines[nl++], 64, "COMMAND POINT %d", pt + 1);
-                        snprintf(lines[nl++], 64, "Status: %s", MSIM_STATUS_TEXT[msim_point_status(&g_sim, pt)]);
-                    }
-                    for (q = 0; q < 5; q++) snprintf(lines[nl++], 64, "%d %s", q + 1, CC_ORDER_TEXT[q]);
-                }
-                /* the 3Dfx menu record (0x102653f0, menus 1 / 7 / 8): no background or frame (flags 0x0a), no sprites;
-                 * rect (0.22, 0.30)-(1.0, 0.60) of the screen = x 141-640, y 144-288; title and items in palette 14 (the
-                 * HUD green), a line under the title (0x10006520). Row spacing ASSUMED 14 units */
-                (void)bg; (void)yellow;
-                py = 144.0f + 6.0f;
-                for (q = 0; q < nl; q++) hud_text(g_hud, 141.0f + 0.02f * 499.0f, py + (float)q * 14.0f, lines[q], green);
-                hud_line(g_hud, 141.0f + 0.02f * 499.0f, py + 11.0f, 141.0f + 0.02f * 499.0f + 200.0f, py + 11.0f, 1.0f, green);
-            }
+            if (g_cc_page >= 0 && g_sim_ok) cc_draw();   /* the COMMAND COMPUTER / SYSTEMS STATUS panel */
             mm_draw();   /* the MAIN MENU over the HUD */
             if (g_paused && g_hs_paused.tex)   /* 0x10036370: PAUSED centred in the rect (0, 0.2)-(1, 0.4), native size */
                 hud_draw(g_hud, &g_hs_paused, 320.0f - hud_px_x(g_hud, (float)g_hs_paused.w) * 0.5f,
@@ -5369,9 +6591,10 @@ int main(int argc, char **argv)
 #undef LX
 #undef LY
             hud_end(g_hud);
-        } else if (g_hud && g_world && ((g_paused && g_hs_paused.tex) || (MSG_ONLY_VIEW && g_msg_t > 0))) {   /* HUD hidden / external view: PAUSED all the same */
-            static const float green2[4] = {0.3f, 1.0f, 0.35f, 1.0f};
+        } else if (g_hud && g_world && ((g_paused && g_hs_paused.tex) || (MSG_ONLY_VIEW && g_msg_t > 0) || (g_cc_page >= 0 && g_sim_ok))) {   /* HUD hidden / external view: PAUSED all the same */
+            const float *green2 = HP(0xe);
             HUD_BEGIN(g_hud, w, h);
+            if (g_cc_page >= 0 && g_sim_ok) cc_draw();   /* the menus are not part of the HUD (SYSTEMS STATUS: HUD Off) */
             if (g_paused && g_hs_paused.tex)
                 hud_draw(g_hud, &g_hs_paused, 320.0f - hud_px_x(g_hud, (float)g_hs_paused.w) * 0.5f,
                          144.0f - hud_px_y(g_hud, (float)g_hs_paused.h) * 0.5f, NULL);
@@ -5418,7 +6641,7 @@ int main(int argc, char **argv)
             }
         }
         test_frame(w, h);   /* TEST hook (tests/sequences) */
-        if (g_auto_on && g_world && (g_auto_elapsed += 1.0f / 30.0f) >= g_auto_secs) {
+        if (g_auto_on && g_world && (g_auto_elapsed += g_auto_dt) >= g_auto_secs) {
             test_dump("final");   /* TEST hook */
             unsigned char *px = malloc((size_t)w * (size_t)h * 3);
             FILE *of = fopen(g_auto_out, "wb");
@@ -5468,6 +6691,7 @@ int main(int argc, char **argv)
     SDL_DestroyWindow(win);
     SDL_Quit();
     if (g_fx_ta && g_fx_ta != ta) prj_close(g_fx_ta);   /* the mission's first texture archive, after a Video mode change */
+    titanium_open(0);
     prj_close(ma); prj_close(ta);
     return exit_code;   /* 42: Flee to Windows (the shell leaves too) */
 }

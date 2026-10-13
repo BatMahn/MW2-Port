@@ -15,7 +15,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/mek.c
-BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay
+BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium
 GLBIN   = glshot glview mw2shell
 ifeq ($(UNAME_S),Darwin)
   GLBIN = glview mw2shell          # glshot renders headless through EGL: Linux only
@@ -91,13 +91,17 @@ cdtool: tools/cdtool.c src/cdaudio.c build/miniaudio.o
 test_port: tests/test_port.c src/cdaudio.c src/datapath.c build/miniaudio.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc $^ -o $@ $(LDLIBS)
 
+test_titanium: tests/test_titanium.c src/tex.c src/skygnd.c src/portcfg.c src/prj.c src/datapath.c
+	$(CC) $(CFLAGS) -Isrc $^ -o $@ -lm
+
 test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
 test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h
 	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools $$(sdl2-config --cflags) tests/test_inputmap.c $$(sdl2-config --libs) -o $@
 
-# make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso]
+# make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso] [TITANIUM=/path/to/MW2-game/titanium]
+TITANIUM ?= $(MW2)/../MW2-game/titanium
 check: all
 	./prjtool verify $(MW2)/MW2.PRJ
 	./mektool $(MW2)/MW2.PRJ list | tail -1
@@ -105,6 +109,7 @@ check: all
 	./mechview $(MW2)/MW2.PRJ verify
 	MW2_INSTALL_DIR=$(MW2) ./bwdtool $(MW2)/MW2.PRJ missions | tail -1
 	./test_port $(MUSIC) $(MW2) $(ISO)
+	./test_titanium $(TITANIUM)
 	$(MAKE) test_inputmap && ./test_inputmap $(MW2)
 	$(MAKE) test_cockpitcfg && ./test_cockpitcfg $(MW2)
 	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 $(MW2) > /tmp/mw2lab.txt; r=$$?; tail -1 /tmp/mw2lab.txt; exit $$r

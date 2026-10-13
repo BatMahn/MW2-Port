@@ -31,6 +31,8 @@ typedef struct {
     int       hidden;        /* not drawn and not solid (a building's destroyed variant before, its intact one after) */
     unsigned  tint;          /* 0x1RRGGBB: drawn in this colour (the target viewer's damage colours); 0 = its own */
     int       sparse;        /* world objects: an OBJECT DENSITY object (type 0xc0), hidden while the density is LOW */
+    int       scrg;          /* world objects: in a record with a SCRG chunk - the scrub patch that follows the camera
+                              * (engine 0x100113f0 / 0x10011570, DOS 0x1f120 / 0x1f270) */
     char      rec[11];       /* world objects: the record that placed it, and its OBJ node index there (GT A / B) */
     int       obj_index;
     int       tex_offset;    /* added to texture slots 0x00 (camo) and 0x14 (insignia): the owner star's STAR value
@@ -46,6 +48,10 @@ typedef struct {
     int       sphere_ok;     /* hull_center / hull_radius computed */
     int       moving;        /* world objects: carried by a path task (PTBL, world3d_paths) - pos / rot change every step:
                                 left out of the static world mesh and collision lists, drawn and hit-tested as they are */
+    /* TEXTURES TITANIUM (drawing only; the simulation keeps `model`): */
+    int       ti;            /* `model` is a Titanium one (mech3d_ti_load): drawn with the Titanium texture table */
+    const wtb_model *ti_model;   /* world objects: the Titanium archive's model at the same record / OBJ index
+                                  * (world3d_ti_attach), drawn in place of `model`; NULL none */
 } mech3d_part;
 
 #define MECH3D_MAX_NODES 64
@@ -70,8 +76,10 @@ typedef struct {
     float        twist;          /* torso twist relative to the legs, degrees */
     const void  *pose_anim;      /* the last mech3d_pose arguments (an anim_set *), for a level of detail posed alike */
     float        pose_t;
+    const float *pose_off;       /* per ANIM track, added to the table's value (anim_player off: the carried offset), or NULL */
     int          eye_node;       /* EYEO chunk: the skeleton node of the pilot's eye (-1 if none) */
     float        eye_pos[3];     /* its world position after mech3d_pose */
+    float        eye_rot[9];     /* its world rotation (row-major; forward = column 2: rot[2], rot[5], rot[8]) */
     int          eye_ok;
     /* POFO {i16 node, i16 slot} (engine 0x1003eb09: object +0x68[slot]): mount points. Slots by the skeletons'
      * geometry (Timber Wolf, Mad Dog): 0 head, 1 right torso, 2 centre torso, 3 left torso, 4 right arm, 5 left arm,
@@ -89,6 +97,10 @@ int  mech3d_mount_slot(int loc);
  * torso twist included, moved to origin) when it has been posed, else the rest pose turned to heading; returns 0,
  * or -1 if the mech has no such mount */
 int  mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float heading, float out[3]);
+/* the world bounding centre of the object of the node carrying the location (OBJL group 1-8) - the first part of that
+ * group, else of the centre torso (3), as 0x1000fec0 finds it; 0x1000f760 -> 0x10029890: the box middle of its vertices
+ * placed by the node - for the mech at origin with heading, in its last pose; -1 if none */
+int  mech3d_group_point(const mech3d *m, int group, const float origin[3], float heading, float out[3]);
 
 void mech3d_use_skeleton(mech3d *dst, const mech3d *src);   /* dst's meshes posed on src's skeleton (the engine's LOD swap) */
 int  mech3d_load(prj_archive *a, const char *record, int repr, mech3d *out);
@@ -99,6 +111,8 @@ extern int mech3d_lod;
  * out, as the engine's 0x1000de50 takes them off both the drawn and the collision lists (DOS MW2.EXE 0x1fbf0 the same).
  * In the data: gates, fences, lights, trees, spires, small buildings, some hills and craters. */
 extern int world3d_density_low;
+/* the SCRG patch's grid step (cm) from its object's model extent e: ((e >> 14) + 1) x 0x4000; 0 = no patch loaded */
+extern int world3d_scrg_step;
 
 struct anim_set_s;
 /* Pose the skeleton at animation time t (keys) and update every part's
@@ -213,6 +227,7 @@ typedef struct {
     int      table;          /* state table (MTBL) index; 0 = the player's star */
     char     loadout[10];    /* MEK record, e.g. "mdg00std" */
     char     name[33];
+    char     pilot[33];      /* GPS 4th string (unit +0xfe): the viewer shows it after an inspection (0x10020e40) */
     float    speed;          /* walking speed, units/s (from the loadout's walk MP) */
     float    keys_per_s;     /* animation rate that matches that speed (no foot sliding) */
     float    t;              /* current animation time, keys */
@@ -239,5 +254,17 @@ void world3d_free_actors(world_actor *actors, int count);
  * shared, so release with free(out->parts) only). */
 int  world3d_compose(const world_actor *actors, int count, mech3d *out);
 void mech3d_free(mech3d *m);
+
+/* The Titanium edition's own models (its 16-bit MW2.PRJ): the same records and OBJ structure as the 3D editions', but
+ * remodelled meshes in the DOS layout (no normals; UVs in texels) with their own texture table, and the mechs on their own
+ * skeleton offsets (the ANIM records are byte-identical). For drawing only. */
+/* a mech (or vehicle) record from the Titanium archive, every part marked ti, smooth vertex normals added */
+int  mech3d_ti_load(prj_archive *ti, const char *record, int repr, mech3d *out);
+/* each world part (its record and OBJ index): the Titanium record's model at that OBJ index, parsed into *store (one per
+ * part, the caller frees with world3d_ti_free) and set as the part's ti_model. Returns the parts given one. */
+int  world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store);
+void world3d_ti_free(wtb_model *store, int count);
+/* smooth vertex normals for a DOS-layout model: per vertex the sum of its faces' outward normals, normalised */
+void mech3d_ti_normals(wtb_model *m);
 
 #endif

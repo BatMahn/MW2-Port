@@ -17,6 +17,11 @@ sfx *sfx_create(prj_archive *a);
 void sfx_destroy(sfx *s);
 /* Play SNDS record `index` (1-based PRJ index). volume 0..1, pan -1 (left) .. 1 (right). */
 void sfx_play(sfx *s, int index, float volume, float pan);
+/* The level of a non-positional engine sound started at volume 0x64, pan 0x40 (0x10032b60 / DOS 0x40c50: edx =
+ * the volume, the first stack word the pan, the last 0x50 / 0x32 a channel priority, not a level). DOSBox YELLSCN1
+ * (SB16): MECOVHW1 / MECTRDXX at 0.58-0.62x and MECBSYRX (pan 0x2f) 0.48x the mission start's MECTURX2, which the
+ * port plays at 0.8 */
+#define SFX_V64 0.48f
 /* The EFFECTS and VOICE sliders (MW2SND.CFG +4 / +8, 16.16): every sound scaled by effects, voice lines (sfx_play_voice)
  * by voice instead. */
 void sfx_set_gains(sfx *s, float effects, float voice);
@@ -34,6 +39,8 @@ void sfx_pause(sfx *s, int on);
 int  sfx_playing(sfx *s, int index);
 /* 1 while a voice-channel sound (sfx_play_voice) plays */
 int  sfx_voice_busy(sfx *s);
+/* stop the voice-channel sound `index` (the end sequence's flush cutting a message line, 0x10031640) */
+void sfx_stop_voice(sfx *s, int index);
 /* decode an SFLX sound (a SNDS record or a disc .SFL file) to unsigned 8-bit at 11025 Hz; free(*out). Bytes, or -1 */
 int  sfx_decode_sflx(const unsigned char *rec, size_t len, unsigned char **out);
 /* play decoded 8-bit PCM on the voice channel (counts for sfx_voice_busy); the buffer must stay valid */

@@ -19,6 +19,13 @@ typedef struct hud_s hud;
 
 hud *hud_create(prj_archive *a);
 void hud_destroy(hud *h);
+/* The palette the sprites loaded from now on are drawn in (768 bytes of 6-bit VGA values, expanded as the VGA DAC:
+ * v << 2 | v >> 4). The engine draws the HUD through its 16-bit table 0x10260324, which only 0x1002ac40 fills (all 256
+ * entries, RGB555 from the PAL record of the mission's current PALG slot - 0x101b0d20, set from the PALG chunk by
+ * 0x1003e104); hud_create starts with the COCKPIT record. */
+void hud_set_palette(hud *h, const uint8_t *p6);
+/* the current palette's colour idx as RGBA 0..1 */
+void hud_pal_color(const hud *h, int idx, float rgba[4]);
 /* Load SHP `name` frame `frame`; returns 0 on success. */
 int  hud_sprite_load(hud *h, prj_archive *a, const char *name, int frame, hud_sprite *out);
 void hud_sprite_free(hud_sprite *s);
@@ -68,6 +75,8 @@ void hud_tint(hud *h, int w, int hp, const float mul[3], const float add[3]);
 void hud_set_flash(hud *h, float r, float g, float b, float k);   /* takes effect at once (the HUD's program) */
 float hud_flash_level(const hud *h);
 void hud_rect(hud *h, float x, float y, float w, float hgt, const float rgba[4]);
+/* a filled convex polygon of n virtual points {x, y} */
+void hud_poly(hud *h, const float *xy, int n, const float rgba[4]);
 /* Clip the HUD drawing that follows to the virtual rectangle (x, y, w, hgt) (scissor; empty: nothing drawn), until
  * hud_clip_off - the engine's instrument windows drawn into their animating rectangle (0x10021730 / 0x10011aa0) */
 void hud_clip(hud *h, float x, float y, float w, float hgt);
@@ -79,6 +88,8 @@ int  hud_font_load(hud *h, prj_archive *a, const char *name);
 float hud_text(hud *h, float x, float y, const char *str, const float rgba[4]);
 /* Width of text in virtual units (as hud_text would draw it). */
 float hud_text_width(hud *h, const char *str);
+/* The font's line height in virtual units (as hud_text draws it; the engine's font height, 0x100600d8). */
+float hud_text_height(hud *h);
 /* CPIT layout rectangles (320x200 units); returns the count. */
 int  hud_layout(prj_archive *a, int rects[][4], int max);
 

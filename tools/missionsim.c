@@ -165,12 +165,13 @@ int main(int argc, char **argv)
                 }
             }
             s.debug_invulnerable = getenv("MW2_DEBUG_INVULN") != NULL;   /* test: the player survives */
-            if (getenv("MW2_DEBUG_TRACK") && i % 600 == 0) {   /* test: a table's units every 30 s */
+            if (getenv("MW2_DEBUG_TRACK") && i % (getenv("MW2_DEBUG_TRACK_SECS") ? 20 * atoi(getenv("MW2_DEBUG_TRACK_SECS")) : 600) == 0) {   /* test: a table's
+                                                                                       * units every 30 s (MW2_DEBUG_TRACK_SECS) */
                 int q, tb = atoi(getenv("MW2_DEBUG_TRACK"));
                 for (q = 0; q < n; q++)
                     if (s.actors[q].table == tb && s.armed[q] && !s.units[q].destroyed)
-                        printf("  track %5.0fs unit %d at %d,%d height %.1f m heading %.0f\n", i / 20.0, q, s.actors[q].mech.origin[0], s.actors[q].mech.origin[2],
-                               s.units[q].y / 100.0, s.actors[q].mech.heading);
+                        printf("  track %5.0fs unit %d at %d,%d height %.1f m heading %.0f state %d\n", i / 20.0, q, s.actors[q].mech.origin[0], s.actors[q].mech.origin[2],
+                               s.units[q].y / 100.0, s.actors[q].mech.heading, s.minds ? s.minds[q].state : -1);
             }
             if (getenv("MW2_DEBUG_KILL_AT") && i == (int)(atof(getenv("MW2_DEBUG_KILL_AT")) * 20)) s.player_unit.destroyed = 1;   /* test: player destroyed */
             if (s.over) break;   /* the mission's end sequence has finished */

@@ -128,6 +128,19 @@ int fx_load(prj_archive *a, fx_defs *d)
                             if (o->verts[v].y > mxy) mxy = o->verts[v].y;
                         }
                         if (o->vert_count) { d->half_w[type] = (float)(mxx - mnx) * 0.5f * (float)scale; d->half_h[type] = (float)(mxy - mny) * 0.5f * (float)scale; }
+                        if (o->poly_count > 0 && (o->polys[0].color & 0xf000) == 0x3000) {   /* 0x10026fc7 -> 0x1002a8e0 */
+                            int ft = -1, tp = -1, q;
+                            for (q = 0; q < o->polys[0].n; q++) {
+                                const wtb_vertex *vv = &o->verts[o->polys[0].idx[q]];
+                                if (vv->a != 0) continue;
+                                if (vv->b == 0) tp = o->polys[0].idx[q]; else ft = o->polys[0].idx[q];
+                            }
+                            if (ft >= 0 && tp >= 0) {
+                                d->bb[type] = 1;
+                                d->bb_foot[type][0] = (float)(o->verts[ft].x * scale); d->bb_foot[type][1] = (float)(o->verts[ft].y * scale); d->bb_foot[type][2] = (float)(o->verts[ft].z * scale);
+                                d->bb_top[type][0] = (float)(o->verts[tp].x * scale); d->bb_top[type][1] = (float)(o->verts[tp].y * scale); d->bb_top[type][2] = (float)(o->verts[tp].z * scale);
+                            }
+                        }
                         /* the card's colour picks its texture slot: bit 15 set -> 0x100 + low byte (DEATH0,
                          * JET0, MZL0); otherwise bits 4-11 (LAS0, XPL0, PPC0, BUL0: equal to XPLO's field) */
                         if (o->poly_count > 0 && (o->polys[0].color & 0x8000)) d->anim[type] = 0x100 | (o->polys[0].color & 0xFF);

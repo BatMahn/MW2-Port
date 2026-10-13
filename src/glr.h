@@ -68,6 +68,22 @@ typedef struct {
     float far_cull;          /* > 0: objects wholly beyond this distance (cm) are not drawn - the planet's VIEW far
                               * (DOS MW2.EXE 0x3f500 / 0x4e741, 3Dfx 0x1002fba0 / 0x1003dfbc); 0 = everything */
     int   mga_mip;           /* Matrox Mystique: the ground's mip level by view depth (2500 / 5000 / 15000 cm, MYSTIQUE.PAR) */
+    /* the Titanium edition (mercsw.dll + its renderer plugins): its vertex fog ti_fog = {1 = on, Z (the full-fog depth,
+     * 0 = none), the camera's factor}; the cloud layer's drift (slot 0x8c, U and V in texture repeats); effects
+     * alpha-blended (Render type 8) instead of alpha-tested */
+    float ti_fog[3];
+    float ti_scroll[2];
+    int   fx_blend;
+    /* the Titanium lights (mercsw 0x1002ecaa, per vertex, one-sided; its SKYGND.PAR amb / wa / wb): ti_light on, the
+     * ambient colour, two world lights {type 1 directional (unit vector) / 2 point (position), game coordinates}, all 0-1;
+     * the ground's single colour (0x1005527e); the explosion lights (0x1002f238: point lights, each lighting the objects
+     * that reach into its +-radius box, no falloff) */
+    int   ti_light;
+    float ti_amb[3], ti_lcol[2][3], ti_lvec[2][3], ti_gnd[3];
+    int   ti_ltype[2];
+#define GLR_TI_DYN 4
+    int   ti_dyn_n;
+    float ti_dyn[GLR_TI_DYN][7];     /* x, y, z (game), radius, r, g, b */
 } glr_view;
 
 /* Requires a current GL 3.3 core context. Returns NULL on failure (shader
@@ -94,21 +110,44 @@ int  glr_set_actors(glr *r, const mech3d *m, const uint8_t palette[256][3],
  * to disable that layer. Copies what it needs. */
 void glr_set_environment(glr *r, const texture *ground, const texture *sky, float tile_sky, float tile_ground);
 
-/* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again): new texture set */
+/* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again) and the sprites': new texture set */
 void glr_flush_textures(glr *r);
 /* Average colour of a texture (0-1 RGB), as the PowerVR engine uses for fog. */
 void glr_texture_average(const texture *t, float out[3]);
 
-/* Camera-facing textured sprites (weapon effects), game coordinates, drawn unlit after the scene
- * with the texture's 1-bit alpha. Copies up to GLR_MAX_SPRITES; the textures must stay valid. */
+/* Textured sprites (weapon effects), game coordinates, drawn unlit after the scene with the texture's 1-bit alpha.
+ * bb = 1: the engine's colour type 3 billboard (0x1002a8e0) - pos the card's foot, top its top: a screen square of
+ * the projected edge's length centred on it; bb = 0: a camera-facing rectangle half_w x half_h around pos.
+ * Copies up to GLR_MAX_SPRITES; the textures must stay valid. */
 #define GLR_MAX_SPRITES 1024
-typedef struct { float pos[3]; float half_w, half_h; const texture *tex; } glr_sprite;
+/* Image enhancement (view.wire): a sprite is drawn as its card's polygon outline (DOS 0x38ae3 / 3Dfx 0x1002a4b0 colour
+ * the object type picks) - wire_code 2 red (colour 0xb, type word 0x400: the projectile pool), else dark red (8: the
+ * effect pool's type 0x20); has_tri: that triangle (world, game coordinates), else the card's rectangle. */
+typedef struct { float pos[3]; float half_w, half_h; const texture *tex; float top[3]; int bb; int wire_code, has_tri; float tri[3][3]; } glr_sprite;
 void glr_set_sprites(glr *r, const glr_sprite *s, int n);
+
+/* The Titanium particles (mercsw particle.PID, 0x1004d7ba): screen squares of size_px pixels (at 640 x 480; scaled to the
+ * window's height) from the projected point right and down, depth-tested, alpha-blended (Render type 7: SRCALPHA /
+ * INVSRCALPHA, dx5draw 0x10004477) at `alpha` x the texel's alpha, unlit and unfogged (specular 0xff000000). Copied. */
+typedef struct { float pos[3]; float size_px; const texture *tex; } glr_particle;
+void glr_set_particles(glr *r, const glr_particle *p, int n, float alpha);
 
 /* The bank-0 bitmap table (BMID bank 0: scrub rocks / cacti) for colour type 3 billboards; call before glr_set_mech.
  * The array is the caller's and must stay valid. */
 void glr_set_bank0(glr *r, texture *const bank0[GLR_SLOTS]);
 int  glr_billboard_count(void);   /* TEST ONLY: billboards in the last world layer built */
+
+/* The Titanium edition's sky dome (its SKYDOME object, POLY TL1SKYDM: the cloud ceiling, the mountain ring, the sun and
+ * the moon), drawn around the eye before the ground; each polygon's texture is slots[colour & 0xff], its texel UVs
+ * divided by the texture's size - 1 (mercsw 0x10001477). NULL removes it. */
+void glr_set_skydome(glr *r, const wtb_object *o, texture *const slots[GLR_SLOTS]);
+
+/* The Titanium models' texture table (TEXTURES TITANIUM): parts flagged ti (mech3d_part.ti, or with a ti_model) are drawn
+ * from it, their colour words read as the Titanium engine's (DOS-style: bits 12-14 the kind, 5-7 textured with bitmap =
+ * low byte; UV = texel / (size - 1), mercsw 0x10001477) and the camouflage / insignia slots remapped per star (mercsw
+ * 0x100748ab: an even slot 0-0xa with the star's CAMO set c: + c for c < 2, else base[c] + slot / 2; slot 0x3f + star).
+ * slots NULL: off. The arrays are the caller's and must stay valid; call before glr_set_mech / glr_set_actors. */
+void glr_set_titanium(glr *r, texture *const slots[GLR_SLOTS], const int camo[8]);
 
 /* Draw into the currently bound framebuffer, viewport w x h. */
 void glr_draw(glr *r, const glr_view *v, int w, int h);
@@ -122,6 +161,11 @@ void glr_default_view(glr_view *v);
  * distance (MW2.EXE 0x38ae3, 0x3e086, 0x38ee0); luma: 16 x 256 (LUMA record), pal: the mission's PAL. */
 void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma);
 /* replace only the DOS palette (the time-of-day fades) */
+/* The 3D editions' palette fade (engine 0x1002ad50 -> DAT_1024e494, DAT_10160cf0): tint != NULL - every textured
+ * fragment (objects, ground, sky, billboards, effects) times tint (slot 0xc INFRARED (0, 1, 8/255), slot 0x11 the red
+ * flash (1, 8/255, 8/255)); pal / k - palette-coloured (untextured) polygons k of the way to their index's colour in pal
+ * (k 0: off). Not used by the DOS look. */
+void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float tint[3]);
 void glr_set_dos_palette(glr *r, const uint8_t pal[256][3]);
 
 #endif

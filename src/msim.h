@@ -44,7 +44,8 @@ typedef struct {
 
 typedef struct {
     float x, y, z, vx, vy, vz;   /* cm, cm per tick */
-    float ay;                    /* vertical acceleration, cm/tick^2: -drop flag x planet gravity */
+    float ax, ay, az;            /* acceleration, cm/tick^2 (+0x14..+0x1c): at launch (0, -drop flag x planet gravity, 0);
+                                  * a guided missile's is replaced by the guidance each tick, gravity and all (0x10045910) */
     float life;                  /* ticks left */
     int   weapon, owner;         /* owner: actor index, -1 = the player */
     int   homing;                /* guided at this actor (-1 the player, -2 none): engine 0x10045910 */
@@ -54,6 +55,14 @@ typedef struct {
     unsigned id;                 /* serial number, 1.. (shots are not kept in order: the camera follows one by id) */
     float aim_o[3], aim_d[3];    /* TEST ONLY: the player's aim line when it was fired (the eye, the reticle's direction) */
 } msim_shot;
+
+/* the engine's integer servo (0x1003b700 set-up, 0x1003b740 step): value += (now - t) x (target - value) / tau in ticks,
+ * integer arithmetic, snapped to the target when the step would reach or pass it; t = now on every step */
+typedef struct { int32_t t, target, value, tau; } msim_iservo;
+/* a unit's aim range (0x10018a20 set-up, 0x10044810 step): range = unit +0xa8 servo (value +0xb0: the aim ray's hit
+ * range, drifting back to 50000 with tau 20 s), conv = unit +0x98 servo (value +0xa0, target +0x9c = +0xb0, tau 0.2 s):
+ * the shots converge on the aim ray at conv.value (0x100448e0) */
+typedef struct { msim_iservo range, conv; int ok; } msim_aim;
 
 typedef struct {
     mtbl_logic   logic;
@@ -100,9 +109,14 @@ typedef struct {
                                   * type within 5 m, or no free slot) - then neither the effect nor its chunks */
     void       (*on_sound)(void *user, int sound, const float pos[3]);   /* a positional sound at pos (footsteps ...); -1 = the collision clang; pos NULL = a cockpit sound at volume 0x32 */
     void       (*on_radio)(void *user, const char *sound);   /* a mission radio message (SNDS name), voice channel */
-    int         *step_key;        /* per actor: the walk-cycle key last seen (footsteps) */
-    int         *anim_seq;        /* per actor: the sequence playing (walk / run / reverse); a change restarts it */
+    anim_player *anim_pl;         /* per actor: the walk animation's key player (engine 0x1000dec0 / 0x1000b3a0) */
     int         *bump_with;       /* per actor: the mech it is in contact with (+2; 1 = the player), 0 none */
+    float      (*contact_frac)[2];   /* per actor: the sub-cm part (x, z) of the last contact projection, added to the next move
+                                  * (the engine's positions are floats / 16.16; integer cm lost the slow slide round a mech) */
+    float       *across;          /* per actor: the ground velocity across the heading (cm/s, + right) a contact or a wall impact
+                                     * left, easing off at 1/45 a tick (engine 0x10019310's one velocity vector) */
+    float       *contact_acc;     /* per actor: in contact with a mech or a wall, the time (s) not yet run in 1/30 s moves */
+    int         *contact_hold;    /* per actor: 1/30 s moves left in contact mode without a touch (msim_step) */
     int          no_player_muzzle;   /* the viewer's cockpit: the player's own flashes would fill the view */
     void        *shot_user;
     unsigned     player_class;   /* USERSTAR GPS +0x18: UserStar's class for the objective nodes */
@@ -146,6 +160,11 @@ typedef struct {
     int          sd_at_once;     /* the DOS rule for input +0x43 (self-destruct): destroyed at once (MW2.EXE 0x27785 ->
                                     0x265f0); else the 3D editions' state 7, 0x16a ticks first (0x1001a180) */
     int32_t     *sd_at;          /* per actor: the self-destruct's time (sim ms; 0 none) */
+    /* the DOS end (MW2.EXE 0x16e80, set by the front end for the DOS look): the player's star resolved, the radio idle -
+     * "Press any key to exit..." once more than 3 s (whole seconds, clock / 0xb6) have passed, any key then ends
+     * (0x45d80), and the mission ends by itself past 0x14 s; else the 3D editions' CTRL-Q prompt and 0x71c ticks */
+    int          dos_end, dos_prompted;
+    int32_t      dos_resolved_s;
     int         *seen_node;      /* per actor: the star's node last applied (0x10014520 runs on a change) */         /* per actor: whom it attacks (state 3), -1 the player, -2 none */    /* PLNT payload +0x38 == 0: explosions may take the scene light (0x1003de48 -> DAT_1025a6a8) */
     float       *centre_h;       /* per actor: centre above the feet, cm (MGEO int[0]: the climbable rise) */
     float        player_centre_h;
@@ -162,6 +181,8 @@ typedef struct {
     int          star_formation; /* the player's star formation (0..5 echelon left .. wedge), -1 = as spawned */
     int          last_cmd[8];    /* per point (0 = all): the last command's menu index (0x10264468; 7 = "No Cmd") */
     void       (*on_message)(void *user, const char *text, int voice);   /* order acknowledgements (0x10031810) */
+    unsigned char *msg_seen;     /* per actor: bit 0 its death announced (0x10016280 runs once a unit), bit 1 it was shut
+                                  * down / powered down (object +0x14 bit 0x10, set in state 3: 0x1001accc) */
     /* destructible world objects: GT chunks {i16 intact node, i16 destroyed node, .., +16 i16 hit points, +18 type,
      * +20 flags, +24 name[22], +46 sub-name[22]} (engine OBJ/GT handler 0x1003eb5c -> thing table 0x101e0280:
      * +0 flags, +8 hit points; damage 0x10046c20; destroyed: explosion 0x10045c30, swap 0x10046a90) */
@@ -180,12 +201,25 @@ typedef struct {
     int          player_aim_free;  /* 1: with no target the player fires along the aim (the front end; missionsim keeps the nearest enemy) */
     float        player_aim_yaw, player_aim_pitch;
     float        player_eye[3];    /* the aim ray's origin: the player's eye object (unit +0x44, the EYEO node - the camera's), */
-    float        player_conv;      /* the convergence range last set by the aim ray (unit +0xb0; 0 = never: 150000) */
+    float        player_conv;      /* the convergence range the player's shots aim at (unit +0xa0; trace only) */
+    int          reticle_actor, reticle_bld;   /* the unit the player's aim ray last struck (0x10044810 -> DAT_1025a664, kept
+                                                * while the ray strikes nothing): an actor, or a thing (building); -1 none */
+    msim_aim     player_aim;       /* the player's aim range servos (unit +0xa8 / +0x98) */
+    /* area damage (0x10046490 -> 0x10046700): live effects of the damaging types (0x1025b180) with their place, radius
+     * (the effect object's geometry +0x40) and end tick; Combat Variables SPLASH DAMAGE (MW2DIF +2, DAT_1024ac6c + 2) */
+    struct msim_area { int type; float pos[3], r; int32_t end; } area[64];
+    int          area_count, splash;
+    float        fx_radius[32];
+    msim_aim    *aim;              /* per actor: the same (stepped as each projectile leaves, 0x10043e2d) */
     int          player_eye_ok;    /* world cm, set by the front end each frame (0x10044950); 0: the body point pl_h x 0.7 */
     int          player_lock;
     float        player_lock_ticks;
     float       *ai_lock;         /* unused: the AI's missile lock is ai_mind.lock / lock_ticks (engine 0x10044560) */
     float       *provoked;        /* per actor: seconds left of "my group is under attack" (engine 0x10014110 / 0x10012de0) */         /* per actor: ticks its target has been held (AI lock, ASSUMED: the same 2 s) */
+    mech3d       pl_pit;          /* the player's cockpit representation (repr 4 on the full skeleton): its collision */
+    int          pl_pit_ok;        /* model while the view is the cockpit (player_cockpit) */
+    int          player_cockpit;   /* 1: the camera is in the cockpit (mode 0; the front end sets it, default 1) */
+    float        player_twist;     /* the player's torso twist, degrees (the front end; poses the collision models) */
     mech3d       pl_shown;        /* the player's mech as drawn (posed with animation and twist): its mounts */
     int          pl_shown_ok;      /* per actor: inspected by the player's side */
     void        *message_user;
@@ -208,7 +242,7 @@ int  msim_set_formation(msim *s, int formation);
  * a mech (actor >= 0) or a structure (thing >= 0, index into bld) - when within its radius + 200 m; marks it for the
  * scan objectives (MTBL_K_SCAN). Returns 1 "Inspection successful", 2 "Target is beyond inspection radius", 0 nothing
  * (no target, or already inspected). */
-int  msim_inspect(msim *s, int actor, int thing);
+int  msim_inspect(msim *s, int actor, int thing);   /* 1 inspected, 2 out of range, 3 inspected before, 0 no target */
 /* the structure nearest the aim line within cone degrees (for TARGET_AT_RETICLE), -1 none */
 int  msim_aim_thing(const msim *s, float yaw_deg, float cone_deg, float *distance);
 /* the engine's weapon table +0x18: the weapon is guided (LRMs, Streak SRMs, Narc) */
@@ -267,15 +301,24 @@ int  msim_can_step_hr(const msim *s, float x0, float z0, float x, float z, float
 /* the same sphere test without the closing rule, against unit `other` only (-1 the player): is p1 inside its sphere?
  * (the engine's push-out of a unit set down inside another, 0x1000ba20) */
 int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
-/* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr with the surface normal n (engine 0x1000b5e0 on a world hit,
- * then 0x10019310's second try): the unit ends a quarter of the untravelled distance off the touching point along the
- * move reflected by the surface, or stays if that is refused too; *speed (cm/s along heading_deg, signed) becomes the
- * reflected velocity x -0.25 (x -0.5 when it stayed), along the heading. Returns 1 when it stayed. */
+/* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second
+ * try): the unit ends a quarter of the untravelled distance off the touching point (the hit less the look-ahead R,
+ * behind the start when the hit is nearer than R) along the move reflected by the surface (a type 6 sphere: on its
+ * surface); if the move there is refused too, it keeps that point when the same object refused it and stays where it
+ * was when another did. The velocity (*speed cm/s along heading_deg, signed, and *across cm/s across it, + to the right;
+ * across may be NULL: taken as 0 and dropped) becomes the reflected direction x |velocity| x -0.25 (x -0.5 when the
+ * second move was refused). n is unused (the hit's own normal is taken). Returns bit 0 when it stayed, bit 1 when the
+ * impact is harmless (a climbable face with the feet in the ground window: no damage, no sound, no contact). */
 void msim_block_normal(float n[3]);   /* the normal of the surface that refused the last msim_can_step_hr move */
+const char *msim_block_what(void);   /* TEST ONLY: the model name of what refused it */
 int  msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n[3],
-                       float heading_deg, float *speed);
+                       float heading_deg, float *speed, float *across);
 /* Inside a type 1 obstacle's XZ box (walls, buildings: engine 0x1000d520, any height)? n = its face normal. */
 int  msim_wall_at(const msim *s, float x, float z, float n[3]);
+/* the last msim_world_impact's object takes the walking-impact damage (engine 0x1000c3c0 -> 0x10046c20) of a unit
+ * moving at speed cm/tick (owner -1 the player, else the actor); does that object have a thing (sound 0xc8 / 0xe5)? */
+void msim_impact_damage(msim *s, int owner, float speed);
+int  msim_impact_destructible(const msim *s);
 /* the living armed enemy closest to the aim direction (degrees, game yaw) within
  * `cone` degrees and weapon range; -1 if none */
 int  msim_aim_target(const msim *s, float aim_yaw, float cone, float *distance);
@@ -289,5 +332,8 @@ void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float
 float msim_top_speed(int walk_mp, float gravity_g);
 /* the player's throttle preset n (0 = STOP .. 9 = FULL) as a fraction of full: DOS n x 113 / 0x400 */
 float msim_throttle_preset(int n);
+/* the directional jets' drag coefficients in the DOS edition's integers (DOS 0x26ba2): thrust T (cm/tick^2) and top
+ * walking speed (cm/s) in; drag per tick = S x (k S + B) for the drift speed S (cm/tick) */
+void msim_jet_drag(float thrust, float top_cm_s, float *k, float *B);
 
 #endif

@@ -80,7 +80,7 @@ static const screen_def SCREENS[] = {
 static uint8_t g_fb[W * H * 3];
 
 /* ---- music (MW2SHELL main loop): per-screen numbers for contexts Wolf / Falcon / neutral
- * (tables 0x838c8 / 0x83910 / 0x83880); 0x20000000 keep, 0x10000000 stop first, 0 no change.
+ * (tables 0x838c8 / 0x83910 / 0x83880); 0x20000000 stop (the song closed, 0x35c4c), 0x10000000 stop first, 0 no change.
  * DATABASE index = number + driver offset (ULTRA.MDI: 32, table 0x83e14); entry = index - 1. */
 static const uint32_t MUSIC[3][17] = {
     {0x25, 0x24, 0, 0, 0x20000000, 0x24, 0, 0x23, 0x20000000, 0x25, 0x20000000, 0x25, 0x24, 0x25, 0x26, 0x20000000, 0x20000000},
@@ -688,7 +688,14 @@ static void apply_music(int screen, int clan)
     long n;
     if ((!g_bank && !g_mt32) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
     v = MUSIC[clan][screen];
-    if (!v || (v & 0x20000000)) return;
+    if (!v) return;
+    if (v & 0x20000000) {   /* 0x35c4c / main loop 0x36700: the song closed and forgotten (0xa6380 = 0, 0xa6384 = 0) */
+        sfx_lock(g_sfx);
+        if ((g_song || g_msong) && getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
+        gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1;
+        sfx_unlock(g_sfx);
+        return;
+    }
     /* the song set by device (driver table 0x83e14): MT32MPU.MDI +24, ULTRA.MDI +32; DATABASE index = number + that */
     entry = (int)(v & 0xffffff) + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1;
     sfx_lock(g_sfx);
@@ -704,10 +711,16 @@ static void apply_music(int screen, int clan)
         }
         g_song_entry = entry;
         g_song_len = n; g_song_rate = sfx_rate(g_sfx);
+        if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: start entry %d (screen %d)\n", entry, screen);   /* TEST ONLY */
     }
     sfx_unlock(g_sfx);
 }
 
+/* back from a mission: the original's shell is a new process ("mw2shell sim", main 0x36700) that restores the saved
+ * screen (MW2PRM.CFG, 0x374c0) and applies its music with nothing playing - so the screen's song starts again (training
+ * 14: Wolf 0x26 / Falcon 0x29, Instant Action 7: 0x23, the roster 12: 0x24 / 0x27; the debriefing 3 has none: silent).
+ * The port's shell stays up with the song closed for the mission (launch_*): the same call restarts it */
+static void music_after_mission(int screen, int clan) { apply_music(screen, clan); }
 
 /* ================= Instant Action: "Trials of Grievance" (screen 7, FUN_00029680) =================
  * Hotspots 0x7e8a4 (25), scenarios 0x7f2fc, planet videos 0x7f2a0, clan emblem videos 0x7f328,
@@ -727,17 +740,22 @@ static const char *const IA_SCEN[10] = {"jackscn1", "chedscn1", "edamscn1", "pro
 static const char *const IA_CLAN[6] = {"WIAWOLF", "WIAJF", "WIAGHOST", "WIASMOKE", "WIANOVA", "WIASTEEL"};
 static const char *const IA_FORM[6] = {"Echelon Left", "Echelon Right", "Line Abreast", "Line Astern", "V-Form", "Wedge"};
 typedef struct { const char *code, *file, *name; int tons; } mech_entry;
+/* tons: the original table (0x8367c) lists the three easter-egg chassis at 100; the port uses their real MEK tonnage
+ * (ELE00STD 1, TAR00STD 25, BTM00STD 85 - user request) */
 static const mech_entry MECHS[18] = {
     {"frm", "firemoth", "Firemoth", 20}, {"ktf", "kitfox", "Kit Fox", 30}, {"jnr", "jenner", "Jenner IIC", 35},
     {"nva", "nova", "Nova", 50}, {"stm", "strmcrow", "Stormcrow", 55}, {"mdg", "maddog", "Mad Dog", 60},
     {"hlb", "hellbrgr", "Hellbringer", 65}, {"rfl", "rifleman", "Rifleman IIC", 65}, {"smn", "summoner", "Summoner", 70},
     {"tbr", "timbrwlf", "Timber Wolf", 75}, {"grg", "gargoyle", "Gargoyle", 80}, {"whm", "warhammr", "Warhammer IIC", 80},
     {"mrd", "marauder", "Marauder IIC", 85}, {"whk", "warhawk", "Warhawk", 85}, {"drw", "direwolf", "Dire Wolf", 100},
-    {"ele", "elementl", "Elemental", 100}, {"tar", "tarantul", "Tarantula", 100}, {"btm", "btllmstr", "Battle Master IIC", 100},
+    {"ele", "elementl", "Elemental", 1}, {"tar", "tarantul", "Tarantula", 25}, {"btm", "bttlmstr", "Battle Master IIC", 85},
 };
 typedef struct { int scen, mech[2][3], form[2], clan[2], nmech; char loadout[2][3][9]; int tons[2], size[2], planet, loaded;
                  char text[3][64]; } ia_state;
-static ia_state g_ia = {0, {{9, -1, -1}, {5, -1, -1}}, {0, 0}, {0, 1}, 15, {{""}}, {100, 100}, {3, 3}, 0, 0, {""}};
+/* nmech: the chassis Instant Action offers. The original (FUN_000295c0, MW2SHELL) offers the 15 clan 'Mechs unless the
+ * pilot is named "Enzo" (18: + Elemental, Tarantula, Battle Master IIC), "Hobbes" (17) or "Calvin" (16) - an easter egg;
+ * the port unlocks all 18 permanently (user request) */
+static ia_state g_ia = {0, {{9, -1, -1}, {5, -1, -1}}, {0, 0}, {0, 1}, 18, {{""}}, {100, 100}, {3, 3}, 0, 0, {""}};
 
 typedef struct { smk *s; int x, y; Uint32 last; int hold, once; char then[16]; } overlay;
 static int g_from_screen = -1;   /* the screen before the current one */
@@ -856,16 +874,19 @@ static void read_results(const char *dir)
 
 /* the simulation's command line: MW2_SIM if set (tests), else the glview beside this executable with the configured
  * archives; and the child's paths (the configuration, passed as its environment) */
-/* the chosen edition's files (Combat Variables RENDERER; mw2port.cfg edition=), falling back to the enhanced mix when
- * that edition's files are missing */
-static struct { char models[PORTCFG_PATH], textures[PORTCFG_PATH], kind[16], sky[PORTCFG_PATH], fog[PORTCFG_PATH]; int ed; } g_edf;
+/* the chosen look's files (Combat Variables RENDERER and TEXTURES; mw2port.cfg renderer= / textures=), falling back to
+ * the enhanced mix when that renderer's files are missing and to the ORIGINAL textures when TITANIUM can't be had (the
+ * DOS renderer, no titanium/ folder) */
+static struct { char models[PORTCFG_PATH], textures[PORTCFG_PATH], kind[16], sky[PORTCFG_PATH], fog[PORTCFG_PATH]; int ed, tx; } g_edf;
 static void edition_files(void)
 {
-    char kind[PORTCFG_PATH];
-    g_edf.ed = g_cfg.edition;
-    if (portcfg_edition(&g_cfg, g_cfg.edition, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
-        g_edf.ed = PORTCFG_ED_ENHANCED;
-        portcfg_edition(&g_cfg, PORTCFG_ED_ENHANCED, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog);
+    char kind[PORTCFG_PATH], m[PORTCFG_PATH], t[PORTCFG_PATH], s[PORTCFG_PATH], f[PORTCFG_PATH];
+    g_edf.ed = g_cfg.renderer;
+    if (portcfg_edition(&g_cfg, g_edf.ed, m, t, kind, s, f) != 0) g_edf.ed = PORTCFG_ED_ENHANCED;
+    g_edf.tx = portcfg_texset_ok(&g_cfg, g_edf.ed, g_cfg.texset) ? g_cfg.texset : PORTCFG_TX_ORIGINAL;
+    if (portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
+        g_edf.tx = PORTCFG_TX_ORIGINAL;
+        portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog);
     }
     snprintf(g_edf.kind, sizeof g_edf.kind, "%.15s", kind);
 }
@@ -900,10 +921,12 @@ static void sim_command(char *line, size_t n, const char *scen, const char *save
         if (k > 4 && strcasecmp(g_cfg.cd + k - 4, ".iso") == 0) setenv("MW2_CD_IMAGE", g_cfg.cd, 1); else setenv("MW2_CD_DIR", g_cfg.cd, 1);
     }
     edition_files();
-    /* the edition decides the sky file and the fog (only the PowerVR edition, and the enhanced mix, have fog) */
+    /* the renderer decides the sky file and the fog (only the PowerVR edition, and the enhanced mix, have fog); the
+     * TITANIUM textures bring the Titanium sky file */
     setenv_or_unset("MW2_SKYGND", g_edf.sky);
     setenv_or_unset("MW2_SKYGND_FOG", g_edf.fog);
     setenv("MW2_EDITION", PORTCFG_ED_NAME[g_edf.ed], 1);
+    setenv("MW2_TEXTURES", PORTCFG_TX_NAME[g_edf.tx], 1);
     if (g_cfg.ultrasnd[0] && !getenv("MW2_ULTRASND")) setenv("MW2_ULTRASND", g_cfg.ultrasnd, 1);
     if (g_cfg.music[0] && !getenv("MW2_MUSIC_DIR")) setenv("MW2_MUSIC_DIR", g_cfg.music, 1);
     if (cmd) snprintf(line, n, cmd, scen);
@@ -1054,6 +1077,7 @@ static int launch_ia(void)
     setenv("MW2_OE", FORM_ARG[g_ia.form[1]], 1);
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
@@ -1104,7 +1128,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                 if (h >= 14 && h <= 16) { side = 1; g_ia.mech[side][h - 14] = g_ia.mech[side][h - 14] + 1 >= g_ia.nmech ? -1 : g_ia.mech[side][h - 14] + 1; }
                 if (h == 6) g_ia.form[0] = (g_ia.form[0] + 1) % 6;
                 if (h == 2) { g_ia.scen = (g_ia.scen + 1) % 10; ia_load_scenario(); }
-                if (h == 0) { launch_ia(); snprintf(note, sizeof note, "%s", g_result); }
+                if (h == 0) { launch_ia(); music_after_mission(7, 2); snprintf(note, sizeof note, "%s", g_result); }
                 while (*c && *c != ',') c++;
                 if (*c) c++;
             }
@@ -1128,7 +1152,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                     smk_rewind(ov[2].s);
                 }
                 launch_ia();
-                apply_music(7, 2);
+                music_after_mission(7, 2);
                 play_ambient(-1);
                 snprintf(note, sizeof note, "%s", g_result);
             }
@@ -1335,6 +1359,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                     star_reset_mission(clan, k);
                     printf("roster: launch old mission %d (%s)\n", k + 1, CAMPAIGN_TITLE[clan][k]);
                     launch_campaign_m(clan, sel, k);
+                    music_after_mission(12, clan);   /* the roster is the return state (12) */
                     reg_load();
                     load_bg(clan == 1 ? 23 : 16);
                     old_list = 0;   /* the roster again, as on entering (the record panel) */
@@ -1520,10 +1545,21 @@ int campaign_is_trial(int clan, int m) { return m >= 0 && m < 16 && CAMPAIGN_TRI
 
 static void shell_message(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg);
 static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg, int def);
-/* ---- the star (Star Configuration, screen 13, FUN_0003b420; record 0x841dc per clan): formation 0-5, size 1..3,
- * slots {mech, loadout, pilot name}; saved by the port as STAR<clan>.CFG in the install dir (the original's
- * storage NOT CONFIRMED) */
+/* ---- the star (Star Configuration, screen 13, FUN_0003b420): formation 0-5, size 1..3, slots {mech, loadout, pilot
+ * name}. The original has two star records of 0x80 bytes - 0x840dc (the player's: either clan's campaign, Instant Action
+ * friendly) and 0x8415c (Instant Action enemy), PTR 0x841dc the current one (FUN_0003ab50) - {+0 formation, +4 slot
+ * being edited, +8 maximum, +0xc size, +0x10 tonnage limit, +0x14 + 0x24 k: {int mech (table 0x83688 order = lance.c),
+ * char loadout[16], char pilot[16]}}. They persist in MW2PRM.CFG (0x218 bytes at 0xa6394, the install dir): +0 return
+ * screen, +4 / +8 the launch context, +0xc 1 when 0x840dc is current, +0x10 record 0x840dc, +0x90 record 0x8415c,
+ * +0x114 pilot (MW2REG index, -1 none), +0x118 the sim's command line - written at every launch (FUN_000375a0 ->
+ * FUN_0003a810 copies both records in) and read at every shell start (main 0x23599 -> FUN_000374c0 -> FUN_0003a850
+ * copies them back), so the star survives the mission and a restart of the game. The port keeps the clans' stars in
+ * record 0x840dc (one record, as the original) and writes it whenever the star changes (the port's shell does not
+ * exit for a mission); the rest of the file is kept */
 typedef struct { int formation, size; lance_slot slot[3]; } star_cfg;
+#define PRM_STAR0 0x10   /* MW2PRM.CFG: record 0x840dc (0x8415c follows at 0x90) */
+static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static void wr32le(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static star_cfg g_star[4];   /* 0 / 1 the clans' stars, 2 / 3 Instant Action friendly / enemy (= g_ia) */
 static const char *ia_pilot(void);
 static void ia_load_scenario(void);
@@ -1553,8 +1589,25 @@ static void star_load(int clan)
     st->size = 1;
     for (k = 0; k < 3; k++) { st->slot[k].mech = -1; snprintf(st->slot[k].pilot, sizeof st->slot[k].pilot, k ? "Friend %d" : "MechWarrior", k); }
     st->slot[0].mech = -1;   /* not chosen: each mission's own mech (BRF2 SDSC) */
-    snprintf(p, sizeof p, "%s/STAR%d.CFG", g_dir, clan);
-    if ((f = fopen(p, "rb"))) { star_cfg t; if (fread(&t, 1, sizeof t, f) == sizeof t) *st = t; fclose(f); }
+    snprintf(p, sizeof p, "%s/MW2PRM.CFG", g_dir);
+    if ((f = fopen(p, "rb"))) {
+        uint8_t prm[0x218];
+        if (fread(prm, 1, sizeof prm, f) == sizeof prm) {
+            const uint8_t *r = prm + PRM_STAR0;
+            int sz = (int)rd32le(r + 0xc), fm = (int)rd32le(r);
+            if (sz >= 1 && sz <= 3 && fm >= 0 && fm <= 5) {
+                st->formation = fm; st->size = sz;
+                for (k = 0; k < 3; k++) {
+                    const uint8_t *q = r + 0x14 + 0x24 * k;
+                    int m = (int)rd32le(q);
+                    st->slot[k].mech = m >= 0 && m < lance_mech_count() ? m : -1;
+                    snprintf(st->slot[k].loadout, sizeof st->slot[k].loadout, "%.8s", (const char *)q + 4);
+                    if (q[20]) snprintf(st->slot[k].pilot, sizeof st->slot[k].pilot, "%.15s", (const char *)q + 20);
+                }
+            }
+        }
+        fclose(f);
+    }
     if (st->size < 1 || st->size > 3) st->size = 1;
     if (st->formation < 0 || st->formation > 5) st->formation = 0;
 }
@@ -1571,8 +1624,26 @@ static void star_save(int clan)
         }
         return;
     }
-    snprintf(p, sizeof p, "%s/STAR%d.CFG", g_dir, clan);
-    if ((f = fopen(p, "wb"))) { fwrite(&g_star[clan], 1, sizeof g_star[clan], f); fclose(f); }
+    {   /* record 0x840dc in MW2PRM.CFG (read-modify-write; a new file starts as FUN_000375a0 would leave it: no pilot) */
+        uint8_t prm[0x218], *r = prm + PRM_STAR0;
+        const star_cfg *st = &g_star[clan];
+        int k;
+        memset(prm, 0, sizeof prm);
+        wr32le(prm + 0x114, 0xffffffffu);
+        snprintf(p, sizeof p, "%s/MW2PRM.CFG", g_dir);
+        if ((f = fopen(p, "rb"))) { if (fread(prm, 1, sizeof prm, f) != sizeof prm) { /* short: the rest stays zero */ } fclose(f); }
+        wr32le(prm + 0xc, 1);   /* 0x840dc current (DAT_000a63a0) */
+        wr32le(r, (uint32_t)st->formation);
+        if ((int)rd32le(r + 8) < st->size) wr32le(r + 8, (uint32_t)st->size);   /* the maximum: kept unless smaller */
+        wr32le(r + 0xc, (uint32_t)st->size);
+        for (k = 0; k < 3; k++) {
+            uint8_t *q = r + 0x14 + 0x24 * k;
+            wr32le(q, (uint32_t)st->slot[k].mech);   /* the strings' tails are left as they were */
+            snprintf((char *)q + 4, 16, "%.8s", st->slot[k].loadout);
+            snprintf((char *)q + 20, 16, "%.15s", st->slot[k].pilot);
+        }
+        if ((f = fopen(p, "wb"))) { fwrite(prm, 1, sizeof prm, f); fclose(f); }
+    }
 }
 /* the campaign star back to the mission's own (main loop 0x36700 case 0xb: entering the Ready Room from the clan
  * hall (1) or the debriefing (3) runs FUN_0003ab50(0, 0, 3, 1, 100) then FUN_000291b0(<mission>, 1): formation 0,
@@ -1600,6 +1671,16 @@ static void star_reset_mission(int clan, int mission)
     star_save(clan);
 }
 
+/* the engine table (0x7f6cc, 79 x {rating, mass x 100, manufacturer}: ratings 10..400 in steps of 5); the ENGINE page's
+ * "Manufactur" line is the entry of the design's engine (0x2bf80: object +0x24 -> the index, + 10000 for an XL -> % 10000) */
+static const char *const ENGINE_MAKER[79] = {
+    "Omni", "GM", "Pitban", "Omni", "Nissan", "VOX", "GM", "GM", "DAV", "VOX", "Leenex", "Nissan", "Omni", "GM",
+    "VOX", "DAV", "DAV", "Nissan", "Hermes", "DAV", "GM", "GM", "GM", "Vlar", "Magna", "Hermes", "Leenex", "Omni",
+    "GM", "GM", "LTV", "VOX", "DAV", "Omni", "GM", "GM", "DAV", "Nissan", "Nissan", "Vlar", "GM", "Core Tex", "DAV",
+    "VOX", "Leenex", "GM", "Pitban", "Magna", "Magna", "Strand", "Magna", "Vlar", "GM", "Core Tex", "VOX", "Pitban",
+    "Omni", "GM", "Vlar", "GM", "Magna", "GM", "Pitban", "VOX", "VOX", "Leenex", "VOX", "Vlar", "Magna", "LTV",
+    "Hermes", "Hermes", "Magna", "GM", "GM", "LTV", "Magna", "Hermes", "LTV"};
+static const char *engine_maker(int rating) { int i = (rating - 10) / 5; return ENGINE_MAKER[i < 0 ? 0 : i > 78 ? 78 : i]; }
 /* ---- the Mech Lab (screen 9, FUN_000339e0), chassis / variant choice only for now (weapon editing NOT YET):
  * the 18 shell mechs; variants = the archive's MEK records <code>NN... */
 static int mek_variants(const char *code, char out[][9], int max)
@@ -2291,7 +2372,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                 dlg_g(444, 64, "ENGINE");
                 dlg_g(444, 86, "Rating"); snprintf(t, sizeof t, "%d%s", ed_rating(e), ed_is_xl(e) ? "XL" : ""); dlg_g(544, 86, t);
                 dlg_g(444, 97, "Type"); dlg_w(544, 97, ed_is_xl(e) ? "XL" : "Std");
-                dlg_g(444, 108, "Manufactur"); dlg_g(544, 108, "Vlar");
+                dlg_g(444, 108, "Manufactur"); dlg_g(544, 108, engine_maker(ed_rating(e)));
                 dlg_g(444, 119, "Mass"); snprintf(t, sizeof t, "%.2f T", mm.engine); dlg_g(544, 119, t);
                 dlg_g(444, 130, "Walking Speed"); snprintf(t, sizeof t, "%.1f kph", walk); dlg_g(544, 130, t);
                 dlg_g(444, 141, "Running Speed"); snprintf(t, sizeof t, "%.1f kph", run); dlg_g(544, 141, t);
@@ -2458,6 +2539,11 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);
     for (i = 0; i < 9; i++) cl[i] = (cx == 2 && i >= 4) ? NULL : clip_open(CL[cx][i]);   /* context 2: WIASTAR .. WIAVP flags 0x24, hidden */
     if (!headless) shell_sound(LAB_VOICE[m], 0x28);   /* the chassis' name on entering (0x34441) */
+    if (getenv("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the chassis by lance index, as NEXT CHASSIS would reach it */
+        m = atoi(getenv("MW2_SHELL_LAB_CHASSIS")) % lance_mech_count();
+        nv = mek_variants(lance_mech_code(m), var, 24); vi = 0;
+        printf("lab chassis %d %s, %d variants\n", m, MECHS[m].name, nv);
+    }
     while (next == -1) {
         SDL_Event e;
         const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
@@ -2470,7 +2556,11 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             FILE *fp;
             free(shp); shp = NULL; shpn = 0; shp_m = m;
             snprintf(dn, sizeof dn, "SMK\\%s%s.SHP", clan == 1 ? "AJFMP" : clan >= 2 ? "AIAMP" : "AWOMP", MECH_PIC[m]);
-            if ((fp = fopen(gpath(dn), "rb"))) {
+            if (!(fp = fopen(gpath(dn), "rb"))) {   /* the easter-egg chassis have only the Instant Action turntable */
+                snprintf(dn, sizeof dn, "SMK\\AIAMP%s.SHP", MECH_PIC[m]);
+                fp = fopen(gpath(dn), "rb");
+            }
+            if (fp) {
                 fseek(fp, 0, SEEK_END); shplen = (size_t)ftell(fp); fseek(fp, 0, SEEK_SET);
                 if ((shp = malloc(shplen)) && fread(shp, 1, shplen, fp) == shplen) shpn = shp_count(shp, shplen);
                 fclose(fp);
@@ -2496,9 +2586,13 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                     }
                     if (h == 0) next = clan >= 2 ? 7 : 11;                                                          /* EXIT LAB (case 0: 0xb) */
                     else if (h == 1) { shell_sound(0x66, 0x32); next = 13; }                                        /* STAR CONFIG (0xd) */
-                    else if (h == 2 || h == 3) {                                                                     /* chassis: the 15 clan 'Mechs */
+                    else if (h == 2 || h == 3) {                                                                     /* chassis: all 18 (easter-egg chassis unlocked) */
                         shell_sound_stop(LAB_VOICE[m]);                                                              /* the last name stops (0x3a400) */
-                        m = (m + (h == 2 ? 1 : 14)) % 15;
+                        {   /* all 18 chassis, the easter-egg ones too, in every lab (user request; the original: FUN_000339e0
+                             * DAT_00083840 = FUN_000295c0() - 15 to 18 by the pilot's name - for the IA star, 15 otherwise) */
+                            int nch = lance_mech_count();
+                            m = (m + (h == 2 ? 1 : nch - 1)) % nch;
+                        }
                         nv = mek_variants(lance_mech_code(m), var, 24); vi = 0;
                         shell_sound(LAB_VOICE[m], 0x28);
                     } else if ((h == 4 || h == 5) && nv) { shell_sound(0x65, 0x32); vi = (vi + (h == 4 ? 1 : nv - 1)) % nv; }   /* variant */
@@ -2672,11 +2766,16 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         }
         draw_bg();
         g_clip_pal = getenv("MW2_NO_CLIPPAL") || !cl[0] || !cl[0]->s ? NULL : smk_palette(cl[0]->s);
-        for (k = 0; k < 10; k++) {
-            if (!cl[k]) continue;
-            if (k >= 1 && k <= 3 && k > st->size) continue;   /* empty bays */
-            clip_next(cl[k]);
-            clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
+        {   /* each clip steps at its own Smacker rate (the grids, bays and panels: 67 ms; DOSBox AWOGRID 71-74 ms a frame,
+             * the 67 ms rounded up to the 70 Hz display) - the loop had stepped them every 66 ms pass */
+            static Uint32 clast[10];
+            Uint32 now = SDL_GetTicks();
+            for (k = 0; k < 10; k++) {
+                if (!cl[k]) continue;
+                if (k >= 1 && k <= 3 && k > st->size) continue;   /* empty bays */
+                if (headless || f == 0 || !cl[k]->s || now - clast[k] >= (Uint32)smk_frame_ms(cl[k]->s)) { clip_next(cl[k]); clast[k] = now; }
+                clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
+            }
         }
         if (!getenv("MW2_SC_CLIPPAL")) g_clip_pal = NULL;
         {   /* FUN_0003b1f0: the formation (centred at 320, y 4) and four lines (y 35 / 50 / 65 / 80);
@@ -2768,7 +2867,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
             SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
-            SDL_Delay(66);   /* the clips' pace (ASSUMED ~15 fps) */
+            SDL_Delay(15);
         }
     }
     for (k = 0; k < 10; k++) clip_close(cl[k]);
@@ -2830,6 +2929,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     setenv("MW2_PILOT", g_reg[reg].name, 1);
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
@@ -2924,7 +3024,10 @@ static void wr32(uint8_t *b, int32_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v 
  * +0x24, 1 = ON / HIGH), RESOLUTION 377 (MW2SND +0x2c: the VESA driver name, vesa480.dll / vesa768.dll), INVULNERABILITY
  * 416 (MW2DIF +1), UNLIMITED AMMO 436 (+0), NO COLLISION DAMAGE 456 (+3); sliders MUSIC / EFFECTS / VOICE at
  * (335, 128 / 152 / 176) 285 wide = MW2SND int32 16.16 at +0xc / +4 / +8. The port: RESOLUTION lists the display's
- * modes: see above. */
+ * modes: see above. The port's look rows RENDERER (y 239) and TEXTURES (y 258) head the DETAIL group: the artwork's
+ * DIFFICULTY group (its heading and HEAT TRACKING, y 219-252) is drawn 20 px higher, into the gap under the sliders
+ * (the VOICE track ends at y 192), and the DETAIL heading moves up from the OBJECT TEXTURES row to the RENDERER row -
+ * every row then 19-20 px apart as the original's, each group headed by its red word. */
 static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     uint8_t snd[60], dif[8];
@@ -2934,8 +3037,11 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     int done = 0, i, nmodes = 0, mi = -1;
     struct { int w, h; } modes[64];
     smk *logo = open_smk("AMWLOGO1");
-    static const int ROW_Y[13] = {219, 239, 277, 297, 317, 337, 357, 377, 397, 416, 436, 456, 258};   /* + the port's RENDERER */
+    /* the original's rows (DIFFICULTY and HEAT TRACKING 20 px up, see above), the port's DISPLAY, RENDERER, TEXTURES */
+    static const int ROW_Y[14] = {199, 219, 277, 297, 317, 337, 357, 377, 397, 416, 436, 456, 239, 258};
     static const char *const ED_TEXT[PORTCFG_ED_COUNT] = {"ENHANCED", "DOS", "3DFX", "ATI RAGE", "S3 VIRGE", "POWERVR", "MATROX MYSTIQUE"};
+    static const char *const TX_TEXT[PORTCFG_TX_COUNT] = {"ORIGINAL", "TITANIUM"};
+    int tx_lock;
     memset(snd, 0, sizeof snd); memset(dif, 0, sizeof dif);
     wr32(snd + 0x0c, 65536); wr32(snd + 0x04, 65536); wr32(snd + 0x08, 65536);
     for (i = 0x14; i <= 0x24; i += 4) wr32(snd + i, 1);
@@ -2956,8 +3062,11 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     load_bg(2);
     while (!done) {
         SDL_Event e;
-        int sel[13];
+        int sel[14];
         char res[32], aa[16];
+        /* TEXTURES is ORIGINAL and not changeable with the DOS renderer (its palette-indexed textures) or without the
+         * titanium/ folder; shown in grey then */
+        tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM);
         sel[0] = dif[5] <= 2 ? dif[5] : 1; sel[1] = dif[4] ? 0 : 1;
         for (i = 0; i < 5; i++) sel[2 + i] = rd32(snd + 0x14 + 4 * i) ? 0 : 1;   /* ON / HIGH first */
         /* RESOLUTION: the original's three words when the sim draws at one of them (render=), else the port's NATIVE text */
@@ -2973,7 +3082,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) || (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
-                    for (i = 0; i < 13; i++) {
+                    for (i = 0; i < 14; i++) {
                         if (x < 375 || x > 633 || y < ROW_Y[i] - 2 || y > ROW_Y[i] + 14) continue;
                         if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
                         else if (i == 1) dif[4] ^= 1;
@@ -3000,15 +3109,17 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         else if (i == 9) dif[1] ^= 1;
                         else if (i == 10) dif[0] ^= 1;
                         else if (i == 11) dif[3] ^= 1;
-                        else if (i == 12) {   /* the port's RENDERER: the look of the simulation, editions whose files are here */
-                            int e2 = pc.edition, tries;
+                        else if (i == 12) {   /* the port's RENDERER: how the simulation is drawn, editions whose files are here */
+                            int e2 = pc.renderer, tries;
                             for (tries = 0; tries < PORTCFG_ED_COUNT; tries++) {
                                 char m1[PORTCFG_PATH], m2[PORTCFG_PATH], m3[PORTCFG_PATH], m4[PORTCFG_PATH], m5[PORTCFG_PATH];
                                 e2 = (e2 + 1) % PORTCFG_ED_COUNT;
                                 if (portcfg_edition(&g_cfg, e2, m1, m2, m3, m4, m5) == 0) break;
                             }
-                            pc.edition = g_cfg.edition = e2;
+                            pc.renderer = g_cfg.renderer = e2;
                         }
+                        else if (i == 13 && !tx_lock)   /* the port's TEXTURES: ORIGINAL / TITANIUM */
+                            pc.texset = g_cfg.texset = pc.texset == PORTCFG_TX_TITANIUM ? PORTCFG_TX_ORIGINAL : PORTCFG_TX_TITANIUM;
                     }
                     for (i = 0; i < 3; i++) {   /* MUSIC / EFFECTS / VOICE: the knob's centre at x 350 + v */
                         static const int SY[3] = {128, 152, 176}, SO[3] = {0x0c, 0x04, 0x08};
@@ -3022,6 +3133,19 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             }
         }
         draw_bg();
+        {   /* the port's layout (see above): the DIFFICULTY group's artwork 20 px up, the DETAIL heading to the RENDERER row */
+            int x, y;
+            for (y = 219; y <= 252; y++) for (x = 0; x < 375; x++) {
+                uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3;
+                memcpy(q - (size_t)20 * W * 3, q, 3);
+                if (y > 252 - 20) q[0] = q[1] = q[2] = 0;
+            }
+            for (y = 276; y <= 294; y++) for (x = 0; x < 171; x++) {
+                uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3;
+                memcpy(q - (size_t)38 * W * 3, q, 3);
+                q[0] = q[1] = q[2] = 0;
+            }
+        }
         {   /* blank the value column, then the chosen words */
             int x, y;
             for (y = 124; y < 476; y++) for (x = 375; x < 634; x++) { uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3; q[0] = q[1] = q[2] = 0; }
@@ -3029,29 +3153,32 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         {   /* every value in one lettering (the port's rows had made the artwork's words look out of place): the chosen
              * value per row as text at x 393; the DISPLAY label right-aligned at 360 */
             static const char *const DIFF[3] = {"EASY", "MEDIUM", "HARD"};
-            char vals[13][32];
+            char vals[14][32];
             tt_item it;
             int k;
-            const char *lines[15];
-            int ly[15], lx[15];
-            for (k = 0; k < 13; k++) {
+            const char *lines[17];
+            int ly[17], lx[17];
+            for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
                 else if (k == 7) snprintf(vals[k], sizeof vals[k], "%s", sel[7] == 0 ? "320x200" : sel[7] == 1 ? "640x480" : sel[7] == 2 ? "1024x768" : res);
                 else if (k == 8) snprintf(vals[k], sizeof vals[k], "%s", aa);
-                else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.edition >= 0 && pc.edition < PORTCFG_ED_COUNT ? pc.edition : 0]);
+                else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.renderer >= 0 && pc.renderer < PORTCFG_ED_COUNT ? pc.renderer : 0]);
+                else if (k == 13) snprintf(vals[k], sizeof vals[k], "%s", TX_TEXT[!tx_lock && pc.texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
                 else snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "ON" : "OFF");
                 lines[k] = vals[k]; ly[k] = ROW_Y[k] + 1; lx[k] = 393;
             }
-            lines[13] = "DISPLAY"; ly[13] = 398; lx[13] = 360;
-            lines[14] = "RENDERER"; ly[14] = ROW_Y[12] + 1; lx[14] = 360;
-            for (k = 0; k < 15; k++) {
+            lines[14] = "DISPLAY"; ly[14] = 398; lx[14] = 360;
+            lines[15] = "RENDERER"; ly[15] = ROW_Y[12] + 1; lx[15] = 360;
+            lines[16] = "TEXTURES"; ly[16] = ROW_Y[13] + 1; lx[16] = 360;
+            for (k = 0; k < 17; k++) {
                 const char *t = lines[k];
+                int grey = tx_lock && (k == 13 || k == 16);   /* TEXTURES locked: its label and value greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
-                    int tx2 = k >= 13 ? lx[k] - text_width(&g_flabel, t) : lx[k];
-                    draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, -1);
-                } else if (g_text_hires) tt_text(lx[k], ly[k], t, k >= 13);
-                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = k >= 13; it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
+                    int tx2 = k >= 14 ? lx[k] - text_width(&g_flabel, t) : lx[k];
+                    draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, grey ? 6 : -1);
+                } else if (g_text_hires) { int n0 = g_ntt; tt_text(lx[k], ly[k], t, k >= 14); if (grey && g_ntt > n0) g_tt[n0].rgb[0] = g_tt[n0].rgb[1] = g_tt[n0].rgb[2] = 110; }
+                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = k >= 14; it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = grey ? 110 : 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
             }
         }
         if (logo) { smk_next(logo); blit_smk(logo, 120, 4); }
@@ -3164,6 +3291,8 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     int top = 0x1cc, done = 0, k, frames = 0, prev_bg = g_bg_entry;
     const uint8_t (*pal)[3];
     uint8_t *bgfb = malloc(sizeof g_fb);
+    const Uint32 t0 = SDL_GetTicks();
+    Uint32 logo_t = t0;
     credits_load();
     load_bg(4);                                   /* shell image 5: "THE KESHIK" under the logo */
     pal = (const uint8_t (*)[3])g_bg.pal;
@@ -3192,16 +3321,20 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             text_layer_cull(0, 0x1cc, W, H);
         }
         if (logo) blit_smk(logo, 120, 4);
-        top--;
+        /* FUN_00021400: one pixel a pass of its loop, nothing else pacing it (no timer, no retrace wait: DOSBox, cycles
+         * max, 0-3 px a 70 Hz frame, 96 px/s on average - the port scrolls at that average); the list is never started
+         * again (the first line drawn only moves on; once the last has passed the window stays empty until a key or a
+         * click); the logo clip steps at its own rate (AMWLOGO1 100 ms; DOSBox the same) */
         frames++;
-        if (top + 20 * g_ncredits < 0x69) top = 0x1cc;   /* ASSUMED: starts over at the end */
+        if (headless) top--;
+        else top = 0x1cc - (int)((SDL_GetTicks() - t0) * 96u / 1000u);
         if (headless) { if (frames >= (getenv("MW2_KESHIK_FRAMES") ? atoi(getenv("MW2_KESHIK_FRAMES")) : 300)) done = 1; continue; }
         while (SDL_PollEvent(&e))
             if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) done = 1;
-        if (logo && (frames & 1)) smk_next(logo);   /* the clip steps twice a scroll step in the original loop (ASSUMED rate) */
+        if (logo && SDL_GetTicks() - logo_t >= (Uint32)smk_frame_ms(logo)) { smk_next(logo); logo_t = SDL_GetTicks(); }
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
         SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
-        SDL_Delay(20);
+        SDL_Delay(10);
     }
     if (logo) smk_close(logo);
     free(bgfb);
@@ -3540,6 +3673,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     setenv("MW2_PILOT", pilot, 1);
     sim_command(line, sizeof line, up, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     loading_screen(g_load_clan);
@@ -3595,6 +3729,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                             char scen[16];
                             snprintf(scen, sizeof scen, "%s%dSCN1", clan == 1 ? "tnj" : "tnw", i + 1);
                             launch_scenario(clan, scen, reg >= 0 ? g_reg[reg].name : "Cadet");
+                            music_after_mission(14, clan);   /* user report: the training menu's song resumes */
                             load_bg(clan == 1 ? 19 : 12);
                         }
                 }
@@ -3621,6 +3756,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                 char scen[16];
                 snprintf(scen, sizeof scen, "%s%dSCN1", clan == 1 ? "tnj" : "tnw", it);
                 launch_scenario(clan, scen, reg >= 0 ? g_reg[reg].name : "Cadet");
+                music_after_mission(14, clan);
             }
         }
         if (headless) { if (f >= frames) next = -2; }
@@ -3635,29 +3771,43 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
 }
 
 
-/* ---- the Archive Holoprojector (screen 5, FUN_00026b50): ARCHWO.MW2 / ARCHJF.MW2 = u32 count, u32 offsets[count + 1],
- * pages of tagged fields: 00 01 title; 00 04 <target page> 00 <name> per link; 00 02 text (\n \t markup, \aNN = the
- * next word links to this page's link NN); 00 ff end. Background: the holo-room (entry 11 / 18); the text box and
- * the link highlighting are approximations of the footage */
-typedef struct { char word[40]; int link, nl, x, y, w; } arch_tok;
+/* ---- the Archive Holoprojector (screen 5, FUN_00026b50 -> the viewer FUN_00027a20 / FUN_00027160): ARCHWO.MW2 /
+ * ARCHJF.MW2 = u32 count, u32 offsets[count + 1], pages of tagged fields: 00 01 title; 00 04 <target> 00 <name> per
+ * link - the target is a 1-based page number (ARCHWO: "0clans.com" 2 -> page 1 "Clan History", "redline.com" 68 -> 67);
+ * 00 02 text (\n line, \t tab, \aNN = the next word links to this page's link NN; raw line ends are nothing); 00 ff end.
+ * Background: the holo-room (entry 11 / 18; its magenta panel is part of the picture). Text in shell font 0x20
+ * (DAT_00091184 = DATABASE entry 31) - measured against DOSBox (docs/reference/dos_archive_*.png, 38 / 38 wrapped lines
+ * and every pixel of the text): the title in entry 29's capitals centred on x 320 at y 50; the text from (88, 70),
+ * 12 px a line, 19 lines a page, wrapped at 460 px, tab stops every 36 px (a tab opening a continued page is dropped),
+ * colour 5 (187 grey: the font's colour 1 remapped), link words in the font's own white. Hotspots 0x7d75c / 0x7e0c4
+ * (4: ~EXIT, ~PREV PAGE, ~NEXT PAGE, ~BACK; '~' = the label (entry 27) only under the pointer; PREV / NEXT only when
+ * there is such a page - DOSBox) */
+typedef struct { char word[40]; int link, line, x, w; } arch_tok;
+static const int ARCH_HS[2][4][6] = {
+    {{0, 440, 639, 479, 320, 455}, {405, 372, 479, 405, 449, 354}, {480, 372, 556, 405, 511, 408}, {67, 358, 120, 410, 92, 408}},
+    {{0, 440, 639, 479, 320, 455}, {405, 364, 479, 397, 449, 346}, {480, 364, 556, 397, 511, 400}, {67, 358, 120, 410, 92, 400}}};
+static const char *const ARCH_LABEL[4] = {"EXIT", "PREV PAGE", "NEXT PAGE", "BACK"};
+enum { ARCH_X = 88, ARCH_Y = 70, ARCH_LH = 12, ARCH_LINES = 19, ARCH_W = 460, ARCH_TAB = 36 };
 static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
     char path[700];
     uint8_t *d = NULL;
     long len = 0;
     FILE *f;
-    int page = 0, hist[64], nh = 0, next = -1, fr = 0, top = 0;
+    int page = 0, hist[64], nh = 0, next = -1, fr = 0, sub = 0;
+    const int (*hs)[6] = ARCH_HS[clan == 1];
     snprintf(path, sizeof path, "%s", gpath(clan == 1 ? "ARCHJF.MW2" : "ARCHWO.MW2"));
     if ((f = fopen(path, "rb"))) { fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET); d = malloc((size_t)len); if (d && fread(d, 1, (size_t)len, f) != (size_t)len) len = 0; fclose(f); }
     if (!d || len < 8) { free(d); return 1; }
+    if (getenv("MW2_ARCH_PAGE")) sscanf(getenv("MW2_ARCH_PAGE"), "%d,%d", &page, &sub);   /* TEST ONLY: page, sub-page */
     load_bg(clan == 1 ? 18 : 11);
     while (next == -1) {
         static arch_tok tok[3000];
-        int nt = 0, links[64], nl = 0, i, n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
+        int nt = 0, links[64], nl = 0, i, nlines = 1, npages, hover = -1, en[4], n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
         char title[64] = "";
-        const int bx = 120, by = 70, bw = 400, bh = 320, lh = 12;
-        {   /* parse the page */
+        {   /* parse and lay out the page */
             uint32_t a = 0, b = 0;
+            const int sp = text_width(&g_fthin, " ");
             if (page >= 0 && page < n && 8 + page * 4 + 4 <= len) {
                 a = d[4 + page * 4] | d[5 + page * 4] << 8 | d[6 + page * 4] << 16 | (uint32_t)d[7 + page * 4] << 24;
                 b = d[8 + page * 4] | d[9 + page * 4] << 8 | d[10 + page * 4] << 16 | (uint32_t)d[11 + page * 4] << 24;
@@ -3668,80 +3818,84 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                 a += 2;
                 if (tag == 0xff) break;
                 if (tag == 1) { snprintf(title, sizeof title, "%s", (const char *)d + a); a += (uint32_t)strlen((const char *)d + a) + 1; }
-                else if (tag == 4) { if (nl < 64) links[nl++] = d[a]; a += 2; a += (uint32_t)strlen((const char *)d + a) + 1; }
-                else if (tag == 2) {   /* the text, into words */
+                else if (tag == 4) { if (nl < 64) links[nl++] = d[a] - 1; a += 2; a += (uint32_t)strlen((const char *)d + a) + 1; }
+                else if (tag == 2) {
                     const char *t = (const char *)d + a;
                     size_t L = strlen(t), q = 0;
-                    int pending = -1, x = 0, y = 0;
+                    int pending = -1, x = 0, line = 0;
                     while (q < L && nt < 3000) {
                         if (t[q] == '\\' && q + 1 < L) {
                             char c = t[q + 1];
-                            if (c == 'n') { x = 0; y++; q += 2; continue; }
-                            if (c == 't') { x = (x / 64 + 1) * 64; q += 2; continue; }
+                            if (c == 'n') { x = 0; line++; q += 2; continue; }
+                            if (c == 't') { if (!(x == 0 && line > 0 && line % ARCH_LINES == 0)) x = (x / ARCH_TAB + 1) * ARCH_TAB; q += 2; continue; }
                             if (c == 'a' && q + 3 < L) { pending = (t[q + 2] - '0') * 10 + (t[q + 3] - '0'); q += 4; continue; }
                             q += 2; continue;
                         }
-                        if (t[q] == '\n' || t[q] == '\r' || t[q] == ' ') { if (t[q] == ' ') x += 5; q++; continue; }
+                        if (t[q] == ' ') { x += sp; q++; continue; }
+                        if (t[q] == '\n' || t[q] == '\r') { q++; continue; }
                         {
                             arch_tok *k = &tok[nt];
                             int wl = 0;
-                            while (q < L && t[q] != ' ' && t[q] != '\n' && t[q] != '\\' && wl < 39) k->word[wl++] = t[q++];
+                            while (q < L && t[q] != ' ' && t[q] != '\n' && t[q] != '\r' && t[q] != '\\' && wl < 39) k->word[wl++] = t[q++];
                             k->word[wl] = 0;
-                            k->w = text_width(&g_flist, k->word);
-                            if (x + k->w > bw - 8) { x = 0; y++; }
-                            k->x = x; k->y = y; k->link = pending; pending = -1;
+                            k->w = text_width(&g_fthin, k->word);
+                            if (x + k->w > ARCH_W && nt > 0 && tok[nt - 1].line == line) { x = 0; line++; }
+                            k->x = x; k->line = line; k->link = pending; pending = -1;
                             x += k->w;
                             nt++;
                         }
                     }
+                    nlines = line + 1;
                     a += (uint32_t)L + 1;
                 } else a += (uint32_t)strlen((const char *)d + a) + 1;   /* other fields: skipped */
             }
         }
+        npages = (nlines + ARCH_LINES - 1) / ARCH_LINES;
+        if (sub >= npages) sub = npages - 1;
+        if (sub < 0) sub = 0;
+        en[0] = 1; en[1] = sub > 0; en[2] = sub + 1 < npages; en[3] = 1;
+        for (i = 0; i < 4; i++) if (en[i] && *mx >= hs[i][0] && *mx <= hs[i][2] && *my >= hs[i][1] && *my <= hs[i][3]) hover = i;
         if (!headless) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y * 3;
                 if (e.type == SDL_KEYDOWN) {
                     if (e.key.keysym.sym == SDLK_ESCAPE) next = 1;
-                    if (e.key.keysym.sym == SDLK_DOWN || e.key.keysym.sym == SDLK_PAGEDOWN) top += e.key.keysym.sym == SDLK_DOWN ? 1 : bh / lh - 2;
-                    if (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_PAGEUP) top -= e.key.keysym.sym == SDLK_UP ? 1 : bh / lh - 2;
-                    if (e.key.keysym.sym == SDLK_BACKSPACE && nh) { page = hist[--nh]; top = 0; }
+                    if ((e.key.keysym.sym == SDLK_DOWN || e.key.keysym.sym == SDLK_PAGEDOWN) && en[2]) sub++;
+                    if ((e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_PAGEUP) && en[1]) sub--;
+                    if (e.key.keysym.sym == SDLK_BACKSPACE && nh) { page = hist[--nh]; sub = 0; }
                 }
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                    int x = e.button.x, y = e.button.y;
-                    if (y >= 440 && x >= 60 && x < 200) { if (nh) { page = hist[--nh]; top = 0; } else next = 1; }   /* BACK */
-                    else if (y >= 440 && x >= 440 && x < 600) top += bh / lh - 2;                                     /* NEXT PAGE */
+                    int x = e.button.x, y = e.button.y, h = -1;
+                    for (i = 0; i < 4; i++) if (en[i] && x >= hs[i][0] && x <= hs[i][2] && y >= hs[i][1] && y <= hs[i][3]) h = i;
+                    if (h == 0) next = 1;                                   /* EXIT: the hall */
+                    else if (h == 1) sub--;                                 /* PREV PAGE */
+                    else if (h == 2) sub++;                                 /* NEXT PAGE */
+                    else if (h == 3) { if (nh) { page = hist[--nh]; sub = 0; } }   /* BACK: the page linked from (none at the first: ASSUMED) */
                     else for (i = 0; i < nt; i++) {
                         const arch_tok *k = &tok[i];
-                        int ky = by + (k->y - top) * lh;
-                        if (k->link >= 0 && k->link < nl && x >= bx + k->x && x < bx + k->x + k->w && y >= ky && y < ky + lh) {
+                        int ky = ARCH_Y + (k->line - sub * ARCH_LINES) * ARCH_LH;
+                        if (k->line / ARCH_LINES != sub) continue;
+                        if (k->link >= 0 && k->link < nl && links[k->link] >= 0 && links[k->link] < n && x >= ARCH_X + k->x && x < ARCH_X + k->x + k->w && y >= ky && y < ky + ARCH_LH) {
                             if (nh < 64) hist[nh++] = page;
-                            page = links[k->link]; top = 0;
+                            page = links[k->link]; sub = 0;
                             break;
                         }
                     }
                 }
             }
         }
-        if (top < 0) top = 0;
         draw_bg();
         {
             const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
-            int x, y;
-            for (y = by - 30; y < by + bh + 6; y++) for (x = bx - 10; x < bx + bw + 10; x++) { uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3; q[0] = (uint8_t)(q[0] / 3 + 60); q[1] /= 3; q[2] = (uint8_t)(q[2] / 3 + 60); }
-            draw_text(&g_flabel, 320 - text_width(&g_flabel, title) / 2, by - 24, title, pal, -1);
+            draw_text(&g_fbig, 320 - text_width(&g_fbig, title) / 2, 50, title, pal, -1);
             for (i = 0; i < nt; i++) {
                 const arch_tok *k = &tok[i];
-                int ky = by + (k->y - top) * lh;
-                if (ky < by || ky > by + bh - lh) continue;
-                draw_text(&g_flist, bx + k->x, ky, k->word, pal, -1);
-                if (k->link >= 0) for (x = bx + k->x; x < bx + k->x + k->w; x++) { uint8_t *q = g_fb + ((size_t)(ky + lh - 1) * W + (size_t)x) * 3; q[0] = 120; q[1] = 255; q[2] = 120; }   /* a link */
+                if (k->line / ARCH_LINES != sub) continue;
+                draw_text(&g_fthin, ARCH_X + k->x, ARCH_Y + (k->line % ARCH_LINES) * ARCH_LH, k->word, pal, k->link >= 0 && k->link < nl ? -1 : 5);
             }
-            draw_text(&g_flabel, 130 - text_width(&g_flabel, "BACK") / 2, 450, "BACK", pal, -1);
-            draw_text(&g_flabel, 520 - text_width(&g_flabel, "NEXT PAGE") / 2, 450, "NEXT PAGE", pal, -1);
+            if (hover >= 0) draw_text(&g_flabel, hs[hover][4] - text_width(&g_flabel, ARCH_LABEL[hover]) / 2, hs[hover][5], ARCH_LABEL[hover], pal, -1);
         }
         fr++;
         if (headless) { if (fr >= frames) next = -2; }
@@ -4347,6 +4501,18 @@ int main(int argc, char **argv)
     g_f26.len = shelldb_entry(&g_db, 26, &g_f26.d);       /* shell font 0x1b (DAT_00091174): The Keshik's headings */
     g_f28.len = shelldb_entry(&g_db, 27, &g_f28.d);       /* shell font 0x1c (DAT_00091178) */
     if (getenv("MW2_SHELL_MOUSE")) sscanf(getenv("MW2_SHELL_MOUSE"), "%d,%d", &mx, &my);
+    if (getenv("MW2_STAR_PRM")) {   /* TEST ONLY: the star record in <dir>/MW2PRM.CFG - load, print, save with formation + 1, reload */
+        int k, pass;
+        snprintf(g_dir, sizeof g_dir, "%s", getenv("MW2_STAR_PRM"));
+        for (pass = 0; pass < 2; pass++) {
+            star_load(0);
+            printf("star formation %d size %d", g_star[0].formation, g_star[0].size);
+            for (k = 0; k < 3; k++) printf(" | %d %s %s", g_star[0].slot[k].mech, g_star[0].slot[k].loadout, g_star[0].slot[k].pilot);
+            printf("\n");
+            if (!pass) { g_star[0].formation = (g_star[0].formation + 1) % 6; star_save(0); }
+        }
+        return 0;
+    }
     if (getenv("MW2_LAB_MASSES")) {   /* tests: every stock design's mass as the CUSTOMIZE panel computes it */
         char err[256];
         prj_archive *a = prj_open(gpath("MW2.PRJ"), err, sizeof err);
@@ -4466,6 +4632,7 @@ int main(int argc, char **argv)
         const char *pending_video = NULL;
         int next = -1, nclan = clan, f = 0;
         Uint32 last = SDL_GetTicks();
+        apply_music(screen, clan);   /* main 0x36700 applies the screen's music first - the cinematic screens 15 / 16 stop it */
         if (screen == 16) {   /* the ending (mend / mend2), then the clan hall */
             play_cinematic(rd, tx, clan == 1 ? "MEND2" : "MEND", headless);
             screen = 1;
@@ -4476,7 +4643,6 @@ int main(int argc, char **argv)
             screen = 1;
             continue;
         }
-        apply_music(screen, clan);
         if (screen == 11 && clan >= 0 && clan <= 1) {   /* the hall's READY ROOM once all 16 missions are won */
             int rg;
             reg_load();

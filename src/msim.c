@@ -15,6 +15,12 @@ static unsigned rnd_ms(unsigned *x);
 
 static float g_block_n[3] = {0, 1, 0};   /* see refuse() */
 static const char *g_block_what;   /* TEST ONLY (MW2_BLOCK_TRACE): what refused the last step */
+#define MSIM_CONTACT_HOLD 10   /* 1/30 s moves without a touch before contact mode ends (sliding round a mech: TNJ1 at most 3 between touches) */
+static int g_block_id = -1;        /* what refused the last msim_can_step_hr move: the world part (a terrain piece too), -1 none */
+static int g_hit_kind;             /* the last refusal: 1 the segment hit (g_hit_t along it), 2 a type 6 sphere (g_push) */
+static float g_hit_t, g_push[3], g_hit_at[4];   /* the hit's length along the extended segment; the pushed centre; the object's sphere */
+static int g_impact_part = -1;     /* the object of the last msim_world_impact (its first hit) and its centre */
+static float g_impact_at[4];
 static const msim_nav *find_nav(const msim *s, const char *name)
 {
     int i;
@@ -45,6 +51,7 @@ static const struct { int voice; const char *text; } ORDER_MSG[11] = {
     {0x23, "destroyed"}, {0x36, "critical hit"}, {0x0c, "ejecting"}, {0x0d, "reports system shutdown"},
     {0x2a, "reports task complete. Rejoining formation"}};
 static const char *const POINT_TEXT[3] = {"All points", "Point 2", "Point 3"};
+static const int POINT_VOICE[3] = {2, 264, 265};   /* 0x1024eb40 {voice, text}: ALLPOINT, Point 2, Point 3 */
 
 /* the player's starmates in lance order: point 1 = the first */
 static int star_member(const msim *s, int point)
@@ -65,9 +72,11 @@ static void msim_order_message(msim *s, int point, int msg)
 {
     char line[96];
     if (msg < 0 || msg > 10) return;
+    /* 0x10031810(msg, point): the point's entry first (table 0x1024eb40), the message's second (0x1024ec58) - both
+     * voices said in turn, the texts joined by a space (0x10031150); no point (-1): the message alone */
     if (point >= 0 && point < 3) snprintf(line, sizeof line, "%s %s", POINT_TEXT[point], ORDER_MSG[msg].text);
     else snprintf(line, sizeof line, "%s", ORDER_MSG[msg].text);
-    if (s->on_message) s->on_message(s->message_user, line, ORDER_MSG[msg].voice);
+    if (s->on_message) s->on_message(s->message_user, line, point >= 0 && point < 3 ? POINT_VOICE[point] | ORDER_MSG[msg].voice << 16 : ORDER_MSG[msg].voice);
     if (s->log) s->log(s->log_user, line);
 }
 
@@ -85,6 +94,8 @@ int msim_point_status(const msim *s, int point)
     return s->minds ? s->minds[i].state + 1 : 0;
 }
 
+static void guard_drop(ai_mind *m);
+static void guard_enter(const msim *s, ai_mind *m, int code);
 int msim_command(msim *s, int point, int order, int target)
 {
     int i, first = point ? point : 1, last = point ? point : 64, msg = -1, given = 0;
@@ -119,8 +130,10 @@ int msim_command(msim *s, int point, int order, int target)
         s->cmd[a] = order;
         s->cmd_target[a] = order == MSIM_CMD_ATTACK || order == MSIM_CMD_DEFEND ? target : -1;
         if (order == MSIM_CMD_JOIN) s->engage[a] = 0;
+        if (m->state == AI_FOLLOW || m->state == AI_PATROL) guard_drop(m);   /* exit 0x10013680 (5 / 7) -> 0x10013e90 */
         m->state = order; m->target = order == MSIM_CMD_ATTACK;
         if (s->defend_leg) s->defend_leg[a] = 0;
+        if (order == MSIM_CMD_DEFEND) guard_enter(s, m, 0x20000 | (target + 1));   /* entry case 7 -> 0x10013f00 */
         given = 1;
     }
     s->last_cmd[point < 8 ? point : 7] = MENU_INDEX[order];
@@ -271,9 +284,11 @@ static void cb_finished(void *u, int t, int i, int ok)
 
 int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count)
 {
+    int player_table;
     bwd_mission m;
     prj_record rec;
     int i, k;
+    const char *pl_rec;
     memset(s, 0, sizeof *s);
     snprintf(s->scene, sizeof s->scene, "%s", scene);
     s->actors = actors;
@@ -296,6 +311,23 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                     s->fx_light_ok = ch->size < 60 || (ch->data[56] | ch->data[57] | ch->data[58] | ch->data[59]) == 0;
                 }
             bwd_mission_free(&bm);
+        }
+        {   /* the mission configuration's overrides (0x1003de10 PLNT handler): DAT_1024ac6c is MW2DIF.CFG read into 0x17
+             * zeroed bytes (0x10008ae3 -> 0x100408a0; MW2NET.CFG in a network game): +0xf (16.16) replaces the gravity, +0x13
+             * the temperature, when not 0. The shell writes 8 bytes (Combat Variables, FUN_000258e0: fwrite 8 x 1), so a
+             * single-player game never has them - only a longer file would */
+            unsigned char *dif = NULL;
+            size_t dlen = 0;
+            dp_add_roots_from_env();
+            if (dp_read_file("MW2DIF.CFG", &dif, &dlen) == 0) {
+                if (dlen >= 0x17) {
+                    int32_t gv = (int32_t)(dif[0xf] | dif[0x10] << 8 | dif[0x11] << 16 | (uint32_t)dif[0x12] << 24);
+                    int32_t tv = (int32_t)(dif[0x13] | dif[0x14] << 8 | dif[0x15] << 16 | (uint32_t)dif[0x16] << 24);
+                    if (gv) pl.gravity_g = (float)gv / 65536.0f;
+                    if (tv) pl.temperature = tv;
+                }
+                free(dif);
+            }
         }
         if (pl.gravity_g <= 0) pl.gravity_g = 1.0f;
         if (getenv("MW2_DEBUG_PLANET")) fprintf(stderr, "planet %s: %.4f g, temp %d, jet damping %.0f\n", scene, pl.gravity_g, (int)pl.temperature, pl.jet_damping);
@@ -340,6 +372,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     snprintf(s->player_skel, sizeof s->player_skel, "TIMBRWLF");
     snprintf(s->player_loadout, sizeof s->player_loadout, "TBR00STD");
     s->player_class = 6;   /* the usual GPS class (destroy / protect) when there is no USERSTAR */
+    player_table = 0;
     {
         unsigned char *d = NULL;
         size_t len = 0, o = 12;
@@ -359,6 +392,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                         bwd_gps g;
                         if (bwd_gps_decode(pc, &g) != 0 || !g.is_player || !g.skeleton[0] || !g.loadout[0]) continue;
                         if (pc->size >= 26) s->player_class = (unsigned)(pc->data[24] | pc->data[25] << 8);
+                        player_table = g.table >= 0 && g.table < 0x10 ? g.table : 0;   /* GPS +4 -> unit +8 (0x1003f34b) */
                         snprintf(s->player_skel, sizeof s->player_skel, "%s", g.skeleton);
                         snprintf(s->player_loadout, sizeof s->player_loadout, "%s", g.loadout);
                         for (k = 0; s->player_skel[k]; k++) s->player_skel[k] = (char)toupper((unsigned char)s->player_skel[k]);
@@ -382,6 +416,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                     if (c.size >= 26) s->player_class = (unsigned)(c.data[24] | c.data[25] << 8);   /* GPS +0x18 (0x1003f38b) */
                     if (bwd_gps_decode(&c, &g) == 0 && g.skeleton[0] && g.loadout[0]) {
                         int k;
+                        player_table = g.table >= 0 && g.table < 0x10 ? g.table : 0;   /* GPS +4 -> unit +8 (0x1003f34b) */
                         snprintf(s->player_skel, sizeof s->player_skel, "%s", g.skeleton);
                         snprintf(s->player_loadout, sizeof s->player_loadout, "%s", g.loadout);
                         for (k = 0; s->player_skel[k]; k++) s->player_skel[k] = (char)toupper((unsigned char)s->player_skel[k]);
@@ -410,11 +445,17 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         s->player_unit.unlimited_ammo = v[0] != 0;
         s->player_unit.invulnerable = v[1] != 0;
         s->collision_damage = v[3] != 0;
+        s->splash = v[2] != 0;   /* SPLASH DAMAGE ("Splash Damage ON / OFF", MW2.EXE 0x46e90 strings), default on */
         for (i = 0; i < count; i++) s->units[i].no_collision_damage = v[3] == 0;   /* a global switch (DAT_1024ac6c + 3): falls too */
         s->player_unit.no_heat = v[4] == 0;
         s->player_unit.no_collision_damage = v[3] == 0;
         combat_set_player_difficulty(&s->player_unit, v[5]);
         s->difficulty = v[5];
+        /* the loader's armour factor by difficulty (engine 0x10041410, DOS 0x4c760): the player x 4, the player's side
+         * (alliance 0) x 3 / 3 / 4, others x 1 / 3 / 4 - armour and rear armour only */
+        combat_set_armor_mult(&s->player_unit, combat_armor_mult(1, 0, v[5]));
+        for (i = 0; i < count; i++)
+            if (s->armed[i]) combat_set_armor_mult(&s->units[i], combat_armor_mult(0, actors[i].friendly ? 0 : actors[i].alliance, v[5]));
         {   /* MW2SND.CFG +0x24: chunky explosions (default on) */
             unsigned char *snd = NULL;
             size_t sl = 0;
@@ -424,9 +465,23 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "MW2DIF: unlimited ammo %d, invulnerable %d, collision damage %d, heat tracking %d, difficulty %d\n", v[0], v[1], v[3], v[4], v[5]);
     }
     s->player_unit.hold_fire_above = 65.0f;      /* headless test player; glview sets 0 (you decide) */
-    if (mech3d_load(a, s->player_skel, 0, &s->pl_mech) == 0 || mech3d_load(a, "TIMBRWLF", 0, &s->pl_mech) == 0) {
+    pl_rec = s->player_skel;
+    if (mech3d_load(a, s->player_skel, 0, &s->pl_mech) == 0 || (pl_rec = "TIMBRWLF", mech3d_load(a, pl_rec, 0, &s->pl_mech) == 0)) {
         s->pl_mech_ok = 1;
         mech3d_hit_weights(&s->pl_mech, s->player_unit.hit_w);
+        /* in the cockpit view the player's object is switched to level of detail 4 (0x100267d0: camera mode 0,
+         * 0x1002df50) and the swap (0x10026330 -> 0x10026430) takes the old pieces out of the collision list and
+         * puts the new representation's in (0x10029a00, 0x1000db80): the shots meet the cockpit set - head, arms,
+         * upper and lower legs (TIMBRWLF: TW5_HEAD 3.5 m wide against TW1_HEAD's 7.3, no hips) */
+        s->pl_pit_ok = mech3d_load(a, pl_rec, 4, &s->pl_pit) == 0 && s->pl_pit.part_count > 0;
+        if (s->pl_pit_ok) mech3d_use_skeleton(&s->pl_pit, &s->pl_mech);
+    }
+    s->player_cockpit = 1;
+    {   /* each effect type's card radius (its geometry's +0x40: the farthest vertex, 0x100291fd) for the area damage */
+        fx_defs *fd = calloc(1, sizeof *fd);
+        if (fd && fx_load(a, fd) == 0)
+            for (i = 0; i < 32; i++) s->fx_radius[i] = sqrtf(fd->half_w[i] * fd->half_w[i] + fd->half_h[i] * fd->half_h[i]);
+        free(fd);
     }
     s->ai_ok = ai_load(&s->ai, a) == 0;
     s->minds = calloc((size_t)(count ? count : 1), sizeof *s->minds);
@@ -439,9 +494,16 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->defend_leg = calloc((size_t)(count ? count : 1), sizeof *s->defend_leg);
     s->ai_lock = calloc((size_t)(count ? count : 1), sizeof *s->ai_lock);
     s->provoked = calloc((size_t)(count ? count : 1), sizeof *s->provoked);
-    s->step_key = calloc((size_t)(count ? count : 1), sizeof *s->step_key);
-    s->anim_seq = calloc((size_t)(count ? count : 1), sizeof *s->anim_seq);
+    s->anim_pl = calloc((size_t)(count ? count : 1), sizeof *s->anim_pl);
+    for (i = 0; s->anim_pl && i < count; i++) anim_player_init(&s->anim_pl[i], actors[i].mech.anim_rate > 0 ? actors[i].mech.anim_rate : 70);
     s->bump_with = calloc((size_t)(count ? count : 1), sizeof *s->bump_with);
+    s->aim = calloc((size_t)(count ? count : 1), sizeof *s->aim);
+    memset(&s->player_aim, 0, sizeof s->player_aim);
+    s->reticle_actor = s->reticle_bld = -1;
+    s->contact_frac = calloc((size_t)(count ? count : 1), sizeof *s->contact_frac);
+    s->contact_acc = calloc((size_t)(count ? count : 1), sizeof *s->contact_acc);
+    s->across = calloc((size_t)(count ? count : 1), sizeof *s->across);
+    s->contact_hold = calloc((size_t)(count ? count : 1), sizeof *s->contact_hold);
     s->player_sel_w = 0;
     s->player_lock_target = -1;
     s->inspected = calloc((size_t)(count ? count : 1), 1);
@@ -454,6 +516,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         s->engage[i] = !(actors[i].friendly && actors[i].table == 0);   /* 0x100124a0: the player's group 0 */
     }
     for (i = 0; s->minds && i < count; i++) ai_init(&s->minds[i], actors[i].leader ? AIP_LDEFEND : AIP_FDEFEND);
+    if (getenv("MW2_AI_SEED")) for (i = 0; s->minds && i < count; i++) s->minds[i].rng ^= (unsigned)strtoul(getenv("MW2_AI_SEED"), NULL, 0) * 2654435761u;   /* TEST ONLY: sample the AI's random choices */
     s->air_speed = calloc((size_t)(count ? count : 1), sizeof *s->air_speed);
     s->avoid_turn = calloc((size_t)(count ? count : 1), sizeof *s->avoid_turn);
     s->avoid_thr = calloc((size_t)(count ? count : 1), sizeof *s->avoid_thr);
@@ -461,6 +524,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->avoid_side = calloc((size_t)(count ? count : 1), sizeof *s->avoid_side);
     s->height = calloc((size_t)(count ? count : 1), sizeof *s->height);
     s->wreck_until = calloc((size_t)count + 1, sizeof *s->wreck_until);
+    s->msg_seen = calloc((size_t)(count ? count : 1), sizeof *s->msg_seen);
     s->twist_limit = calloc((size_t)(count ? count : 1), sizeof *s->twist_limit);
     s->radius = calloc((size_t)(count > 0 ? count : 1), sizeof *s->radius);
     s->fly_seen = calloc((size_t)count + 1, sizeof *s->fly_seen);
@@ -520,9 +584,13 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                 if (bwd_navp(&m.records[i].chunks[k], &nv) != 0) continue;
                 snprintf(s->navs[s->nav_count].name, sizeof s->navs[0].name, "%s", m.records[i].name);
                 snprintf(s->navs[s->nav_count].label, sizeof s->navs[0].label, "%.21s", nv.name);
-                /* engine 0x1001cea0: skipped when NAVP +16 is 0 or +22 differs from the unit's +8
-                   (the player's group, assumed 0: 115 of 138 named nav points carry 0) */
-                s->navs[s->nav_count].selectable = nv.shown != 0 && nv.team == 0;
+                /* engine 0x1001cea0: skipped when NAVP +16 is 0 or +22 differs from the unit's +8 - the player's table,
+                 * its GPS +4 (the loader 0x1003f34b: the byte, 0 when 0x10 or more; 0 in all 50 mission trees' player GPS
+                 * and in the shell's USERSTAR). The runtime flags (+0x24 of the nav record, NAVP +18 at load: 0 in all 629
+                 * NAVPs) gain only 1 (the AI's own temporary points, 0x1001cab0 - never in the player's list) and 0x20
+                 * (visited); 0x40 (0x1001cea0 with 0x10000, 0x10015c00's 0x1000ad40 call) and 0x100 (0x10020e40) are
+                 * never set */
+                s->navs[s->nav_count].selectable = nv.shown != 0 && nv.team == player_table;
                 s->navs[s->nav_count].shown = nv.shown != 0;
                 s->navs[s->nav_count].x = (float)nv.x;
                 s->navs[s->nav_count].y = (float)nv.y;
@@ -579,6 +647,7 @@ static void ai_wake(msim *s, int i)
         s->on_sound(s->shot_user, 0x104, p3);
     }
 }
+static int task_pos(const msim *s, int code, float p[3], float *range);
 static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, float *eface, float *eh, int *who)
 {
     const world_actor *ac = &s->actors[i];
@@ -609,6 +678,16 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
             *ey = s->units[t].y; *eface = s->actors[t].mech.heading; *eh = s->height ? s->height[t] : 0; *who = t;
             return 1;
         }
+    }
+    if (s->minds && s->minds[i].tgt == -2 && (s->minds[i].state == AI_TARGET || s->minds[i].state == AI_ATTACK) &&
+        ((s->minds[i].node_tgt >> 16) == 1 || (s->minds[i].node_tgt >> 16) == 4)) {
+        /* a node task's nav point or thing as the target +0x14e (0x10014ba0 kinds 1 / 2 / 8): aimed at and fired on like a
+         * unit (0x100231a0, 0x100232b0's window by its distance); destroyed -> none (condition 6 / 0x10013c40 flag 4).
+         * who = -3: not a unit */
+        float p[3], r;
+        if (!task_pos(s, s->minds[i].node_tgt, p, &r)) return 0;
+        *ex = p[0]; *ez = p[2]; *ey = p[1]; *eface = 0; *eh = 0; *who = -3;
+        return 1;
     }
     if (self_al != 0 && !s->player_unit.destroyed && (self_al != 2 || s->player_victim == i || (s->provoked && s->provoked[i] > 0))) {
         float dx = s->player[0] - x0, dz = s->player[2] - z0;
@@ -717,9 +796,68 @@ static void group_assign(msim *s, int table, int leader, int who)
  * the first in lance order, not the leader, idle (0) or following (5) with weapons left (0x10020880); else the leader if
  * it idles with weapons; it enters the kind's state on the target (0x10013d40 -> 0x10013e00; while it has a state pushed
  * (+0x140), that pushed state is replaced instead) and takes the node's lock bits (0x100146e0) | 0x40 in +0x152.
- * Applied: kinds 1 / 2 / 8 on a unit (state 2 on it) and kinds 1 / 2 on a thing (state 2; the port's AI then fights the
- * enemy it finds, as before - it can't aim at a thing). Kinds 4 (state 7, guard), 0x100 / 0x20 (8, go to) and 0x2000
- * (4) and kind 8 on a thing are counted but not applied (the port's AI has no such tasks for enemy stars). */
+ * The state by kind (0x10014e63..0x10014f30): 1 / 2 / 8 -> 2 (target), 4 -> 7 (patrol round it, 0x10013f00), 0x20 / 0x100 ->
+ * 8 (go to it), 0x2000 -> 4 (flee it), 0x1000 -> 0 after the nuke at the member (0x10047020) - never reached: a 0x1000
+ * node succeeds the moment it is ready (0x1000a1d0 LAB_1000a621 with its test flag still true) before 0x1000a9b0 picks
+ * the current node, and kinds 0x20 / 0x2000 test an uninitialised flag in 0x10013c40 (taken as done, below). The target
+ * code goes to +0x14c and +0x14e alike (0x10013e00 -> 0x10012a00): the movement (0x100130f0) heads for it, the aim
+ * (0x100231a0) and the weapons' window (0x100232b0) take it - a nav point or a thing as much as a unit (pick_enemy). */
+/* a task target (the node's code: 0x20000 | unit + 1 (0 the player), 0x10000 | nav point, 0x40000 | thing): where it is
+ * (a thing: its box's centre - the engine's object +0x34 is its world bounding centre, 0x10029c10) and the reference
+ * range 0x10013450 gives it: a nav point its radius (at least 100 cm), a unit or a thing 100 m. 0: gone (a destroyed
+ * unit or thing, or none) */
+static int task_pos(const msim *s, int code, float p[3], float *range)
+{
+    int type = code >> 16, idx = code & 0xffff;
+    *range = 10000.0f;
+    if (type == 2) {
+        idx--;
+        if (idx < 0) { if (s->player_unit.destroyed) return 0; p[0] = s->player[0]; p[1] = s->player_unit.y; p[2] = s->player[2]; return 1; }
+        if (idx >= s->actor_count || !s->armed[idx] || s->units[idx].destroyed) return 0;
+        p[0] = (float)s->actors[idx].mech.origin[0]; p[1] = s->units[idx].y; p[2] = (float)s->actors[idx].mech.origin[2];
+        return 1;
+    }
+    if (type == 1) {
+        if (idx >= s->nav_count) return 0;
+        p[0] = s->navs[idx].x; p[1] = s->navs[idx].y; p[2] = s->navs[idx].z;
+        *range = s->navs[idx].radius >= 100.0f ? s->navs[idx].radius : 100.0f;
+        return 1;
+    }
+    if (type == 4 && idx < s->bld_count && s->bld[idx].hp > 0) {
+        int k;
+        for (k = 0; k < 3; k++) p[k] = (s->bld[idx].mn[k] + s->bld[idx].mx[k]) * 0.5f;
+        return 1;
+    }
+    return 0;
+}
+/* the unit's own temporary nav points (ai_mind.guard). Leaving state 5 or 7 (0x10013680 -> 0x10013e90) deletes them
+ * walking the nav table by index: each deletion (0x1001cb40) shifts the rest down while the index still steps on, so
+ * only every other one goes - the 1st, 3rd, 5th ... (the port keeps a unit's points apart from the other units': in the
+ * engine's one table another unit's point between two of them takes the skip instead - ASSUMED none) */
+static void guard_drop(ai_mind *m)
+{
+    int r, w = 0;
+    for (r = 1; r < m->guard_n; r += 2, w++) { m->guard[w][0] = m->guard[r][0]; m->guard[w][1] = m->guard[r][1]; }
+    m->guard_n = w;
+}
+/* entering patrol (0x10013790 case 7 -> 0x10013f00): four 30 m nav points (0x1001cab0) at x - R, z - R, x + R, z + R
+ * round the target (R = 0x10013450's range; a thing 250 m, 0x46c35000), appended to the table in that order; the goal is
+ * the first own point in the table (0x10014050(0x100) -> 0x1001dac0(1) -> 0x1001cca0 from index 1). On arriving (DEFLT
+ * state 7: condition 3, the goal within its radius) the rule re-enters state 7 with the target (ref2 0x40 -> +0x14e):
+ * exit (every other point deleted) and entry again - so the goal walks -x, -z, +z, -z of the next ring and then stays
+ * on the oldest -x point left: a guard round a fixed target ends standing at its x - R point */
+static void guard_enter(const msim *s, ai_mind *m, int code)
+{
+    static const float PX[4] = {-1, 0, 1, 0}, PZ[4] = {0, -1, 0, 1};
+    float c[3], r;
+    int k;
+    if (!task_pos(s, code, c, &r)) return;   /* 0x10013f00: no position, no points */
+    if ((code >> 16) == 4) r = 25000.0f;
+    for (k = 0; k < 4 && m->guard_n < 16; k++, m->guard_n++) {   /* 0x1001cab0 refuses past 0x80 nav points */
+        m->guard[m->guard_n][0] = c[0] + PX[k] * r;
+        m->guard[m->guard_n][1] = c[2] + PZ[k] * r;
+    }
+}
 static int node_target_list(const msim *s, const mtbl_node *n, int *code, int max)
 {
     int i, c = 0;
@@ -795,14 +933,27 @@ static void node_assign(msim *s, int table, int leader)
     }
     {
         ai_mind *m = &s->minds[pick];
-        int unit = (tcode >> 16) == 2, thing = (tcode >> 16) == 4;
-        int apply = ((kind == 1 || kind == 2) && (unit || thing)) || (kind == 8 && unit);
-        if (!apply) return;
-        m->lock_bits |= n->lock == 1 ? 2 : n->lock == 2 ? 1 : 0;
+        int unit = (tcode >> 16) == 2, st = (kind == 1 || kind == 2 || kind == 8) ? AI_TARGET : kind == 4 ? AI_PATROL :
+                                             (kind == 0x100 || kind == 0x20) ? AI_GODIRECT : -1;   /* (0x2000 -> 4 and
+                                                                                   * 0x1000 never get here: above) */
+        if (st < 0) return;
+        m->lock_bits |= n->lock == 1 ? 2 : n->lock == 2 ? 1 : 0;   /* +0x152 |= 0x100146e0(+0xb7) | 0x40, whatever follows */
+        /* 0x10013d40: with a state pushed (+0x140 = 1) the (state, target) pair is written to slot +0x140 (+0x12c) - the
+         * pop reads slot +0x140 - 1 (+0x128): the assignment is lost */
+        if (m->counter) return;
+        if (!ai_allows(&s->ai, m, st)) return;                      /* 0x10013e00 -> 0x10013d90 */
+        if (getenv("MW2_DEBUG_NODE_TASKS")) {   /* TEST ONLY */
+            float tp[3] = {0, 0, 0}, tr = 0;
+            task_pos(s, tcode, tp, &tr);
+            fprintf(stderr, "node task %.2f table %d kind %#x actor %d (%s) state %d -> %d target %#x %s at %.0f,%.0f,%.0f range %.0f\n", s->now / 1000.0,
+                    table, (unsigned)kind, pick, s->actors[pick].name, m->state, st, (unsigned)tcode, n->target, tp[0], tp[1], tp[2], tr);
+        }
+        if (m->state == AI_FOLLOW || m->state == AI_PATROL) guard_drop(m);   /* exit 0x10013680 cases 5 / 7 -> 0x10013e90 */
         m->node_tgt = tcode;
-        if (m->counter) { m->prev_state = AI_TARGET; return; }   /* the pushed state is replaced (0x10013d40) */
-        m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = unit ? (tcode & 0xffff) - 1 : -2;
-        m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
+        m->prev_state = m->state; m->state = st; m->target = st == AI_TARGET; m->tgt = unit && st == AI_TARGET ? (tcode & 0xffff) - 1 : -2;
+        m->to_navref = 0;
+        if (st == AI_TARGET) m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
+        if (st == AI_PATROL) guard_enter(s, m, tcode);                       /* entry case 7 -> 0x10013f00 */
         ai_wake(s, pick);
     }
 }
@@ -876,15 +1027,75 @@ static void aim_trace(const msim *s, const msim_shot *sh, const char *what, cons
     t = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
     for (k = 0; k < 3; k++) m[k] = v[k] - d[k] * t;
     ml = sqrtf(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]); vl = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    printf("AIMHIT now=%d %s range=%.0f off_deg=%.3f miss_cm=%.0f right=%.0f up=%.0f conv=%.0f\n", (int)s->now, what, t, vl > 0 ? asinf(ml / vl) * 180.0f / 3.14159265f : 0.0f, ml,
-           m[0] * cosf(ay) - m[2] * sinf(ay), m[1], s->player_conv);
+    printf("AIMHIT now=%d %s range=%.0f off_deg=%.3f miss_cm=%.0f right=%.0f up=%.0f conv=%.0f w=%d\n", (int)s->now, what, t, vl > 0 ? asinf(ml / vl) * 180.0f / 3.14159265f : 0.0f, ml,
+           m[0] * cosf(ay) - m[2] * sinf(ay), m[1], s->player_conv, sh->weapon);
 }
 static int missile_fx(int weapon) { int v = combat_weapon_visual(weapon); return v >= 0 && ((v & 0xff) == 3 || (v & 0xff) == 4); }
+/* effect types whose live effect damages the units round it (0x1025b180: +0x18 of the 0x1025b168 rows) */
+static const unsigned char AREA_TYPE[32] = {0,0,0,1, 1,0,1,1, 0,0,0,0, 1,1,0,0, 0,1,0,1, 1,1,1,0, 0,0,0,0, 0,0,0,0};
 static void effect(msim *s, int type, const float p[3], int chunks)
 {
     s->fx_refused = 0;
     if (s->on_effect) s->on_effect(s->shot_user, type, p);
     if (chunks && !s->fx_refused) spawn_debris(s, 4, p);
+    if (!s->fx_refused && type >= 0 && type < 32 && AREA_TYPE[type] && s->area_count < (int)(sizeof s->area / sizeof s->area[0])) {
+        struct msim_area *a = &s->area[s->area_count++];
+        a->type = type; memcpy(a->pos, p, sizeof a->pos); a->r = s->fx_radius[type];
+        a->end = (int32_t)((int64_t)s->now * 182 / 1000) + fx_duration(type);
+    }
+}
+/* 0x10046490, every frame: each live effect of a damaging type, with SPLASH DAMAGE on (DAT_1024ac6c + 2), calls
+ * 0x10046700(pos, radius, 1/256): every unit whose position (+0x50, the feet) is nearer the effect than its contact
+ * radius (controller +0xe8) + the effect's radius takes ticks / 256 on each location 2-8 and half that on the head
+ * (location 1) through 0x100171d0 (so a CT share spreads as a hit's); a unit in state 4 (destroyed: its own death
+ * explosion, the wreck's blasts) twice that (x DAT_102485f8 = 2) - 0x100171d0 has no state test, so a wreck loses
+ * locations (blown off) and its bins cook off. Skipped: controller +0x10c bit 0x100 (a wreck blown apart on landing,
+ * 0x1000c4d0 - not modelled) and state 5 counts once (an ejected unit stands intact). Then the effect's life runs down
+ * by the ticks (it ends at <= 0) */
+static void area_damage(msim *s, float ticks)
+{
+    int32_t now = (int32_t)((int64_t)s->now * 182 / 1000);
+    int k, u, l;
+    for (k = 0; k < s->area_count; ) {
+        struct msim_area *a = &s->area[k];
+        if (now >= a->end) { s->area[k] = s->area[--s->area_count]; continue; }
+        for (u = -1; s->splash && u < s->actor_count; u++) {
+            combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
+            float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
+            float y = cu->y, rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), dx = x - a->pos[0], dy = y - a->pos[1], dz = z - a->pos[2];
+            float d = ticks / 256.0f * (cu->destroyed && !cu->intact_out ? 2.0f : 1.0f);
+            if (u >= 0 && !s->armed[u]) continue;
+            if (dx * dx + dy * dy + dz * dz >= (rr + a->r) * (rr + a->r)) continue;
+            combat_damage_at(cu, d / 2.0f, 1, &s->rng);
+            for (l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
+        }
+        k++;
+    }
+}
+
+/* a bin explosion (0x100167b0, the count not 0): explosion 7 at the location's node (0x1000fec0 / 0x1000f760 ->
+ * 0x10045c30) - a damaging effect type (0x1025b180), so it hurts every location of the units round it, the exploding
+ * one too (area_damage): the node 0x1000fec0 finds - the first in the tree whose model's group (+0x16) is the
+ * location, else the centre torso's - at its object's world bounding centre (0x1000f760 -> 0x10029890: the box middle of the part's vertices placed
+ * by the node, mech3d_group_point) */
+static void ammo_booms(msim *s)
+{
+    int u;
+    for (u = -1; u < s->actor_count; u++) {
+        combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
+        const mech3d *m = u < 0 ? &s->pl_mech : &s->actors[u].mech;
+        float o[3], p[3], h;
+        int loc = cu->ammo_boom_loc;
+        if (!loc) continue;
+        cu->ammo_boom_loc = 0;
+        if (u >= 0 && !s->armed[u]) continue;
+        o[0] = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0];
+        o[1] = cu->y;
+        o[2] = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
+        h = u < 0 ? s->player_facing : s->actors[u].mech.heading;
+        if (mech3d_group_point(m, loc, o, h, p) != 0) continue;   /* no such node: no explosion (0x100167b0) */
+        effect(s, 7, p, 0);
+    }
 }
 
 /* a destroyed location's parts fly off (engine 0x10015410: same physics, 0xe24 ticks, pool of 128) */
@@ -930,19 +1141,28 @@ static void debris_step(msim *s, float ticks)
         msim_debris *d = &s->debris[i];
         if (now >= d->until) { s->debris[i--] = s->debris[--s->debris_count]; continue; }
         if (!d->moving) continue;
-        {
-            float vy = d->v[1] - 0.0296f * ticks, ny = d->p[1] + (d->v[1] - 0.5f * 0.0296f * ticks) * ticks, g;
+        {   /* 0x100156f0, in its order: the new vertical speed and height; touching the ground (vy under 1e-7 and the height
+             * at or under it) - at rest if the speed was under 0.5525 cm/tick (0xbf0d6fbc) or it had been rising, the
+             * height the ground's, vy = -vy / 4, and on rand-table % 2 (0x1003d910 with 2: 1 in 2) vy halved again and
+             * the horizontal speed halved and reflected; the spin always halved and reflected (degrees a tick: the
+             * angles go x pi / 180 into 0x1002f070); then the move and the turn at the new speeds; at rest the slot's
+             * motion is cleared (0x10015a50) and the piece stays */
+            float v0 = d->v[1], vy = v0 - 0.0296f * ticks, ny = d->p[1] + (v0 - 0.5f * 0.0296f * ticks) * ticks, g;
+            int rest = 0;
+            if (vy < 1e-7f) {
+                g = msim_ground(s, d->p[0], d->p[2], d->p[1]);
+                if (ny <= g) {
+                    rest = vy > -0.5525f || v0 > 1e-7f;
+                    ny = g;
+                    vy = -vy * 0.25f;
+                    if (rnd_ms(&s->rng) % 2) { vy *= 0.5f; d->v[0] *= -0.5f; d->v[2] *= -0.5f; }
+                    for (k = 0; k < 3; k++) d->spin[k] *= -0.5f;
+                }
+            }
             d->p[0] += d->v[0] * ticks; d->p[2] += d->v[2] * ticks;
             for (k = 0; k < 3; k++) d->ang[k] += d->spin[k] * ticks;
-            g = msim_ground(s, d->p[0], d->p[2], d->p[1]);
-            if (vy < 0 && ny <= g) {   /* landed: bounce */
-                ny = g;
-                vy = -vy * 0.25f;
-                if (frand_ms(&s->rng) < 0.5f) { d->v[0] *= -0.5f; d->v[2] *= -0.5f; }   /* "at random" (odds not decoded) */
-                for (k = 0; k < 3; k++) d->spin[k] *= -0.5f;
-                if (vy < 0.5525f) { d->moving = 0; vy = 0; }
-            }
             d->p[1] = ny; d->v[1] = vy;
+            if (rest) { d->moving = 0; d->v[0] = d->v[1] = d->v[2] = 0; for (k = 0; k < 3; k++) d->spin[k] = 0; }
         }
     }
 }
@@ -963,7 +1183,7 @@ static void wrecks(msim *s, int32_t dt_ms)
         else { x = s->player[0]; z = s->player[2]; y = u->y + 500.0f; }
         if (s->wreck_until[i] == 0) {
             float p[3] = {x, y, z};
-            if (s->on_effect) s->on_effect(s->shot_user, 0x0d, p);
+            effect(s, 0x0d, p, 0);   /* 0x1001be40 (+0x8c == 0): a damaging type - area damage round the wreck (0x10046490) */
             s->wreck_until[i] = now + 0x712;
             continue;
         }
@@ -1031,6 +1251,43 @@ static void self_destruct(msim *s, int i)
     }
 }
 
+/* The messages a unit's state change posts (0x10031870, message table 0x1024f140):
+ *  - a death (0x10016280, run once per unit for any cause - weapons, area damage, collisions, ammo, heat, self-destruct,
+ *    ejection - and whoever the killer, the player, a starmate or nobody): a unit of the enemy alliance (its group's +0,
+ *    0x10019040 == 1) by its class (unit +0, jump table 0x100165d8): 1 mech -> 0x15 "Enemy mech destroyed" (voice 70),
+ *    2 hovercraft / 4 tank -> 0x16 "Enemy vehicle destroyed" (71), 3 turret -> 0x19 "Enemy target destroyed" (73),
+ *    5 aircraft / 8 dropship -> 0x17 "Enemy aircraft destroyed" (72), 6 / 7 (doors) nothing; and a starmate (its group
+ *    led by the player, 0x10018f90) -> 0x10031810(6, its point): "Point n" "destroyed";
+ *  - an enemy unit back up after a shutdown (0x1001a180 state 2 with object +0x14 bit 0x10, set in state 3), the
+ *    player up (+0x15 & 0x20): 0x1a "Enemy power-up detected" (74) */
+static void unit_messages(msim *s)
+{
+    int i;
+    int pl_up = !s->player_unit.destroyed && !s->player_unit.shutdown && !((float)s->now < s->player_online_at && !getenv("MW2_NO_STARTUP"));
+    if (!s->msg_seen || !s->armed) return;
+    for (i = 0; i < s->actor_count; i++) {
+        const world_actor *ac = &s->actors[i];
+        const combat_unit *u = &s->units[i];
+        int enemy = (ac->friendly ? 0 : ac->alliance) == 1;
+        if (!s->armed[i] || (s->msg_seen[i] & 1)) continue;
+        if (u->destroyed) {
+            static const char *const KILL[9] = {NULL, "Enemy mech destroyed", "Enemy vehicle destroyed", "Enemy target destroyed",
+                                                "Enemy vehicle destroyed", "Enemy aircraft destroyed", NULL, NULL, "Enemy aircraft destroyed"};
+            static const int KILL_VOICE[9] = {0, 70, 71, 73, 71, 72, 0, 0, 72};
+            int c = ac->unit_class;
+            s->msg_seen[i] |= 1;
+            if (enemy && c >= 0 && c < 9 && KILL[c] && s->on_message) s->on_message(s->message_user, KILL[c], KILL_VOICE[c]);
+            if (ac->friendly && ac->table == 0) msim_order_message(s, star_point(s, i), 6);   /* "Point n destroyed" */
+            continue;
+        }
+        if (u->shutdown || (s->powered_down && s->powered_down[i])) s->msg_seen[i] |= 2;
+        else if ((s->msg_seen[i] & 2) && !(s->online_at && (float)s->now < s->online_at[i])) {   /* the start-up done */
+            s->msg_seen[i] &= ~2;
+            if (enemy && pl_up && s->on_message) s->on_message(s->message_user, "Enemy power-up detected", 74);
+        }
+    }
+}
+
 void msim_step(msim *s, int32_t dt_ms)
 {
     if (dt_ms <= 0) return;   /* a sub-millisecond frame: its time is carried to the next one (glview sim_ms) */
@@ -1042,13 +1299,14 @@ void msim_step(msim *s, int32_t dt_ms)
     s->now += dt_ms;
     if (s->paths && s->world) paths_step(s);
     if (s->player_vertical) {   /* tools without their own player physics: stand the player on the terrain */
-        s->player_unit.ground = msim_ground(s, s->player[0], s->player[2], s->player_unit.y);
+        s->player_unit.ground = msim_ground(s, s->player[0], s->player[2], s->player_unit.y + s->player_centre_h);
         combat_jets(&s->player_unit, 0, dt, &s->rng);
     }
     combat_step(s, dt);
     wrecks(s, dt_ms);
     blow_offs(s);   /* locations destroyed since the last step: their parts fly */
     debris_step(s, (float)dt_ms * 0.182f);
+    unit_messages(s);   /* deaths so far: announced before the mission tables look at them (0x10016280 posts at once) */
     mtbl_logic_step(&s->logic, s->now, &w);
     /* mission end (engine 0x10009f50 for the player's star; 0x100374e0 end sequence: 0x71c ticks) */
     if (!s->ending) {
@@ -1087,7 +1345,21 @@ void msim_step(msim *s, int32_t dt_ms)
                 if (o[0]) s->on_radio(s->shot_user, o);
             }
             /* "Press CTRL-Q to exit..." on the message bar: 0x1536 ticks at priority 100 (0x10002f20) */
-            if (s->on_message) s->on_message(s->message_user, "Press CTRL-Q to exit...", -0x1536);
+            if (s->dos_end) s->dos_resolved_s = (s->logic.result_time[0] > 0 ? s->logic.result_time[0] : s->now) / 1000;   /* star +8 */
+            else if (s->on_message) s->on_message(s->message_user, "Press CTRL-Q to exit...", -0x1536);
+        }
+    } else if (!s->over && s->dos_end) {
+        /* DOS 0x16fbe..0x1703b: with no radio line playing (DAT_00097ddc), past 3 s the prompt (0x11020: 0x1554 ticks,
+         * priority 100) once; past 0x14 s the loop's end (DAT_00095864 += 2) */
+        int el = (int)(s->now / 1000) - (int)s->dos_resolved_s;
+        if (!s->radio_busy) {
+            if (!s->dos_prompted && el > 3) {
+                s->dos_prompted = 1;
+                if (s->on_message) s->on_message(s->message_user, "Press any key to exit...", -0x1554);
+            } else if (el > 0x14) {
+                s->over = 1;
+                s->ended_at = s->now;
+            }
         }
     } else if (!s->over && s->now >= s->end_at) {
         s->over = 1;
@@ -1117,6 +1389,18 @@ void msim_step(msim *s, int32_t dt_ms)
         world_actor *l = group_leader(s, ac->table);
         float dx, dz;
         int enemy_who = -1, in_star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
+        if (s->armed[i] && s->units[i].destroyed && !fixed_unit(ac) && s->units[i].y > s->units[i].ground + 1.0f) {
+            /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 on the ground
+             * (object +0x78) - it stops dead; killed in the air it flies on at its velocity (no drive, LAB_1001aae9), falls
+             * and freezes on touching down (0x1000c4d0 sets +0x78) */
+            float h = (ac->mech.heading + (m->jet_side ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f, v = s->air_speed ? s->air_speed[i] : m->speed;
+            ac->mech.origin[0] = (int32_t)lrintf((float)ac->mech.origin[0] + sinf(h) * v * dt);
+            ac->mech.origin[2] = (int32_t)lrintf((float)ac->mech.origin[2] + cosf(h) * v * dt);
+            s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y);
+            combat_jets(&s->units[i], 0, dt, &s->rng);
+            if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; }
+            ac->mech.origin[1] = (int32_t)s->units[i].y;
+        }
         if (!s->armed[i] || s->units[i].destroyed) continue;
         if (l == ac && m->event_cond == 7) {   /* the leader's tick: its posted sighting (0x10011c50 -> 0x10014ba0) */
             group_assign(s, ac->table, i, m->event_who);
@@ -1145,6 +1429,7 @@ void msim_step(msim *s, int32_t dt_ms)
             else if (kn & (0x800 | 0x10)) { m->state = AI_SHUTDOWN; m->target = 0; ai_power_down(s, i); }
             else {   /* the leader idles, the members follow; the node's targets come one a tick (node_assign) */
                 ai_wake(s, i);
+                if (m->state == AI_FOLLOW || m->state == AI_PATROL) guard_drop(m);   /* the exit (0x10013680 -> 0x10013e90) */
                 m->state = ac->leader ? AI_IDLE : AI_FOLLOW; m->target = 0; m->node_tgt = 0;
             }
         }
@@ -1170,7 +1455,7 @@ void msim_step(msim *s, int32_t dt_ms)
             int who = -1;
             v.has_enemy = pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who);
             enemy_who = v.has_enemy ? who : -1;
-            v.enemy_is_player = v.has_enemy && who < 0;
+            v.enemy_is_player = v.has_enemy && who == -1;
             m->targets_player = v.enemy_is_player;
             v.enemy_x = ex; v.enemy_z = ez; v.enemy_heading = ef; v.enemy_height = ey - s->units[i].ground;   /* against my own height above my ground */
         }
@@ -1283,22 +1568,13 @@ void msim_step(msim *s, int32_t dt_ms)
                 float tx = 0, tz = 0, r = 10000.0f;
                 int ok = 0;
                 if (c == MSIM_CMD_DEFEND && t >= 0 && t < s->actor_count && s->defend_leg) {
-                    /* engine 0x10013f00: four patrol points at x +- R, z +- R around the defended mech, R = its reference
-                     * range (0x10013450: an object = 100 m); DEFLT state 7 re-enters on reaching one (cond 3, ref 0x2a),
-                     * rebuilding them round the mech's new position. No engagement: condition 7 is blocked while
-                     * commanded and the group assignment skips commanded units */
-                    static const float PX[4] = {1, 0, -1, 0}, PZ[4] = {0, 1, 0, -1};
-                    int leg = s->defend_leg[i] & 3;
-                    float ddx, ddz;
-                    tx = (float)s->actors[t].mech.origin[0] + PX[leg] * 10000.0f;
-                    tz = (float)s->actors[t].mech.origin[2] + PZ[leg] * 10000.0f;
-                    ddx = tx - (float)ac->mech.origin[0]; ddz = tz - (float)ac->mech.origin[2];
-                    if (ddx * ddx + ddz * ddz < 3000.0f * 3000.0f) {
-                        s->defend_leg[i] = 4 | ((leg + 1) & 3);
-                        tx = (float)s->actors[t].mech.origin[0] + PX[(leg + 1) & 3] * 10000.0f;
-                        tz = (float)s->actors[t].mech.origin[2] + PZ[(leg + 1) & 3] * 10000.0f;
-                    }
-                    r = 3000.0f; ok = 1;
+                    /* engine 0x10013f00: four 30 m patrol points at x - R, z - R, x + R, z + R round the defended mech, R
+                     * = its reference range (0x10013450: a unit 100 m); the goal is the first own point in the nav table;
+                     * DEFLT state 7 re-enters on reaching it (cond 3, ref 0x2a; ref2 0x40 = the mech), every other point
+                     * deleted and four more made round the mech's new position (guard_drop / guard_enter). No engagement:
+                     * condition 7 is blocked while commanded and the group assignment skips commanded units */
+                    if (m->guard_n == 0 && m->state == AI_PATROL) guard_enter(s, m, 0x20000 | (t + 1));
+                    if (m->guard_n > 0) { tx = m->guard[0][0]; tz = m->guard[0][1]; r = 3000.0f; ok = 1; }
                 }
                 if (c == MSIM_CMD_DISENGAGE && s->player_nav >= 0 && s->player_nav < s->nav_count) {
                     tx = (float)s->navs[s->player_nav].x; tz = (float)s->navs[s->player_nav].z; r = (float)s->navs[s->player_nav].radius; ok = 1;
@@ -1329,7 +1605,7 @@ void msim_step(msim *s, int32_t dt_ms)
             dx = sx - (float)ac->mech.origin[0]; dz = sz - (float)ac->mech.origin[2];
             v.has_goal = 1; v.goal_radius = 3000.0f;   /* formation slots are 30 m nav points (0x1001cab0) */
             v.goal_dist = sqrtf(dx * dx + dz * dz); v.goal_bearing = atan2f(dx, dz) * 180.0f / 3.14159265f;
-            if (m->state == AI_IDLE || m->state == AI_PATROL) m->state = AI_FOLLOW;
+            if (m->state == AI_IDLE || (m->state == AI_PATROL && !m->node_tgt)) m->state = AI_FOLLOW;   /* (a node's guard: kept) */
         } else if (cur >= 0) {
             const mtbl_node *n = &s->logic.tables[ac->table].nodes[cur];
             float tx, tz, r;
@@ -1340,13 +1616,40 @@ void msim_step(msim *s, int32_t dt_ms)
                 dx = tx - (float)ac->mech.origin[0]; dz = tz - (float)ac->mech.origin[2];
                 v.has_goal = 1; v.goal_radius = r;
                 v.goal_dist = sqrtf(dx * dx + dz * dz); v.goal_bearing = atan2f(dx, dz) * 180.0f / 3.14159265f;
-                if (m->state == AI_IDLE && n->kind == MTBL_K_REACH) m->state = AI_PATROL;
+            }
+        }
+        if (m->node_tgt && (m->state == AI_PATROL || (m->state == AI_GODIRECT && !m->to_navref && !m->target))) {
+            /* a node task's goal +0x14c (0x10014ba0): patrol (kind 4) heads for its first own 30 m point (0x10013f00), go to
+             * (0x100) for the target itself within 0x10013450's range (a nav point's radius, else 100 m) - the movement of
+             * states 6-8 (0x100130f0: throttle 0x100134c0 by that range, steering 0x10013600) */
+            float p[3], r = 3000.0f;
+            int ok = 0;
+            if (m->state == AI_PATROL && m->guard_n > 0) { p[0] = m->guard[0][0]; p[2] = m->guard[0][1]; ok = 1; }
+            else if (m->state == AI_GODIRECT) ok = task_pos(s, m->node_tgt, p, &r);
+            if (ok) {
+                dx = p[0] - (float)ac->mech.origin[0]; dz = p[2] - (float)ac->mech.origin[2];
+                v.has_goal = 1; v.goal_radius = r;
+                v.goal_dist = sqrtf(dx * dx + dz * dz); v.goal_bearing = atan2f(dx, dz) * 180.0f / 3.14159265f;
             }
         }
     star_done:
         v.speed_kmh = fabsf(m->speed) * 0.036f;   /* actual speed */
         if (s->powered_down && s->powered_down[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; }   /* shut down: no rules run */
-        else ai_step(&s->ai, m, &v, dt);
+        else {
+            ai_step(&s->ai, m, &v, dt);
+            if (m->entered) {   /* 0x10013e00: the exit (0x10013680 cases 5 / 7 -> 0x10013e90) and the entry (0x10013790 case 7
+                                 * -> 0x10013f00 round the target +0x14e: a node's guard target, a Defend order's mech) */
+                int c = s->cmd ? s->cmd[i] : 0, t = s->cmd_target ? s->cmd_target[i] : -1;
+                if (m->entered_from == AI_FOLLOW || m->entered_from == AI_PATROL) guard_drop(m);
+                if (m->state == AI_PATROL) {
+                    if (in_star && c == MSIM_CMD_DEFEND && t >= 0) {
+                        if (m->entered_from == AI_PATROL && s->defend_leg) s->defend_leg[i] |= 4;   /* a patrol point reached */
+                        guard_enter(s, m, 0x20000 | (t + 1));
+                    }
+                    else if (!in_star && m->node_tgt) guard_enter(s, m, m->node_tgt);
+                }
+            }
+        }
         if (getenv("MW2_TEST_HOLD_ACTOR") && atoi(getenv("MW2_TEST_HOLD_ACTOR")) == i) {   /* TEST hook: this unit stands still
                                                                                                * (no walking, turning, jets, dodges or fire) */
             m->throttle = 0; m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_side = 0; m->wants_fire = 0; m->reverse = 0;
@@ -1406,129 +1709,179 @@ void msim_step(msim *s, int32_t dt_ms)
              * 0x100190d0), the player's rule; reverse (input +0x2f, manoeuvres 8 / 10): the drive x -0.5 at once, the
              * throttle itself stays positive. AI mechs get no 12.5% turning creep (that is for object +0x10 != 2, the
              * player); 0x1001f910's 10% is set by ai.c */
-            msim_drive_step(&m->thr_servo, &m->spd_servo, &m->speed, m->throttle, m->reverse ? -0.5f : 1.0f, top,
-                            !(s->units[i].shutdown || s->units[i].immobile), m->drive_slow, dt * 182.0f);
-            kmh = fabsf(m->spd_servo) * 0.036f;
-            rate = m->turn / 1024.0f * 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);   /* by c[0xb] x 6.516 (0x1001a180) */
-            if (m->jet && s->units[i].jet_fuel >= 1.0f) rate = m->turn / 1024.0f * 90.0f * 2.0f;   /* jetting: x2 (0x1001a180) */
-            ac->mech.heading = wrap180(ac->mech.heading + rate * dt);
-            spd = m->speed;
-            s->units[i].throttle_frac = fabsf(m->thr_servo) > 1.0f ? 1.0f : fabsf(m->thr_servo);   /* walking heat: c[0x13] - 1/64 (0x1001aac8) */
-            if (s->units[i].y > s->units[i].ground + 1.0f) spd = s->air_speed ? s->air_speed[i] : spd;     /* airborne (y is absolute: above the ground): keep momentum */
-            {
-                float hv = spd / 182.0f;                                          /* cm/tick */
-                int thrust = m->jet && (m->jet_forward || m->jet_side);           /* +0x20 forward, +0x1e / +0x1f sideways */
-                combat_jets_forward(&s->units[i], thrust, dt, &hv);
-                if (thrust) spd = hv * 182.0f;
-                if (s->air_speed) s->air_speed[i] = spd;
-            }
-            h = (ac->mech.heading + (m->jet_side && s->units[i].y > s->units[i].ground + 1.0f ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f;
-            {
-                float nx = (float)ac->mech.origin[0] + sinf(h) * spd * dt, nz = (float)ac->mech.origin[2] + cosf(h) * spd * dt;
-                {   /* mech-mech contact, in 3D (engine 0x1000b5e0 -> 0x1000ba20 spheres, 0x10019310): the unit touched, the
-                     * normal from its centre to this one's, the relative speed. On top of it (normal y above 0.7071) with
-                     * the feet within 10 m of the terrain: landed - no damage to either, the mover stood on the terrain at its
-                     * projection onto the sphere and pushed out of the sphere by the next frame's move; else this one
-                     * takes collision damage by the normal (0x1000c160 / 0x1000c1f0: legs from below, head from above x
-                     * the tonnage ratio, else arm / torso) on every contact tick - only the mover: the other takes damage
-                     * only from its own movement's contacts (0x10019d77) - and a clang once per contact (on_sound -1). Airborne, it bounces off along the normal at half the relative speed (0x1000ba20
-                     * +0xf4 = n x max(1, dv / 2)); walking, it is pushed back 60 cm at -30 % speed. */
-                    float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], ticks = dt * 182.0f;
-                    float ch = s->centre_h ? s->centre_h[i] : 550.0f, air = s->units[i].y > s->units[i].ground + 1.0f;
-                    float vy = air ? s->units[i].vy : 0.0f;
-                    float p0[3] = {x0, s->units[i].y + ch, z0}, p1[3] = {nx, s->units[i].y + ch + vy * ticks, nz};
-                    float n[3], c[3], rr = 0, ov[3], sv[3] = {sinf(h) * spd / 182.0f, vy, cosf(h) * spd / 182.0f};
-                    int hit = msim_unit_contact(s, i, p0, p1, n, c, &rr, ov), pushout = 0;
-                    /* set down inside the sphere of the unit it landed on (bump_with < 0): this frame's move ends inside it
-                     * whatever its direction - the engine's push-out (0x1000ba20 tests only that the end is inside) */
-                    if (hit == -2 && s->bump_with && s->bump_with[i] < 0 && msim_unit_inside(s, i, -s->bump_with[i] - 2, p1, n, c, &rr, ov)) {
-                        hit = -s->bump_with[i] - 2; pushout = 1;
+            /* the moves: in contact with a mech or a wall in 1/30 s steps, the remainder carried, until MSIM_CONTACT_HOLD
+             * steps in a row have touched nothing - the engine's contact responses are per frame and frame-rate dependent
+             * (0x1000ba20, 0x1000b5e0), the port takes the 30 fps reference (as the player's, glview pl_locomote); out of
+             * contact the frame is one move */
+            float rest = dt, sdt;
+            int cm = s->contact_acc && s->contact_hold && s->contact_hold[i] > 0;
+            if (cm) s->contact_acc[i] += dt;
+            else if (s->contact_acc) s->contact_acc[i] = 0;
+            for (;;) {
+                int touched = 0;
+                if (cm) {
+                    if (s->contact_acc[i] < 1.0f / 30.0f - 1e-5f) break;
+                    s->contact_acc[i] -= 1.0f / 30.0f;
+                    sdt = 1.0f / 30.0f;
+                } else sdt = rest;
+                msim_drive_step(&m->thr_servo, &m->spd_servo, &m->speed, m->throttle, m->reverse ? -0.5f : 1.0f, top,
+                                !(s->units[i].shutdown || s->units[i].immobile), m->drive_slow, sdt * 182.0f);
+                kmh = fabsf(m->spd_servo) * 0.036f;
+                rate = m->turn / 1024.0f * 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);   /* by c[0xb] x 6.516 (0x1001a180) */
+                if (m->jet && s->units[i].jet_fuel >= 1.0f) rate = m->turn / 1024.0f * 90.0f * 2.0f;   /* jetting: x2 (0x1001a180) */
+                ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
+                spd = m->speed;
+                s->units[i].throttle_frac = fabsf(m->thr_servo) > 1.0f ? 1.0f : fabsf(m->thr_servo);   /* walking heat: c[0x13] - 1/64 (0x1001aac8) */
+                if (s->units[i].y > s->units[i].ground + 1.0f) spd = s->air_speed ? s->air_speed[i] : spd;     /* airborne (y is absolute: above the ground): keep momentum */
+                {
+                    float hv = spd / 182.0f;                                          /* cm/tick */
+                    int thrust = m->jet && (m->jet_forward || m->jet_side);           /* +0x20 forward, +0x1e / +0x1f sideways */
+                    combat_jets_forward(&s->units[i], thrust, sdt, &hv);
+                    if (thrust && s->units[i].jet_fuel > 0) {   /* the drag while thrusting (0x10019310 / DOS 0x26ba2, msim_jet_drag), S
+                                                                 * the DOS (4 max + min) >> 2 of the drift's x / z */
+                        float kq, B, hj = (ac->mech.heading + (m->jet_side && s->units[i].y > s->units[i].ground + 1.0f ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f;
+                        float ax = fabsf(sinf(hj) * hv), az = fabsf(cosf(hj) * hv), S = ax > az ? ax + az * 0.25f : az + ax * 0.25f;
+                        msim_jet_drag(s->units[i].jet_ddy, ac->speed, &kq, &B);
+                        if (S > 1e-7f && (kq != 0 || B != 0)) hv -= hv * (kq * S + B) * sdt * 182.0f;
                     }
-                    if (hit != -2) {
-                        /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
-                         * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
-                         * |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
-                        float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], dv = sqrtf(dvx * dvx + dvy * dvy);
-                        float bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
-                        float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);   /* projected onto its sphere */
-                        float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py);
-                        if (getenv("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
-                        if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
-                            /* the engine: the position projected onto the sphere (0x1000ba20), the feet taken as 1 cm under
-                             * the terrain there (local_5c = -1) - so it stands on the terrain at that point, inside the
-                             * sphere - vy 0, the velocity n x max(1, dv / 2) across the ground, the contact count cleared;
-                             * the next frame's move pushes it out (above) */
-                            float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
-                            if (bs < 1.0f) bs = 1.0f;
-                            (void)hl;
-                            ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
-                            s->units[i].ground = gnd;
-                            s->units[i].y = s->units[i].ground; s->units[i].vy = 0;
-                            if (s->air_speed) s->air_speed[i] = 0;
-                            m->speed = spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
-                            if (s->bump_with) s->bump_with[i] = -(hit + 2);
-                        } else {
-                            if (s->collision_damage)   /* every contact tick, the mover only (0x10019d6a -> 0x1000c160) */
-                                combat_collision_unit(&s->units[i], dv, n, ac->mech.heading + m->twist, hit == -1 ? s->player_unit.tons : s->units[hit].tons, &s->rng);
-                            if (s->bump_with && s->bump_with[i] != hit + 2) {
-                                if (s->on_sound && dv > 0.5f) { float p3[3] = {(x0 + c[0]) * 0.5f, s->units[i].y, (z0 + c[2]) * 0.5f}; s->on_sound(s->shot_user, -1, p3); }
-                                s->bump_with[i] = hit + 2;
-                            }
-                            if (air || pushout) {   /* bounced off / pushed out: to the sphere's surface, moving away along the normal */
-                                if (bs < 1.0f) bs = 1.0f;
-                                float gx = c[0] + n[0] * (rr + 1.0f), gz = c[2] + n[2] * (rr + 1.0f);
-                                ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
-                                s->units[i].y = c[1] + n[1] * (rr + 1.0f) - ch;
-                                s->units[i].ground = msim_ground(s, gx, gz, s->units[i].y);
-                                if (s->units[i].y < s->units[i].ground) s->units[i].y = s->units[i].ground;
-                                s->units[i].vy = n[1] * bs;
-                                spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
-                                if (s->air_speed) s->air_speed[i] = spd;
-                                if (s->units[i].y <= s->units[i].ground + 1.0f) { s->units[i].vy = 0; m->speed = spd; }   /* on the ground */
-                            } else {
-                                float bx = x0 - c[0], bz = z0 - c[2], bl = sqrtf(bx * bx + bz * bz);
-                                if (bl > 1.0f) { ac->mech.origin[0] += (int32_t)lrintf(bx / bl * 60.0f); ac->mech.origin[2] += (int32_t)lrintf(bz / bl * 60.0f); }
-                                m->speed *= -0.3f;   /* bounced back, as the player (glview) */
-                            }
+                    if (thrust) spd = hv * 182.0f;
+                    if (s->air_speed) s->air_speed[i] = spd;
+                }
+                h = (ac->mech.heading + (m->jet_side && s->units[i].y > s->units[i].ground + 1.0f ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f;
+                {
+                    float acr = 0.0f, nx, nz;
+                    if (s->across && s->across[i] != 0.0f) {   /* the velocity across the heading a contact / impact left: x (1 -
+                                                                 * ticks / 45) on the ground, zero under 0.0625 cm/tick or airborne
+                                                                 * (0x10019310, 0x102473b4 / 0x102473d0), the move by the mean */
+                        float kq = sdt * 182.0f / 45.0f, a0 = s->across[i];
+                        s->across[i] *= kq < 1.0f ? 1.0f - kq : 0.0f;
+                        acr = 0.5f * (a0 + s->across[i]);
+                        if (fabsf(s->across[i]) < 0.0625f * 182.0f || s->units[i].y > s->units[i].ground + 1.0f) s->across[i] = 0;
+                    }
+                    nx = (float)ac->mech.origin[0] + (sinf(h) * spd + cosf(h) * acr) * sdt;
+                    nz = (float)ac->mech.origin[2] + (cosf(h) * spd - sinf(h) * acr) * sdt;
+                    if (s->contact_frac) {   /* the sub-cm rest of the last contact projection */
+                        nx += s->contact_frac[i][0]; nz += s->contact_frac[i][1];
+                        s->contact_frac[i][0] = s->contact_frac[i][1] = 0;
+                    }
+                    {   /* mech-mech contact, in 3D (engine 0x1000b5e0 -> 0x1000ba20 spheres, 0x10019310): the unit touched, the
+                         * normal from its centre to this one's, the relative speed. On top of it (normal y above 0.7071) with
+                         * the feet within 10 m of the terrain: landed - no damage to either, the mover stood on the terrain at its
+                         * projection onto the sphere and pushed out of the sphere by the next frame's move; else this one
+                         * takes collision damage by the normal (0x1000c160 / 0x1000c1f0: legs from below, head from above x
+                         * the tonnage ratio, else arm / torso) on every contact tick - only the mover: the other takes damage
+                         * only from its own movement's contacts (0x10019d77) - and a clang once per contact (on_sound -1). Walking or airborne, the move's end is projected onto the r1 + r2 sphere and
+                         * it bounces off along the normal at half the relative speed (0x1000ba20 +0xf4 = n x max(1, dv / 2)) -
+                         * pressing on, it slides round the other (the port had pushed a walker back 60 cm at -30 % speed). */
+                        float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], ticks = sdt * 182.0f;
+                        float ch = s->centre_h ? s->centre_h[i] : 550.0f, air = s->units[i].y > s->units[i].ground + 1.0f;
+                        float vy = air ? s->units[i].vy : 0.0f;
+                        float p0[3] = {x0, s->units[i].y + ch, z0}, p1[3] = {nx, s->units[i].y + ch + vy * ticks, nz};
+                        float n[3], c[3], rr = 0, ov[3], sv[3] = {sinf(h) * spd / 182.0f, vy, cosf(h) * spd / 182.0f};
+                        int hit = msim_unit_contact(s, i, p0, p1, n, c, &rr, ov), pushout = 0;
+                        /* set down inside the sphere of the unit it landed on (bump_with < 0): this frame's move ends inside it
+                         * whatever its direction - the engine's push-out (0x1000ba20 tests only that the end is inside) */
+                        if (hit == -2 && s->bump_with && s->bump_with[i] < 0 && msim_unit_inside(s, i, -s->bump_with[i] - 2, p1, n, c, &rr, ov)) {
+                            hit = -s->bump_with[i] - 2; pushout = 1;
                         }
-                        nx = (float)ac->mech.origin[0]; nz = (float)ac->mech.origin[2];
-                    } else if (s->bump_with) s->bump_with[i] = 0;
+                        if (hit != -2) {
+                            touched = 1;
+                            /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
+                             * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
+                             * |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
+                            float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], dv = sqrtf(dvx * dvx + dvy * dvy);
+                            float bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
+                            float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);   /* projected onto its sphere */
+                            float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
+                            if (getenv("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
+                            if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
+                                /* the engine: the position projected onto the sphere (0x1000ba20), the feet taken as 1 cm under
+                                 * the terrain there (local_5c = -1) - so it stands on the terrain at that point, inside the
+                                 * sphere - vy 0, the velocity n x max(1, dv / 2) across the ground, the contact count cleared;
+                                 * the next frame's move pushes it out (above) */
+                                float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
+                                if (bs < 1.0f) bs = 1.0f;
+                                (void)hl;
+                                ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
+                                s->units[i].ground = gnd;
+                                s->units[i].y = s->units[i].ground; s->units[i].vy = 0;
+                                if (s->air_speed) s->air_speed[i] = 0;
+                                m->speed = spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
+                                if (s->bump_with) s->bump_with[i] = -(hit + 2);
+                            } else {
+                                if (s->collision_damage)   /* every contact tick, the mover only (0x10019d6a -> 0x1000c160) */
+                                    combat_collision_unit(&s->units[i], dv, n, ac->mech.heading + m->twist, hit == -1 ? s->player_unit.tons : s->units[hit].tons, &s->rng);
+                                if (s->bump_with && s->bump_with[i] != hit + 2) {
+                                    if (s->on_sound && dv > 0.5f) { float p3[3] = {(x0 + c[0]) * 0.5f, s->units[i].y, (z0 + c[2]) * 0.5f}; s->on_sound(s->shot_user, -1, p3); }
+                                    s->bump_with[i] = hit + 2;
+                                }
+                                {   /* bounced off / pushed out: to the sphere's surface, moving away along the normal (walking too) */
+                                    if (bs < 1.0f) bs = 1.0f;
+                                    float rp = air || pushout ? rr + 1.0f : rr;   /* walking: onto the sphere itself (0x1000ba20) */
+                                    float gx = c[0] + n[0] * rp, gz = c[2] + n[2] * rp;
+                                    ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
+                                    if (s->contact_frac) { s->contact_frac[i][0] = gx - (float)ac->mech.origin[0]; s->contact_frac[i][1] = gz - (float)ac->mech.origin[2]; }
+                                    /* the projection is in 3D (0x1000ba20): walking too the centre goes to the sphere's surface,
+                                     * lifted by n.y x the penetration (or lowered: back on the ground), and the velocity n x
+                                     * max(1, dv / 2) carries n.y up - a small hop when the other's centre is lower */
+                                    s->units[i].y = c[1] + n[1] * rp - ch;
+                                    s->units[i].ground = msim_ground(s, gx, gz, s->units[i].y + ch);
+                                    if (s->units[i].y < s->units[i].ground) s->units[i].y = s->units[i].ground;
+                                    s->units[i].vy = n[1] * bs;
+                                    spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
+                                    if (s->air_speed) s->air_speed[i] = spd;
+                                    if (s->across) s->across[i] = (n[0] * cosf(h) - n[2] * sinf(h)) * bs * 182.0f;   /* and across it */
+                                    if (s->units[i].y <= s->units[i].ground + 1.0f) { s->units[i].vy = 0; m->speed = spd; }   /* on the ground */
+                                }
+                            }
+                            nx = (float)ac->mech.origin[0]; nz = (float)ac->mech.origin[2];
+                        } else if (s->bump_with) s->bump_with[i] = 0;
+                    }
+                    if (msim_can_step_hr(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], nx, nz, s->units[i].y, s->centre_h[i], s->radius[i])) {   /* airborne too
+                                                                        * (0x10019310: every move; the port's is level, at the present height) */
+                        /* the contact count (controller +0xa4, 0x1000b5e0) clears on a free move; a unit that does not move
+                         * keeps it (and counts on) */
+                        if ((int32_t)lrintf(nx) != ac->mech.origin[0] || (int32_t)lrintf(nz) != ac->mech.origin[2]) s->units[i].blocked = 0;
+                        ac->mech.origin[0] = (int32_t)lrintf(nx);
+                        ac->mech.origin[2] = (int32_t)lrintf(nz);
+                    } else {   /* walked into the world (engine 0x10019310 -> 0x1000b5e0): the move cut back to the touching
+                                * point and the velocity reflected and cut to a quarter (msim_world_impact) - so pressing on, the
+                                * speed stays under the damage threshold; unless harmless (a climbable face, the feet in the
+                                * ground window: 0x10019c4e), collision damage at the attempted speed on every contact frame
+                                * (0x10019d84 -> 0x1000c3c0 / 0x1000c1f0) and the object walked into takes its share */
+                        float wn[3], bx = nx, bz = nz, sp3 = sqrtf(spd * spd + acr * acr) / 182.0f;
+                        float sacr = s->across ? s->across[i] : 0.0f;
+                        int imp = msim_world_impact(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], &bx, &bz, s->units[i].y, s->centre_h[i], s->radius[i], NULL,
+                                                    ac->mech.heading, &m->speed, &sacr);
+                        if (s->across) s->across[i] = sacr;
+                        wn[0] = g_block_n[0]; wn[1] = g_block_n[1]; wn[2] = g_block_n[2];   /* the hit's normal (the second try's when refused) */
+                        ac->mech.origin[0] = (int32_t)lrintf(bx); ac->mech.origin[2] = (int32_t)lrintf(bz);
+                        if (s->contact_frac) { s->contact_frac[i][0] = bx - (float)ac->mech.origin[0]; s->contact_frac[i][1] = bz - (float)ac->mech.origin[2]; }   /* a wall slide's sub-cm moves */
+                        /* the contact the AI reads (+0xa4, 0x10020e00) counts whatever the Collision Damage setting: 0x1000b5e0
+                         * adds one for every refused move (0x10010530 hit), a mech or a sphere in the way; a harmless one
+                         * clears it */
+                        s->units[i].blocked = !(imp & 2);
+                        if (!(imp & 2)) {
+                            if (s->collision_damage)   /* Combat Variables: a global switch in the engine */
+                                combat_collision(&s->units[i], sp3, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - ac->mech.heading, &s->rng);
+                            msim_impact_damage(s, i, sp3);
+                        }
+                    touched = 1;
+                        if (getenv("MW2_BLOCK_TRACE") && atoi(getenv("MW2_BLOCK_TRACE")) == i)   /* TEST ONLY */
+                            fprintf(stderr, "block %.2fs actor %d at %d,%d by %s n %.2f %.2f %.2f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2],
+                                    g_block_what ? g_block_what : "terrain", wn[0], wn[1], wn[2]);
+                    }
                 }
-                if (s->units[i].y > s->units[i].ground + 1.0f || msim_can_step_hr(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], nx, nz, s->units[i].y, s->centre_h[i], s->radius[i])) {   /* airborne: no ground test */
-                    /* the contact count (controller +0xa4, 0x1000b5e0) clears on a free move; a unit that does not move
-                     * keeps it (and counts on) */
-                    if ((int32_t)lrintf(nx) != ac->mech.origin[0] || (int32_t)lrintf(nz) != ac->mech.origin[2]) s->units[i].blocked = 0;
-                    ac->mech.origin[0] = (int32_t)lrintf(nx);
-                    ac->mech.origin[2] = (int32_t)lrintf(nz);
-                } else {   /* blocked by the terrain: collision damage at the attempted speed on every contact frame (engine
-                            * 0x10019d84 -> 0x1000c3c0), the move cut back and the velocity reflected and cut to a quarter
-                            * (msim_world_impact, 0x1000b5e0) - so pressing on, the speed stays under the damage threshold */
-                    float wn[3] = {g_block_n[0], g_block_n[1], g_block_n[2]};   /* the refusing surface's normal */
-                    float bx = nx, bz = nz;
-                    if (s->collision_damage)   /* Combat Variables: a global switch in the engine */
-                        combat_collision(&s->units[i], spd / 182.0f, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - ac->mech.heading, &s->rng);
-                    msim_world_impact(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], &bx, &bz, s->units[i].y, s->centre_h[i], s->radius[i], wn,
-                                      ac->mech.heading, &m->speed);
-                    ac->mech.origin[0] = (int32_t)lrintf(bx); ac->mech.origin[2] = (int32_t)lrintf(bz);
-                    /* the contact the AI reads (+0xa4, 0x10020e00) counts whatever the Collision Damage setting: 0x1000b5e0
-                     * adds one for every refused move (0x10010530 hit), a mech or a sphere in the way */
-                    s->units[i].blocked = 1;
-                    if (getenv("MW2_BLOCK_TRACE") && atoi(getenv("MW2_BLOCK_TRACE")) == i)   /* TEST ONLY */
-                        fprintf(stderr, "block %.2fs actor %d at %d,%d by %s n %.2f %.2f %.2f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2],
-                                g_block_what ? g_block_what : "terrain", wn[0], wn[1], wn[2]);
+                if (touched && s->contact_hold) s->contact_hold[i] = MSIM_CONTACT_HOLD;
+                if (!cm) break;
+                if (!touched && --s->contact_hold[i] <= 0) {   /* out of contact: the rest of the frame as one move */
+                    cm = 0; rest = s->contact_acc[i]; s->contact_acc[i] = 0;
+                    if (rest <= 1e-5f) break;
                 }
-            }
-            if (fabsf(spd) > 1.0f && s->units[i].y <= s->units[i].ground + 1.0f) {   /* on the ground (y is absolute - the old y <= 0 test froze every
-                                                                               * stride on terrain above zero); engine key timing: TSK duration x gait factor (0x1000e600) */
-                static const float MOD[3] = {1.5f, 1.0f, 0.75f};
-                float fr = fabsf(m->thr_servo);   /* gait by the current throttle c[0x13] (0x1000b3a0: param_1[8] + 0x4c) */
-                int g = fr < 0.25f ? 0 : fr < 0.75f ? 1 : 2;
-                {   int r0 = ac->mech.anim_rate > 0 ? ac->mech.anim_rate : 70;   /* key time 0x1000e600 (integer) */
-                    ac->t += dt * 182.0f / (float)(g == 0 ? r0 + (r0 >> 1) : g == 1 ? r0 : r0 - (r0 >> 2)); (void)MOD; }
             }
             if (fixed_unit(ac)) s->units[i].ground = s->units[i].y;   /* 0x100219e0: no translation, no gravity */
             else {
-                s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y);
+                s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y + (s->centre_h ? s->centre_h[i] : 550.0f));
                 combat_jets(&s->units[i], m->jet, dt, &s->rng);           /* jump jets / falling, on the terrain */
                 if (s->units[i].landed_vy < -5.384f && !s->units[i].destroyed && s->on_sound) {   /* the touch-down (0x10019e28 ->
                                                                                                     * 0x1001c0a0): MECMTNSF 0xe6 up to 16.154 cm/tick, MECMTNHD 0xe5 faster, at the mech */
@@ -1545,51 +1898,51 @@ void msim_step(msim *s, int32_t dt_ms)
         if (getenv("MW2_AI_TRACE") && i == atoi(getenv("MW2_AI_TRACE")) && (s->now / dt_ms) % 10 == 0) {   /* tests: one AI every 10 steps */
             fprintf(stderr, "ai %.2fs actor %d at %d,%d y %.0f immobile %d heading %.1f turn %.0f avoid %.0f/%d goal %.1f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2], s->units[i].y, s->units[i].immobile,
                     ac->mech.heading, m->turn, s->avoid_turn ? s->avoid_turn[i] : 0.0f, s->avoid_side ? s->avoid_side[i] : 0, v.has_goal ? v.goal_bearing : -999.0f);
-            fprintf(stderr, "ai %.2fs actor %d %s man %d (prev %d) thr %.2f%s speed %.0f twist %.1f->%.1f pitch %.1f->%.1f lock %#x tgt %d fire %d\n",
+            fprintf(stderr, "ai %.2fs actor %d %s man %d (prev %d) thr %.2f%s speed %.0f twist %.1f->%.1f pitch %.1f->%.1f lock %#x tgt %d fire %d heat %.1f\n",
                     s->now / 1000.0, i, ai_state_name(m->state), m->man, m->prev_man, m->throttle, m->reverse ? " REV" : "", m->speed,
-                    m->twist, m->twist_demand, m->pitch, m->pitch_demand, m->lock, m->tgt, m->wants_fire);
+                    m->twist, m->twist_demand, m->pitch, m->pitch_demand, m->lock, m->tgt, m->wants_fire, s->units[i].heat);
         }
     }
 
-    /* pose everyone: gait by throttle (engine 0x1000b3a0: < 25% seq 0, 25-75% seq 1, >= 75% seq 2) */
+    /* pose everyone: the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13] and the key
+     * player (0x1000dec0, anim_player_step) walks the keys toward it - a stopping mech finishes its stride and comes to
+     * the standing pose (the old code froze the keys mid-stride whenever the ground speed fell under 1 cm/s) */
     for (i = 0; i < s->actor_count; i++) {
         world_actor *ac = &s->actors[i];
-        int first = 0, cnt = 12;
         /* no walk animation (vehicles, turrets, dropships): the rest pose, placed at the unit's position and heading -
          * the model drawn and hit is where the unit is */
         if (!ac->have_anim) { mech3d_pose(&ac->mech, NULL, 0); continue; }
-        /* destroyed (state 4): the mech stands as it was struck (ASSUMED: the stride stops - the engine's state 4 runs
-         * no gait; DOSBox shows the self-destructed player's mech standing) */
+        /* destroyed (state 4): the mech stands as it was struck (the engine's state 4 runs no gait; DOSBox shows the
+         * self-destructed Mad Dog mid-stride - ASSUMPTIONS "Standing wrecks"); only the dead are held */
         if (s->armed[i] && s->units[i].destroyed) continue;
-        {
-            /* by the current throttle c[0x13] (0x1000b3a0); reversing (input +0x2f, ai_mind.reverse) -> sequence 2 */
-            float thr = s->minds ? (s->minds[i].reverse ? -s->minds[i].thr_servo : s->minds[i].thr_servo) : 0;
-            int seq;
-            if (s->minds && s->minds[i].reverse && thr > -0.02f && s->minds[i].throttle > 0) thr = -0.02f;
-            seq = thr < -0.01f ? 2 : thr < 0.75f ? 0 : 1;   /* engine 0x1000b3a0: the run from gait 3 (3/4 up); 2 = reverse walk */
-            if (anim_sequence(&ac->anim, seq, &first, &cnt) != 0) { seq = 0; anim_sequence(&ac->anim, 0, &first, &cnt); }
-            if (s->anim_seq && s->anim_seq[i] != seq + 1) { s->anim_seq[i] = seq + 1; ac->t = 0; }   /* a new sequence from its start (as the player's) */
-        }
-        {   /* the stride loops left - right - left (anim_loop_range); the lead-in plays once */
-            int ls, le;
-            anim_loop_range(&ac->anim, first, cnt, &ls, &le);
-            if (ac->t >= (float)le) ac->t = (float)ls + fmodf(ac->t - (float)le, (float)(le - ls > 0 ? le - ls : 1));
-        }
-        if (s->step_key && !s->units[i].destroyed) {   /* footsteps (0x1000e600 / 0x1000b3a0): a key flagged 0x800 -> 0x103 at the mech */
-            int key = first + (int)ac->t;
-            if (key != s->step_key[i] && key >= 0 && key < ac->anim.key_count && (ac->anim.key_flags[key] & 0x800) && s->on_sound) {
+        if (s->anim_pl && s->units[i].y <= s->units[i].ground + 1.0f) {   /* airborne: the keys hold (ASSUMED, as before) */
+            /* 0x1000b3a0: c[0x13] over the stop level (1/64) by more than 1/2048 (1/32 of full: 0x3c840001) walks -
+             * gait 1 under 1/4 of full, 2 under 3/4, else 3; sequence 0 (walk) below gait 3, 1 (run) at it, 2 (reverse)
+             * while reversing (input +0x2f; the AI's throttle stays positive), the gait then at most 2; at or under it
+             * the request is "stop" (-1, gait 0: 0x1000b350) */
+            const ai_mind *m = s->minds ? &s->minds[i] : NULL;
+            float fr = m ? fabsf(m->thr_servo) : 0.0f;
+            int req = -1, gait = 0, ev;
+            int rate = ac->mech.anim_rate > 0 ? ac->mech.anim_rate : 70;   /* the TSK key time */
+            if (m && fr > 1.0f / 32.0f) {
+                gait = fr < 0.25f ? 1 : fr < 0.75f ? 2 : 3;
+                req = gait == 3 ? 1 : 0;
+                if (s->anim_pl[i].cur == 2 && gait > 2) gait = 2;
+                if (m->reverse) req = 2;
+            }
+            ev = anim_player_step(&ac->anim, &s->anim_pl[i], req, gait, rate, dt * 182.0f);
+            if ((ev & ANIM_EV_STEP) && !s->units[i].destroyed && s->on_sound) {   /* footsteps: a key flagged 0x800 -> 0x103 at the mech (0x1000b3a0) */
                 float p3[3] = {(float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2]};
                 s->on_sound(s->shot_user, 0x103, p3);
             }
-            s->step_key[i] = key;
-        }
-        if (s->minds) {   /* a key flagged 0x10 (object +0x80 bit 2): the drive servo's T becomes 90.5 ticks for good (0x1001a180) */
-            int key = first + (int)ac->t;
-            if (key >= 0 && key < ac->anim.key_count && (ac->anim.key_flags[key] & 0x10) && fabsf(s->minds[i].speed) > 1.0f) s->minds[i].drive_slow = 1;
+            /* a key flagged 0x10 (object +0x80 bit 1): the drive servo's T becomes 90.5 ticks for good (0x1001a180) */
+            if ((ev & ANIM_EV_SLOW) && m && fabsf(m->speed) > 1.0f) s->minds[i].drive_slow = 1;
+            ac->t = s->anim_pl[i].t;
         }
         if (getenv("MW2_ANIM_TRACE") && i == atoi(getenv("MW2_ANIM_TRACE")))   /* tests: one actor every step */
-            fprintf(stderr, "anim %.2fs actor %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (first %d)\n", s->now / 1000.0, i, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].throttle : 0.0f, ac->t, first);
-        mech3d_pose(&ac->mech, &ac->anim, (float)first + ac->t);
+            fprintf(stderr, "anim %.2fs actor %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
+        ac->mech.pose_off = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? s->anim_pl[i].off : NULL;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
+        mech3d_pose(&ac->mech, &ac->anim, ac->t);
     }
 }
 
@@ -1599,6 +1952,7 @@ void msim_free(msim *s)
     free(s->armed);
     free(s->height);
     free(s->wreck_until); s->wreck_until = NULL;
+    free(s->msg_seen); s->msg_seen = NULL;
     free(s->twist_limit);
     free(s->minds);
     free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
@@ -1606,9 +1960,13 @@ void msim_free(msim *s)
     free(s->inspected);
     free(s->ai_lock);
     free(s->provoked);
-    free(s->step_key);
-    free(s->anim_seq);
+    free(s->anim_pl);
     free(s->bump_with);
+    free(s->aim); s->aim = NULL;
+    free(s->contact_frac); s->contact_frac = NULL;
+    free(s->contact_acc); s->contact_acc = NULL;
+    free(s->across); s->across = NULL;
+    free(s->contact_hold); s->contact_hold = NULL;
     s->minds = NULL;
     free(s->air_speed); s->air_speed = NULL;
     free(s->obstacle_part); s->obstacle_part = NULL; s->world = NULL;
@@ -1618,6 +1976,8 @@ void msim_free(msim *s)
     s->obstacles = NULL; s->avoid_turn = s->avoid_thr = s->avoid_next = NULL; s->avoid_side = NULL;
     s->twist_limit = NULL;
     if (s->pl_mech_ok) mech3d_free(&s->pl_mech);
+    if (s->pl_pit_ok) mech3d_free(&s->pl_pit);
+    s->pl_pit_ok = 0;
     s->units = NULL;
     s->armed = NULL;
     s->height = NULL;
@@ -1718,6 +2078,97 @@ int msim_weapon_guided(int w) { return w >= 0 && w < 31 && GUIDED[w]; }
 /* weapon table +0x3c / +0x40: the lock's range window, cm */
 static const int LOCK_MIN[31] = {7500,7500,7500,7500, 0,0,0, 25,25,25, 0,0,0,0,0,0,0,0,0,0,1000,0,0,0,0,0,0,0, 0, 0,0};
 static void car_inc(msim *s, int off);
+
+/* the player's collision pieces: the cockpit set while the view is the cockpit (see msim_init), else the full model */
+static mech3d *player_hull(msim *s) { return s->pl_pit_ok && s->player_cockpit ? &s->pl_pit : &s->pl_mech; }
+/* the engine's tick clock (DAT_1024ab44) */
+static int32_t sim_ticks(const msim *s) { return (int32_t)((int64_t)s->now * 182 / 1000); }
+/* 0x1003b740: an integer servo step - the 32-bit product (imul), divided toward zero (idiv), snapped to the target
+ * when the step reaches or passes it */
+static int32_t iservo_step(msim_iservo *v, int32_t now)
+{
+    int32_t d = v->target - v->value, st;
+    if (d != 0) {
+        st = (int32_t)((uint32_t)(now - v->t) * (uint32_t)d) / (v->tau > 0 ? v->tau : 1);
+        if ((d > 0 && st >= d) || (d < 0 && st <= d)) v->value = v->target;
+        else v->value += st;
+    }
+    v->t = now;
+    return v->value;
+}
+/* 0x10044810: one aim range update. The +0xa8 servo first (its value +0xb0, the hit range, back toward 50000 with tau
+ * 20 s); then the aim ray: a unit struck (object class 0x300) sets +0xb0 to the distance, 2000 at the least
+ * (0x10248598; nothing struck, or something else nearer: +0xb0 keeps its value); the +0x98 servo (value +0xa0) then
+ * follows +0xb0 with tau 0.2 s. Both set up at 50000 (0x10018a20 -> 0x1003b700: tau = seconds x 181). Returns +0xa0. */
+static float aim_range_step(msim *s, msim_aim *a, int hit, float dist)
+{
+    int32_t now = sim_ticks(s);
+    if (!a->ok) {
+        a->range.t = a->conv.t = 0;   /* set up with the unit at the mission's start (0x10018a20) */
+        a->range.target = a->range.value = a->conv.target = a->conv.value = 50000;
+        a->range.tau = 3620; a->conv.tau = 36;
+        a->ok = 1;
+    }
+    iservo_step(&a->range, now);
+    if (hit) a->range.value = dist <= 2000.0f ? 2000 : (int32_t)dist;   /* _ftol */
+    a->conv.target = a->range.value;
+    return (float)iservo_step(&a->conv, now);
+}
+static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
+static int shot_thing(const msim *s, int part);
+/* the aim ray (0x10044950 -> 0x100103e0): 150000 cm from the eye along dir, the nearest thing it enters - a mech's part
+ * hulls (the shots' own test, 25 cm samples within the mech's bounding sphere; the shooter's own skipped), a world
+ * object, the ground. Returns 1 with the distance when that is a unit (mechs, or a thing's object: class 0x200), 0 when
+ * nothing, the ground or another object is nearer. */
+static int aim_ray(msim *s, int self, const float from[3], const float dir[3], float *dist)
+{
+    float best = 150000.0f, tb = 2.0f;
+    int q, hit = 0, part = -1, hitq = -1, hitb = -1;
+    for (q = -1; q < s->actor_count; q++) {
+        float c[3], t, px, py, pz, rr, t0, t1, h;
+        mech3d *mq;
+        if (q == self) continue;
+        if (q < 0) {
+            if (!s->pl_mech_ok || s->player_unit.destroyed) continue;
+            mq = player_hull(s);
+            c[0] = s->player[0] - from[0]; c[1] = s->player_unit.y + (s->player_centre_h > 0 ? s->player_centre_h : 475.0f) - from[1]; c[2] = s->player[2] - from[2];
+            rr = s->player_radius > 1200.0f ? s->player_radius : 1200.0f;
+        } else {
+            if (!s->armed[q] || s->units[q].destroyed) continue;
+            mq = &s->actors[q].mech;
+            c[0] = (float)mq->origin[0] - from[0];
+            c[1] = s->units[q].y + (s->centre_h ? s->centre_h[q] : s->height[q] * 0.5f) - from[1];
+            c[2] = (float)mq->origin[2] - from[2];
+            rr = s->radius ? s->radius[q] : 450.0f;
+            rr = rr > s->height[q] * 0.75f ? rr : s->height[q] * 0.75f;   /* the whole mech inside */
+        }
+        t = c[0] * dir[0] + c[1] * dir[1] + c[2] * dir[2];
+        px = c[0] - dir[0] * t; py = c[1] - dir[1] * t; pz = c[2] - dir[2] * t;
+        if (t <= 0 || px * px + py * py + pz * pz > rr * rr) continue;
+        h = sqrtf(rr * rr - (px * px + py * py + pz * pz));
+        t0 = t - h > 0 ? t - h : 0; t1 = t + h;
+        for (; t0 < t1 && t0 < best; t0 += 100.0f) {   /* 25 cm samples (mech3d_hull_hit: four a segment) */
+            float o2[3] = {from[0] + dir[0] * t0, from[1] + dir[1] * t0, from[2] + dir[2] * t0}, d2[3] = {dir[0] * 100.0f, dir[1] * 100.0f, dir[2] * 100.0f}, ft;
+            if (mech3d_hull_hit(mq, o2, d2, &ft)) { best = t0 + ft * 100.0f; hit = 1; hitq = q; break; }
+        }
+    }
+    {   /* world objects nearer: a thing's object (0x200) is a unit struck, anything else stops the ray */
+        float dv[3] = {dir[0] * best, dir[1] * best, dir[2] * best};
+        if (s->world && s->terrain && shot_objects(s, from, dv, &tb, &part) && tb < 1.0f) {
+            hitb = shot_thing(s, part);
+            hit = hitb >= 0; hitq = -1;
+            best *= tb;
+        }
+    }
+    if (hit && los_blocked(s, from[0], from[1], from[2], from[0] + dir[0] * best, from[1] + dir[1] * best, from[2] + dir[2] * best)) hit = 0;   /* the ground nearer */
+    if (hit && self == -1 && !(hitq < 0 && hitb < 0)) {   /* the player's: the unit struck becomes the reticle's (0x1004489f) */
+        s->reticle_actor = hitq >= 0 ? hitq : -1;
+        s->reticle_bld = hitq >= 0 ? -1 : hitb;
+    }
+    *dist = best;
+    return hit;
+}
+
 static void spawn_shot_h(msim *s, int weapon, int owner, const float from[3], const float to[3], float scatter, int homing);
 static void spawn_shot_h(msim *s, int weapon, int owner, const float from[3], const float to[3], float scatter, int homing)
 {
@@ -1732,10 +2183,26 @@ static void spawn_shot_h(msim *s, int weapon, int owner, const float from[3], co
     if (len < 1) len = 1;
     sh->x = from[0]; sh->y = from[1]; sh->z = from[2];
     sh->vx = d[0] / len * sp; sh->vy = d[1] / len * sp; sh->vz = d[2] / len * sp;
+    {   /* 0x10044ac0 (from 0x10043f14): a missile (table +0 type 3 / 4) leaves rand(200) - 100 cm off the mount along the
+         * level perpendicular p = (-dz, 0, dx) / |(dx, dz)| of its unit direction d, plus the same amount along the
+         * engine's (d x p) with its y as written: (dy pz, dx pz + dz px, -dy px) - its flight line unchanged */
+        int kind = combat_weapon_kind(weapon);
+        if (kind == 3 || kind == 4) {
+            float ux = d[0] / len, uy = d[1] / len, uz = d[2] / len, hl = sqrtf(ux * ux + uz * uz);
+            float off = (float)((int)(rnd_ms(&s->rng) % 200u) - 100);
+            if (hl > 0) {
+                float px = -uz / hl, pz = ux / hl;
+                sh->x += off * (px + uy * pz);
+                sh->y += off * (ux * pz + uz * px);
+                sh->z += off * (pz - uy * px);
+            }
+        }
+    }
     sh->life = (float)combat_weapon_life(weapon);
     sh->weapon = weapon;
     sh->owner = owner;
     if (owner == -1) car_inc(s, 0x13);   /* the player's shots */
+    sh->ax = sh->az = 0;
     sh->ay = -(float)combat_weapon_drop(weapon) * 0.0296f * s->planet.gravity_g;   /* 0x10043cc0: +0x28 x gravity */
     sh->homing = msim_weapon_guided(weapon) ? homing : -2;   /* 0x100437a0: the mech's target when guided and locked */
     sh->age = 0;
@@ -1851,6 +2318,8 @@ static void building_damage(msim *s, int b, float dmg, int owner, const float at
     struct msim_building *bd = &s->bld[b];
     mech3d_part *pi;
     char line[96];
+    if (getenv("MW2_DAMAGE_LOG"))   /* TEST ONLY: who damages which structure */
+        printf("damage structure %s by %s %.3f\n", bd->name, owner < 0 ? (owner == -1 ? "player" : "none") : s->actors[owner].group, (double)dmg);
     int changed = 1;
     (void)owner;
     if (bd->hp <= 0) return;
@@ -1880,7 +2349,7 @@ static void building_damage(msim *s, int b, float dmg, int owner, const float at
     {   /* at the impact point (0x10046c20): class 0xb0 things one explosion 0x0d, everything else effect 3 and a debris
          * chunk (0x20b -> 0x10045d00 case 0xb -> 0x10046d40) */
         float p[3] = {at ? at[0] : (float)pi->pos[0], at ? at[1] : (float)pi->pos[1] + 200.0f, at ? at[2] : (float)pi->pos[2]};
-        if ((bd->type & 0xf0) == 0xb0) { if (s->on_effect) s->on_effect(s->shot_user, 0x0d, p); }
+        if ((bd->type & 0xf0) == 0xb0) effect(s, 0x0d, p, 0);   /* a damaging type: area damage round it (0x10046490) */
         else { effect(s, 3, p, 1); spawn_debris(s, 4, p); }   /* 0x20b: (0x200 >> 8) & 2 -> four chunks */
     }
     s->buildings_destroyed++;
@@ -1911,20 +2380,23 @@ int msim_aim_thing(const msim *s, float yaw_deg, float cone_deg, float *distance
 int msim_inspect(msim *s, int actor, int thing)
 {
     float dx, dz, r;
+    /* engine 0x1001d510 (DOS 0x2a7xx): the horizontal distance (+0xc0, 0x1001d970) against the radius + 200 m; 1 inspected,
+     * 2 out of range, 3 inspected before */
     if (actor >= 0 && actor < s->actor_count) {
-        if (!s->inspected || s->inspected[actor]) return 0;
+        if (!s->inspected) return 0;
+        if (s->inspected[actor]) return 3;                                 /* inspected before (DAT_1024c8ac = 3) */
         dx = (float)s->actors[actor].mech.origin[0] - s->player[0]; dz = (float)s->actors[actor].mech.origin[2] - s->player[2];
-        r = (s->height ? s->height[actor] * 0.5f : 500.0f) + 20000.0f;   /* the mech's radius (+0xe8, ASSUMED half its height) + 200 m */
+        r = (s->radius ? s->radius[actor] : 450.0f) + 20000.0f;           /* the unit's radius +0xe8 (MGEO int[6]) + 200 m (0x102474d0) */
         if (dx * dx + dz * dz > r * r) return 2;
         s->inspected[actor] = 1;
         return 1;
     }
     if (thing >= 0 && thing < s->bld_count) {
         struct msim_building *g = &s->bld[thing];
-        float hx = (g->mx[0] - g->mn[0]) * 0.5f, hz = (g->mx[2] - g->mn[2]) * 0.5f;
-        if (g->inspected) return 0;
+        if (g->inspected) return 3;
         dx = (g->mn[0] + g->mx[0]) * 0.5f - s->player[0]; dz = (g->mn[2] + g->mx[2]) * 0.5f - s->player[2];
-        r = sqrtf(hx * hx + hz * hz) + 20000.0f;                           /* its radius (half the box diagonal, ASSUMED) + 200 m */
+        r = 20000.0f;   /* the thing record's +0x10 + 200 m: the 3Dfx DLL never sets +0x10 (0; the loader 0x1003eb5c and the clear
+                         * 0x10018920 leave it), so 200 m from its point; DOS sets it to the model's bounding radius (0x4fdad) */
         if (dx * dx + dz * dz > r * r) return 2;
         g->inspected = 1;
         return 1;
@@ -1934,17 +2406,18 @@ int msim_inspect(msim *s, int actor, int thing)
 
 void msim_damage_building(msim *s, int b, float dmg) { float p[3] = {0, 0, 0}; if (b >= 0 && b < s->bld_count) building_damage(s, b, dmg, -1, p); }
 
-/* a 50 m sidestep (0x10020ac0 -> 0x100204e0 probes): clear of obstacles and mechs */
-static int probe_hits(const msim *s, float x0, float z0, float x1, float z1);
-static int mech_probe(const msim *s, int self, float x0, float z0, float x1, float z1, float *hx, float *hz);
+/* a 50 m sidestep (0x10020ac0 -> 0x100204e0 probes, 0x100103e0): clear when the probe hits nothing - world or unit */
+static int probe_engine(const msim *s, int self, const float p0[3], const float p1[3], int *climb, float *ox, float *oz);
 struct side_ctx { const msim *s; int i; };
 static int side_free(void *ctx, int side)
 {
     const struct side_ctx *c = ctx;
     const world_actor *ac = &c->s->actors[c->i];
-    float h = (ac->mech.heading + 90.0f * (float)side) * 3.14159265f / 180.0f, hx, hz;
-    float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], x1 = x0 + sinf(h) * 5000.0f, z1 = z0 + cosf(h) * 5000.0f;
-    return !probe_hits(c->s, x0, z0, x1, z1) && !mech_probe(c->s, c->i, x0, z0, x1, z1, &hx, &hz);
+    float h = (ac->mech.heading + 90.0f * (float)side) * 3.14159265f / 180.0f, ox, oz;
+    float yc = c->s->units[c->i].y + (c->s->centre_h ? c->s->centre_h[c->i] : 550.0f);
+    float p0[3] = {(float)ac->mech.origin[0], yc, (float)ac->mech.origin[2]}, p1[3] = {p0[0] + sinf(h) * 5000.0f, yc, p0[2] + cosf(h) * 5000.0f};
+    int climb;
+    return !probe_engine(c->s, c->i, p0, p1, &climb, &ox, &oz);
 }
 /* a guided launch at AI mech t by a shooter of pilot level lv (the player 1): engine 0x10020ac0 */
 static void missile_warning(msim *s, int t, int lv)
@@ -1975,7 +2448,13 @@ static void combat_step(msim *s, float dt)
         s->pl_mech.origin[1] = (int32_t)s->player_unit.y;
         s->pl_mech.origin[2] = (int32_t)s->player[2];
         s->pl_mech.heading = s->player_facing;
+        s->pl_mech.twist = s->player_twist;
         mech3d_pose(&s->pl_mech, NULL, 0);
+        if (s->pl_pit_ok) {
+            memcpy(s->pl_pit.origin, s->pl_mech.origin, sizeof s->pl_pit.origin);
+            s->pl_pit.heading = s->player_facing; s->pl_pit.twist = s->player_twist;
+            mech3d_pose(&s->pl_pit, NULL, 0);
+        }
     }
     /* the fire routine (0x100437a0) runs from the controller only in state 2: not while starting up (states 0 / 1,
      * 0x1001a180 / 0x10021a50) or powered down - a queued volley waits, nothing is triggered */
@@ -1985,6 +2464,8 @@ static void combat_step(msim *s, float dt)
         s->units[i].offline = (s->online_at && (float)s->now < s->online_at[i]) || (s->powered_down && s->powered_down[i]);
     combat_tick(&s->player_unit, dt);
     for (i = 0; i < s->actor_count; i++) if (s->armed[i]) combat_tick(&s->units[i], dt);
+    area_damage(s, ticks);
+    ammo_booms(s);
     /* the heat restart sets state 0 (0x10016201), which runs the start-up again (0x1001ab71: online 0x43e + rand(0x16a)
      * ticks later; no throttle, turning, jets or weapons until then) */
     if (s->player_unit.restarted) {
@@ -2002,7 +2483,7 @@ static void combat_step(msim *s, float dt)
         ai_mind *m = s->minds && s->ai_ok ? &s->minds[i] : NULL;
         if (!s->armed[i] || s->units[i].destroyed || !pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who)) continue;
         (void)ef;
-        aim_h = who < 0 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;
+        aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
         dx = ex - (float)s->actors[i].mech.origin[0];
         dz = ez - (float)s->actors[i].mech.origin[2];
         from[0] = (float)s->actors[i].mech.origin[0]; from[1] = s->units[i].y + s->height[i] * 0.7f; from[2] = (float)s->actors[i].mech.origin[2];
@@ -2031,18 +2512,20 @@ static void combat_step(msim *s, float dt)
                 }
             } else m->lock = 0;
         }
-        if ((m ? m->wants_fire : (who < 0 && order_attacks_player(s, i))) &&
+        if ((m ? m->wants_fire : (who == -1 && order_attacks_player(s, i))) &&
             !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f, (float)s->actors[i].mech.origin[2],
                          ex, aim_h, ez)) {
-            int fw = combat_ai_fire(&s->units[i], sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);   /* one weapon per decision (0x100232b0) */
-            if (fw >= 0 && m) m->fire_locked = (m->lock & 0x80) != 0;   /* homing only if locked when triggered (0x100437a0) */
+            int fw;
+            /* homing only if locked when triggered (0x100437a0 / 0x100443a0): the volley latches the target in its slot */
+            s->units[i].lock_target = m && (m->lock & 0x80) && who >= -1 ? who : -2;
+            fw = combat_ai_fire(&s->units[i], sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);   /* one weapon per decision (0x100232b0) */
             /* 0x10023428: a guided weapon (weapon table +0x18) fired at the player (+0x14e == player | 0x200): ENEMYFIR
              * 0x6f, volume 0x32, not positional (pos NULL) */
-            if (fw >= 0 && who < 0 && msim_weapon_guided(s->units[i].weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
+            if (fw >= 0 && who == -1 && msim_weapon_guided(s->units[i].weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
         }
         {   /* engine 0x100448e0: the shot follows the shooter's aim line (no random scatter): the legs' heading + the
              * LAGGED torso twist (clamped to MGEO) and the lagged pitch, from the aim origin; aimed at the ray's point at
-             * the target's distance */
+             * the target's distance (no AI programs; with them the aim ray below, per projectile) */
             float lim = s->twist_limit ? s->twist_limit[i] : 90.0f, rel, yaw, pit, d3;
             float tx = ex - from[0], ty = aim_h - from[1], tz = ez - from[2];
             if (m) rel = m->twist;
@@ -2057,12 +2540,40 @@ static void combat_step(msim *s, float dt)
         }
         {
             int first = 0;
-            int loc = -1;
-            while ((w = combat_next_projectile_at(&s->units[i], &first, &loc)) >= 0) {
+            int loc = -1, hom = -2;
+            while ((w = combat_next_projectile_h(&s->units[i], &first, &loc, &hom)) >= 0) {
                 /* from the weapon's mount (POFO slot by its location), else the body point */
                 float o[3] = {(float)s->actors[i].mech.origin[0], s->units[i].y, (float)s->actors[i].mech.origin[2]}, mf[3];
                 const float *src = mech3d_mount_world(&s->actors[i].mech, mech3d_mount_slot(loc), o, s->actors[i].mech.heading, mf) == 0 ? mf : from;
-                spawn_shot_h(s, w, i, src, to, 0.0f, m && m->fire_locked ? who : -2);
+                if (m && s->aim) {
+                    /* every projectile as it leaves (0x10043cc0 -> 0x10044810, AI units only): the aim ray from the EYE
+                     * (unit +0x44, the EYEO node as posed: walk, lagged twist; no torso sway, mech3d.c) along the eye
+                     * object's world yaw and the controller's lagged pitch (0x100449d0: +0x20 -> +0x1c replaces the
+                     * eye's own pitch) sets the aim range (aim_range_step); the shot heads from its mount for the
+                     * point at that range on the ray (0x100448e0) - so it lands where the eye ray meets the target, not
+                     * on the target's centre */
+                    const mech3d *am = &s->actors[i].mech;
+                    float eye[3], dir[3], ey2, pr = m->pitch * 3.14159265f / 180.0f, dist, r;
+                    int hit;
+                    if (am->eye_ok) {
+                        eye[0] = o[0] + am->eye_pos[0] - am->mount_from[0];
+                        eye[1] = o[1] + am->eye_pos[1] - am->mount_from[1];
+                        eye[2] = o[2] + am->eye_pos[2] - am->mount_from[2];
+                        ey2 = atan2f(am->eye_rot[2], am->eye_rot[8]);
+                    } else {
+                        memcpy(eye, from, sizeof eye);
+                        ey2 = (am->heading + m->twist) * 3.14159265f / 180.0f;
+                    }
+                    dir[0] = sinf(ey2) * cosf(pr); dir[1] = sinf(pr); dir[2] = cosf(ey2) * cosf(pr);
+                    hit = aim_ray(s, i, eye, dir, &dist);
+                    r = aim_range_step(s, &s->aim[i], hit, dist);
+                    to[0] = eye[0] + dir[0] * r; to[1] = eye[1] + dir[1] * r; to[2] = eye[2] + dir[2] * r;
+                    if (getenv("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
+                        fprintf(stderr, "aiaim %.2f actor %d w %d hit %d dist %.0f range %d conv %.0f eye %.0f %.0f %.0f yaw %.2f body %.2f pitch %.2f\n",
+                                s->now / 1000.0, i, w, hit, dist, s->aim[i].range.value, r, eye[0], eye[1], eye[2], ey2 * 180.0f / 3.14159265f,
+                                wrap180(am->heading + m->twist), m->pitch);
+                }
+                spawn_shot_h(s, w, i, src, to, 0.0f, hom);   /* the target latched at the trigger (slot +0x18 / +0x1c) */
                 if (who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* the target dodges (0x10020ac0 from 0x1004397b) */
                     int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
                     missile_warning(s, who, lv);
@@ -2126,39 +2637,26 @@ static void combat_step(msim *s, float dt)
                  * (0x10044810 -> 0x100103e0) is where the ray first enters a mech, here its parts' hulls (the shots' own
                  * test), found within the mech's bounding sphere */
                 float dir[3] = {sinf(ay) * cosf(ap), sinf(ap), cosf(ay) * cosf(ap)}, best = 150000.0f;
-                int q, hit = 0;
+                int hit = 0;
                 if (s->player_eye_ok && !getenv("MW2_AIM_BODY")) memcpy(from, s->player_eye, sizeof from);   /* TEST ONLY: MW2_AIM_BODY the old ray */
-                for (q = 0; q < s->actor_count; q++) {
-                    float c[3], t, px, py, pz, rr = s->radius ? s->radius[q] : 450.0f, t0, t1, h;
-                    if (!s->armed[q] || s->units[q].destroyed) continue;
-                    c[0] = (float)s->actors[q].mech.origin[0] - from[0];
-                    c[1] = s->units[q].y + (s->centre_h ? s->centre_h[q] : s->height[q] * 0.5f) - from[1];
-                    c[2] = (float)s->actors[q].mech.origin[2] - from[2];
-                    t = c[0] * dir[0] + c[1] * dir[1] + c[2] * dir[2];
-                    rr = rr > s->height[q] * 0.75f ? rr : s->height[q] * 0.75f;   /* the whole mech inside */
-                    px = c[0] - dir[0] * t; py = c[1] - dir[1] * t; pz = c[2] - dir[2] * t;
-                    if (t <= 0 || px * px + py * py + pz * pz > rr * rr) continue;
-                    h = sqrtf(rr * rr - (px * px + py * py + pz * pz));
-                    t0 = t - h > 0 ? t - h : 0; t1 = t + h;
-                    for (; t0 < t1 && t0 < best; t0 += 100.0f) {   /* 25 cm samples (mech3d_hull_hit: four a segment) */
-                        float o2[3] = {from[0] + dir[0] * t0, from[1] + dir[1] * t0, from[2] + dir[2] * t0}, d2[3] = {dir[0] * 100.0f, dir[1] * 100.0f, dir[2] * 100.0f}, ft;
-                        if (mech3d_hull_hit(&s->actors[q].mech, o2, d2, &ft)) { float th = t0 + ft * 100.0f; best = th < 2000.0f ? 2000.0f : th; hit = 1; break; }
-                    }
-                }
-                /* nothing of class 0x300 struck: +0xb0 keeps its last value (0x10044847 / 0x10044858 skip the store) -
-                 * the range stays at the last mech's (the engine's ramp toward it, 0x1003b740 on +0x98, left out) */
-                if (hit && los_blocked(s, from[0], from[1], from[2], from[0] + dir[0] * best, from[1] + dir[1] * best, from[2] + dir[2] * best)) hit = 0;   /* the ground nearer */
-                if (hit) s->player_conv = best;
-                else best = s->player_conv > 0 ? s->player_conv : 150000.0f;
+                /* every frame for the player (0x10019310 -> 0x1001a021): the ray's hit range (aim_ray) through the
+                 * servos (aim_range_step): with nothing struck the range drifts back toward 50000 (tau 20 s) and the
+                 * convergence follows the range with tau 0.2 s */
+                hit = aim_ray(s, -1, from, dir, &best);
+                best = aim_range_step(s, &s->player_aim, hit, best);
+                s->player_conv = best;
                 to[0] = from[0] + dir[0] * best; to[1] = from[1] + dir[1] * best; to[2] = from[2] + dir[2] * best;
             }
             else if (tgt_ok) { to[0] = (float)s->actors[e].mech.origin[0]; to[1] = s->units[e].y + s->height[e] * 0.55f; to[2] = (float)s->actors[e].mech.origin[2]; }
             else { to[0] = from[0] + dx; to[1] = from[1] + sinf(ap) * 100000.0f; to[2] = from[2] + dz; }
+            /* a volley triggered now latches the target if locked (0x100437a0 / 0x10044440: slot +0x18 / +0x1c from the
+             * mech's +0xdc when the controller's 0x80 is set) - its later missiles home even if the lock breaks */
+            s->player_unit.lock_target = (s->player_lock & 0x80) ? s->player_lock_target : -2;
             if (s->player_attacks) combat_trigger_mask(&s->player_unit, tgt_ok ? sqrtf(dx * dx + dz * dz) : 0.0f, s->player_fire_mask ? s->player_fire_mask : 0xFFFFFFFFu);
             {
                 int first = 0;
-                int loc = -1;
-                while ((w = combat_next_projectile_at(&s->player_unit, &first, &loc)) >= 0) {
+                int loc = -1, hom = -2;
+                while ((w = combat_next_projectile_h(&s->player_unit, &first, &loc, &hom)) >= 0) {
                     float o[3] = {s->player[0], s->player_unit.y, s->player[2]}, mf[3];
                     const float *src = (s->pl_shown_ok && mech3d_mount_world(&s->pl_shown, mech3d_mount_slot(loc), o, s->player_facing, mf) == 0) ||
                                        (s->pl_mech_ok && mech3d_mount_world(&s->pl_mech, mech3d_mount_slot(loc), o, s->player_facing, mf) == 0) ? mf : from;
@@ -2166,7 +2664,7 @@ static void combat_step(msim *s, float dt)
                         float hh = s->player_facing * 3.14159265f / 180.0f, dx2 = src[0] - s->player[0], dz2 = src[2] - s->player[2];
                         fprintf(stderr, "muzzle w %d loc %d slot %d: right %.0f up %.0f fwd %.0f (%s) eye %.0f %.0f %.0f to %.0f %.0f %.0f\n", w, loc, mech3d_mount_slot(loc), dx2 * cosf(hh) - dz2 * sinf(hh), src[1] - s->player_unit.y, dx2 * sinf(hh) + dz2 * cosf(hh), src == from ? "body" : "mount", from[0], from[1], from[2], to[0], to[1], to[2]);
                     }
-                    spawn_shot_h(s, w, -1, src, to, 0.0f, (s->player_lock & 0x80) ? s->player_lock_target : -2);
+                    spawn_shot_h(s, w, -1, src, to, 0.0f, hom);
                     if (s->shot_count > 0 && s->shots[s->shot_count - 1].owner == -1) {   /* TEST ONLY: the aim line */
                         msim_shot *ns = &s->shots[s->shot_count - 1];
                         float ay2 = s->player_aim_yaw * 3.14159265f / 180.0f, ap2 = s->player_aim_pitch * 3.14159265f / 180.0f;
@@ -2212,35 +2710,15 @@ static void combat_step(msim *s, float dt)
                 }
                 sh->prox = 0;
             }
-            if (sh->homing != -2 && sh->age > 0) {   /* guidance (0x10045910): acceleration = unit(target - p) - unit(v), per tick^2 */
-                float tx, ty, tz, tl, vl, ax, ay2, az;
-                int tg = sh->homing;
-                if (tg == -1 ? s->player_unit.destroyed : (tg < 0 || tg >= s->actor_count || !s->armed[tg] || s->units[tg].destroyed)) sh->homing = -2;
-                else {
-                    /* at the target OBJECT's position (+0x50..+0x58: the feet); within 100 cm (0x102485c4) the projectile is
-                     * flagged to hit it next tick. Its speed is not held: the turn costs speed, as in the engine */
-                    if (tg == -1) { tx = s->player[0]; ty = s->player_unit.y; tz = s->player[2]; }
-                    else { tx = (float)s->actors[tg].mech.origin[0]; ty = s->units[tg].y; tz = (float)s->actors[tg].mech.origin[2]; }
-                    tx -= sh->x; ty -= sh->y; tz -= sh->z;
-                    tl = sqrtf(tx * tx + ty * ty + tz * tz); vl = sqrtf(sh->vx * sh->vx + sh->vy * sh->vy + sh->vz * sh->vz);
-                    if (tl <= 100.0f) sh->prox = 1;
-                    if (tl > 1 && vl > 0) {
-                        ax = tx / tl - sh->vx / vl; ay2 = ty / tl - sh->vy / vl; az = tz / tl - sh->vz / vl;
-                        sh->x += 0.5f * ax * step * step; sh->y += 0.5f * ay2 * step * step; sh->z += 0.5f * az * step * step;
-                        sh->vx += ax * step; sh->vy += ay2 * step; sh->vz += az * step;
-                        o[0] = sh->x; o[1] = sh->y; o[2] = sh->z;
-                    }
-                }
-            }
             sh->age += step;
             /* 0x10044f60: p += v dt + a dt^2 / 2; v += a dt */
-            dv[0] = sh->vx * step; dv[1] = sh->vy * step + 0.5f * sh->ay * step * step; dv[2] = sh->vz * step;
+            dv[0] = sh->vx * step + 0.5f * sh->ax * step * step; dv[1] = sh->vy * step + 0.5f * sh->ay * step * step; dv[2] = sh->vz * step + 0.5f * sh->az * step * step;
             /* candidates: the player and actors near the segment */
             for (i = -1; i < s->actor_count; i++) {
                 const mech3d *m;
                 float cx, cz, ex, ez, lx, lz, len2, u, px, pz;
                 if (i == sh->owner) continue;
-                if (i == -1) { if (!s->pl_mech_ok || s->player_unit.destroyed) continue; m = &s->pl_mech; }
+                if (i == -1) { if (!s->pl_mech_ok || s->player_unit.destroyed) continue; m = player_hull(s); }
                 else { if (!s->armed[i] || s->units[i].destroyed) continue; m = &s->actors[i].mech; }
                 cx = (float)m->origin[0]; cz = (float)m->origin[2];
                 /* coarse: horizontal distance from the segment to the unit < 20 m */
@@ -2274,10 +2752,30 @@ static void combat_step(msim *s, float dt)
                 if (gone) { sh->life = 0; sh->y = -1.0f; break; }
             }
             if (hit_unit == -2) {
+                float ov[3] = {sh->vx, sh->vy, sh->vz};
                 sh->x += dv[0]; sh->y += dv[1]; sh->z += dv[2];
-                sh->vy += sh->ay * step;
+                sh->vx += sh->ax * step; sh->vy += sh->ay * step; sh->vz += sh->az * step;
                 sh->life -= step;
                 if (sh->life <= 0) break;
+                if (sh->homing != -2 && sh->age > 0) {
+                    /* guidance (0x10045910, from 0x10044f60 after the move, with the velocity the move used): the
+                     * acceleration (+0x14..+0x1c) BECOMES unit(target - p) - unit(v) - no gravity while guided - aimed at
+                     * the target OBJECT's position (+0x50..+0x58: the feet); within 100 cm (0x102485c4) the projectile is
+                     * flagged to hit it next tick. Speed is not held: turning costs speed. A target gone (unit flags 2 /
+                     * 4): acceleration 0 and +0x34 = 0 - it flies on straight, gravity no longer applied */
+                    int tg = sh->homing;
+                    float tx, ty, tz, tl, vl;
+                    if (tg == -1 ? s->player_unit.destroyed : (tg < 0 || tg >= s->actor_count || !s->armed[tg] || s->units[tg].destroyed)) {
+                        sh->homing = -2; sh->ax = sh->ay = sh->az = 0;
+                    } else {
+                        if (tg == -1) { tx = s->player[0]; ty = s->player_unit.y; tz = s->player[2]; }
+                        else { tx = (float)s->actors[tg].mech.origin[0]; ty = s->units[tg].y; tz = (float)s->actors[tg].mech.origin[2]; }
+                        tx -= sh->x; ty -= sh->y; tz -= sh->z;
+                        tl = sqrtf(tx * tx + ty * ty + tz * tz); vl = sqrtf(ov[0] * ov[0] + ov[1] * ov[1] + ov[2] * ov[2]);
+                        if (tl <= 100.0f) sh->prox = 1;
+                        if (tl > 0 && vl > 0) { sh->ax = tx / tl - ov[0] / vl; sh->ay = ty / tl - ov[1] / vl; sh->az = tz / tl - ov[2] / vl; }
+                    }
+                }
                 {
                     float gy = msim_ground(s, sh->x, sh->z, sh->y);
                     if (sh->y < gy) {   /* hit the terrain: a ground impact effect */
@@ -2300,6 +2798,12 @@ static void combat_step(msim *s, float dt)
             int gone_before[8], li;
             int was = tu->destroyed, dealt;
             memcpy(gone_before, tu->loc_gone, sizeof gone_before);
+            if (hit_unit == -1 && getenv("MW2_TEST_PLHIT_GROUP")) hit_group = atoi(getenv("MW2_TEST_PLHIT_GROUP"));   /* TEST ONLY: the location struck */
+            if (hit_unit == -1 && getenv("MW2_AI_AIM_TRACE")) {   /* TEST ONLY: where the player was struck (right, up, forward of the player) */
+                float hx = o[0] + dv[0] * tbest - s->player[0], hz = o[2] + dv[2] * tbest - s->player[2], fh = s->player_facing * 3.14159265f / 180.0f;
+                fprintf(stderr, "plhit %.2f from %d w %d group %d right %.0f up %.0f fwd %.0f\n", s->now / 1000.0, sh->owner, sh->weapon, hit_group,
+                        hx * cosf(fh) - hz * sinf(fh), o[1] + dv[1] * tbest - s->player_unit.y, hx * sinf(fh) + hz * cosf(fh));
+            }
             dealt = combat_hit(tu, sh->weapon, hit_group, th - dir, &s->rng);
             (void)gone_before; (void)li;   /* the blown-off parts: blow_offs, each step */
             s->hits++;
@@ -2332,9 +2836,14 @@ static void combat_step(msim *s, float dt)
             }
             if (s->on_effect) {   /* impact effect at the hit point; the death explosion when it kills */
                 float hp[3] = {o[0] + dv[0] * tbest, o[1] + dv[1] * tbest, o[2] + dv[2] * tbest};
-                int ft = fx_impact_type(combat_weapon_visual(sh->weapon), FX_HIT_UNIT | (hit_unit == -1 ? FX_HIT_PLAYER : 0));
+                /* the flags (0x100453xx): 0x100 any unit; for the player still alive after the hit (+0x14 & 2 clear) 0x4000,
+                 * and 0x2000 only when the part struck is in location 1-4 (head, right / centre / left torso: the hit
+                 * part's +0x16) - an arm or a leg hit shows the plain unit effect */
+                int ph = hit_unit == -1 && !tu->destroyed && hit_group >= 1 && hit_group <= 4;
+                int ft = fx_impact_type(combat_weapon_visual(sh->weapon), FX_HIT_UNIT | (ph ? FX_HIT_PLAYER : 0));
                 if (ft >= 0) effect(s, ft, hp, missile_fx(sh->weapon));
                 if (sh->owner == -1) aim_trace(s, sh, "unit", hp);   /* TEST ONLY */
+                if (getenv("MW2_FX_TRACE") && hit_unit == -1) fprintf(stderr, "plfx %.2f group %d type %d\n", s->now / 1000.0, hit_group, ft);   /* TEST ONLY */
                 (void)was;   /* the death explosion comes from the death sequence (wrecks) */
             }
             if (s->log) {
@@ -2375,16 +2884,13 @@ int msim_aim_target(const msim *s, float aim_yaw, float cone, float *distance)
 
 
 /* ---------------- terrain (collision types 0 and 5) ---------------- */
-typedef struct { float minx, maxx, minz, maxz, x[3], z[3], n[3], d; } tri_t;
+struct cobj; struct cpoly; struct qnode;
 typedef struct { float minx, maxx, minz, maxz, top; } box_t;
 typedef struct { int *idx; int n, cap; } cell_t;
 typedef struct {
-    tri_t *tri; int ntri;
-    box_t *box; int nbox;
     box_t *wall; int nwall;    /* type 1: XZ boxes, no height limit (engine 0x1000d520) */
     float x0, z0, cs; int gw, gh;
-    cell_t *cell;              /* triangles (index >= 0) and boxes (-1 - index) per 50 m cell */
-    int *solid; float (*solid_box)[4]; int nsolid, capsolid;   /* objects with a segment test (types 0, 2, 7): part, XZ box */
+    int nsolid;                /* fixed objects of collision types 0, 1, 2, 5, 7 */
     /* projectiles (0x100103e0 walks the whole collision list): every object of collision type 0-3 or 6-9 (5, the polygon
      * terrain, is the ground test; 4 never hits; -1 objects are not in the list) - part index, world box, bounding
      * sphere (0x10028xxx: the vertex box's centre, the farthest vertex), per 50 m cell */
@@ -2396,6 +2902,13 @@ typedef struct {
      * entry takes its new world matrix whenever the node moves (0x1000fbe0 -> 0x10029c10) - so they block walking,
      * carry the ground (type 0 tops) and the avoidance probes where they are now: part, world box (refreshed each step) */
     int *mov; float (*mov_box)[6]; int nmov;
+    /* the engine's collision list (clist_build): entries in world order, the faces of types 2 / 5 / 7, the type 5
+     * quadtrees, the fixed entries per 50 m cell */
+    struct cobj *co; int nco;
+    struct cpoly *cp; int ncp, capcp;
+    struct qnode *qn; int nqn, capqn;
+    int *qidx; int nqidx, capqidx;
+    cell_t *ccell;
 } terrain_t;
 
 static void cell_add(cell_t *c, int v)
@@ -2408,19 +2921,21 @@ static void terrain_free(terrain_t *t)
 {
     int i;
     if (!t) return;
-    for (i = 0; t->cell && i < t->gw * t->gh; i++) free(t->cell[i].idx);
     for (i = 0; t->ocell && i < t->gw * t->gh; i++) free(t->ocell[i].idx);
-    free(t->cell); free(t->tri); free(t->box); free(t->wall); free(t->solid); free(t->solid_box);
+    free(t->wall);
     free(t->obj); free(t->obj_box); free(t->obj_sph); free(t->ocell); free(t->thing_of); free(t->stamp);
+    for (i = 0; t->ccell && i < t->gw * t->gh; i++) free(t->ccell[i].idx);
+    free(t->ccell); free(t->co); free(t->cp); free(t->qn); free(t->qidx);
     free(t->mov); free(t->mov_box); free(t);
 }
 
 static void terrain_release(void *t) { terrain_free((terrain_t *)t); }
 
+static void clist_build(terrain_t *t, const mech3d *w);
 static terrain_t *terrain_build(const mech3d *w)
 {
     terrain_t *t = calloc(1, sizeof *t);
-    int i, k, j, capt = 0, capb = 0, capw = 0;
+    int i, k, j, capw = 0;
     float minx = 1e30f, maxx = -1e30f, minz = 1e30f, maxz = -1e30f;
     if (!t) return NULL;
     for (i = 0; i < w->part_count; i++) {
@@ -2435,57 +2950,12 @@ static terrain_t *terrain_build(const mech3d *w)
             for (j = 0; j < 3; j++) { if (q[j] < bmn[j]) bmn[j] = q[j]; if (q[j] > bmx[j]) bmx[j] = q[j]; }
         }
         if (bmn[0] > bmx[0]) continue;
-        if (p->coll == 0 || p->coll == 2 || p->coll == 7) {   /* the move segment's objects (msim_can_step_hr) */
-            if (t->nsolid == t->capsolid) {
-                t->capsolid = t->capsolid ? t->capsolid * 2 : 64;
-                t->solid = realloc(t->solid, (size_t)t->capsolid * sizeof *t->solid);
-                t->solid_box = realloc(t->solid_box, (size_t)t->capsolid * sizeof *t->solid_box);
-            }
-            t->solid[t->nsolid] = i;
-            t->solid_box[t->nsolid][0] = bmn[0]; t->solid_box[t->nsolid][1] = bmx[0];
-            t->solid_box[t->nsolid][2] = bmn[2]; t->solid_box[t->nsolid][3] = bmx[2];
-            t->nsolid++;
-            if (p->coll != 0) continue;   /* types 2 and 7: no ground (no entry at 0x1024b3b0) */
-        }
-        if (p->coll == 1) {   /* engine type 1 (0x1000d520): an XZ box, blocking at any height */
+        t->nsolid++;   /* counted: the collision list's fixed entries (clist_build) */
+        if (p->coll == 1) {   /* engine type 1 (0x1000d520): an XZ box (msim_wall_at, tools) */
             if (t->nwall == capw) { capw = capw ? capw * 2 : 64; t->wall = realloc(t->wall, (size_t)capw * sizeof *t->wall); }
             t->wall[t->nwall].minx = bmn[0]; t->wall[t->nwall].maxx = bmx[0]; t->wall[t->nwall].minz = bmn[2]; t->wall[t->nwall].maxz = bmx[2];
             t->wall[t->nwall].top = bmx[1];
             t->nwall++;
-        }
-        if (p->coll == 1) { /* bounds below */ }
-        else if (p->coll == 0) {   /* engine type 0 (0x1000d250): the object's box; its top is the ground */
-            if (t->nbox == capb) { capb = capb ? capb * 2 : 64; t->box = realloc(t->box, (size_t)capb * sizeof *t->box); }
-            t->box[t->nbox].minx = bmn[0]; t->box[t->nbox].maxx = bmx[0]; t->box[t->nbox].minz = bmn[2]; t->box[t->nbox].maxz = bmx[2];
-            t->box[t->nbox].top = bmx[1];
-            t->nbox++;
-        } else {              /* engine type 5 (0x1000cf80): upward-facing polygons, height on their plane */
-            for (k = 0; k < o->poly_count; k++) {
-                const wtb_poly *pg = &o->polys[k];
-                float a[3], b[3], c[3], u[3], v[3], n[3], len;
-                int f;
-                if (pg->n < 3) continue;
-                part_vertex(p, &o->verts[pg->idx[0]], a);
-                for (f = 1; f + 1 < pg->n; f++) {   /* fan into triangles */
-                    tri_t *tr;
-                    part_vertex(p, &o->verts[pg->idx[f]], b);
-                    part_vertex(p, &o->verts[pg->idx[f + 1]], c);
-                    for (j = 0; j < 3; j++) { u[j] = b[j] - a[j]; v[j] = c[j] - a[j]; }
-                    n[0] = u[1] * v[2] - u[2] * v[1]; n[1] = u[2] * v[0] - u[0] * v[2]; n[2] = u[0] * v[1] - u[1] * v[0];
-                    len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-                    if (len < 1e-3f) continue;
-                    for (j = 0; j < 3; j++) n[j] /= len;
-                    if (n[1] < 0) for (j = 0; j < 3; j++) n[j] = -n[j];   /* winding varies; the surface faces up */
-                    if (n[1] < 0.05f) continue;                         /* walls: not ground */
-                    if (t->ntri == capt) { capt = capt ? capt * 2 : 256; t->tri = realloc(t->tri, (size_t)capt * sizeof *t->tri); }
-                    tr = &t->tri[t->ntri++];
-                    tr->x[0] = a[0]; tr->z[0] = a[2]; tr->x[1] = b[0]; tr->z[1] = b[2]; tr->x[2] = c[0]; tr->z[2] = c[2];
-                    tr->minx = fminf(a[0], fminf(b[0], c[0])); tr->maxx = fmaxf(a[0], fmaxf(b[0], c[0]));
-                    tr->minz = fminf(a[2], fminf(b[2], c[2])); tr->maxz = fmaxf(a[2], fmaxf(b[2], c[2]));
-                    memcpy(tr->n, n, sizeof n);
-                    tr->d = n[0] * a[0] + n[1] * a[1] + n[2] * a[2];
-                }
-            }
         }
         if (bmn[0] < minx) minx = bmn[0];
         if (bmx[0] > maxx) maxx = bmx[0];
@@ -2539,17 +3009,16 @@ static terrain_t *terrain_build(const mech3d *w)
         }
     }
     t->nparts = w->part_count;
-    if (!t->ntri && !t->nbox && !t->nwall && !t->nsolid && !t->nobj && !t->nmov) { terrain_free(t); return NULL; }
+    if (!t->nwall && !t->nsolid && !t->nobj && !t->nmov) { terrain_free(t); return NULL; }
     t->cs = 5000.0f;
     t->x0 = minx; t->z0 = minz;
     if (!(maxx >= minx) || !(maxz >= minz) || maxx - minx > 4.0e8f || maxz - minz > 4.0e8f) { terrain_free(t); return NULL; }
     t->gw = (int)((maxx - minx) / t->cs) + 1; t->gh = (int)((maxz - minz) / t->cs) + 1;
     if (t->gw > 4096) t->gw = 4096;
     if (t->gh > 4096) t->gh = 4096;
-    t->cell = calloc((size_t)t->gw * (size_t)t->gh, sizeof *t->cell);
     t->ocell = calloc((size_t)t->gw * (size_t)t->gh, sizeof *t->ocell);
     t->stamp = calloc((size_t)(w->part_count > 0 ? w->part_count : 1), sizeof *t->stamp);
-    if (!t->cell || !t->ocell || !t->stamp) { terrain_free(t); return NULL; }
+    if (!t->ocell || !t->stamp) { terrain_free(t); return NULL; }
     for (i = 0; i < t->nobj; i++) {   /* each object in the cells its sphere's square covers */
         const float *sp = t->obj_sph[i];
         int cx0 = (int)((sp[0] - sp[3] - t->x0) / t->cs), cx1 = (int)((sp[0] + sp[3] - t->x0) / t->cs);
@@ -2561,27 +3030,515 @@ static terrain_t *terrain_build(const mech3d *w)
         for (cz = cz0; cz <= cz1; cz++)
             for (cx = cx0; cx <= cx1; cx++) cell_add(&t->ocell[cz * t->gw + cx], i);
     }
-    for (i = 0; i < t->ntri + t->nbox; i++) {
-        float a0 = i < t->ntri ? t->tri[i].minx : t->box[i - t->ntri].minx, a1 = i < t->ntri ? t->tri[i].maxx : t->box[i - t->ntri].maxx;
-        float b0 = i < t->ntri ? t->tri[i].minz : t->box[i - t->ntri].minz, b1 = i < t->ntri ? t->tri[i].maxz : t->box[i - t->ntri].maxz;
-        int cx0 = (int)((a0 - t->x0) / t->cs), cx1 = (int)((a1 - t->x0) / t->cs), cz0 = (int)((b0 - t->z0) / t->cs), cz1 = (int)((b1 - t->z0) / t->cs), cx, cz;
+    clist_build(t, w);
+    return t;
+}
+
+
+/* ---------------- the engine's collision list (0x1024b320): walking, the ground and the AI probes ----------------
+ * Every world object of collision type 0-3 or 5-9 is one entry, in world order (the moving ones where they are now).
+ * Per type (table 0x1024b3a8: point test / segment test / ground): 0 the world box (0x1000d1b0 / 0x1000d310 / its top
+ * 0x1000d1f0), 1 the box (0x1000d520 / 0x1000d310 / none), 2 and 7 the faces (0x1000d6b0 / 0x1000d7b0 / none), 4 nothing
+ * (0x1000d580 / 0x1000d590), 5 the polygon terrain through a quadtree (0x1000d640 / 0x1000d680 -> 0x1000ccf0 /
+ * 0x1000d690 -> 0x1000cf80), 3, 6, 8, 9 the bounding sphere (no entries: 0x100107b0). A face is the polygon with the
+ * engine's normal (the stored one negated, 0x10042140; the winding normal negated when there is none) and its first
+ * vertex. */
+typedef struct cpoly { float v[WTB_MAX_POLY_VERTS][3]; int n; float nrm[3]; float mn[3], mx[3]; } cpoly_t;
+typedef struct qnode { float r[6]; int ch[4]; int np, p0; } qnode_t;   /* r: x0 x1 y0 y1 z0 z1; np > 0: a leaf */
+typedef struct cobj { int part, type, moving; float box[6], sph[4], lsph[4]; int p0, np, root; } cobj_t;
+
+/* the engine's normal of polygon pg of part wp (world), 0 when degenerate */
+static int eng_poly_normal(const mech3d_part *wp, const wtb_poly *pg, float nw[3])
+{
+    const wtb_object *o = &wp->model.objects[0];
+    int j;
+    if (pg->has_normal) {
+        wtb_vertex nv;
+        float zero[3], one[3];
+        memset(&nv, 0, sizeof nv);
+        part_vertex(wp, &nv, zero);
+        nv.x = (int32_t)lrintf(-pg->normal[0] * 4096.0f); nv.y = (int32_t)lrintf(-pg->normal[1] * 4096.0f); nv.z = (int32_t)lrintf(-pg->normal[2] * 4096.0f);
+        part_vertex(wp, &nv, one);
+        for (j = 0; j < 3; j++) nw[j] = (one[j] - zero[j]) / 4096.0f;
+        return 1;
+    } else {
+        float A[3], B[3], C[3], u[3], v[3], l;
+        part_vertex(wp, &o->verts[pg->idx[0]], A); part_vertex(wp, &o->verts[pg->idx[1]], B); part_vertex(wp, &o->verts[pg->idx[2]], C);
+        for (j = 0; j < 3; j++) { u[j] = B[j] - A[j]; v[j] = C[j] - A[j]; }
+        nw[0] = -(u[1] * v[2] - u[2] * v[1]); nw[1] = -(u[2] * v[0] - u[0] * v[2]); nw[2] = -(u[0] * v[1] - u[1] * v[0]);
+        l = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
+        if (l < 1e-6f) return 0;
+        for (j = 0; j < 3; j++) nw[j] /= l;
+        return 1;
+    }
+}
+
+/* a part's polygons as engine faces (world vertices, normal, extent) */
+static void cpoly_fill(cpoly_t *c, const mech3d_part *wp, const wtb_poly *pg, const float nrm[3])
+{
+    int j, a;
+    c->n = pg->n > WTB_MAX_POLY_VERTS ? WTB_MAX_POLY_VERTS : pg->n;
+    for (a = 0; a < 3; a++) { c->mn[a] = 3.4e38f; c->mx[a] = -3.4e38f; c->nrm[a] = nrm[a]; }
+    for (j = 0; j < c->n; j++) {
+        part_vertex(wp, &wp->model.objects[0].verts[pg->idx[j]], c->v[j]);
+        for (a = 0; a < 3; a++) { if (c->v[j][a] < c->mn[a]) c->mn[a] = c->v[j][a]; if (c->v[j][a] > c->mx[a]) c->mx[a] = c->v[j][a]; }
+    }
+}
+
+/* point in polygon on two axes (0x10010a90 x / z, 0x100110d0 y / z, 0x10010db0 x / y) */
+static int cpoly_in(const cpoly_t *p, int a, int b, float x, float y)
+{
+    int i, j, c = 0;
+    for (i = 0, j = p->n - 1; i < p->n; j = i++) {
+        const float *P = p->v[i], *Q = p->v[j];
+        if ((P[b] > y) != (Q[b] > y) && x < (Q[a] - P[a]) * (y - P[b]) / (Q[b] - P[b]) + P[a]) c = !c;
+    }
+    return c;
+}
+
+/* the quadtree of a type 5 object (0x1000c550 / 0x1000c640): the root is the vertex box and always splits; a child takes
+ * the lower half of its parent's x / z range [lo, mid] or the upper [mid + 1, hi] (bits 0 / 1 of its index), exists only
+ * when both ranges are non-empty, and is a leaf of the polygons whose extent touches its rectangle (in polygon order,
+ * their y range; none: y 0 - 0) unless more than 25 do: then it splits again (y range from its children) */
+static int qt_new(terrain_t *t)
+{
+    if (t->nqn == t->capqn) {
+        qnode_t *q = realloc(t->qn, (size_t)(t->capqn ? t->capqn * 2 : 256) * sizeof *q);
+        if (!q) return -1;
+        t->qn = q; t->capqn = t->capqn ? t->capqn * 2 : 256;
+    }
+    memset(&t->qn[t->nqn], 0, sizeof t->qn[0]);
+    t->qn[t->nqn].ch[0] = t->qn[t->nqn].ch[1] = t->qn[t->nqn].ch[2] = t->qn[t->nqn].ch[3] = -1;
+    return t->nqn++;
+}
+static int qt_child(terrain_t *t, const cobj_t *o, int parent, int b)
+{
+    float r[6], ylo = 3.4e38f, yhi = -3.4e38f, pr[6];
+    int k, cnt = 0, list[25], ni, c;
+    memcpy(pr, t->qn[parent].r, sizeof pr);
+    if (!(b & 1)) { r[0] = pr[0]; r[1] = (pr[1] + pr[0]) * 0.5f; } else { r[1] = pr[1]; r[0] = (pr[0] + pr[1]) * 0.5f + 1.0f; }
+    if (!(b & 2)) { r[4] = pr[4]; r[5] = (pr[5] + pr[4]) * 0.5f; } else { r[5] = pr[5]; r[4] = (pr[4] + pr[5]) * 0.5f + 1.0f; }
+    if (!(r[0] < r[1] && r[4] < r[5])) return -1;
+    for (k = 0; k < o->np; k++) {
+        const cpoly_t *p = &t->cp[o->p0 + k];
+        if (!(p->mn[0] <= r[1] && r[0] <= p->mx[0] && p->mn[2] <= r[5] && r[4] <= p->mx[2])) continue;
+        if (++cnt > 25) break;
+        list[cnt - 1] = k;
+        if (p->mn[1] < ylo) ylo = p->mn[1];
+        if (p->mx[1] > yhi) yhi = p->mx[1];
+    }
+    if ((ni = qt_new(t)) < 0) return -1;
+    t->qn[ni].r[0] = r[0]; t->qn[ni].r[1] = r[1]; t->qn[ni].r[4] = r[4]; t->qn[ni].r[5] = r[5];
+    if (cnt > 25) {
+        ylo = 3.4e38f; yhi = -3.4e38f;
+        for (c = 0; c < 4; c++) {
+            int ch = qt_child(t, o, ni, c);
+            t->qn[ni].ch[c] = ch;
+            if (ch < 0) continue;
+            if (t->qn[ch].r[3] > yhi) yhi = t->qn[ch].r[3];
+            if (t->qn[ch].r[2] < ylo) ylo = t->qn[ch].r[2];
+        }
+        if (ylo == 3.4e38f) ylo = yhi = 0.0f;
+        t->qn[ni].r[2] = ylo; t->qn[ni].r[3] = yhi;
+        return ni;
+    }
+    if (cnt == 0) ylo = yhi = 0.0f;
+    t->qn[ni].r[2] = ylo; t->qn[ni].r[3] = yhi;
+    if (t->nqidx + cnt > t->capqidx) {
+        int nc = t->capqidx ? t->capqidx * 2 : 1024, *q;
+        while (nc < t->nqidx + cnt) nc *= 2;
+        if (!(q = realloc(t->qidx, (size_t)nc * sizeof *q))) return ni;
+        t->qidx = q; t->capqidx = nc;
+    }
+    t->qn[ni].p0 = t->nqidx; t->qn[ni].np = cnt;
+    for (k = 0; k < cnt; k++) t->qidx[t->nqidx++] = o->p0 + list[k];
+    return ni;
+}
+
+static void clist_build(terrain_t *t, const mech3d *w)
+{
+    int i, k, j;
+    t->co = calloc((size_t)(w->part_count > 0 ? w->part_count : 1), sizeof *t->co);
+    if (!t->co) return;
+    for (i = 0; i < w->part_count; i++) {
+        const mech3d_part *p = &w->parts[i];
+        const wtb_object *o;
+        cobj_t *c;
+        float bmn[3] = {3.4e38f, 3.4e38f, 3.4e38f}, bmx[3] = {-3.4e38f, -3.4e38f, -3.4e38f}, lmn[3] = {3.4e38f, 3.4e38f, 3.4e38f}, lmx[3] = {-3.4e38f, -3.4e38f, -3.4e38f}, r2 = 0, l2 = 0;
+        if (p->coll < 0 || p->coll > 9 || p->coll == 4 || p->hidden || p->model.object_count < 1 || p->model.objects[0].vert_count < 1) continue;
+        o = &p->model.objects[0];
+        c = &t->co[t->nco];
+        memset(c, 0, sizeof *c);
+        c->part = i; c->type = p->coll; c->moving = p->moving; c->root = -1;
+        for (k = 0; k < o->vert_count; k++) {
+            float q[3], lq[3] = {(float)o->verts[k].x, (float)o->verts[k].y, (float)o->verts[k].z};
+            part_vertex(p, &o->verts[k], q);
+            for (j = 0; j < 3; j++) {
+                if (q[j] < bmn[j]) bmn[j] = q[j];
+                if (q[j] > bmx[j]) bmx[j] = q[j];
+                if (lq[j] < lmn[j]) lmn[j] = lq[j];
+                if (lq[j] > lmx[j]) lmx[j] = lq[j];
+            }
+        }
+        for (j = 0; j < 3; j++) { c->box[2 * j] = bmn[j]; c->box[2 * j + 1] = bmx[j]; c->sph[j] = (bmn[j] + bmx[j]) * 0.5f; c->lsph[j] = (lmn[j] + lmx[j]) * 0.5f; }
+        for (k = 0; k < o->vert_count; k++) {   /* the bounding sphere (+0x34 / +0x40): the box centre, the farthest vertex */
+            float q[3], d2 = 0, e2 = 0, lq[3] = {(float)o->verts[k].x, (float)o->verts[k].y, (float)o->verts[k].z};
+            part_vertex(p, &o->verts[k], q);
+            for (j = 0; j < 3; j++) { d2 += (q[j] - c->sph[j]) * (q[j] - c->sph[j]); e2 += (lq[j] - c->lsph[j]) * (lq[j] - c->lsph[j]); }
+            if (d2 > r2) r2 = d2;
+            if (e2 > l2) l2 = e2;
+        }
+        c->sph[3] = sqrtf(r2); c->lsph[3] = sqrtf(l2);
+        if (!c->moving && (c->type == 2 || c->type == 5 || c->type == 7)) {
+            c->p0 = t->ncp;
+            for (k = 0; k < o->poly_count; k++) {
+                const wtb_poly *pg = &o->polys[k];
+                float nrm[3];
+                if (pg->n < 3 || !eng_poly_normal(p, pg, nrm)) continue;
+                if (t->ncp == t->capcp) {
+                    cpoly_t *q = realloc(t->cp, (size_t)(t->capcp ? t->capcp * 2 : 1024) * sizeof *q);
+                    if (!q) break;
+                    t->cp = q; t->capcp = t->capcp ? t->capcp * 2 : 1024;
+                }
+                cpoly_fill(&t->cp[t->ncp++], p, pg, nrm);
+            }
+            c->np = t->ncp - c->p0;
+        }
+        t->nco++;
+    }
+    for (i = 0; i < t->nco; i++) {   /* the type 5 quadtrees (after the polygon array stops moving) */
+        cobj_t *c = &t->co[i];
+        int r, b;
+        if (c->type != 5 || c->moving) continue;
+        if ((r = qt_new(t)) < 0) break;
+        t->qn[r].r[0] = c->box[0]; t->qn[r].r[1] = c->box[1]; t->qn[r].r[2] = c->box[2];
+        t->qn[r].r[3] = c->box[3]; t->qn[r].r[4] = c->box[4]; t->qn[r].r[5] = c->box[5];
+        c->root = r;
+        for (b = 0; b < 4; b++) { int ch = qt_child(t, c, r, b); t->qn[r].ch[b] = ch; }
+    }
+    t->ccell = calloc((size_t)t->gw * (size_t)t->gh, sizeof *t->ccell);
+    for (i = 0; t->ccell && i < t->nco; i++) {   /* each fixed entry in the cells its box covers (in list order) */
+        const cobj_t *c = &t->co[i];
+        int cx0, cx1, cz0, cz1, cx, cz;
+        if (c->moving) continue;
+        cx0 = (int)((c->box[0] - t->x0) / t->cs); cx1 = (int)((c->box[1] - t->x0) / t->cs);
+        cz0 = (int)((c->box[4] - t->z0) / t->cs); cz1 = (int)((c->box[5] - t->z0) / t->cs);
         if (cx0 < 0) cx0 = 0;
         if (cz0 < 0) cz0 = 0;
         if (cx1 >= t->gw) cx1 = t->gw - 1;
         if (cz1 >= t->gh) cz1 = t->gh - 1;
         for (cz = cz0; cz <= cz1; cz++)
-            for (cx = cx0; cx <= cx1; cx++) cell_add(&t->cell[cz * t->gw + cx], i < t->ntri ? i : -1 - (i - t->ntri));
+            for (cx = cx0; cx <= cx1; cx++) cell_add(&t->ccell[cz * t->gw + cx], i);
     }
-    return t;
 }
 
-static int in_tri(const tri_t *t, float x, float z)
+/* a moving entry where it is now: its world box (terrain_t mov_box) and bounding sphere */
+static int cobj_now(const msim *s, const cobj_t *c, float box[6], float sph[4])
 {
-    float d1 = (x - t->x[1]) * (t->z[0] - t->z[1]) - (t->x[0] - t->x[1]) * (z - t->z[1]);
-    float d2 = (x - t->x[2]) * (t->z[1] - t->z[2]) - (t->x[1] - t->x[2]) * (z - t->z[2]);
-    float d3 = (x - t->x[0]) * (t->z[2] - t->z[0]) - (t->x[2] - t->x[0]) * (z - t->z[0]);
-    int neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
-    return !(neg && pos);
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    const mech3d_part *p;
+    int k;
+    if (!c->moving) { memcpy(box, c->box, sizeof c->box); memcpy(sph, c->sph, sizeof c->sph); return 1; }
+    if (!s->world || c->part >= s->world->part_count) return 0;
+    p = &s->world->parts[c->part];
+    if (p->hidden) return 0;
+    for (k = 0; k < t->nmov; k++) if (t->mov[k] == c->part) break;
+    if (k == t->nmov || t->mov_box[k][0] < -1e29f) return 0;
+    box[0] = t->mov_box[k][0]; box[1] = t->mov_box[k][3]; box[2] = t->mov_box[k][1];
+    box[3] = t->mov_box[k][4]; box[4] = t->mov_box[k][2]; box[5] = t->mov_box[k][5];
+    {
+        wtb_vertex v;
+        memset(&v, 0, sizeof v);
+        v.x = (int32_t)lrintf(c->lsph[0]); v.y = (int32_t)lrintf(c->lsph[1]); v.z = (int32_t)lrintf(c->lsph[2]);
+        part_vertex(p, &v, sph);
+        sph[3] = c->lsph[3];
+    }
+    return 1;
+}
+
+/* the list entries that may hold point / segment (x0, z0) - (x1, z1): the fixed ones of the cells it crosses and the
+ * moving ones, in list order; returns the count (out has room for n) */
+static int clist_near(const msim *s, float x0, float z0, float x1, float z1, int *out, int n)
+{
+    terrain_t *t = (terrain_t *)s->terrain;
+    int cnt = 0, cx0, cx1, cz0, cz1, cx, cz, k, a, b;
+    if (!t || !t->co) return 0;
+    if (x1 < x0) { float q = x0; x0 = x1; x1 = q; }
+    if (z1 < z0) { float q = z0; z0 = z1; z1 = q; }
+    t->stamp_now++;
+    if (t->ccell) {
+        cx0 = (int)floorf((x0 - t->x0) / t->cs); cx1 = (int)floorf((x1 - t->x0) / t->cs);
+        cz0 = (int)floorf((z0 - t->z0) / t->cs); cz1 = (int)floorf((z1 - t->z0) / t->cs);
+        if (cx0 < 0) cx0 = 0;
+        if (cz0 < 0) cz0 = 0;
+        if (cx1 >= t->gw) cx1 = t->gw - 1;
+        if (cz1 >= t->gh) cz1 = t->gh - 1;
+        for (cz = cz0; cz <= cz1; cz++)
+            for (cx = cx0; cx <= cx1; cx++) {
+                const cell_t *c = &t->ccell[cz * t->gw + cx];
+                for (k = 0; k < c->n; k++) {
+                    int ci = c->idx[k], pi = t->co[ci].part;
+                    if (t->stamp[pi] == t->stamp_now) continue;
+                    t->stamp[pi] = t->stamp_now;
+                    if (cnt < n) out[cnt++] = ci;
+                }
+            }
+    }
+    for (k = 0; k < t->nco; k++)   /* the moving ones, and every sphere (its reach can pass its box) */
+        if ((t->co[k].moving || t->co[k].type == 6) && t->stamp[t->co[k].part] != t->stamp_now && cnt < n) {
+            t->stamp[t->co[k].part] = t->stamp_now;
+            out[cnt++] = k;
+        }
+    for (a = 1; a < cnt; a++)   /* list order */
+        for (b = a; b > 0 && out[b - 1] > out[b]; b--) { int q = out[b]; out[b] = out[b - 1]; out[b - 1] = q; }
+    return cnt;
+}
+
+/* engine 0x1000cf80 on a type 5 object's quadtree: inside the root rectangle, the first polygon (in polygon order) of
+ * the leaf with a normal y above 0 (the float's bits as an int > 0) that holds (x, z) gives the height on its plane through
+ * its first vertex (0x1000fff0); none - a hole, or a point in the 1 cm seam between two children - gives 0 */
+static int qt_ground(const terrain_t *t, int ni, float x, float z, float *h, const float **nrm)
+{
+    const qnode_t *q;
+    int k;
+    if (ni < 0) return 0;
+    q = &t->qn[ni];
+    if (x < q->r[0] || x > q->r[1] || z < q->r[4] || z > q->r[5]) return 0;
+    if (q->np > 0) {
+        for (k = 0; k < q->np; k++) {
+            const cpoly_t *p = &t->cp[t->qidx[q->p0 + k]];
+            if (p->nrm[1] > 0.0f && cpoly_in(p, 0, 2, x, z)) {
+                *h = p->v[0][1] - ((x - p->v[0][0]) * p->nrm[0] + (z - p->v[0][2]) * p->nrm[2]) / p->nrm[1];
+                *nrm = p->nrm;
+                return 1;
+            }
+        }
+        *h = 0.0f; *nrm = NULL;
+        return 1;
+    }
+    for (k = 0; k < 4; k++) if (qt_ground(t, q->ch[k], x, z, h, nrm)) return 1;
+    *h = 0.0f; *nrm = NULL;
+    return 1;
+}
+
+/* ---- segments (0x1000ae00: start, end, end - start, the unit direction, the length) ---- */
+typedef struct { float p[3], e[3], d[3], u[3], len; } eseg_t;
+static void eseg_set(eseg_t *g, const float p[3], const float e[3])
+{
+    int a;
+    for (a = 0; a < 3; a++) { g->p[a] = p[a]; g->e[a] = e[a]; g->d[a] = e[a] - p[a]; }
+    g->len = sqrtf(g->d[0] * g->d[0] + g->d[1] * g->d[1] + g->d[2] * g->d[2]);
+    for (a = 0; a < 3; a++) g->u[a] = g->len > 0 ? g->d[a] / g->len : 0.0f;
+}
+static void eseg_len(eseg_t *g, float L)   /* 0x1000b060 / 0x1000b160: the end moved to length L along the direction */
+{
+    int a;
+    g->len = L;
+    for (a = 0; a < 3; a++) { g->e[a] = g->p[a] + g->u[a] * L; g->d[a] = g->e[a] - g->p[a]; }
+}
+
+/* the slab test (0x1000b230 per axis; 0x1000d310 / 0x1000ccf0): the latest entry (x, then y, then z on a tie), the
+ * earliest exit; an entry before the start counts as 0 (a segment starting inside the box hits it at once); the exit
+ * no later than the length. *axis: the entry's axis */
+static int eseg_slab(const eseg_t *g, const float b[6], float *tin, int *axis)
+{
+    float tn = -3.4e38f, tx = 3.4e38f;
+    int a, ax = 0;
+    for (a = 0; a < 3; a++) {
+        float lo = b[2 * a], hi = b[2 * a + 1], en, ex;
+        if (fabsf(g->u[a]) < 1e-7f) {
+            if (g->p[a] < lo || g->p[a] > hi) return 0;
+            en = -3.4e38f; ex = 3.4e38f;
+        } else {
+            en = (lo - g->p[a]) / g->u[a]; ex = (hi - g->p[a]) / g->u[a];
+            if (ex < en) { float q = en; en = ex; ex = q; }
+        }
+        if (a == 0) { tn = en; tx = ex; }
+        else { if (tn < en) { tn = en; ax = a; } if (ex < tx) tx = ex; }
+    }
+    if (tx < tn) return 0;
+    if (tn < 0) tn = 0;
+    if (g->len < tx) tx = g->len;
+    if (tx < tn) return 0;
+    *tin = tn; *axis = ax;
+    return 1;
+}
+
+/* a face (0x10010830): crossed from its front (direction . normal < 0, the start more than 1e-7 in front of it) within
+ * the segment's present length, the crossing inside the polygon (projected on the plane of the normal's largest
+ * component, 0x100109e0); the segment then ends there */
+static int eseg_poly(const cpoly_t *p, eseg_t *g, float n[3])
+{
+    float dn = p->nrm[0] * g->u[0] + p->nrm[1] * g->u[1] + p->nrm[2] * g->u[2], f, t, Q[3];
+    if (!(dn < 0.0f) || p->n < 3) return 0;
+    f = p->nrm[0] * (g->p[0] - p->v[0][0]) + p->nrm[1] * (g->p[1] - p->v[0][1]) + p->nrm[2] * (g->p[2] - p->v[0][2]);
+    if (f < 1e-7f) return 0;
+    t = -(f / dn);
+    if (!(t >= 1e-7f) || t > g->len) return 0;
+    Q[0] = g->p[0] + g->u[0] * t; Q[1] = g->p[1] + g->u[1] * t; Q[2] = g->p[2] + g->u[2] * t;
+    {
+        float ax = fabsf(p->nrm[0]), ay = fabsf(p->nrm[1]), az = fabsf(p->nrm[2]);
+        int in = ax < ay && az < ay ? cpoly_in(p, 0, 2, Q[0], Q[2]) : az < ax ? cpoly_in(p, 1, 2, Q[1], Q[2]) : cpoly_in(p, 0, 1, Q[0], Q[1]);
+        if (!in) return 0;
+    }
+    eseg_len(g, t);
+    n[0] = p->nrm[0]; n[1] = p->nrm[1]; n[2] = p->nrm[2];
+    return 1;
+}
+
+/* a type 5 quadtree (0x1000ccf0 / 0x1000ced0): node boxes by the slab test; a leaf - its first polygon crossed; an inner
+ * node - the nearest of its children's hits (each tried with the whole segment). The normal left is the last face
+ * crossed (the engine's DAT_1024b408), not necessarily the nearest */
+static int qt_seg(const terrain_t *t, int ni, eseg_t *g, float n[3])
+{
+    const qnode_t *q;
+    float tn;
+    int ax, k;
+    if (ni < 0) return 0;
+    q = &t->qn[ni];
+    if (!eseg_slab(g, q->r, &tn, &ax)) return 0;
+    if (q->np > 0) {
+        for (k = 0; k < q->np; k++) if (eseg_poly(&t->cp[t->qidx[q->p0 + k]], g, n)) return 1;
+        return 0;
+    }
+    {
+        float best = 3.4e38f;
+        eseg_t keep = *g;
+        for (k = 0; k < 4; k++) {
+            eseg_t gc = *g;
+            if (qt_seg(t, q->ch[k], &gc, n) && gc.len < best) { best = gc.len; keep = gc; }
+        }
+        if (best < 2147483648.0f) { *g = keep; return 1; }
+        return 0;
+    }
+}
+
+/* 0x10029db0: the bounding sphere's entry along the segment - 10 when the start is inside, 3.4e38 when it misses or
+ * lies past the end, 0 when the projection is shorter than the radius */
+static float eseg_sphere(const float sp[4], const eseg_t *g)
+{
+    float v[3] = {sp[0] - g->p[0], sp[1] - g->p[1], sp[2] - g->p[2]}, c2, b, tp, e;
+    if (!(sp[3] >= 1e-7f)) return 3.4e38f;
+    c2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - sp[3] * sp[3];
+    if (c2 < 0) return 10.0f;
+    b = v[0] * g->d[0] + v[1] * g->d[1] + v[2] * g->d[2];
+    if (b < 0) return 3.4e38f;
+    tp = b / g->len;
+    if (tp * tp - c2 < 0) return 3.4e38f;
+    e = tp - sp[3];
+    if (e < 0) return 0.0f;
+    if (g->len <= e) return 3.4e38f;
+    return e;
+}
+
+/* one entry against the segment (0x10010650 with its type's segment test); the segment ends at the hit, n the hit's
+ * normal (DAT_1024b408..410) */
+static int cobj_seg(const msim *s, const cobj_t *c, const float box[6], const float sph[4], float ent, eseg_t *g, float n[3])
+{
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    if (!(g->len > 0.0f)) return 1;
+    switch (c->type) {
+    case 0: case 1: {   /* 0x1000d310: the box; the normal on the entry axis against the move */
+        float tn;
+        int ax;
+        if (!eseg_slab(g, box, &tn, &ax)) return 0;
+        eseg_len(g, tn);
+        n[0] = n[1] = n[2] = 0;
+        n[ax] = g->d[ax] > 0.0f ? -1.0f : 1.0f;   /* end - start after the cut (so +1 for a hit at the start itself) */
+        return 1;
+    }
+    case 2: case 7: {   /* 0x1000d7b0: the first face crossed, in polygon order */
+        int k;
+        if (c->moving) {   /* where the path task has it now */
+            const mech3d_part *p = &s->world->parts[c->part];
+            const wtb_object *o = &p->model.objects[0];
+            for (k = 0; k < o->poly_count; k++) {
+                cpoly_t cp;
+                float nrm[3];
+                if (o->polys[k].n < 3 || !eng_poly_normal(p, &o->polys[k], nrm)) continue;
+                cpoly_fill(&cp, p, &o->polys[k], nrm);
+                if (eseg_poly(&cp, g, n)) return 1;
+            }
+            return 0;
+        }
+        for (k = 0; k < c->np; k++) if (eseg_poly(&t->cp[c->p0 + k], g, n)) return 1;
+        return 0;
+    }
+    case 5:   /* 0x1000d680 -> 0x1000ccf0 */
+        return c->root >= 0 && qt_seg(t, c->root, g, n);
+    default: {   /* 3, 6, 8, 9: 0x100107b0 - the sphere: hit at its entry (the end stays when the entry is 0), the normal
+                  * from its centre to the start (entry 10: the start inside) or to the end */
+        const float *q;
+        float l;
+        if (ent > 0.0f) eseg_len(g, ent);
+        q = ent == 10.0f ? g->p : g->e;
+        n[0] = q[0] - sph[0]; n[1] = q[1] - sph[1]; n[2] = q[2] - sph[2];
+        l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (l > 0) { n[0] /= l; n[1] /= l; n[2] /= l; }
+        return 1;
+    }
+    }
+}
+
+/* the list against a segment. walk = 1: a unit's move (0x10010530) - type 6 left out (0x1000be60 takes those), every
+ * entry whose sphere is entered before the hit found so far is tested with the whole segment and its hit replaces the
+ * one found so far even when farther; walk = 0: a probe (0x100103e0) - the nearest hit. *t: the hit's length along the
+ * segment, *ci: the entry */
+static int clist_seg(const msim *s, const float p0[3], const float p1[3], int walk, float *t, float n[3], int *ci)
+{
+    const terrain_t *tt = (const terrain_t *)s->terrain;
+    eseg_t g0;
+    int cand[4096], nc, k, hit = -1;
+    float best = 3.4e38f;
+    if (!tt || !tt->co) return 0;
+    eseg_set(&g0, p0, p1);
+    if (!(g0.len > 0.0f)) return 0;
+    nc = clist_near(s, p0[0], p0[2], p1[0], p1[2], cand, 4096);
+    for (k = 0; k < nc; k++) {
+        const cobj_t *c = &tt->co[cand[k]];
+        float box[6], sph[4], e, nn[3] = {0, 1, 0};
+        eseg_t g;
+        if (walk && c->type == 6) continue;
+        if (!cobj_now(s, c, box, sph)) continue;
+        if (tt->thing_of && c->part < tt->nparts && tt->thing_of[c->part] >= 0 && s->bld[tt->thing_of[c->part]].hp <= 0) continue;
+        e = eseg_sphere(sph, &g0);
+        if (!(e < best)) continue;
+        g = g0;
+        if (!cobj_seg(s, c, box, sph, e, &g, nn)) continue;
+        if (!walk && !(g.len < best)) continue;
+        best = g.len; hit = cand[k];
+        n[0] = nn[0]; n[1] = nn[1]; n[2] = nn[2];
+    }
+    if (hit < 0) return 0;
+    *t = best; *ci = hit;
+    return 1;
+}
+
+/* engine 0x1000be60: before the move's segment, the unit's new centre against the type 6 entries (spheres - vehicles,
+ * dropships, towers): closer than the two radii (the unit's +0xe8 and the sphere's +0x40) it is set on the sphere's
+ * surface along the line from its centre (no direction: +z), the first such in list order. (Class 0x50 spheres are
+ * knocked away instead, 0x10015230 / 0x10015920, and do not stop it - no world object has class 0x50.) */
+static int sphere_push(const msim *s, const float c[3], float R, float out[3], float n[3], int *ci)
+{
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    int k;
+    if (!t || !t->co) return 0;
+    for (k = 0; k < t->nco; k++) {
+        const cobj_t *o = &t->co[k];
+        float box[6], sph[4], d[3], dl, rr;
+        if (o->type != 6 || !cobj_now(s, o, box, sph)) continue;
+        if (t->thing_of && o->part < t->nparts && t->thing_of[o->part] >= 0 && s->bld[t->thing_of[o->part]].hp <= 0) continue;
+        d[0] = c[0] - sph[0]; d[1] = c[1] - sph[1]; d[2] = c[2] - sph[2];
+        dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]); rr = R + sph[3];
+        if (!(dl < rr)) continue;
+        if ((s->world->parts[o->part].objtype & 0xf0) == 0x50) return 0;
+        if (dl < 1e-7f) { n[0] = 0; n[1] = 0; n[2] = 1.0f; }
+        else { n[0] = d[0] / dl; n[1] = d[1] / dl; n[2] = d[2] / dl; }
+        out[0] = sph[0] + n[0] * rr; out[1] = sph[1] + n[1] * rr; out[2] = sph[2] + n[2] * rr;
+        *ci = k;
+        return 1;
+    }
+    return 0;
 }
 
 /* the servo 0x1003b7e0: value += elapsed ticks x (target - value) / T, never past the target (snaps within 1e-7 of it) */
@@ -2622,7 +3579,8 @@ void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float
  * 0x697e98 (105.49 in 16.16) rounded (0x4cd46), then (c22 << 16) / the gravity ratio 0x957b4, truncated (0x26973); the
  * ratio is (0x957b0 << 16) / 0x794 (0x14f67), 0x957b0 = PLNT g (16.16) x 0x794 (0.0296) rounded (PLNT handler). Full
  * throttle (0x400 over the stop level) = c22 / 64 cm/tick. Timber Wolf (5 MP) on YELL (0.9 g): 527 -> 585 = 9.1406
- * cm/tick (the 3Dfx DLL's floats: 9.1575) */
+ * cm/tick (the 3Dfx DLL's floats: 9.1575). No clamp either way (low gravity speeds mechs up): DOSBox ORANSCN1 (0.6 g)
+ * FULL at heading 180 - Timber Wolf (5 MP) 133 kph, Nova NVA00STD (6 MP) 160; Nova THROTTLE_8 124, THROTTLE_7 106 */
 float msim_top_speed(int walk_mp, float gravity_g)
 {
     int64_t g16 = (int64_t)lrintf(gravity_g * 65536.0f), grav = (g16 * 0x794 + 0x8000) >> 16;
@@ -2636,6 +3594,27 @@ float msim_top_speed(int walk_mp, float gravity_g)
  * value: the Timber Wolf's FULL top reads 90 / 84 / 82 / 91 kph at headings 158 / 142 / 128 / 193 degrees, which only
  * 1017 x 585 / 65536 = 9.078 cm/tick (59.5 km/h) gives through the readout's estimate (60 km/h gives 91 / 84 / 84 / 91) */
 float msim_throttle_preset(int n) { return (float)(n * 113) / 1024.0f; }
+/* The directional jets' drag (DOS 0x26ba2..0x26cxx; 3Dfx 0x100194fa..0x10019618 the same in floats): L = c[0x22] x 0x1400 /
+ * 2 (2.5 x the top walking speed, 16.16), L2 = L^2 >> 16 rounded, k = ((T - ((T << 16) / L) / 3) << 16) / (L2 - (3 L >> 2)),
+ * B = ((T - (k L2 >> 16 rounded)) << 16) / L, all truncating; drag = (k S >> 16 + B) S >> 16 - so the terminal speed is
+ * ~L as in the floats, but k is a few units (Nova on ORAN: k = 3 for the floats' 3.85, B = +33 for -1.6), which slows
+ * the middle of the climb: DOSBox ORANSCN1 Nova, backward jets from rest, 144 / 207 / 267 kph at 0.92 / 1.42 / 1.92 s -
+ * the integers give 149 / 215 / 267, the floats 154 / 223 / 277 */
+void msim_jet_drag(float thrust, float top_cm_s, float *k, float *B)
+{
+    int64_t T = lrintf(thrust * 65536.0f), c22 = lrintf(top_cm_s * 64.0f / 182.0f), L = c22 * 0x1400 / 2, L2, TL, u58, den, ki, u12;
+    *k = *B = 0;
+    if (T < 1 || L < 1) return;
+    L2 = ((L * L) >> 16) + (((L * L) >> 15) & 1);
+    TL = (T << 16) / L;
+    u58 = T - TL / 3;
+    den = L2 - ((L * 3) >> 2);
+    if (den == 0) return;
+    ki = (u58 << 16) / den;
+    u12 = T - (((ki * L2) >> 16) + (((ki * L2) >> 15) & 1));
+    *k = (float)ki / 65536.0f;
+    *B = (float)((u12 * 65536) / L) / 65536.0f;
+}
 float msim_ground(const msim *s, float x, float z, float y) { return msim_ground_n(s, x, z, y, NULL); }
 
 int msim_wall_at(const msim *s, float x, float z, float n[3])
@@ -2806,7 +3785,11 @@ static int unit_sphere(const msim *s, int k, float q[3], float *r2, float ov[3])
     }
     return 1;
 }
-/* the normal from q to p (unit), the engine's (0, 0, 1) for coincident centres (0x1000ba20) */
+/* the normal from q to p (unit), the engine's (0, 0, 1) for coincident centres (0x1000ba20). (DOS, MW2.EXE 0x200d0, takes
+ * every length here - the contact distance, this normal's divisor, the bounce and damage speeds, the wall-impact speed
+ * 0x1fca0 and the sphere push 0x20570 - as the approximation max + (mid + min) / 4; modelled alone, without DOS's whole-cm
+ * positions, it made TNJ1's slide 10.5 s against DOSBox's 8 s (the true length: 8 s), so every edition keeps the 3D
+ * editions' true length, 0x10030330) */
 static void contact_normal(const float p[3], const float q[3], float d, float n[3])
 {
     if (d > 1e-3f) { n[0] = (p[0] - q[0]) / d; n[1] = (p[1] - q[1]) / d; n[2] = (p[2] - q[2]) / d; }
@@ -2820,12 +3803,12 @@ int msim_unit_contact(const msim *s, int self, const float p0[3], const float p1
         float q[3], r2, d1, d0, rs, v[3];
         if (k == self || !unit_sphere(s, k, q, &r2, v)) continue;
         rs = r1 + r2;
-        d1 = (p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]);
-        d0 = (p0[0] - q[0]) * (p0[0] - q[0]) + (p0[1] - q[1]) * (p0[1] - q[1]) + (p0[2] - q[2]) * (p0[2] - q[2]);
-        if (d1 < rs * rs && d1 < d0 && d1 < best) {
+        d1 = sqrtf((p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]));
+        d0 = sqrtf((p0[0] - q[0]) * (p0[0] - q[0]) + (p0[1] - q[1]) * (p0[1] - q[1]) + (p0[2] - q[2]) * (p0[2] - q[2]));
+        if (d1 < rs && d1 < d0 && d1 < best) {
             best = d1; hit = k; *rr = rs;
             c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
-            contact_normal(p1, q, sqrtf(d1), n);
+            contact_normal(p1, q, d1, n);
             ov[0] = v[0]; ov[1] = v[1]; ov[2] = v[2];
         }
     }
@@ -2843,182 +3826,133 @@ int msim_unit_inside(const msim *s, int self, int other, const float p1[3], floa
 }
 
 void msim_block_normal(float n[3]) { n[0] = g_block_n[0]; n[1] = g_block_n[1]; n[2] = g_block_n[2]; }
-int msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n[3],
-                      float heading_deg, float *speed)
+const char *msim_block_what(void) { return g_block_what; }
+int msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n_in[3],
+                      float heading_deg, float *speed, float *across)
 {
-    /* engine 0x1000b5e0, the world hit (0x10010530): the move's segment (extended by the look-ahead) is cut back to
-     * where the unit touches; d = the move's unit direction, r = d - 2 (d . n) n its reflection by the hit normal
-     * (DAT_1024b420..428); the position = that point + r x the untravelled distance x 0.25 (0x10247148), the velocity
-     * +0xf4..0xfc = r x |attempted velocity +0x100..0x108| x -0.25 (0x10247144). 0x10019310 then tries the move from
-     * where the unit stood to that position again (second 0x1000b5e0 call, 0x10019a61): refused, the unit stays (a
-     * different object; the port the same for one) and the velocity is doubled (0x102473d4). The port finds the
-     * touching point by halving the move (msim_can_step_hr has no hit distance), and keeps the velocity along the
-     * heading (its component across the heading dropped, as the port's velocity everywhere). */
-    float dx = *x - x0, dz = *z - z0, len = sqrtf(dx * dx + dz * dz), lo = 0.0f, hi = 1.0f, ux, uz, dn, rx, rz, bx, bz, hh, k;
-    int it, stayed;
-    if (len < 1e-3f) { *x = x0; *z = z0; return 1; }
-    for (it = 0; it < 8; it++) {
-        float t = 0.5f * (lo + hi);
-        if (msim_can_step_hr(s, x0, z0, x0 + dx * t, z0 + dz * t, y, H, R)) lo = t; else hi = t;
-    }
-    ux = dx / len; uz = dz / len;
-    dn = ux * n[0] + uz * n[2];
-    rx = ux - 2.0f * dn * n[0]; rz = uz - 2.0f * dn * n[2];
-    bx = x0 + dx * lo + rx * (1.0f - lo) * len * 0.25f;
-    bz = z0 + dz * lo + rz * (1.0f - lo) * len * 0.25f;
-    stayed = !msim_can_step_hr(s, x0, z0, bx, bz, y, H, R);
-    if (stayed) { bx = x0; bz = z0; }
-    *x = bx; *z = bz;
-    k = stayed ? -0.5f : -0.25f;
+    /* engine 0x1000b5e0, the world hit (0x10010530): the move's segment (centre to centre, extended R ahead) ends at the
+     * hit; the touching point is that hit less R along the move - behind the start when the hit is nearer than R
+     * (0x1000b060(hit - extension)); d = the move's unit direction, r = d - 2 (d . n) n its reflection by the hit normal
+     * (DAT_1024b420..428, 0x10247140 2.0); the position = the touching point + r x the untravelled distance x 0.25
+     * (0x10247148) when any is left, the velocity +0xf4..0xfc = r x |attempted velocity +0x100..0x108| x -0.25
+     * (0x10247144) - a vector (its part across the heading returned in *across). A type 6 sphere (0x1000be60) instead
+     * sets the unit on its surface with the velocity n x |v| x 0.25 x 0.5 (x -0.5 above 8 cm/tick, 0x10247150..158).
+     * 0x10019310 then tries the move from where the unit stood to that position again (second 0x1000b5e0 call,
+     * 0x10019a61; its own result discarded): refused, the velocity is doubled (0x102473d4) and the unit keeps the new
+     * position when the object hit is the same as the first time (0x10019a6a; a terrain piece is an object), else it
+     * stays where it stood (0x10019a76). Returns bit 0: it stayed; bit 1: harmless - the normal left (the second try's
+     * when refused) has y above cos 45 (0x3f350481) and the feet are within 10 m above / 100 m below the ground there
+     * (0x10019c30): no damage, no sound, the contact count cleared (0x10019c4e) */
+    float dx = *x - x0, dz = *z - z0, len = sqrtf(dx * dx + dz * dz), n[3], bx, bz, v, hh, vel[3], g;
+    int kind, id1, ret = 0, k;
+    (void)n_in;
+    if (msim_can_step_hr(s, x0, z0, *x, *z, y, H, R)) return 0;
+    kind = g_hit_kind; id1 = g_block_id;
+    memcpy(n, g_block_n, sizeof n);
+    g_impact_part = id1;
+    memcpy(g_impact_at, g_hit_at, sizeof g_impact_at);
     hh = heading_deg * 3.14159265f / 180.0f;
-    *speed = k * fabsf(*speed) * (rx * sinf(hh) + rz * cosf(hh));
-    return stayed;
+    v = (across ? sqrtf(*speed * *speed + *across * *across) : fabsf(*speed)) / 182.0f;   /* |the attempted velocity|, cm/tick */
+    if (kind == 2) {
+        float m = v * 0.25f, kk = m > 8.0f ? -0.5f : 0.5f;
+        bx = g_push[0]; bz = g_push[2];
+        for (k = 0; k < 3; k++) vel[k] = n[k] * m * kk;
+    } else {
+        float ux = dx / len, uz = dz / len, dn = ux * n[0] + uz * n[2], r[3], tch = g_hit_t - R, u = len - tch;
+        r[0] = ux - 2.0f * dn * n[0]; r[1] = -2.0f * dn * n[1]; r[2] = uz - 2.0f * dn * n[2];
+        bx = x0 + ux * tch; bz = z0 + uz * tch;
+        if (u > 0.0f) { bx += r[0] * u * 0.25f; bz += r[2] * u * 0.25f; }
+        for (k = 0; k < 3; k++) vel[k] = r[k] * v * -0.25f;
+    }
+    if (!msim_can_step_hr(s, x0, z0, bx, bz, y, H, R)) {   /* the second try */
+        for (k = 0; k < 3; k++) vel[k] *= 2.0f;
+        if (g_block_id != id1) { bx = x0; bz = z0; ret |= 1; }
+    } else memcpy(g_block_n, n, sizeof n);
+    *x = bx; *z = bz;
+    *speed = (vel[0] * sinf(hh) + vel[2] * cosf(hh)) * 182.0f;
+    if (across) *across = (vel[0] * cosf(hh) - vel[2] * sinf(hh)) * 182.0f;
+    g = y - msim_ground(s, bx, bz, y + H);   /* the feet over the ground there (0x10010080 at the centre) */
+    if (g_block_n[1] > 0.70710677f && g < 1000.0f && g > -10000.0f) ret |= 2;
+    return ret;
+}
+
+/* collision damage to the object walked into (engine 0x1000c3c0, the impact of a unit that touched no unit): its thing
+ * takes (|v| - 3.0694) x 0.050123 x 3 (0x1024715c..164) at the object's centre (0x10046c20) whatever the Collision
+ * Damage setting (the unit's own share is that setting's, 0x1000c1f0); the class 0xb0 branch before it (0x1000c3cb:
+ * 50 to each leg, an explosion at the object, destroyed) runs only with DAT_1024ffcc set - the network game (SimMain's
+ * session argument, 0x10008a8d; switch /N) */
+void msim_impact_damage(msim *s, int owner, float speed)
+{
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    int pi = g_impact_part;
+    if (!(speed > 3.0693676f) || !t || !t->thing_of || pi < 0 || pi >= t->nparts || t->thing_of[pi] < 0) return;
+    building_damage(s, t->thing_of[pi], (speed - 3.0693676f) * 0.050123077f * 3.0f, owner, g_impact_at);
+}
+/* the object of the last impact is destructible (its thing; the impact sound 0xc8 MECBLDC1, else 0xe5 MECMTNHD:
+ * 0x10019cf8 tests the object's +3 bit 1) */
+int msim_impact_destructible(const msim *s)
+{
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    int pi = g_impact_part;
+    return t && t->thing_of && pi >= 0 && pi < t->nparts && t->thing_of[pi] >= 0;
 }
 
 int msim_can_step_hr(const msim *s, float x0, float z0, float x, float z, float y, float H, float R)
 {
+    /* engine 0x1000b5e0 for a walking unit (the move level: no vertical part): its new centre (H above the feet)
+     * against the type 6 spheres (0x1000be60), then the segment from the old centre to the new one extended R along the
+     * move (0x1000b7b9: (1 - |dy|) x R + |dy| x H) against the collision list (0x10010530): types 0 and 1 by their
+     * world box (a box below or above the centre's height is not touched; one the centre starts inside stops it at
+     * once), 2 / 7 / 5 by the faces it crosses from the front - the terrain too: any face crossed refuses the move, a
+     * climbable one (normal y above cos 45) only spares the damage (msim_world_impact). A move of nothing tests nothing. */
+    float p0[3] = {x0, y + H, z0}, p1[3] = {x, y + H, z}, dx = x - x0, dz = z - z0, dl = sqrtf(dx * dx + dz * dz), t, n[3];
+    const terrain_t *tt = (const terrain_t *)s->terrain;
+    int ci;
     g_block_what = NULL;
-    float n[3], g = msim_ground_n(s, x, z, y, n), dh = y - g, dx = x - x0, dz = z - z0, dl = sqrtf(dx * dx + dz * dz);
-    /* the engine's move segment runs from the old centre to the new one (H above the feet), extended R ahead along
-     * the move (0x1000b5e0); it stops only on FRONT faces it crosses (0x10010830: direction . normal < 0), and a
-     * crossed face steeper than 45 degrees (normal y < 0x3f350482) blocks - so the climbable rise is H (Timber Wolf
-     * 5.5 m), seen R ahead. Walking off an edge isn't blocked (the face below is a back face). */
-    if (n[1] < 0.70710677f && g - y > H && n[0] * dx + n[2] * dz < 0) return refuse(n);
-    if (dl > 1e-3f) {
-        float n2[3], ax = x + dx / dl * R, az = z + dz / dl * R, g2 = msim_ground_n(s, ax, az, y, n2);
-        if (n2[1] < 0.70710677f && g2 - y > H && n2[0] * dx + n2[2] * dz < 0) return refuse(n2);
+    g_block_id = -1;
+    g_hit_kind = 0;
+    if (!tt || !tt->co) return 1;
+    if (sphere_push(s, p1, R, g_push, n, &ci)) {
+        g_hit_kind = 2; g_block_id = tt->co[ci].part; g_block_what = s->world->parts[g_block_id].model_name;
+        { float box[6]; cobj_now(s, &tt->co[ci], box, g_hit_at); }
+        return refuse(n);
     }
-    {
-        float wn[3];
-        if (msim_wall_at(s, x, z, wn)) { g_block_what = "wall (type 1)"; return refuse(wn); }   /* type 1 obstacle */
-    }
-    if (dh < -9999.99f) return refuse(n);   /* 0xc61c3fff: feet 100 m under the ground (the engine's other limit, feet > 999.99 above
-                                     * after crossing a face, has no counterpart without the face test) */
-    if (s->world && s->terrain) {
-        const terrain_t *tt = (const terrain_t *)s->terrain;
-        /* objects (engine 0x1000b5e0 -> 0x10010530 -> 0x10010650, the segment test of the object's collision type from the
-         * table at 0x1024b3a8): the move segment runs from the old centre (H above the feet) to the new one extended R along
-         * the move. Type 0 (0x1000d310): the object's world box, a 3D slab test - so a box blocks only where it spans the
-         * centre's height: a pipe overhead (YELLARE6's Coolant-Piping, 7.4 - 9.2 m up) is walked under, and a box lower
-         * than the centre is climbed by the ground (0x1000d1f0: the box top). Types 2 and 7 (0x1000d7b0 -> 0x10010830):
-         * the polygons, FRONT faces crossed only (the stored normal, negated on load, 0x10042140); type 7 = the chemical
-         * plant's processor and the destroyed variants. A hit whose normal y is under cos 45 (0x3f350482) is refused
-         * (0x10019310); a flatter face is climbed. */
-        float cy = y + H, ex = x, ez = z, sx, sz;
-        int k;
-        if (dl > 1e-3f) { ex = x + dx / dl * R; ez = z + dz / dl * R; }
-        sx = ex - x0; sz = ez - z0;
-        for (k = 0; k < tt->nsolid + tt->nmov; k++) {   /* the fixed objects, then the moving ones where they are now */
-            const float *mb = k < tt->nsolid ? NULL : tt->mov_box[k - tt->nsolid];
-            float mxz[4];
-            const float *b = mb ? mxz : tt->solid_box[k];
-            int pi = mb ? tt->mov[k - tt->nsolid] : tt->solid[k];
-            const mech3d_part *wp;
-            if (mb) { mxz[0] = mb[0]; mxz[1] = mb[3]; mxz[2] = mb[2]; mxz[3] = mb[5]; }
-            const wtb_object *o;
-            float t0 = 0, t1 = 1, lo[2] = {b[0], b[2]}, hi[2] = {b[1], b[3]}, org[2] = {x0, z0}, dv[2] = {sx, sz};
-            int a, ok = 1, ent = 0;
-            if (pi < 0 || pi >= s->world->part_count) continue;
-            wp = &s->world->parts[pi];
-            if (wp->hidden || wp->model.object_count < 1 || (wp->coll != 0 && wp->coll != 2 && wp->coll != 7)) continue;
-            for (a = 0; a < 2 && ok; a++) {   /* the segment's XZ against the footprint */
-                if (fabsf(dv[a]) < 1e-6f) { if (org[a] < lo[a] || org[a] > hi[a]) ok = 0; continue; }
-                {
-                    float ta = (lo[a] - org[a]) / dv[a], tb = (hi[a] - org[a]) / dv[a];
-                    if (ta > tb) { float tq = ta; ta = tb; tb = tq; }
-                    if (ta > t0) { t0 = ta; ent = a; }
-                    if (tb < t1) t1 = tb;
-                    if (t0 > t1) ok = 0;
-                }
-            }
-            if (!ok) continue;
-            o = &wp->model.objects[0];
-            if (wp->coll == 0) {
-                float bot = 3.4e38f, top = -3.4e38f;
-                int q;
-                /* already inside the footprint: the port lets the mech walk out (the engine's slab test would hold it) */
-                if (x0 >= b[0] && x0 <= b[1] && z0 >= b[2] && z0 <= b[3]) continue;
-                for (q = 0; q < o->vert_count; q++) {
-                    float v = (float)o->verts[q].y;
-                    if (v > top) top = v;
-                    if (v < bot) bot = v;
-                }
-                top += (float)wp->pos[1]; bot += (float)wp->pos[1];
-                if (mb) { bot = mb[1]; top = mb[4]; }   /* moving (turned): its world box now */
-                if (bot <= cy && cy <= top) {   /* the box face entered (0x1000d310's entry axis) */
-                    float bn[3] = {0, 0, 0};
-                    g_block_what = wp->model_name;
-                    bn[ent ? 2 : 0] = dv[ent] > 0 ? -1.0f : 1.0f;
-                    return refuse(bn);
-                }
-            } else {
-                float org3[3] = {x0, cy, z0}, d3[3] = {sx, 0.0f, sz};
-                int q, j;
-                for (q = 0; q < o->poly_count; q++) {
-                    const wtb_poly *pg = &o->polys[q];
-                    float A[3], B[3], C[3], nw[3], zero[3], one[3];
-                    wtb_vertex nv;
-                    if (pg->n < 3) continue;
-                    part_vertex(wp, &o->verts[pg->idx[0]], A);
-                    part_vertex(wp, &o->verts[pg->idx[1]], B);
-                    part_vertex(wp, &o->verts[pg->idx[2]], C);
-                    if (pg->has_normal) {   /* the engine's normal: the stored one negated, turned with the object */
-                        memset(&nv, 0, sizeof nv);
-                        part_vertex(wp, &nv, zero);
-                        nv.x = (int32_t)lrintf(-pg->normal[0] * 4096.0f); nv.y = (int32_t)lrintf(-pg->normal[1] * 4096.0f); nv.z = (int32_t)lrintf(-pg->normal[2] * 4096.0f);
-                        part_vertex(wp, &nv, one);
-                        for (j = 0; j < 3; j++) nw[j] = (one[j] - zero[j]) / 4096.0f;
-                    } else {                /* the winding normal points like the stored one: negated */
-                        float u[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]}, v[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]}, l;
-                        nw[0] = -(u[1] * v[2] - u[2] * v[1]); nw[1] = -(u[2] * v[0] - u[0] * v[2]); nw[2] = -(u[0] * v[1] - u[1] * v[0]);
-                        l = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
-                        if (l < 1e-6f) continue;
-                        for (j = 0; j < 3; j++) nw[j] /= l;
-                    }
-                    if (nw[0] * d3[0] + nw[2] * d3[2] >= 0 || nw[1] >= 0.70710677f) continue;   /* back face, or climbable */
-                    for (j = 1; j + 1 < pg->n; j++) {
-                        if (j > 1) { part_vertex(wp, &o->verts[pg->idx[j]], B); part_vertex(wp, &o->verts[pg->idx[j + 1]], C); }
-                        if (seg_tri(org3, d3, A, B, C) >= 0) { g_block_what = wp->model_name; return refuse(nw); }
-                    }
-                }
-            }
-        }
+    if (!(dl > 0.0f)) return 1;
+    p1[0] += dx / dl * R; p1[2] += dz / dl * R;
+    if (clist_seg(s, p0, p1, 1, &t, n, &ci)) {
+        g_hit_kind = 1; g_hit_t = t; g_block_id = tt->co[ci].part; g_block_what = s->world->parts[g_block_id].model_name;
+        { float box[6]; cobj_now(s, &tt->co[ci], box, g_hit_at); }
+        return refuse(n);
     }
     return 1;
 }
 
 float msim_ground_n(const msim *s, float x, float z, float y, float *nout)
 {
+    /* engine 0x10010080 over the collision list: the type 5 terrain (its quadtree, qt_ground) and the type 0 boxes (their
+     * top inside their XZ extent, 0x1000d1f0); the highest surface within 10 m of y (y < h + 10 m and h - 10 m < y) wins,
+     * else (while none is within) the highest below y, else 0. The engine asks with the unit's CENTRE height (object
+     * +0x54 = the feet + H: 0x10019b33 / 0x10019dbf) */
     const terrain_t *t = s ? (const terrain_t *)s->terrain : NULL;
-    const cell_t *c;
     static const float UP[3] = {0, 1, 0};
     float win = -3.4e38f, below = -3.4e38f;
     const float *nwin = UP, *nbelow = UP;
-    int cx, cz, k;
+    int cand[4096], nc, k;
     if (nout) memcpy(nout, UP, sizeof UP);
-    if (!t) return 0.0f;
-    cx = (int)((x - t->x0) / t->cs); cz = (int)((z - t->z0) / t->cs);
-    c = cx < 0 || cz < 0 || cx >= t->gw || cz >= t->gh || !t->cell ? NULL : &t->cell[cz * t->gw + cx];
-    for (k = 0; k < (c ? c->n : 0) + t->nmov; k++) {
-        float h;
+    if (!t || !t->co) return 0.0f;
+    nc = clist_near(s, x, z, x, z, cand, 4096);
+    for (k = 0; k < nc; k++) {
+        const cobj_t *c = &t->co[cand[k]];
         const float *ny = UP;
-        int v = c && k < c->n ? c->idx[k] : -1;
-        if (!c || k >= c->n) {   /* a moving type 0 object: its box top where it is now */
-            const float *mb = t->mov_box[k - (c ? c->n : 0)];
-            const mech3d_part *mp = s->world && t->mov[k - (c ? c->n : 0)] < s->world->part_count ? &s->world->parts[t->mov[k - (c ? c->n : 0)]] : NULL;
-            if (!mp || mp->coll != 0 || x < mb[0] || x > mb[3] || z < mb[2] || z > mb[5]) continue;
-            h = mb[4];
-        } else if (v >= 0) {
-            const tri_t *tr = &t->tri[v];
-            if (x < tr->minx || x > tr->maxx || z < tr->minz || z > tr->maxz || !in_tri(tr, x, z)) continue;
-            h = (tr->d - tr->n[0] * x - tr->n[2] * z) / tr->n[1];
-            ny = tr->n;
-        } else {
-            const box_t *b = &t->box[-1 - v];
-            if (x < b->minx || x > b->maxx || z < b->minz || z > b->maxz) continue;
-            h = b->top;
-        }
-        /* engine 0x10010080: within 10 m of y wins (highest); else the highest below y */
+        float h, box[6], sph[4];
+        if (c->type == 5) {
+            const float *pn = NULL;
+            if (c->moving || !qt_ground(t, c->root, x, z, &h, &pn)) continue;
+            if (pn) ny = pn;
+        } else if (c->type == 0) {
+            if (!cobj_now(s, c, box, sph) || x < box[0] || x > box[1] || z < box[4] || z > box[5]) continue;
+            h = box[3];
+        } else continue;
         if (win == -3.4e38f && h < y && h > below) { below = h; nbelow = ny; }
         if (y < h + 1000.0f && h - 1000.0f < y && h > win) { win = h; nwin = ny; }
     }
@@ -3147,151 +4081,46 @@ void msim_set_world(msim *s, const mech3d *world)
     mov_refresh(s);
 }
 
-/* segment (2D) against the building footprints: returns the index hit or -1 */
-static int probe_hits(const msim *s, float x0, float z0, float x1, float z1)
-{
-    int i;
-    for (i = 0; i < s->obstacle_count; i++) {
-        const float *b = s->obstacles[i];
-        float t0 = 0, t1 = 1, d[2] = {x1 - x0, z1 - z0}, o[2] = {x0, z0}, lo[2] = {b[0], b[2]}, hi[2] = {b[1], b[3]};
-        int a, ok = 1;
-        /* the engine tests rays against faces: something the mech already stands in doesn't block it */
-        if (x0 >= b[0] && x0 <= b[1] && z0 >= b[2] && z0 <= b[3]) continue;
-        for (a = 0; a < 2 && ok; a++) {
-            if (fabsf(d[a]) < 1e-6f) { if (o[a] < lo[a] || o[a] > hi[a]) ok = 0; continue; }
-            {
-                float ta = (lo[a] - o[a]) / d[a], tb = (hi[a] - o[a]) / d[a];
-                if (ta > tb) { float t = ta; ta = tb; tb = t; }
-                if (ta > t0) t0 = ta;
-                if (tb < t1) t1 = tb;
-                if (t0 > t1) ok = 0;
-            }
-        }
-        if (ok) {
-            /* narrow phase: the probe at 2 m height against this object's faces */
-            if (s->world && s->obstacle_part) {
-                float o3[3] = {x0, 200.0f, z0}, d3[3] = {x1 - x0, 0.0f, z1 - z0}, t;
-                const mech3d_part *p = &s->world->parts[s->obstacle_part[i]];
-                mech3d one;
-                memset(&one, 0, sizeof one);
-                one.parts = (mech3d_part *)p;
-                one.part_count = 1;
-                if (seg_mech(&one, o3, d3, &t)) return i;
-                continue;
-            }
-            return i;
-        }
-    }
-    return -1;
-}
-
-/* A probe as the engine's 0x100103e0 sees it: the NEAREST object face the ray crosses (*ny = that face's normal y, the
- * engine's DAT_1024b424 from 0x10010650; the normal as in msim_can_step_hr: the stored one negated), -1 none. */
-static int probe_nearest(const msim *s, float x0, float z0, float x1, float z1, float *ny)
-{
-    int i, best = -1;
-    float tbest = 2.0f;
-    *ny = 0;
-    if (!s->world || !s->obstacle_part) { best = probe_hits(s, x0, z0, x1, z1); return best; }
-    for (i = 0; i < s->obstacle_count; i++) {
-        const float *b = s->obstacles[i];
-        const mech3d_part *wp = &s->world->parts[s->obstacle_part[i]];
-        const wtb_object *o;
-        float o3[3] = {x0, 200.0f, z0}, d3[3] = {x1 - x0, 0.0f, z1 - z0};
-        int k, j;
-        if (x0 >= b[0] && x0 <= b[1] && z0 >= b[2] && z0 <= b[3]) continue;   /* standing in it: no front face (as probe_hits) */
-        if ((x0 < b[0] && x1 < b[0]) || (x0 > b[1] && x1 > b[1]) || (z0 < b[2] && z1 < b[2]) || (z0 > b[3] && z1 > b[3])) continue;
-        if (wp->model.object_count < 1) continue;
-        o = &wp->model.objects[0];
-        for (k = 0; k < o->poly_count; k++) {
-            const wtb_poly *pg = &o->polys[k];
-            float A[3], B[3], C[3], t;
-            if (pg->n < 3) continue;
-            part_vertex(wp, &o->verts[pg->idx[0]], A);
-            for (j = 1; j + 1 < pg->n; j++) {
-                part_vertex(wp, &o->verts[pg->idx[j]], B);
-                part_vertex(wp, &o->verts[pg->idx[j + 1]], C);
-                t = seg_tri(o3, d3, A, B, C);
-                if (t >= 0 && t <= 1 && t < tbest) {
-                    float nw[3], zero[3], one[3];
-                    tbest = t; best = i;
-                    if (pg->has_normal) {
-                        wtb_vertex nv;
-                        memset(&nv, 0, sizeof nv);
-                        part_vertex(wp, &nv, zero);
-                        nv.x = (int32_t)lrintf(-pg->normal[0] * 4096.0f); nv.y = (int32_t)lrintf(-pg->normal[1] * 4096.0f); nv.z = (int32_t)lrintf(-pg->normal[2] * 4096.0f);
-                        part_vertex(wp, &nv, one);
-                        nw[1] = (one[1] - zero[1]) / 4096.0f;
-                    } else {
-                        float P[3], u[3], v[3], l;
-                        part_vertex(wp, &o->verts[pg->idx[1]], P);
-                        u[0] = P[0] - A[0]; u[1] = P[1] - A[1]; u[2] = P[2] - A[2];
-                        part_vertex(wp, &o->verts[pg->idx[2]], P);
-                        v[0] = P[0] - A[0]; v[1] = P[1] - A[1]; v[2] = P[2] - A[2];
-                        nw[0] = u[1] * v[2] - u[2] * v[1]; nw[1] = u[2] * v[0] - u[0] * v[2]; nw[2] = u[0] * v[1] - u[1] * v[0];
-                        l = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
-                        nw[1] = l > 1e-6f ? -nw[1] / l : 0.0f;
-                    }
-                    *ny = nw[1];
-                }
-            }
-        }
-    }
-    return best;
-}
-
-/* engine 0x100204b0: a probe hit that does not count - an object whose collision type has a ground handler (column 0 of
- * the type table 0x1024b3b0: types 0 (0x1000d1f0) and 5 (0x1000d690); 0x100102c0) where the face hit slopes at most 40
- * degrees (normal y >= 0x3f441893 = 0.766: it would be climbed), or any object of class 0x50 (object +2 = the OBJ type
- * word, & 0xf0) */
-static int probe_climbable(const msim *s, int hit, float ny)
-{
-    const mech3d_part *p;
-    if (hit < 0 || !s->world || !s->obstacle_part) return 0;
-    p = &s->world->parts[s->obstacle_part[hit]];
-    if ((p->objtype & 0xf0) == 0x50) return 1;
-    return (p->coll == 0 || p->coll == 5) && ny >= 0.76604f;
-}
 
 /* engine 0x100201c0: probe ahead at 0, 26.6, 45, 63.4 degrees toward the avoid side; each blocked
  * probe adds 204.8 turn; deflecting drops throttle to 1/4; re-checked every 90 / 181 ticks */
-/* Terrain on a probe ray (engine 0x100201c0 probes the collision list, terrain included): walk it in
- * 50 cm steps (thin rock fins are under a metre) from height y, following the ground like a mech; a
- * refused step blocks. */
-static int terrain_probe(const msim *s, float x0, float z0, float y, float x1, float z1)
+/* One probe (0x100204e0 -> 0x100103e0): a ray at the unit's centre height (object +0x54) from its centre - or, for the
+ * check back toward the goal, from its side R - 1 cm out (0x100204e0 param 6) - against the whole collision list: the
+ * NEAREST hit of the world entries (the terrain pieces too, whatever their size; type 6 spheres too) and the other
+ * units (the unit's own object skipped; a unit as its contact circle r1 + r2 - the engine tests its part objects).
+ * Returns 0 none, 1 an entry, 2 a unit; *climb: 0x100204b0 - an entry whose type has a ground handler (0 / 5, column 2
+ * of 0x1024b3a8, 0x100102c0) hit on a face with normal y above 0.766 (0x3f441892), or of class 0x50; (*ox, *oz) the
+ * thing's centre (its bounding sphere +0x34 / the unit), which 0x10020670 turns away from */
+static int probe_engine(const msim *s, int self, const float p0[3], const float p1[3], int *climb, float *ox, float *oz)
 {
-    float dx = x1 - x0, dz = z1 - z0, len = sqrtf(dx * dx + dz * dz);
-    int k, n = (int)(len / 50.0f) + 1;
-    if (!s->terrain) return 0;
-    for (k = 1; k <= n; k++) {
-        float px = x0 + dx * (float)k / (float)n, pz = z0 + dz * (float)k / (float)n;
-        if (!msim_can_step(s, x0 + dx * (float)(k - 1) / (float)n, z0 + dz * (float)(k - 1) / (float)n, px, pz, y)) return 1;
-        y = msim_ground(s, px, pz, y);
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    float tt = 3.4e38f, n[3] = {0, 1, 0}, dx = p1[0] - p0[0], dz = p1[2] - p0[2], l2 = dx * dx + dz * dz, len = sqrtf(l2);
+    int ci, hit = 0, k;
+    *climb = 0;
+    if (t && clist_seg(s, p0, p1, 0, &tt, n, &ci)) {
+        const cobj_t *c = &t->co[ci];
+        float box[6], sph[4];
+        hit = 1;
+        *climb = ((c->type == 0 || c->type == 5) && n[1] > 0.7660444f) || (s->world->parts[c->part].objtype & 0xf0) == 0x50;
+        cobj_now(s, c, box, sph);
+        *ox = sph[0]; *oz = sph[2];
     }
-    return 0;
-}
-
-/* Mechs on a probe ray: the engine's probes (0x100201c0 -> 0x100103e0) test the whole collision list, the player and
- * the other mechs included, skipping only the unit's own object. A mech is touched within the two contact radii
- * (MGEO int[6] each, 0x1000ba20). Returns 1 and the mech's position when one is hit. */
-static int mech_probe(const msim *s, int self, float x0, float z0, float x1, float z1, float *hx, float *hz)
-{
-    float dx = x1 - x0, dz = z1 - z0, l2 = dx * dx + dz * dz;
-    int k;
-    for (k = -1; k < s->actor_count; k++) {
-        float cx, cz, t, px, pz;
+    for (k = -1; k < s->actor_count && len > 0; k++) {   /* the units: a nearer one wins */
+        float cx, cz, rr, b, c2, disc, te;
         if (k == self) continue;
         if (k < 0) { if (s->player_unit.destroyed) continue; cx = s->player[0]; cz = s->player[2]; }
         else { if (!s->armed[k] || s->units[k].destroyed) continue; cx = (float)s->actors[k].mech.origin[0]; cz = (float)s->actors[k].mech.origin[2]; }
-        float rr = (self >= 0 ? s->radius[self] : s->player_radius) + (k < 0 ? s->player_radius : s->radius[k]);
-        if ((cx - x0) * (cx - x0) + (cz - z0) * (cz - z0) < rr * rr) continue;   /* already touching: a face test misses */
-        t = l2 > 0 ? ((cx - x0) * dx + (cz - z0) * dz) / l2 : 0;
-        if (t < 0) t = 0;
-        if (t > 1) t = 1;
-        px = x0 + dx * t - cx; pz = z0 + dz * t - cz;
-        if (px * px + pz * pz < rr * rr) { *hx = cx; *hz = cz; return 1; }
+        rr = (self >= 0 ? s->radius[self] : s->player_radius) + (k < 0 ? s->player_radius : s->radius[k]);
+        c2 = (cx - p0[0]) * (cx - p0[0]) + (cz - p0[2]) * (cz - p0[2]) - rr * rr;
+        if (c2 < 0) continue;   /* already touching: a face test misses */
+        b = ((cx - p0[0]) * dx + (cz - p0[2]) * dz) / len;
+        disc = b * b - c2;
+        if (b < 0 || disc < 0) continue;
+        te = b - sqrtf(disc);
+        if (te > len || !(te < tt)) continue;
+        tt = te; hit = 2; *climb = 0; *ox = cx; *oz = cz;
     }
-    return 0;
+    return hit;
 }
 
 static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, float dt)
@@ -3310,37 +4139,35 @@ static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, floa
     if (ac->unit_class != 1) len *= 0.5f;   /* 0x100201c0: the unit record's class (+0) other than 1 - vehicles - probes half as far */
     if (len < 0.3f) len = 0.3f;
     len *= 5000.0f;
-    for (step = 0; step < 4; step++) {
-        float a = (ac->mech.heading + (float)side * ANG[step]) * 3.14159265f / 180.0f, L = len * LEN[step];
-        float ny = 0;
-        int hit = probe_nearest(s, x, z, x + sinf(a) * L, z + cosf(a) * L, &ny);
-        float mx = 0, mz = 0;
-        if (probe_climbable(s, hit, ny)) break;   /* 0x100204b0: a climbable / class 0x50 hit ends the scan - no turn, no wall follow */
-        if (hit < 0 && mech_probe(s, i, x, z, x + sinf(a) * L, z + cosf(a) * L, &mx, &mz)) hit = -3;   /* a mech */
-        if (hit < 0 && hit != -3 && terrain_probe(s, x, z, s->units[i].y, x + sinf(a) * L, z + cosf(a) * L)) hit = -2;   /* terrain */
-        if (hit == -1) {
-            if (step == 0 && fabsf(wrap180(goal_bearing - ac->mech.heading)) <= 1.0f) side = 0;
-            if (step == 0 && side != 0) {
-                /* ahead is clear but the goal is still off to the other side: the engine probes 26.6 degrees back toward
-                 * it (0x100201c0: 0x100204e0(-side, 1, ..)) and, while that ray is blocked, keeps turning away (+side x
-                 * 409.6, 0x10247594) at full throttle - it follows the wall instead of steering straight back into it */
-                float b = (ac->mech.heading - (float)side * ANG[1]) * 3.14159265f / 180.0f, L = len * LEN[1], bx = 0, bz = 0;
-                float ex = x + sinf(b) * L, ez = z + cosf(b) * L, bny = 0;
-                int bh = probe_nearest(s, x, z, ex, ez, &bny);
-                if ((bh >= 0 && !probe_climbable(s, bh, bny)) || mech_probe(s, i, x, z, ex, ez, &bx, &bz) || terrain_probe(s, x, z, s->units[i].y, ex, ez))
-                    accum += (float)side * 409.6f;
+    {
+        float yc = s->units[i].y + (s->centre_h ? s->centre_h[i] : 550.0f), R = s->radius ? s->radius[i] : 450.0f;
+        for (step = 0; step < 4; step++) {
+            float a = (ac->mech.heading + (float)side * ANG[step]) * 3.14159265f / 180.0f, L = len * LEN[step];
+            float p0[3] = {x, yc, z}, p1[3] = {x + sinf(a) * L, yc, z + cosf(a) * L}, ox = 0, oz = 0;
+            int climb, hit = probe_engine(s, i, p0, p1, &climb, &ox, &oz);
+            if (!hit) {
+                if (step == 0 && fabsf(wrap180(goal_bearing - ac->mech.heading)) <= 1.0f) side = 0;
+                if (step == 0 && side != 0) {
+                    /* ahead is clear but the goal is still off to the other side: the engine probes 26.6 degrees back toward
+                     * it from the unit's side (0x100201c0: 0x100204e0(-side, 1, ..): R - 1 cm out on that side) and, while
+                     * that ray hits something not climbable, keeps turning away (+side x 409.6, 0x10247594) at full throttle -
+                     * it follows the wall instead of steering straight back into it */
+                    float bh = (ac->mech.heading - (float)side * ANG[1]) * 3.14159265f / 180.0f, Lb = len * LEN[1];
+                    float hr = ac->mech.heading * 3.14159265f / 180.0f, off = (float)(-side) * (R - 1.0f);
+                    float q0[3] = {x + cosf(hr) * off, yc, z - sinf(hr) * off}, q1[3];
+                    int bclimb;
+                    q1[0] = q0[0] + sinf(bh) * Lb; q1[1] = yc; q1[2] = q0[2] + cosf(bh) * Lb;
+                    if (probe_engine(s, i, q0, q1, &bclimb, &ox, &oz) && !bclimb) accum += (float)side * 409.6f;
+                }
+                break;
             }
-            break;
+            if (climb) break;   /* 0x100204b0: a climbable / class 0x50 hit ends the scan - no turn, no wall follow */
+            if (side == 0) {   /* 0x10020670: turn away from the thing hit (its centre: a terrain piece's too) */
+                float ob = atan2f(ox - x, oz - z) * 180.0f / 3.14159265f;
+                side = wrap180(ob - ac->mech.heading) < 0 ? 1 : -1;
+            }
+            accum += (float)side * 204.8f;
         }
-        if (side == 0 && (hit >= 0 || hit == -3)) {   /* 0x10020670: turn away from the obstacle */
-            float ob = hit == -3 ? atan2f(mx - x, mz - z) * 180.0f / 3.14159265f
-                                 : atan2f((s->obstacles[hit][0] + s->obstacles[hit][1]) * 0.5f - x, (s->obstacles[hit][2] + s->obstacles[hit][3]) * 0.5f - z) * 180.0f / 3.14159265f;
-            side = wrap180(ob - ac->mech.heading) < 0 ? 1 : -1;
-        } else if (side == 0) {   /* terrain: the side whose 45-degree ray is walkable (port) */
-            float ar = (ac->mech.heading + 45.0f) * 3.14159265f / 180.0f;
-            side = terrain_probe(s, x, z, s->units[i].y, x + sinf(ar) * L, z + cosf(ar) * L) ? -1 : 1;
-        }
-        accum += (float)side * 204.8f;
     }
     s->avoid_side[i] = side;
     if (accum != 0) {

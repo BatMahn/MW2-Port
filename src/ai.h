@@ -124,6 +124,7 @@ typedef struct {
     float man_ticks, man_limit;
     int   flank_slot;        /* manoeuvre 1: slot taken (-1 none) */
     float flank_x, flank_z, flank_retarget;
+    int   flank_face;        /* manoeuvre 1: +0x184 = 1 - at the slot, turning to face the target (0x1001f9d0) */
     int   jet;               /* jet input this tick */
     int   jet_forward;       /* horizontal jet thrust input (+0x20) */
     int   man_phase;         /* manoeuvre 5/9 phase (engine +0x180) */
@@ -164,6 +165,13 @@ typedef struct {
     int   node_tgt;          /* the node target 0x10014ba0 last gave it (msim's code; 0 none) - its +0x14e for a target
                               * the port's AI can't aim at (a thing), so the node's count still sees it */
     int   fire_locked;       /* the lock (0x80) when the weapon now firing was triggered: its missiles home */
+    int   entered;           /* a rule committed or popped this step (0x10011d20 -> 0x10013e00): the engine's exit
+                              * (0x10013680) and entry (0x10013790) run - into the same state too */
+    int   entered_from;      /* the state it left */
+    /* the unit's own temporary nav points (0x1001cab0: flag 1, owner = the unit, 30 m radius) as patrol (state 7)
+     * makes them (0x10013f00), in table order; the patrol's goal +0x14c is the first (0x10014050(0x100)) */
+    float guard[16][2];
+    int   guard_n;
     unsigned rng;
 } ai_mind;
 

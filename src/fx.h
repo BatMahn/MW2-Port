@@ -39,6 +39,10 @@ typedef struct {
     int     slots[FX_TYPES];          /* pool slots of each type (XPLO count) */
     int     anim[FX_TYPES];           /* texture slot of the type's first pool object, -1 none */
     float   half_w[FX_TYPES], half_h[FX_TYPES];   /* card size (cm) */
+    /* a colour type 3 card (0x3xxx, drawn by the billboard 0x1002a8e0): its foot (texel u 0, v > 0) and top (u 0, v 0)
+     * corners, cm from the effect's position (x 0..2: game x, y, z; the pool objects are unrotated, 0x10045c30) */
+    int     bb[FX_TYPES];
+    float   bb_foot[FX_TYPES][3], bb_top[FX_TYPES][3];
     fx_anim tex[512];                 /* texture slots (u16, engine 0x1002d060: < 0x200) */
 } fx_defs;
 

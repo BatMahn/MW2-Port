@@ -54,4 +54,20 @@ int   anim_loop_start(const anim_set *s, int first, int count);
  * (start, end relative to the sequence; returns the keys between footfalls, 0 without two) */
 int   anim_loop_range(const anim_set *s, int first, int count, int *ls, int *le);
 
+/* The engine's key player (0x1000dec0) with the gait code's request (0x1000b3a0): see anim.c */
+typedef struct {
+    int   on;          /* playing (object +0x80 bit 0) */
+    int   key;         /* the key playing, -1 none (track +0x24) */
+    int   cur;         /* the sequence playing (object +0x84), -1 none */
+    int   dur;         /* the time the next key gets, ticks (object +0x94) */
+    float left, len;   /* ticks left in the key playing (track +0x14), and its length */
+    float t;           /* the pose: absolute key time for anim_value / mech3d_pose */
+    float off[ANIM_MAX_TRACKS];   /* the carried pose offset per track (the engine adds key deltas onto the node) */
+} anim_player;
+#define ANIM_EV_STEP 1   /* entered a key flagged 0x800 (a foot coming down: +0x80 bit 3) */
+#define ANIM_EV_SLOW 2   /* entered a key flagged 0x10 (+0x80 bit 1) */
+int   anim_key_time(int gait, int rate);
+void  anim_player_init(anim_player *p, int rate);
+int   anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks);
+
 #endif

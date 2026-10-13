@@ -38,6 +38,7 @@ static int world_pos(const node *nodes, const node *base, int i, int32_t out[3],
 
 int mech3d_lod;
 int world3d_density_low;
+int world3d_scrg_step;
 static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d *out);
 static void mounts_local(mech3d *m);
 /* The engine keeps ONE skeleton per object and a level of detail only swaps each node's geometry (3Dfx 0x10026430: node
@@ -263,7 +264,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
     prj_record rec;
     bwd_chunk *chunks = NULL;
     wnode *nodes = NULL;
-    int n, k, i, poly_type, rc = -1, max = MAX_NODES * 4;
+    int n, k, i, poly_type, rc = -1, max = MAX_NODES * 4, scrg_obj = -1;
 
     if (prj_read_named(a, "BWD", record, &rec) != PRJ_OK) return -1;
     poly_type = prj_find_type(a, "POLY");
@@ -281,6 +282,11 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         nodes[o.index].model = o.model;
         nodes[o.index].coll = o.coll;
         nodes[o.index].objtype = o.objtype;
+    }
+    {   /* SCRG {i16 object}: the record's scrub patch (engine 0x1003e693 -> 0x100113f0, DOS 0x4ed5b -> 0x1f120) */
+        int sc = -1;
+        for (k = 0; k < n; k++) if (strcmp(chunks[k].tag, "SCRG") == 0 && chunks[k].size >= 2) sc = (int16_t)(chunks[k].data[0] | chunks[k].data[1] << 8);
+        scrg_obj = sc >= 0 && sc < max && nodes[sc].present ? sc : -1;
     }
     for (i = 0; i < max; i++) {
         prj_record mr;
@@ -316,6 +322,19 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         if (p->sparse && world3d_density_low) p->hidden = 1;
         if (wtb_parse(mr.data, mr.size, &p->model) != 0) { prj_record_free(&mr); continue; }
         prj_record_free(&mr);
+        p->scrg = scrg_obj >= 0;   /* the patch object and its children (the 3 x 3 tiles) */
+        if (i == scrg_obj && p->model.object_count) {   /* the grid step from the patch model's x / z extent (0x100113f0) */
+            const wtb_object *o = &p->model.objects[0];
+            int q, mnx = 1 << 30, mxx = -(1 << 30), mnz = 1 << 30, mxz = -(1 << 30), e;
+            for (q = 0; q < o->vert_count; q++) {
+                if (o->verts[q].x < mnx) mnx = o->verts[q].x;
+                if (o->verts[q].x > mxx) mxx = o->verts[q].x;
+                if (o->verts[q].z < mnz) mnz = o->verts[q].z;
+                if (o->verts[q].z > mxz) mxz = o->verts[q].z;
+            }
+            e = mxx - mnx > mxz - mnz ? mxx - mnx : mxz - mnz;
+            if (e > 0) world3d_scrg_step = ((e >> 14) + 1) * 0x4000;   /* the object's +4 non-zero branch (INFERRED) */
+        }
         if (p->model.object_count) {   /* flat pieces lying in the ground plane (T_1LINE, T_1SPOTA ...) raised 4 cm */
             const wtb_object *o = &p->model.objects[0];
             int q, flat = o->vert_count > 2;
@@ -620,6 +639,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     {   int q; for (q = 0; q < 3; q++) ac->ai_range[q] = (float)(g.ranges[q] ? g.ranges[q] : 250) * 100.0f; }
                     snprintf(ac->loadout, sizeof ac->loadout, "%s", g.loadout);
                     snprintf(ac->name, sizeof ac->name, "%s", g.name);
+                    snprintf(ac->pilot, sizeof ac->pilot, "%s", g.pilot);
                     ac->have_anim = piece.anim_id && anim_load_id(a, piece.anim_id, &ac->anim) == 0 &&
                                     ac->anim.track_count >= 3;   /* vehicles/turrets: stub sets */
                     mech3d_pose(&ac->mech, NULL, 0);
@@ -746,7 +766,13 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
                     int tr = m->bind_track[k];
                     float v;
                     if (m->bind_node[k] != m->skel_index[i] || tr < 0 || tr >= anim->track_count) continue;
-                    v = anim_value(anim, tr, t);
+                    v = anim_value(anim, tr, t) + (m->pose_off && tr < ANIM_MAX_TRACKS ? m->pose_off[tr] : 0.0f);
+                    /* the torso (the record's first THNG node = the twist node, every mech) gets its whole local rotation
+                     * from the controller each frame (0x1001a180 -> 0x1000f990 -> 0x1002f070 / 0x1000f8f0: pitch, twist,
+                     * roll 0), so the walk's rotation keys on it (0x1000dec0 -> 0x1000f9d0, small relative turns) never
+                     * add up: no torso sway (Gargoyle +-4 deg yaw, Battlemaster / Hellbringer / Summoner +-2.6, Firemoth
+                     * pitch). Its translation keys stay */
+                    if (anim->tracks[tr].type > 2 && m->skel_index[i] == m->twist_node) continue;
                     if (anim->tracks[tr].type <= 2) lpos[anim->tracks[tr].type] += v;
                     else { mat3_axis(tmp, anim->tracks[tr].type - 3, v); mat3_mul(lrot, lrot, tmp); }
                 }
@@ -784,6 +810,44 @@ static void mounts_local(mech3d *m)
                 memcpy(m->mount_local[q], wpos[k], sizeof m->mount_local[q]);
                 m->mount_local_ok |= 1u << q;
             }
+}
+int mech3d_group_point(const mech3d *m, int group, const float origin[3], float heading, float out[3])
+{
+    float wrot[MECH3D_MAX_NODES][9], wpos[MECH3D_MAX_NODES][3], c, sn, ctr[3] = {0, 0, 0}, lw[3];
+    int done[MECH3D_MAX_NODES], i, k, g, node = -1, part = -1;
+    mech3d tmp = *m;
+    for (g = group; g >= 0 && node < 0; g = g == 3 ? -1 : 3)   /* 0x1000fec0(group), else 0x1000fec0(3) */
+        for (i = 0; i < m->part_count && node < 0; i++) if (m->parts[i].group == g && m->parts[i].node >= 0) { node = m->parts[i].node; part = i; }
+    if (node < 0) return -1;
+    {   /* the node's object (0x1000f760: node +0x6c) gives its world bounding centre (0x10029890: object +0x34..+0x3c) - the
+         * local centre +0x28..+0x30 (the vertices' box middle, x 0.5, 0x100290c0) through the node's placement (0x10029c10) */
+        const mech3d_part *p = &m->parts[part];
+        if (p->model.object_count > 0 && p->model.objects[0].vert_count > 0) {
+            const wtb_object *o = &p->model.objects[0];
+            float mn[3], mx[3];
+            int v, j;
+            for (j = 0; j < 3; j++) { mn[j] = 1e30f; mx[j] = -1e30f; }
+            for (v = 0; v < o->vert_count; v++) {
+                float q[3] = {(float)o->verts[v].x, (float)o->verts[v].y, (float)o->verts[v].z};
+                for (j = 0; j < 3; j++) { if (q[j] < mn[j]) mn[j] = q[j]; if (q[j] > mx[j]) mx[j] = q[j]; }
+            }
+            for (j = 0; j < 3; j++) ctr[j] = (mn[j] + mx[j]) * 0.5f;
+        }
+    }
+    tmp.origin[0] = tmp.origin[1] = tmp.origin[2] = 0;
+    tmp.heading = 0;
+    solve_nodes(&tmp, (const anim_set *)m->pose_anim, m->pose_t, wrot, wpos, done);
+    for (k = 0; k < m->skel_count; k++) {
+        const float *l = lw, *R = wrot[k];
+        if (m->skel_index[k] != node || !done[k]) continue;
+        for (i = 0; i < 3; i++) lw[i] = wpos[k][i] + R[i * 3] * ctr[0] + R[i * 3 + 1] * ctr[1] + R[i * 3 + 2] * ctr[2];
+        c = cosf(heading * 3.14159265f / 180.0f); sn = sinf(heading * 3.14159265f / 180.0f);
+        out[0] = origin[0] + c * l[0] + sn * l[2];   /* mat3_axis about y: x' = c x + s z, z' = -s x + c z */
+        out[1] = origin[1] + l[1];
+        out[2] = origin[2] - sn * l[0] + c * l[2];
+        return 0;
+    }
+    return -1;
 }
 int mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float heading, float out[3])
 {
@@ -827,6 +891,7 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
         int q;
         if (m->eye_node >= 0 && m->skel_index[k] == m->eye_node && done[k]) {
             memcpy(m->eye_pos, wpos[k], sizeof m->eye_pos);
+            memcpy(m->eye_rot, wrot[k], sizeof m->eye_rot);
             m->eye_ok = 1;
         }
         for (q = 0; q < 8; q++)
@@ -1273,11 +1338,28 @@ static void wp_aim(wp_filt *f, float a)
     f->cur = a - d;
 }
 
-/* 0x10030120: the heading of (dx, dz), degrees from +z towards +x; 45 when both are (near) 0 */
+/* 0x10030120: the heading of (dx, dz), degrees from +z towards +x, from the engine's arctangent table (0x1002ffb0 fills
+ * 0x1015e6f0[i] = atan(i / 512) in degrees, i = 0..511, [512] = 45): the smaller of |dx|, |dz| over the larger, x 512 +
+ * 0.5, truncated, is the index - |dx| < |dz|: table; else 90 - table; |dz| negative: 180 - that; dx negative: negated.
+ * Both under 1e-7: 45; dx alone: 0 / 180 by dz's sign; dz alone: 90 / -90 by dx's; |dx| = |dz| (within 1e-7): 45.
+ * Steps of 1/512 in the ratio: within 0.056 degrees of atan2 */
 static float wp_heading(float dx, float dz)
 {
-    if (fabsf(dx) < 1e-7f && fabsf(dz) < 1e-7f) return 45.0f;
-    return atan2f(dx, dz) * 57.29578f;
+    static float tab[513];
+    float ax = fabsf(dx), az = fabsf(dz), r;
+    if (tab[512] == 0.0f) {
+        int i;
+        for (i = 0; i < 512; i++) tab[i] = (float)(atan((double)i * 0.001953125) * 57.29577957855229);
+        tab[512] = 45.0f;
+    }
+    if (ax < 1e-7f) return az < 1e-7f ? 45.0f : dz < 0 ? 180.0f : 0.0f;
+    if (az < 1e-7f) return dx < 0 ? -90.0f : 90.0f;
+    if (fabsf(ax - az) < 1e-7f) r = 45.0f;
+    else if (ax < az) r = tab[(int)(ax / az * 512.0f + 0.5f)];
+    else r = 90.0f - tab[(int)(az / ax * 512.0f + 0.5f)];
+    if (dz < 0) r = 180.0f - r;
+    if (dx < 0) r = -r;
+    return r;
 }
 
 /* one run of the task (0x1000ee10 mode 1); 0 = the task ends */
@@ -1660,4 +1742,122 @@ int mech3d_fly_loc(const mech3d *m, int q, unsigned mask)
         node = par;
     }
     return 0;
+}
+
+/* ---- the Titanium edition's models (TEXTURES TITANIUM; drawing only) ------------------------------------------ */
+
+/* The Titanium POLY records are in the DOS layout: no stored normals. Its engine lights per vertex from a normal
+ * (mercsw 0x1002ecaa: vertex +0x20..+0x28, one-sided); how it derives them is not traced - here each vertex sums its
+ * faces' normals (area-weighted). The faces' winding: (v1 - v0) x (v2 - v0) points into the mesh for most of them
+ * (Titanium MD1*: 187 of 226 faces, TW1*: 213 / 247, S_1*: 10152 / 14031, against the face centre from the object's
+ * centre), so the outward normal is its negation (INFERRED). */
+void mech3d_ti_normals(wtb_model *m)
+{
+    int oi, k, j;
+    for (oi = 0; m && oi < m->object_count; oi++) {
+        wtb_object *o = &m->objects[oi];
+        for (k = 0; k < o->vert_count; k++) o->verts[k].normal[0] = o->verts[k].normal[1] = o->verts[k].normal[2] = 0;
+        for (k = 0; k < o->poly_count; k++) {
+            const wtb_poly *q = &o->polys[k];
+            const wtb_vertex *a, *b, *c;
+            float e1[3], e2[3], n[3];
+            if (q->n < 3) continue;
+            a = &o->verts[q->idx[0]]; b = &o->verts[q->idx[1]]; c = &o->verts[q->idx[2]];
+            e1[0] = (float)(b->x - a->x); e1[1] = (float)(b->y - a->y); e1[2] = (float)(b->z - a->z);
+            e2[0] = (float)(c->x - a->x); e2[1] = (float)(c->y - a->y); e2[2] = (float)(c->z - a->z);
+            n[0] = -(e1[1] * e2[2] - e1[2] * e2[1]); n[1] = -(e1[2] * e2[0] - e1[0] * e2[2]); n[2] = -(e1[0] * e2[1] - e1[1] * e2[0]);
+            for (j = 0; j < q->n; j++) {
+                wtb_vertex *v = &o->verts[q->idx[j]];
+                v->normal[0] += n[0]; v->normal[1] += n[1]; v->normal[2] += n[2];
+            }
+        }
+        for (k = 0; k < o->vert_count; k++) {
+            float *n = o->verts[k].normal, l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (l > 0) { n[0] /= l; n[1] /= l; n[2] /= l; }
+        }
+    }
+}
+
+int mech3d_ti_load(prj_archive *ti, const char *record, int repr, mech3d *out)
+{
+    int i;
+    if (!ti || mech3d_load(ti, record, repr, out) != 0) return -1;
+    for (i = 0; i < out->part_count; i++) {
+        out->parts[i].ti = 1;
+        if (!out->parts[i].model.extended) mech3d_ti_normals(&out->parts[i].model);
+    }
+    return 0;
+}
+
+int world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store)
+{
+    char rec[11] = "";
+    bwd_chunk *chunks = NULL;
+    prj_record r;
+    int have = 0, nc = 0, i, k, poly, found = 0;
+    *store = NULL;
+    if (!ti || !world || world->part_count <= 0 || (poly = prj_find_type(ti, "POLY")) < 0) return 0;
+    if (!(*store = calloc((size_t)world->part_count, sizeof **store))) return 0;
+    memset(&r, 0, sizeof r);
+    for (i = 0; i < world->part_count; i++) {
+        mech3d_part *p = &world->parts[i];
+        prj_record mr;
+        p->ti_model = NULL;
+        if (!p->rec[0] || strncasecmp(p->rec, "MW2_", 4) == 0) continue;   /* (the shared effect pools: laid out anew) */
+        if (p->scrg) {
+            /* a scrub patch (SCRG): the Titanium build's scenes include none - its SCN1 records for all 59 of the 3D
+             * editions' missions leave out their xxxxSCRI (checked record by record), and its archive lacks most of
+             * their models - so nothing is drawn there (the 3D editions' bitmaps, cyan-keyed, are not Titanium's) */
+            p->ti_model = &(*store)[i];
+            found++;
+            continue;
+        }
+        if (strcmp(rec, p->rec) != 0) {   /* the part's record in the Titanium archive (parts come record by record) */
+            if (have) { free(chunks); chunks = NULL; prj_record_free(&r); have = 0; }
+            snprintf(rec, sizeof rec, "%s", p->rec);
+            nc = 0;
+            if (prj_read_named(ti, "BWD", rec, &r) == PRJ_OK) {
+                have = 1;
+                nc = bwd_chunks(r.data, r.size, NULL, 0);
+                if (nc > 0 && (chunks = calloc((size_t)nc, sizeof *chunks))) bwd_chunks(r.data, r.size, chunks, nc);
+                else nc = 0;
+            }
+        }
+        for (k = 0; k < nc; k++) {
+            bwd_obj o;
+            if (bwd_obj_decode(&chunks[k], &o) != 0 || o.index != p->obj_index) continue;
+            if (prj_find_type(ti, "POLY") >= 0 && prj_read(ti, poly, o.model, &mr) != PRJ_OK) {
+                /* the Titanium record places a model its archive lacks (TNJ1SCRI's scrub TNJ1SCR1): nothing to draw there
+                 * (ASSUMED: the engine draws no model it cannot load) - an empty model */
+                p->ti_model = &(*store)[i];
+                found++;
+                break;
+            }
+            if (prj_read(ti, poly, o.model, &mr) == PRJ_OK) {
+                /* the same object renamed (S_BTFCTL -> S_1TFCTL, SAATFBSA -> SA1TFBSA, S_1BQDGQ -> S_1BLDGQ, V_BDRPWS ->
+                 * V_1DRPW: at most 2 characters differ); the effect pool MW2_SHT1 is laid out differently (LAS0_0 there
+                 * is XPL0_0 here) and TRNJAREA's flags are wind socks: those differ more and are left alone */
+                int diff = 0, l1 = (int)strlen(p->model_name), l2 = (int)strlen(mr.name), q2;
+                for (q2 = 0; q2 < (l1 > l2 ? l1 : l2); q2++)
+                    if (q2 >= l1 || q2 >= l2 || toupper((unsigned char)p->model_name[q2]) != toupper((unsigned char)mr.name[q2])) diff++;
+                if (diff <= 2 && strcasecmp(mr.name, "DUMMY") != 0 && wtb_parse(mr.data, mr.size, &(*store)[i]) == 0 && (*store)[i].object_count > 0) {
+                    if (!(*store)[i].extended) mech3d_ti_normals(&(*store)[i]);
+                    p->ti_model = &(*store)[i];
+                    found++;
+                }
+                prj_record_free(&mr);
+            }
+            break;
+        }
+    }
+    if (have) { free(chunks); prj_record_free(&r); }
+    return found;
+}
+
+void world3d_ti_free(wtb_model *store, int count)
+{
+    int i;
+    if (!store) return;
+    for (i = 0; i < count; i++) wtb_free(&store[i]);
+    free(store);
 }

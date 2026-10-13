@@ -215,6 +215,34 @@ static int im_action_held(const inputmap *m, const char *action, const Uint8 *ks
 }
 
 /* an axis condition's value -1..1 (sign applied); 0 if not an axis */
+/* a stick axis as the GIDDI joystick driver reports it (JOYSTICK.DLL, read 0x10500 -> 0x10660, calibration 0x10eb0):
+ * the deflection from the calibrated centre within a dead zone of span / 16 (axes 1 and 2: 12.5 % of the half travel;
+ * the third axis span / 10, 20 %; the fourth raw) - or twice the centre's jitter if more - reads 0; beyond it the output
+ * grows linearly to full (0x10000) span / 16 short of the end (87.5 % of the half travel), its magnitude rounded up to
+ * the next 1/32 (>> 11, + 1, << 11), and each read is smoothed: (2 x the last + the new) / 3 (at the 30 fps reference) */
+static float im_stick_shape(int ax, float v)
+{
+    static float sm[8];
+    static Uint32 last[8];
+    float dz = ax == 2 ? 0.2f : 0.125f, a = v < 0 ? -v : v, y;
+    Uint32 now = SDL_GetTicks();
+    int k = ax & 7;
+    if (ax >= 3) y = v;   /* the fourth axis: no calibration (stored raw) */
+    else {
+        y = a <= dz ? 0.0f : (a - dz) / (1.0f - dz - 0.125f);
+        if (y > 0) { y = (float)((int)(y * 32.0f) + 1) / 32.0f; if (y > 1) y = 1; }
+        if (v < 0) y = -y;
+    }
+    {   /* (2 x last + new) / 3 for each 1/30 s frame passed */
+        static Uint32 acc[8];
+        int n;
+        if (!last[k] || now - last[k] > 1000) { sm[k] = y; acc[k] = 0; last[k] = now; return y; }
+        acc[k] += (now - last[k]) * 30u; last[k] = now;
+        for (n = 0; acc[k] >= 1000u && n < 30; n++) { acc[k] -= 1000u; sm[k] = (2.0f * sm[k] + y) / 3.0f; }
+    }
+    return sm[k];
+}
+
 static float im_cond_axis(const im_cond *c)
 {
     float v = 0;
@@ -222,7 +250,7 @@ static float im_cond_axis(const im_cond *c)
     if (c->device == 1 && g_im_dev.joy) {
         int ax = c->code - 100;
         if (ax < SDL_JoystickNumAxes(g_im_dev.joy)) v = (float)SDL_JoystickGetAxis(g_im_dev.joy, ax) / 32767.0f;
-        if (v > -0.08f && v < 0.08f) v = 0;   /* centre dead zone (ASSUMED; the drivers calibrate a centre) */
+        v = im_stick_shape(ax, v);
     } else if (c->device == 2) v = c->code == 100 ? g_im_dev.mouse_dx : c->code == 101 ? g_im_dev.mouse_dy : 0;
     return c->sign < 0 ? -v : v;
 }

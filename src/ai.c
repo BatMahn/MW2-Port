@@ -153,6 +153,7 @@ static int action(ai_mind *m, const ai_rule *r)
     case 3:   /* 0x10013320: pop - with nothing pushed the rule commits; else back to the pushed state, no commit */
         if (m->counter == 0) return 1;
         m->counter = 0;
+        m->entered = 1; m->entered_from = m->state;   /* 0x10013320 -> 0x10013e00(pushed state, pushed target) */
         m->state = m->prev_state;
         m->target = m->state == AI_TARGET || m->state == AI_ATTACK;
         m->rule_fired = 1;
@@ -215,7 +216,7 @@ static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
     m->man_limit = 9050.0f;                                                     /* 0x235a ticks (0x1001f290) */
     switch (man) {
     case 0: m->man_limit = (float)(ai_rand(m, 5) * 181u + 1448u); break;      /* rand(5) x 181 + 1448 */
-    case 1: m->man_limit = 3620.0f; break;
+    case 1: m->man_limit = 3620.0f; m->flank_face = 0; break;
     case 3: m->weave = ai_rand(m, 2) ? 1.0f : -1.0f; m->weave_ticks = 0; break;
     case 4: m->man_limit = 905.0f; m->throttle = 0; m->turn = 0; break;      /* 0x389 */
     case 7: {   /* 0x1001f290 case 7 -> 0x1001f630: a point 100 m from the target in a 16-way slot round its facing:
@@ -267,29 +268,44 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
     case 1: {   /* flank (0x1001f9d0): move to the slot point, re-pick every 543 ticks */
         m->flank_retarget -= ticks;
         if (m->flank_slot < 0 || m->flank_retarget <= 0) {
-            float rel = wrap180(atan2f(v->self_x - v->enemy_x, v->self_z - v->enemy_z) * 180.0f / 3.14159265f - v->enemy_heading);
-            int sector = ((int)lrintf(rel / 45.0f) + 8) % 8, slot, k2;
-            if (m->flank_slot >= 0 && v->flank_slots) v->flank_slots[m->flank_slot]--;
-            if (sector == 0) {                         /* in front: a side at random, the other if taken */
-                slot = ai_rand(m, 2) ? 2 : 6;
-                if (v->flank_slots && v->flank_slots[slot]) slot = slot == 2 ? 6 : 2;
-            } else if (sector >= 2 && sector <= 4) {
-                slot = 4;
-                for (k2 = 2; k2 <= 4; k2++) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
-            } else if (sector >= 5 && sector <= 6) {
-                slot = 4;
-                for (k2 = 6; k2 >= 4; k2--) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
-            } else {
-                slot = sector == 1 ? 3 : 5;            /* 1 -> 3, 7 -> 5 */
+            /* 0x1001ea8e: every 0x21f ticks the slot's point is placed again round the target as it stands now
+             * (0x1001f630 -> 0x1001f6b0); the slot itself is chosen once, when the manoeuvre starts (+0x184 = -1 ->
+             * 0x10020d00), and kept */
+            if (m->flank_slot < 0) {
+                float rel = wrap180(atan2f(v->self_x - v->enemy_x, v->self_z - v->enemy_z) * 180.0f / 3.14159265f - v->enemy_heading);
+                int sector = ((int)lrintf(rel / 45.0f) + 8) % 8, slot, k2;
+                if (sector == 0) {                         /* in front: a side at random, the other if taken */
+                    slot = ai_rand(m, 2) ? 2 : 6;
+                    if (v->flank_slots && v->flank_slots[slot]) slot = slot == 2 ? 6 : 2;
+                } else if (sector >= 2 && sector <= 4) {
+                    slot = 4;
+                    for (k2 = 2; k2 <= 4; k2++) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
+                } else if (sector >= 5 && sector <= 6) {
+                    slot = 4;
+                    for (k2 = 6; k2 >= 4; k2--) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
+                } else {
+                    slot = sector == 1 ? 3 : 5;            /* 1 -> 3, 7 -> 5 */
+                }
+                if (v->flank_slots) v->flank_slots[slot]++;
+                m->flank_slot = slot;
             }
-            if (v->flank_slots) v->flank_slots[slot]++;
-            m->flank_slot = slot;
             m->flank_retarget = 543.0f;
-            {
-                float a = (v->enemy_heading + (float)slot * 45.0f) * 3.14159265f / 180.0f;
-                m->flank_x = v->enemy_x + sinf(a) * 15000.0f;
-                m->flank_z = v->enemy_z + cosf(a) * 15000.0f;
+            {   /* the 16-way table 0x1024cd70 at slot x 2: (x, z) = 15000 / (f_x, f_z) in the target's frame (0 -> 0):
+                 * the eight directions on a square - the diagonals 212 m out, the sides 150 m */
+                static const float FX[8] = {0, 1, 1, 1, 0, -1, -1, -1}, FZ[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+                float a = v->enemy_heading * 3.14159265f / 180.0f, lx = 15000.0f * FX[m->flank_slot], lz = 15000.0f * FZ[m->flank_slot];
+                m->flank_x = v->enemy_x + cosf(a) * lx + sinf(a) * lz;
+                m->flank_z = v->enemy_z - sinf(a) * lx + cosf(a) * lz;
             }
+        }
+        {   /* 0x1001f9d0: +0x184 = 0 - steer for the slot (throttle 0x100134c0 with R 4000: none within 40 m); once the
+             * throttle is none and the target is more than 5 deg (0x10247528, double) off the legs, +0x184 = 1: steer for
+             * the TARGET, stepping round at 1/640 (0x1001f910) while more than 5 deg off, else standing - until the slot
+             * is more than 45 m away (0x458ca000; a re-picked slot every 0x21f ticks) */
+            float fx = m->flank_x - v->self_x, fz = m->flank_z - v->self_z, fd = sqrtf(fx * fx + fz * fz);
+            if (m->flank_face && fd > 4500.0f) m->flank_face = 0;
+            if (!m->flank_face && fd < 4000.0f && fabsf(wrap180(v->enemy_bearing - v->heading)) > 5.0f) m->flank_face = 1;
+            if (m->flank_face) { *R = 1e9f; break; }   /* the caller steers for the target: no throttle, 10 % past 5 deg */
         }
         *R = 4000.0f;
         *dist = -1.0f;   /* tell the caller to steer to the flank point */
@@ -420,6 +436,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
     int s, i, k, fired = 0;
     float ticks = dt * 182.0f;
     m->c7_fired = 0;
+    m->entered = 0;
     /* rules for the current state, order program first (engine collects slot 2, 1, 0); the first rule whose action
      * commits ends the pass (0x10011d20 returns 1 -> no movement this tick, 0x10011c50) */
     for (s = 2; s >= 0 && !fired; s--) {
@@ -436,6 +453,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
                 m->rule_fired = 0;
                 if (!action(m, r)) { if (m->rule_fired) fired = 1; continue; }   /* a pop changed the state */
                 fired = 1;
+                m->entered = 1; m->entered_from = m->state;                 /* 0x10013e00: exit + entry, even into the same state */
                 if (r->cond == 3 && m->to_navref) m->nav_ok = 0;            /* 0x10014f60: the nav reached is released */
                 if (r->cond == 7) m->c7_fired = 1;                          /* ref2 0x25: the condition's pick */
                 if (r->next_state != m->state && program_allows(lib, m, r->next_state)) {
@@ -456,7 +474,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
     }
     m->rule_fired = fired;
     if (m->state != AI_GODIRECT) m->to_navref = 0;
-    if (!v->has_enemy && (m->state == AI_TARGET || m->state == AI_ATTACK) && !fired) { m->state = m->prev_state; m->target = 0; }
+    if (!v->has_enemy && (m->state == AI_TARGET || m->state == AI_ATTACK) && !fired) { m->entered = 1; m->entered_from = m->state; m->state = m->prev_state; m->target = 0; }
     if (m->state != AI_ATTACK && m->man >= 0) { m->prev_man = m->man; m->man = -1; m->reverse = 0; m->jet_side = 0; }
     if (m->state != AI_ATTACK) m->jet = 0;
     m->wants_fire = 0;
@@ -535,20 +553,28 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
         else m->turn = err * 18.2044f;
         if (m->state == AI_ATTACK && m->man == 3) m->turn += 450.0f * m->weave;
         if (m->state == AI_ATTACK && m->man == 11) m->turn = 0;            /* 0x1001f290 case 11: +0xc = 0 */
-        /* throttle 0x100134c0 (fractions of full = 1/64) */
-        if (dist > 2.0f * R) thr = 1.0f;
-        else if (dist >= R) thr = 0.8f;
-        else thr = 0;
-        if (full_attack) thr = 1.0f;
-        if (m->state == AI_ATTACK && (m->man == 11 || m->man == 4)) thr = m->throttle;   /* hold the throttle */
-        if (thr > 0 && fabsf(m->turn) > 45.0f) {
-            thr = (0.015625f - fabsf(m->turn) * 1.01725e-05f) / 0.015625f;
-            if (thr < 0.1f) thr = 0.1f;
+        /* throttle 0x100134c0 (3Dfx floats, full = 1/64) in the DOS edition's integers (DOS 0x228d0, input +8 with full =
+         * 0x400): 0x400 beyond 2 R, 0x333 (819 / 1024) from R, else 0; turning harder than 45 (|turn| >> 16 > 0x2d):
+         * (0x4000000 - chop(|turn| x 2/3)) >> 16, at least 0x66 (102 / 1024); halved (>> 1) above 65 heat (heat >> 16 >
+         * 0x41); under 0x66 -> 0. The 3Dfx floats (0.8 / 0.1 of full, heat > 65.0) differ by under 0.4 % */
+        {
+            int ti;
+            if (dist > 2.0f * R) ti = 0x400;
+            else if (dist >= R) ti = 0x333;
+            else ti = 0;
+            if (full_attack) ti = 0x400;
+            if (m->state == AI_ATTACK && (m->man == 11 || m->man == 4)) ti = (int)lrintf(m->throttle * 1024.0f);   /* hold the throttle */
+            if (ti != 0 && (int)(fabsf(m->turn) * 65536.0f) >> 16 > 0x2d) {
+                ti = (0x4000000 - (int)((double)(int)(fabsf(m->turn) * 65536.0f) * (2.0 / 3.0))) >> 16;
+                if (ti < 0x66) ti = 0x66;
+            }
+            if ((int)v->heat > 0x41) ti >>= 1;
+            if (ti < 0x66) ti = 0;
+            thr = (float)ti / 1024.0f;
         }
-        if (v->heat > 65.0f) thr *= 0.5f;
-        if (thr < 0.1f) thr = 0;
-        /* 0x1001f910 (manoeuvres 0 / 1): no throttle but more than 5 deg off -> 1/640 = 10% of full to step round */
-        if (m->state == AI_ATTACK && (m->man == 0 || m->man == 1) && thr <= 0 && fabsf(err) > 5.0f) thr = 0.1f;
+        /* 0x1001f910 (manoeuvres 0 / 1): no throttle but more than 5 deg off -> 1/640 = 10% of full to step round (DOS
+         * 0x2d1c0 / 0x2d200: 0x66 = 102 / 1024) */
+        if (m->state == AI_ATTACK && (m->man == 0 || m->man == 1) && thr <= 0 && fabsf(err) > 5.0f) thr = 102.0f / 1024.0f;
         if (m->state == AI_FLEE) thr = 1.0f;
         m->throttle = thr;
         /* patrol / scouting torso sweep (0x10014ff0) */

@@ -68,6 +68,9 @@ typedef struct {
     uint32_t item;      /* MEK item id of this weapon instance */
     float t;            /* ticks into the current state */
     int   bin_first, bin_n, bin_cur;   /* its ammo bins (+0x34.., +0x30 count, +0x60 current) */
+    int   homing;       /* slot +0x18 / +0x1c: the target latched when the volley was triggered (0x100437a0 / 0x10044440 /
+                           0x100443a0: the unit's target if the controller was locked, 0x80) - every projectile of the volley
+                           homes on it (0x10043cc0 copies it to the projectile's +0x30 / +0x34); -2 none */
 } combat_weapon;
 
 /* an ammo bin (engine 0x16-byte record, 0x10041410): the ammo item id, the weapon it feeds, rounds left */
@@ -77,6 +80,7 @@ typedef struct {
     char          loadout[16];
     float         armor[MEK_LOC_COUNT], rear[MEK_LOC_COUNT], internal[MEK_LOC_COUNT];   /* floats, as the engine keeps them */
     int           armor_max[MEK_LOC_COUNT], rear_max[MEK_LOC_COUNT];   /* starting values (HUD damage levels) */
+    float         armor_mult;       /* the loader's armour factor (combat_set_armor_mult; 1 until set) */
     combat_weapon weapons[COMBAT_MAX_WEAPONS];
     int           weapon_count;
     float         heat, sink_per_tick;
@@ -100,6 +104,8 @@ typedef struct {
     float         seq_ticks;         /* ticks since the sequence / shutdown began (engine c[0x23]) */
     unsigned      rng;
     int           ammo_blown;        /* set when an overheat ammo explosion happened (for messages) */
+    int           ammo_boom_loc;     /* the location (1-8) of the last bin explosion, 0 none: msim puts explosion 7 there
+                                        (0x100167b0 -> 0x10045c30, a damaging effect type) and clears it */
     unsigned      breach_latch;      /* per location (bit l): its armour (front or rear) has been used up (location word
                                         flag 0x4000, 0x100171d0) */
     int           breach_sound;      /* a human pilot, up: a location's armour first used up - MECRDWA1 0xec (0x1001732e);
@@ -107,12 +113,18 @@ typedef struct {
     int           red_flash;         /* set (a human pilot) when the engine asks for the red palette flash (DAT_1024cce0):
                                         an ammunition bin exploding (0x100167b0) or more than 2 points of damage reaching the
                                         head / centre torso structure (0x100171d0); the front end clears it */
+    uint32_t      crit_said[8];      /* a human pilot: the items whose critical the engine announces (0x100167b0 ->
+                                        0x100318a0 "Critical hit : <part>"; not silent, the weapon still working, a heat sink
+                                        still dissipating); the front end says them and clears crit_said_n */
+    int           crit_said_n;
     int           display_hits;      /* criticals 5300-5450: cockpit displays damaged, 2 in 10 per instrument (0x1001e670) */
     int           display_hits5;     /* critical 5700: the same roll at 5 in 10 per instrument (0x1001e670 flag 1) */
     float         throttle_frac;     /* current throttle 0..1 of full, set by the mover: walking heats the mech by
                                         frac/64 x dissipation x 6.4 once per frame (0x1001aac8; 30 fps assumed) */
     float         hold_fire_above;  /* 0 = fire freely (a human pilot); AI: 65 (assumed) */
     int           ai_sel;           /* AI: the selected weapon slot (engine unit +0xac) */
+    int           lock_target;      /* set by the sim before a trigger: the unit's target when locked (controller +0x10c
+                                       bit 0x80), else -2; a volley started now latches it (combat_weapon.homing) */
     float         hit_w[8];         /* location weights (mech3d_hit_weights); all 0 = unknown */
     uint32_t      slots[8][MEK_SLOTS];  /* the location's item list (MEK slots; a critical removes its entry, 0x100167b0) */
     int           slot_count[8];        /* entries in the list (MEK +0x24; -1 per critical) */
@@ -152,6 +164,9 @@ void combat_set_planet(const combat_planet *p);
  * 0x100171d0 applies no damage to anyone (weapon hits, splash, collisions, falls) and 0x10015e10 (BlowAmmo) does nothing.
  * The sim sets it; 1 by default (tools) */
 extern int combat_damage_live;
+extern int combat_ct_split;
+/* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
+void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */
 /* TOGGLE_AUTOEJECT (engine DAT_1024bfbc, default off; one switch for every unit): an ammunition explosion (0x100167b0)
  * then puts the unit in state 5 and calls 0x10016280 - the player ejects (hostile planet: aborted, an ordinary death);
  * an AI mech (single player, DAT_1024ffcc == 0) goes on to state 4 there, an ordinary death */
@@ -164,6 +179,11 @@ uint16_t combat_mek_rating(const mek_def *d);
  * colder than -30 / hotter than 50: Easy 0.001068 / 0.002136 / 0.001068, Medium 0.000763 / 0.001526 / 0.000687,
  * Hard 0.000687 / 0.001030 / 0.000549 (AI 'Mechs: Medium's) */
 void combat_set_player_difficulty(combat_unit *u, int difficulty);
+/* the loader's armour factor (engine 0x10041410 / DOS 0x4c760, by MW2DIF +5 difficulty 0 / 1 / 2): front and rear
+ * armour (not structure) x 4 for the player; x 3 / 3 / 4 for a unit of alliance 0 (the player's side); x 1 / 3 / 4
+ * for any other (enemy, neutral). combat_armor_mult gives the factor, combat_set_armor_mult applies it once */
+float combat_armor_mult(int player, int alliance, int difficulty);
+void combat_set_armor_mult(combat_unit *u, float mult);
 /* advance time: weapon cycles, heat, shutdown */
 void combat_tick(combat_unit *u, float dt);
 /* trigger ready weapons in range at `target` and resolve projectiles now due.
@@ -184,6 +204,8 @@ int  combat_next_projectile(combat_unit *u);
 int  combat_next_projectile_ex(combat_unit *u, int *first);
 /* as combat_next_projectile_ex, also giving the weapon's MEK location (*loc, may be NULL) */
 int  combat_next_projectile_at(combat_unit *u, int *first, int *loc);
+/* the same, also giving the target the volley latched at its trigger (combat_weapon.homing; -2 none) */
+int  combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing);
 float combat_weapon_damage(int w);
 int  combat_weapon_kind(int w);     /* weapon table +0x00: projectile kind (0-2 lasers, 3 SRM/Narc, 4 LRM/Streak, 5 ballistic, 6 PPC, 7 Gauss/flamer) */
 int  combat_weapon_has_object(int w);   /* weapon table +0x14: launches a projectile object (the flamer does not) */   /* damage per projectile (weapon table +0x30) */

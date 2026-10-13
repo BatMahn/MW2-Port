@@ -341,6 +341,10 @@ int sfx_voice_audible(sfx *s, int index)
 void sfx_play(sfx *s, int index, float volume, float pan) { if (s) sfx_play_g(s, index, volume * gain_of(s->gain_fx), pan); }
 void sfx_play_voice(sfx *s, int index, float volume) { if (s) { s->next_is_voice = 1; sfx_play_g(s, index, volume * gain_of(s->gain_voice), 0.0f); s->next_is_voice = 0; } }
 double sfx_log_time = -1;   /* TEST ONLY (MW2_SFX_LOG): the caller's clock (s) printed with each play */
+/* TEST ONLY (MW2_SFX_SIMCLOCK=1): the voice channel counts as busy for each line's length on that clock (sfx_log_time),
+ * not while the audio device plays it - headless runs go faster than real time, so voice order is checkable */
+static double s_sim_voice_end = -1;
+static void sim_voice(int samples) { if (getenv("MW2_SFX_SIMCLOCK")) s_sim_voice_end = sfx_log_time + samples / 11025.0; }
 static void sfx_log(const char *what, int index, float volume, int voice)
 {
     if (getenv("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f%s\n", sfx_log_time, what, index, (double)volume, voice ? " voice" : "");
@@ -373,6 +377,7 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     if (pan > 1) pan = 1;
     s->v[best].c = c;
     s->v[best].loop = 0;
+    if (s->next_is_voice) sim_voice(c->len);   /* TEST ONLY */
     s->v[best].is_voice = s->next_is_voice; s->next_is_voice = 0;
     s->v[best].pos = 0;
     s->v[best].step = 11025.0 / (double)s->rate;    /* engine rate: 11025 Hz */
@@ -428,6 +433,7 @@ void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume)
     if (!s) return;
     volume = volume * gain_of(s->gain_voice) / gain_of(s->gain_fx);   /* the VOICE slider, not EFFECTS */
     s->next_is_voice = 1;
+    sim_voice(len);   /* TEST ONLY */
     sfx_play_pcm(s, pcm, len, 11025, volume, 0);
     s->next_is_voice = 0;
 }
@@ -439,7 +445,18 @@ int sfx_voice_busy(sfx *s)
     SDL_LockAudioDevice(s->dev);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].is_voice) on = 1;
     SDL_UnlockAudioDevice(s->dev);
+    if (getenv("MW2_SFX_SIMCLOCK")) return sfx_log_time >= 0 && sfx_log_time < s_sim_voice_end;   /* TEST ONLY */
     return on;
+}
+
+void sfx_stop_voice(sfx *s, int index)
+{
+    int k;
+    if (!s) return;
+    SDL_LockAudioDevice(s->dev);
+    for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].is_voice && s->v[k].index == index) s->v[k].c = NULL;
+    SDL_UnlockAudioDevice(s->dev);
+    s_sim_voice_end = -1;   /* TEST ONLY clock */
 }
 
 int sfx_playing(sfx *s, int index)

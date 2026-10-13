@@ -77,12 +77,28 @@ hud *hud_create(prj_archive *a)
         for (i = 0; i < 768 && off + (size_t)i < r.size; i++) if (r.data[off + (size_t)i] > 63) six = 0;
         for (i = 0; i < 256 && off + (size_t)i * 3 + 2 < r.size; i++) {
             int k;
-            for (k = 0; k < 3; k++) h->pal[i][k] = (uint8_t)(six ? r.data[off + (size_t)i * 3 + (size_t)k] << 2 : r.data[off + (size_t)i * 3 + (size_t)k]);
+            for (k = 0; k < 3; k++) { int v = r.data[off + (size_t)i * 3 + (size_t)k]; h->pal[i][k] = (uint8_t)(six ? (v << 2) | (v >> 4) : v); }
         }
         h->have_pal = 1;
         prj_record_free(&r);
     }
     return h;
+}
+
+void hud_set_palette(hud *h, const uint8_t *p6)
+{
+    int i, k;
+    if (!h || !p6) return;
+    for (i = 0; i < 256; i++)
+        for (k = 0; k < 3; k++) { int v = p6[i * 3 + k] & 63; h->pal[i][k] = (uint8_t)((v << 2) | (v >> 4)); }
+    h->have_pal = 1;
+}
+
+void hud_pal_color(const hud *h, int idx, float rgba[4])
+{
+    int k;
+    for (k = 0; k < 3; k++) rgba[k] = h ? (float)h->pal[idx & 255][k] / 255.0f : 0.0f;
+    rgba[3] = 1.0f;
 }
 
 void hud_destroy(hud *h)
@@ -356,6 +372,26 @@ void hud_rect(hud *h, float x, float y, float w, float hg, const float rgba[4])
     glUniform1i(h->u_smooth, 0);
     glUniform4fv(h->u_tint, 1, rgba);
     quad(h, x, y, x + w, y + hg, 0, 0, 1, 1);
+}
+
+void hud_poly(hud *h, const float *xy, int n, const float rgba[4])
+{
+    int i, k;
+    glUniform1i(h->u_textured, 0);
+    glUniform1i(h->u_smooth, 0);
+    glUniform4fv(h->u_tint, 1, rgba);
+    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
+    for (i = 1; i + 1 < n; i++) {   /* a fan of triangles, mapped as quad() maps */
+        float v[12];
+        const int idx[3] = {0, i, i + 1};
+        for (k = 0; k < 3; k++) {
+            v[k * 4] = (h->ox + xy[idx[k] * 2] * h->k) / (float)h->vw * 2.0f - 1.0f;
+            v[k * 4 + 1] = 1.0f - xy[idx[k] * 2 + 1] * h->ky / (float)h->vh * 2.0f;
+            v[k * 4 + 2] = v[k * 4 + 3] = 0;
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof v, v);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
 }
 
 void hud_clip(hud *h, float x, float y, float w, float hg)
@@ -634,4 +670,9 @@ float hud_text_width(hud *h, const char *str)
         w += h->glyph_w[c] > 0 ? (float)h->glyph_w[c] : (float)h->cell_w * 0.5f;
     }
     return w * font_scale(h) / h->k;
+}
+
+float hud_text_height(hud *h)
+{
+    return h->font_tex ? (float)h->font_h * font_scale(h) / h->k : 0.0f;
 }

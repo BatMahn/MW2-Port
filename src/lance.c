@@ -5,13 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* MW2SHELL's chassis table (0x8367c) names the Battle Master "btllmstr", but the archives hold it as BTTLMSTR (BWD, MGEO):
+ * that typo would leave the easter-egg chassis without its model - the port uses the record that exists */
 static const struct { const char *code, *file, *name; } MECHS[18] = {
     {"frm", "firemoth", "Firemoth"}, {"ktf", "kitfox", "Kit Fox"}, {"jnr", "jenner", "Jenner IIC"},
     {"nva", "nova", "Nova"}, {"stm", "strmcrow", "Stormcrow"}, {"mdg", "maddog", "Mad Dog"},
     {"hlb", "hellbrgr", "Hellbringer"}, {"rfl", "rifleman", "Rifleman IIC"}, {"smn", "summoner", "Summoner"},
     {"tbr", "timbrwlf", "Timber Wolf"}, {"grg", "gargoyle", "Gargoyle"}, {"whm", "warhammr", "Warhammer IIC"},
     {"mrd", "marauder", "Marauder IIC"}, {"whk", "warhawk", "Warhawk"}, {"drw", "direwolf", "Dire Wolf"},
-    {"ele", "elementl", "Elemental"}, {"tar", "tarantul", "Tarantula"}, {"btm", "btllmstr", "Battle Master IIC"},
+    {"ele", "elementl", "Elemental"}, {"tar", "tarantul", "Tarantula"}, {"btm", "bttlmstr", "Battle Master IIC"},
 };
 /* skill rows (0x7a7a8): skill, range, 1, range, pilot level */
 static const short SKILL[9][5] = {

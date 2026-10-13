@@ -158,13 +158,22 @@ void cc_devices(cc_device dev[CC_DEVICES], const char *dir)
     }
 }
 
+/* the Cockpit Controls' "Default" (MW2SHELL FUN_00020c10): the bindings cleared (FUN_00020730: device -1, flags / a / b
+ * 0, type 0 for the seven analog slots, 1 for the rest), named "Default Config"; then for each selected device in the
+ * device list's order its GIDDI\<device>.CPC, of which only the device's own bindings are taken: a binding at level l
+ * goes to the first free level from l on, unless an identical binding (all six fields) is met first - then it is
+ * dropped; with no free level left it is dropped too */
 int cc_merge_defaults(cc_config *out, const char *dir, const int selected[CC_DEVICES])
 {
     int k, l, s, ok = 0;
     char p[1100];
     cc_config d;
-    if (cc_load(out, (snprintf(p, sizeof p, "%s/DEFAULT.CPC", dir), p)) != 0) memset(out, 0, sizeof *out);
-    for (l = 0; l < CC_LEVELS; l++) for (s = 0; s < CC_SLOTS; s++) { out->b[l][s].device = -1; out->b[l][s].a = out->b[l][s].b = 0; out->b[l][s].flags = 0; }
+    if (cc_load(out, (snprintf(p, sizeof p, "%s/DEFAULT.CPC", dir), p)) != 0) memset(out, 0, sizeof *out);   /* the device table */
+    for (l = 0; l < CC_LEVELS; l++)
+        for (s = 0; s < CC_SLOTS; s++) {
+            cc_binding *b = &out->b[l][s];
+            b->device = -1; b->a = b->b = 0; b->flags = 0; b->pad = 0; b->type = s > 6 ? 1 : 0;
+        }
     snprintf(out->name, sizeof out->name, "Default Config");
     for (k = 0; k < CC_DEVICES; k++) {
         if (!selected[k]) continue;
@@ -172,12 +181,17 @@ int cc_merge_defaults(cc_config *out, const char *dir, const int selected[CC_DEV
         { int h; for (h = (int)strlen(dir) + 1; p[h]; h++) if (p[h] >= 'a' && p[h] <= 'z') p[h] = (char)(p[h] - 32); }
         if (cc_load(&d, p) != 0) continue;
         ok = 1;
-        for (s = 0; s < CC_SLOTS; s++)
-            for (l = 0; l < CC_LEVELS; l++) {
+        for (l = 0; l < CC_LEVELS; l++)
+            for (s = 0; s < CC_SLOTS; s++) {
+                const cc_binding *nb = &d.b[l][s];
                 int l2;
-                if (d.b[l][s].device < 0) continue;
-                for (l2 = 0; l2 < CC_LEVELS && out->b[l2][s].device >= 0; l2++) {}
-                if (l2 < CC_LEVELS) out->b[l2][s] = d.b[l][s];
+                if (nb->device != k) continue;
+                for (l2 = l; l2 < CC_LEVELS; l2++) {
+                    cc_binding *t = &out->b[l2][s];
+                    if (t->device == nb->device && t->type == nb->type && t->flags == nb->flags && t->a == nb->a && t->b == nb->b &&
+                        t->pad == nb->pad) break;                    /* already there */
+                    if (t->device < 0) { *t = *nb; break; }
+                }
             }
     }
     return ok ? 0 : -1;
@@ -205,22 +219,50 @@ void cc_describe(const cc_binding *b, const cc_device dev[CC_DEVICES], char *out
 /* text building */
 typedef struct { char *o; size_t n, cap; int over, analog, discrete; } sb;
 static void put(sb *s, const char *t) { size_t l = strlen(t); if (s->n + l + 1 > s->cap) { s->over = 1; return; } memcpy(s->o + s->n, t, l + 1); s->n += l; }
-typedef struct { const char *name; int sign; const char *dev; const char *in; int mods; } cc_out;
+typedef struct { const char *name; int sign; const char *dev; const char *in; int mods, neg; } cc_out;
 
-/* is (dev, input) used anywhere with modifier m? -> the plain use excludes it */
-static int used_with_mod(const cc_out *o, int no, const char *dev, const char *in, int m)
+/* the modifiers a binding must NOT have held (FUN_000201a0's first passes, bits 4-6 of its flags): a binding with
+ * modifiers m marks them on every other binding of its kind on the same input number - the axes (type 0) among the
+ * axes, the keys / buttons (types 1, 2) among those, a two-input control's second input (b) too - the input number
+ * compared whatever the device (as the shell does); a two-input control whose inputs are one key gives the second its
+ * first's modifiers as NOT modifiers. pos_b: the second input's own modifiers */
+static void neg_mods(const cc_config *c, int neg_a[CC_LEVELS][CC_SLOTS], int neg_b[CC_LEVELS][CC_SLOTS], int pos_b[CC_LEVELS][CC_SLOTS])
 {
-    int i;
-    for (i = 0; i < no; i++) if (strcmp(o[i].dev, dev) == 0 && strcmp(o[i].in, in) == 0 && (o[i].mods & (1 << m))) return 1;
-    return 0;
+    int i, j;
+    const int n = CC_LEVELS * CC_SLOTS;
+    for (i = 0; i < n; i++) {
+        const cc_binding *k = &c->b[i / CC_SLOTS][i % CC_SLOTS];
+        int m = (int)(k->flags & 7);
+        neg_a[i / CC_SLOTS][i % CC_SLOTS] = 0;
+        pos_b[i / CC_SLOTS][i % CC_SLOTS] = k->type == 2 && k->a != k->b ? m : 0;
+        neg_b[i / CC_SLOTS][i % CC_SLOTS] = k->type == 2 && k->a == k->b ? m : 0;
+    }
+    for (i = 0; i < n; i++) {
+        const cc_binding *k = &c->b[i / CC_SLOTS][i % CC_SLOTS];
+        int m = (int)(k->flags & 7), mb = pos_b[i / CC_SLOTS][i % CC_SLOTS];
+        if (k->device < 0 || !m) continue;
+        for (j = 0; j < n; j++) {
+            const cc_binding *o = &c->b[j / CC_SLOTS][j % CC_SLOTS];
+            int *na = &neg_a[j / CC_SLOTS][j % CC_SLOTS], *nb = &neg_b[j / CC_SLOTS][j % CC_SLOTS];
+            if (j == i || o->device < 0) continue;
+            if (k->type == 0) { if (o->type == 0 && o->a == k->a) *na |= m; continue; }
+            if (k->type > 2 || o->type == 0) continue;
+            if (o->a == k->a) *na |= m;
+            if (o->type == 2 && o->b == k->a) *nb |= m;
+            if (o->type == 2 && o->a == k->b) *na |= mb;
+            if (o->type == 2 && o->b == k->b) *nb |= mb;
+        }
+    }
 }
 
 size_t cc_generate(const cc_config *c, const cc_device dev[CC_DEVICES], const int selected[CC_DEVICES], char *out, size_t cap)
 {
     static cc_out o[1024];
-    int no = 0, l, s, i, m;
+    static int neg_a[CC_LEVELS][CC_SLOTS], neg_b[CC_LEVELS][CC_SLOTS], pos_b[CC_LEVELS][CC_SLOTS];
+    int no = 0, l, s, i, m, ng = 0;
     sb b = {out, 0, cap, 0, 0, 0};
-#define EMIT(nm, sg, dv, inp, md) do { if (no < 1024) { o[no].name = (nm); o[no].sign = (sg); o[no].dev = (dv); o[no].in = (inp); o[no].mods = (md); no++; } } while (0)
+#define EMIT(nm, sg, dv, inp, md) do { if (no < 1024) { o[no].name = (nm); o[no].sign = (sg); o[no].dev = (dv); o[no].in = (inp); o[no].mods = (md); o[no].neg = ng; no++; } } while (0)
+    neg_mods(c, neg_a, neg_b, pos_b);
     for (l = 0; l < CC_LEVELS; l++)
         for (s = 0; s < CC_CONTROLS; s++) {
             const cc_binding *k = &c->b[l][s];
@@ -237,7 +279,7 @@ size_t cc_generate(const cc_config *c, const cc_device dev[CC_DEVICES], const in
                 static const char *ALIAS[7] = {NULL, NULL, NULL, NULL, "eyepoint_pan", "track_height", "track_distance"};
                 const char *base = CC_MAPNAME[s];
                 char bn[32];
-                int amod = mods, bmod = strcmp(x, y) == 0 ? 0 : mods, q;
+                int amod = mods, bmod = pos_b[l][s], q;
                 snprintf(bn, sizeof bn, "%.*s", strncmp(base + strlen(base) - 6, "_delta", 6) == 0 ? (int)strlen(base) - 6 : (int)strlen(base), base);
                 for (q = 0; q < 2; q++) {
                     const char *nm = q == 0 ? bn : ALIAS[s];
@@ -245,20 +287,23 @@ size_t cc_generate(const cc_config *c, const cc_device dev[CC_DEVICES], const in
                     if (!nm) continue;
                     snprintf(names[l][s][q * 2], 40, "%s_%s", nm, r ? "plus" : "minus");
                     snprintf(names[l][s][q * 2 + 1], 40, "%s_%s", nm, r ? "minus" : "plus");
-                    EMIT(names[l][s][q * 2], 1, dn, x, amod);
-                    EMIT(names[l][s][q * 2 + 1], 1, dn, y, bmod);
+                    ng = neg_a[l][s]; EMIT(names[l][s][q * 2], 1, dn, x, amod);
+                    ng = neg_b[l][s]; EMIT(names[l][s][q * 2 + 1], 1, dn, y, bmod);
                 }
             } else if (k->type == 0) {
-                EMIT(CC_MAPNAME[s], rev ? -1 : 1, dn, x, mods);
+                ng = neg_a[l][s]; EMIT(CC_MAPNAME[s], rev ? -1 : 1, dn, x, mods);
             } else {
-                EMIT(CC_MAPNAME[s], 1, dn, x, mods);
+                ng = neg_a[l][s]; EMIT(CC_MAPNAME[s], 1, dn, x, mods);
                 if (s == 7) { EMIT("pilot_tilt_reset", 1, dn, x, mods); EMIT("torso_pan_reset", 1, dn, x, mods); EMIT("pilot_pan_reset", 1, dn, x, mods); }
                 if (s == 8) EMIT("eyepoint_pan_minus", 1, dn, x, mods);
                 if (s == 9) EMIT("eyepoint_pan_plus", 1, dn, x, mods);
                 if (s >= 13 && s <= 16) EMIT("jumpjet_enabled", 1, dn, x, mods);
             }
         }
-    if (selected[2]) {   /* the keyboard: the jump-turn keys */
+    ng = 0;
+    {   /* the jump-turn keys (FUN_000201a0): after the bindings, whatever is selected - the keyboard's slot (DAT_0007a958,
+         * always present), inputs 0x66 / 100: GreyDelete legs_pan_minus + jumpjet_enabled, GreyPageDown legs_pan_plus +
+         * jumpjet_enabled */
         EMIT("legs_pan_minus", 1, "keyboard", "GreyDelete", 0); EMIT("jumpjet_enabled", 1, "keyboard", "GreyDelete", 0);
         EMIT("legs_pan_plus", 1, "keyboard", "GreyPageDown", 0); EMIT("jumpjet_enabled", 1, "keyboard", "GreyPageDown", 0);
     }
@@ -269,7 +314,7 @@ size_t cc_generate(const cc_config *c, const cc_device dev[CC_DEVICES], const in
         put(&b, line);
         for (m = 0; m < 3; m++) {
             if (o[i].mods & (1 << m)) { snprintf(line, sizeof line, "\t+ keyboard\t%s\r\n", MODNAME[m]); put(&b, line); }
-            else if (used_with_mod(o, no, o[i].dev, o[i].in, m)) { snprintf(line, sizeof line, "\t- keyboard\t%s\r\n", MODNAME[m]); put(&b, line); }
+            else if (o[i].neg & (1 << m)) { snprintf(line, sizeof line, "\t- keyboard\t%s\r\n", MODNAME[m]); put(&b, line); }
         }
         put(&b, "}\r\n");
         if (strstr(o[i].name, "_delta") || (strcmp(o[i].dev, "keyboard") != 0 && strstr(o[i].in, "/"))) b.analog++; else b.discrete++;

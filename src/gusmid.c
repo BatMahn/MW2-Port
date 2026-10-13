@@ -7,7 +7,11 @@
 #include <string.h>
 
 #define MAXV 32
-#define GF1_FRAME 44100.0   /* envelope update rate (GF1 frames/s at <= 14 voices; ASSUMED) */
+/* the envelope (volume ramp) update rate = the GF1's frame rate, 617400 / active voices (GUS SDK: 14 voices 44100 Hz
+ * ... 32 voices 19293 Hz). MW2's Miles driver ULTRA.MDI (cd SND/) sets 28 active voices: its init fills the card block
+ * at 0x57f4 with 0x1c (code 0x8ca) and 0x1bb2 -> 0x1ee7 clamps the count to 14..28 and writes register 0x0e = 0xc0 |
+ * (voices - 1) (0x2041) -> 22050 frames/s */
+#define GF1_FRAME 22050.0
 
 /* ---------------- patches ---------------- */
 typedef struct {

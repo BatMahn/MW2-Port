@@ -71,6 +71,8 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     snprintf(u->loadout, sizeof u->loadout, "%s", loadout);
     u->speed_gain = 1.0f;
     u->rng = 0x9E3779B9u;
+    u->armor_mult = 1.0f;
+    u->lock_target = -2;
     if (mek_load(a, loadout, &d) != 0) return -1;   /* the archive, else a user design MEK\\<name>.MEK */
     if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s: %d items, %d ammo bins, '%s'\n", loadout, d.item_count, d.link_count, d.config_name);
     /* engine 0x10041410: the MEK locations copied as they are (armour, rear, structure made floats; the item
@@ -111,6 +113,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
         cw->ammo = sim_weapons[wi].ammo_per_ton != -1 ? 0 : -1;
         cw->location = loc;
         cw->state = CW_READY;
+        cw->homing = -2;
         cw->bin_first = u->bin_count;
         for (j = d.item_count; j < d.item_count + d.link_count && j < MEK_MAX_ITEMS; j++) {
             combat_bin *b;
@@ -177,6 +180,7 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
     cw->shots = sim_weapons[cw->weapon].per_volley;
     cw->t = u->last_ticks;
     cw->volley_start = 1;
+    cw->homing = u->lock_target;   /* 0x100437a0: slot +0x18 / +0x1c = the target if locked, at the trigger */
     release_due(u, cw);
 }
 
@@ -317,7 +321,10 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
         cls = id / 100;
         if (cls < 50) {                                       /* a weapon (or an empty entry): that instance is gone */
             for (k = 0; k < t->weapon_count; k++)
-                if (t->weapons[k].item == id) { t->weapons[k].state = -1; t->weapons[k].shots = 0; t->weapons[k].pulses_due = 0; break; }
+                if (t->weapons[k].item == id) {
+                    if (!silent && t->human && t->weapons[k].state >= 0 && t->crit_said_n < 8) t->crit_said[t->crit_said_n++] = id;   /* 0x10016996 */
+                    t->weapons[k].state = -1; t->weapons[k].shots = 0; t->weapons[k].pulses_due = 0; break;
+                }
             break;
         }
         if (cls > 100) {                                      /* ammunition (LRM 20 ammo, 10001-10099, is not: 0x1001680a) */
@@ -333,7 +340,10 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
                 if (!silent && bn->rounds != 0) {
                     /* the bin explodes: rounds x per-round damage (bin +10 = table +0x30) into this location's structure */
                     t->internal[i] -= (float)bn->rounds * sim_weapons[cw->weapon].damage;
+                    if (getenv("MW2_DAMAGE_LOG"))   /* TEST ONLY */
+                        fprintf(stderr, "damage ammo %s %s loc %d %.3f\n", t->human ? "player" : "ai", t->loadout, loc, (double)((float)bn->rounds * sim_weapons[cw->weapon].damage));
                     t->ammo_blown = 1;
+                    t->ammo_boom_loc = loc;   /* 0x100167b0: explosion 7 at the location's node (msim) */
                     if (t->human) t->red_flash = 1;   /* 0x10016b11: the player's bin - DAT_1024cce0 (the red flash) */
                     if (t->internal[i] < 0) {
                         t->internal[i] = 0;
@@ -359,6 +369,9 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
             break;
         }
         eq = (id / 10) * 10;                                   /* equipment */
+        if (!silent && t->human && t->crit_said_n < 8 &&      /* announced (0x100167b0): not MASC, the cockpit or endo / ferro */
+            ((eq >= 5300 && eq <= 5900 && eq % 50 == 0 && eq != 5750) || eq == 7000 || (eq == 6000 && t->sink_per_tick != 0)))
+            t->crit_said[t->crit_said_n++] = id;
         if (eq == 5500 || eq == 5550 || eq == 5600 || eq == 5650 || eq == 5800 || eq == 5850) {
             t->speed_gain -= 0.100006103515625f;               /* hip, leg actuators, gyro, engine */
             if (t->speed_gain < 0) t->speed_gain = 0;
@@ -416,15 +429,23 @@ static void apply_damage(combat_unit *t, float dmg, int rear, unsigned *rng)
 }
 
 int combat_damage_live = 1;
+int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
+const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsigned *rng)
 {
     int i, r, n;
     float *arm;
+    static int dlog = -1;
+    if (dlog < 0) dlog = getenv("MW2_DAMAGE_LOG") != NULL;
+    if (dlog && combat_damage_live && !t->invulnerable && dmg > 1e-7f)   /* TEST ONLY: every damage, by source ("wreck": a destroyed unit) */
+        fprintf(stderr, "damage %s %s %s loc %d%s %.3f\n", combat_damage_src, t->destroyed ? "wreck" : t->human ? "player" : "ai", t->loadout, loc, rear ? "r" : "", (double)dmg);
     /* engine 0x100171d0: nothing for an invulnerable player, damage of 1e-7 or less, or a location outside 1-8 - and
      * nothing at all before the player's first start-up is done (DAT_1024c570; DOSBox WHITSCN1 / PLUMSCN1: the dropped
      * player lands hard, MECMTNHD, the damage display stays blue) */
     if (!combat_damage_live || t->invulnerable || !(dmg > 1e-7f) || loc < 1 || loc > 8) return;
-    if (loc == 3) loc = 2 + rand_n(rng, 3);                  /* CT hit -> LT / CT / RT */
+    /* a CT hit is spread: the 3D editions rand(3) -> 2 / 3 / 4 (0x10017264); DOS rand(2) -> 2 / 3 (MW2.EXE 0x263c8) -
+     * DOSBox AQUASCN1 H T A L: one side torso and the CT take every hit, the other side torso none */
+    if (loc == 3) loc = 2 + rand_n(rng, combat_ct_split == 2 ? 2 : 3);
     i = loc - 1;
     t->damage_taken += (int)dmg;
     if (t->loc_gone[i]) return;                              /* already gone: no transfer (nothing more can happen) */
@@ -565,7 +586,8 @@ int combat_ai_fire(combat_unit *u, float distance, unsigned (*rng)(void *ctx, un
 }
 
 int combat_next_projectile_ex(combat_unit *u, int *first) { return combat_next_projectile_at(u, first, NULL); }
-int combat_next_projectile_at(combat_unit *u, int *first, int *loc)
+int combat_next_projectile_at(combat_unit *u, int *first, int *loc) { return combat_next_projectile_h(u, first, loc, NULL); }
+int combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing)
 {
     int i;
     for (i = 0; i < u->weapon_count; i++)
@@ -574,6 +596,7 @@ int combat_next_projectile_at(combat_unit *u, int *first, int *loc)
             if (first) *first = u->weapons[i].volley_start;
             u->weapons[i].volley_start = 0;
             if (loc) *loc = u->weapons[i].location;
+            if (homing) *homing = u->weapons[i].homing;
             return u->weapons[i].weapon;
         }
     return -1;
@@ -585,6 +608,14 @@ int combat_weapon_has_object(int w) { return w >= 0 && w < 31 && !(sim_weapons[w
 float combat_weapon_damage(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].damage : 0; }
 int combat_weapon_sound(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].sound : 0; }
 int combat_weapon_visual(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].visual : -1; }
+
+void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng)
+{
+    const char *was = combat_damage_src;
+    combat_damage_src = "area";
+    apply_damage_at(t, dmg, 0, loc, rng);
+    combat_damage_src = was;
+}
 
 int combat_hit(combat_unit *t, int w, int loc, float rel_angle, unsigned *rng)
 {
@@ -668,20 +699,25 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
         u->heat += ticks * (float)u->jets * 0.005859375f;           /* 3/512 per jet per tick */
         if (u->no_heat) u->heat = 0;
     }
-    /* standing / walking: follow the terrain up, and down by up to 10 m (the engine's ground window,
-     * 0x10010080); a bigger drop starts a fall */
-    if (!jet && fabsf(u->vy) < 1e-7f && u->y - u->ground <= 1000.0f) { u->y = u->ground; u->vy = 0; return 0; }
+    /* standing / walking (engine 0x10019310 -> 0x10019e28): the unit stands only with its feet at or under the ground
+     * (asked at its centre height, 0x10010080: the highest surface within 10 m of the centre, else the highest below) -
+     * walked up a slope it is set on it; off anything lower, a downhill step too, it is airborne (+0x78 clear, 0x10019dde)
+     * and falls at the planet's gravity until its feet reach the ground: no snap-down */
+    if (!jet && fabsf(u->vy) < 1e-7f && u->y <= u->ground) { u->y = u->ground; u->vy = 0; return 0; }
     a = -g;
     if (jet) a = u->jet_ddy - g + (u->vy > 1e-7f ? (g - u->jet_ddy) / g_planet.jet_damping * u->vy * 3620.0f : 0);
     if (jet && u->jet_forward) a = u->vy > 1e-7f ? -g : 0;   /* forward thrust: no lift, level glide */
     u->y += (0.5f * a * ticks + u->vy) * ticks;
     u->vy += a * ticks;
     if (u->y <= u->ground) {
-        if (u->vy < -16.154f && !u->no_collision_damage) {               /* fall damage to both legs (0x10019310: only with
-                                                                          * Collision Damage on, DAT_1024ac6c + 3) */
+        if (u->vy < -16.154f && !u->no_collision_damage && !u->destroyed) {   /* fall damage to both legs (0x10019310: only with
+                                                                          * Collision Damage on, DAT_1024ac6c + 3; a wreck lands
+                                                                          * first - state 4 -> 0x1000c4d0 and return, 0x10019e71) */
             float dmg = (u->vy + 16.154f) * -1.5476f;
+            combat_damage_src = "fall";
             apply_damage_at(u, dmg, 0, 8, rng);
             apply_damage_at(u, dmg, 0, 7, rng);
+            combat_damage_src = "weapon";
         }
         u->landed_vy = u->vy;   /* the touch-down (0x10019e28..: sound and camera jolt when faster than 5.384 cm/tick) */
         u->y = u->ground;
@@ -724,12 +760,41 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
 
 void combat_collision(combat_unit *u, float speed, float ny, float rel_deg, unsigned *rng)
 {
+    combat_damage_src = "terrain";
     collide(u, speed, ny, rel_deg, 0, 1, rng);
+    combat_damage_src = "weapon";
 }
 
 void combat_collision_unit(combat_unit *u, float dv, const float n[3], float facing_deg, int other_tons, unsigned *rng)
 {
+    combat_damage_src = "unit";
     collide(u, dv, n[1], atan2f(-n[0], -n[2]) * 57.29578f - facing_deg, other_tons, 0, rng);
+    combat_damage_src = "weapon";
+}
+
+float combat_armor_mult(int player, int alliance, int difficulty)
+{
+    /* engine 0x10041410 (0x1004144a..: DAT_1024bfc4 the player's, DAT_1024bfc0 another alliance's, local the player's
+     * side's; applied at 0x100419b8..), DOS 0x4c760 (DAT_000961d8 / DAT_000961d4 / local): by Combat Variables
+     * difficulty (DAT_1024ac6c + 5) 0 / 1 / 2. Another value leaves the statics as they were (4 / 4 as loaded): taken as 2 */
+    static const float SIDE[3] = {3.0f, 3.0f, 4.0f}, OTHER[3] = {1.0f, 3.0f, 4.0f};
+    if (difficulty < 0 || difficulty > 2) difficulty = 2;
+    if (player) return 4.0f;
+    return alliance == 0 ? SIDE[difficulty] : OTHER[difficulty];   /* 0x10019040: the unit's star's alliance */
+}
+
+void combat_set_armor_mult(combat_unit *u, float mult)
+{
+    /* engine 0x10041410 / DOS 0x4c760: after the MEK copy, armour and rear armour x the factor (16.16 in DOS);
+     * the structure is not scaled. The damage display level is a ratio to the starting value (armor_max) */
+    int l;
+    for (l = 0; l < MEK_LOC_COUNT; l++) {
+        u->armor[l] *= mult;
+        u->rear[l] *= mult;
+        u->armor_max[l] = (int)((float)u->armor_max[l] * mult);
+        u->rear_max[l] = (int)((float)u->rear_max[l] * mult);
+    }
+    u->armor_mult *= mult;
 }
 
 void combat_set_player_difficulty(combat_unit *u, int difficulty)
