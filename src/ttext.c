@@ -18,7 +18,10 @@ int ttext_available(void) { return g_ok; }
 
 int ttext_init(const char *base_dir)
 {
-    static const char *REL[] = {"assets/fonts/LiberationSans-Bold.ttf", "../assets/fonts/LiberationSans-Bold.ttf"};
+    /* relative to the executable's directory (base_dir), then the working directory; ../Resources/assets is the
+       macOS .app layout (scripts/macos_app.sh) */
+    static const char *REL[] = {"assets/fonts/LiberationSans-Bold.ttf", "../assets/fonts/LiberationSans-Bold.ttf",
+                                "../Resources/assets/fonts/LiberationSans-Bold.ttf"};
     /* installed copies: the RPM (packaging/mw2port.spec) puts assets/ in /usr/share/mw2port; then the distro font */
     static const char *SYS[] = {"/usr/share/mw2port/assets/fonts/LiberationSans-Bold.ttf",
                                 "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -26,12 +29,12 @@ int ttext_init(const char *base_dir)
     char path[1024];
     int i;
     if (g_ok) return 0;
-    for (i = 0; i < 7 && !g_ok; i++) {
+    for (i = 0; i < 9 && !g_ok; i++) {
         FILE *f;
         long n;
-        if (i < 2) { if (!base_dir) continue; snprintf(path, sizeof path, "%s%s", base_dir, REL[i]); }
-        else if (i < 4) snprintf(path, sizeof path, "%s", REL[i - 2]);
-        else snprintf(path, sizeof path, "%s", SYS[i - 4]);
+        if (i < 3) { if (!base_dir) continue; snprintf(path, sizeof path, "%s%s", base_dir, REL[i]); }
+        else if (i < 6) snprintf(path, sizeof path, "%s", REL[i - 3]);
+        else snprintf(path, sizeof path, "%s", SYS[i - 6]);
         if (!(f = fopen(path, "rb"))) continue;
         fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET);
         free(g_ttf);

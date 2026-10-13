@@ -1,16 +1,16 @@
 #!/bin/sh
 # Build "MechWarrior 2.app" from a macOS build (make mw2) in the current directory (CI: the repo root).
-# Layout: the binary in Contents/MacOS, the font in Contents/MacOS/assets (where the port looks: next to the
-# executable), the icon (packaging/macos/mw2port.icns, an original design drawn by tools/make_icon.py) in
+# Layout: the binary in Contents/MacOS, the font in Contents/Resources/assets (SDL_GetBasePath() returns
+# Contents/Resources inside a bundle; codesign rejects non-code files in Contents/MacOS), the icon (packaging/macos/mw2port.icns, an original design drawn by tools/make_icon.py) in
 # Contents/Resources, and the SDL2 dylib the binary was linked against copied into Contents/Frameworks so the
 # app runs without Homebrew. The bundle is ad-hoc signed (codesign -s -), not notarised: a downloaded copy
 # needs  xattr -dr com.apple.quarantine "MechWarrior 2.app"  once (README).
 set -e
 APP="MechWarrior 2.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS/assets/fonts" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/assets/fonts"
 cp mw2 "$APP/Contents/MacOS/"   # one executable: the shell and (mw2 --sim) the simulation
-cp assets/fonts/LiberationSans-Bold.ttf assets/fonts/README.md "$APP/Contents/MacOS/assets/fonts/"
+cp assets/fonts/LiberationSans-Bold.ttf assets/fonts/README.md "$APP/Contents/Resources/assets/fonts/"
 cp packaging/macos/mw2port.icns "$APP/Contents/Resources/"
 # bundle SDL2: the first non-system dylib named libSDL2 in the binary's load commands
 SDL=$(otool -L "$APP/Contents/MacOS/mw2" | awk '/libSDL2/ {print $1; exit}')
@@ -23,7 +23,20 @@ case "$SDL" in
     chmod u+w "$APP/Contents/Frameworks/$LIB"
     install_name_tool -id "@executable_path/../Frameworks/$LIB" "$APP/Contents/Frameworks/$LIB"
     install_name_tool -change "$SDL" "@executable_path/../Frameworks/$LIB" "$APP/Contents/MacOS/mw2"
-    echo "bundled $SDL" ;;
+    echo "bundled $SDL"
+    # Homebrew's sdl2 is now sdl2-compat, a shim that dlopen()s SDL3 at runtime. It looks for
+    # @loader_path/libSDL3.dylib first (i.e. next to itself in Contents/Frameworks), so bundle SDL3 there too.
+    if strings "$APP/Contents/Frameworks/$LIB" | grep -q libSDL3; then
+      SDL3=""
+      for d in "$(brew --prefix sdl3 2>/dev/null)/lib" /opt/homebrew/lib /usr/local/lib; do
+        [ -f "$d/libSDL3.0.dylib" ] && { SDL3="$d/libSDL3.0.dylib"; break; }
+      done
+      [ -n "$SDL3" ] || { echo "sdl2-compat needs SDL3 but libSDL3.0.dylib was not found" >&2; exit 1; }
+      cp -L "$SDL3" "$APP/Contents/Frameworks/libSDL3.dylib"
+      chmod u+w "$APP/Contents/Frameworks/libSDL3.dylib"
+      install_name_tool -id "@loader_path/libSDL3.dylib" "$APP/Contents/Frameworks/libSDL3.dylib"
+      echo "bundled $SDL3 (for sdl2-compat)"
+    fi ;;
 esac
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
