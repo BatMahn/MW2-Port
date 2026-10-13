@@ -20,9 +20,12 @@ ifeq ($(WINDOWS),1)
   CXXLIB = -static-libgcc -Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic   # no libstdc++ / libwinpthread DLLs to ship
   DLLIB =
   WINSRC = src/wincompat.c src/glload.c
+  WINRES = build/mw2res.o
+  WINDRES ?= $(patsubst %gcc,%windres,$(CC))
 else
   DLLIB = -ldl
   WINSRC =
+  WINRES =
 endif
 ifeq ($(UNAME_S),Linux)
   LDLIBS += -ldl
@@ -43,6 +46,11 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 all: $(BIN)
+
+# Windows: the exe's icon and version information
+build/mw2res.o: packaging/windows/mw2port.rc packaging/windows/mw2port.ico
+	@mkdir -p build
+	$(WINDRES) -I packaging/windows $< -O coff -o $@
 
 build/miniaudio.o: third_party/miniaudio.c third_party/miniaudio.h
 	@mkdir -p build
@@ -80,11 +88,11 @@ build/libmt32emu.a: $(MT32_OBJ)
 	$(AR) rcs $@ $^
 
 # mw2: one executable - the shell, and with --sim the simulation (glview built in, its main renamed)
-mw2: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
+mw2: $(WINRES) build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter-out -Dmain=SDL_main,$(shell $(SDL2_CONFIG) --cflags 2>/dev/null)) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(shell $(SDL2_CONFIG) --cflags 2>/dev/null) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB)
 
 mw2shell: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(filter %.c,$^) build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) -lm $(CXXLIB)

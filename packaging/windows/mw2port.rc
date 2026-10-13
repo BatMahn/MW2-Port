@@ -1,0 +1,27 @@
+/* Windows resources for mw2.exe: the program icon (Explorer, taskbar, and SDL's window class all use icon 1)
+ * and version information. mw2port.ico: the original MechWarrior 2 icon (32 x 32, 16 colours - mw2port-32.png,
+ * isolated camouflage specks removed), pixel-doubled for 64 / 128 / 256, resampled for 24 / 48 and redrawn by hand
+ * for 16. */
+1 ICON "mw2port.ico"
+
+1 VERSIONINFO
+FILEVERSION     0,4,0,0
+PRODUCTVERSION  0,4,0,0
+FILEOS          0x40004
+FILETYPE        0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "MechWarrior 2 (64-bit port)"
+      VALUE "ProductName", "MW2-Port"
+      VALUE "OriginalFilename", "mw2.exe"
+      VALUE "InternalName", "mw2"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
