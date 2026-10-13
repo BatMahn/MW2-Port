@@ -42,13 +42,19 @@ typedef struct {
 
 #define MSIM_MAX_SHOTS 768
 
+/* a thing (structure, index into msim.bld) as a lock / homing target - the engine's target kind 0x400 (mech +0xdc,
+ * missile slot +0x34): player_lock_target, combat_unit.lock_target, msim_shot.homing */
+#define MSIM_TGT_THING(b)  (-1000 - (b))
+#define MSIM_IS_THING(t)   ((t) <= -1000)
+#define MSIM_THING_OF(t)   (-1000 - (t))
+
 typedef struct {
     float x, y, z, vx, vy, vz;   /* cm, cm per tick */
     float ax, ay, az;            /* acceleration, cm/tick^2 (+0x14..+0x1c): at launch (0, -drop flag x planet gravity, 0);
                                   * a guided missile's is replaced by the guidance each tick, gravity and all (0x10045910) */
     float life;                  /* ticks left */
     int   weapon, owner;         /* owner: actor index, -1 = the player */
-    int   homing;                /* guided at this actor (-1 the player, -2 none): engine 0x10045910 */
+    int   homing;                /* guided at this actor (-1 the player, -2 none, MSIM_TGT_THING(b) a thing): engine 0x10045910 */
     float age;                   /* ticks flown (guidance starts after the first, +0xc0) */
     int   prox;                  /* +0x38 bit 0x8000: guidance found it within 1 m of the target's position (0x10045910);
                                   * the next tick it hits the target there (0x10044f60) */
@@ -168,6 +174,10 @@ typedef struct {
     int         *seen_node;      /* per actor: the star's node last applied (0x10014520 runs on a change) */         /* per actor: whom it attacks (state 3), -1 the player, -2 none */    /* PLNT payload +0x38 == 0: explosions may take the scene light (0x1003de48 -> DAT_1025a6a8) */
     float       *centre_h;       /* per actor: centre above the feet, cm (MGEO int[0]: the climbable rise) */
     float        player_centre_h;
+    /* the player's autopilot obstacle avoidance (0x100201c0 on the player's unit record): +0x190 avoid side, +0x188 the
+     * object the first blocked probe hit (nonzero: avoiding), +0x18c the next check (ticks), +0x192 probe length factor */
+    int          pav_side, pav_hit;
+    float        pav_next, pav_len;
     int         *cmd;            /* per actor: commanded AI state (2 attack, 5 follow, 7 patrol, 8 godirect, 11 shutdown), 0 none */
     int         *cmd_target;     /* per actor: the commanded target actor (attack / defend), -1 none */
     int         *engage;         /* per actor: engine +0x154 "engage at will" (0x100124a0: 0 in the player's star, 1 elsewhere) */
@@ -186,7 +196,7 @@ typedef struct {
     /* destructible world objects: GT chunks {i16 intact node, i16 destroyed node, .., +16 i16 hit points, +18 type,
      * +20 flags, +24 name[22], +46 sub-name[22]} (engine OBJ/GT handler 0x1003eb5c -> thing table 0x101e0280:
      * +0 flags, +8 hit points; damage 0x10046c20; destroyed: explosion 0x10045c30, swap 0x10046a90) */
-    struct msim_building { int intact, destroyed, hp, type, inspected; char name[23], sub[23]; float mn[3], mx[3]; } *bld;
+    struct msim_building { int intact, destroyed, hp, type, inspected, side; char name[23], sub[23]; float mn[3], mx[3]; } *bld;   /* side: alliance (AFFL team, 0x10019060; 2 none) */
     int          bld_count;
     int          world_dirty;    /* a building changed: the front end re-uploads the world mesh */
     struct world3d_paths *paths; /* path tasks (PTBL): world parts flagged `moving`, placed every step (NULL: none) */
@@ -197,7 +207,7 @@ typedef struct {
     /* missile lock (engine 0x10044560): set by the front end - the selected weapon (player_unit slot) and the aim
      * (torso facing / pitch, degrees); kept here - player_lock: bit 0x8000 target in the 16-degree window and range,
      * 0x40 acquiring, 0x80 locked (after 0x16a ticks) */
-    int          player_sel_w, player_lock_target;   /* -1: none */
+    int          player_sel_w, player_lock_target;   /* -1: none; an actor, or MSIM_TGT_THING(b) a structure */
     int          player_aim_free;  /* 1: with no target the player fires along the aim (the front end; missionsim keeps the nearest enemy) */
     float        player_aim_yaw, player_aim_pitch;
     float        player_eye[3];    /* the aim ray's origin: the player's eye object (unit +0x44, the EYEO node - the camera's), */
@@ -223,6 +233,12 @@ typedef struct {
     mech3d       pl_shown;        /* the player's mech as drawn (posed with animation and twist): its mounts */
     int          pl_shown_ok;      /* per actor: inspected by the player's side */
     void        *message_user;
+    /* the engine's collision list order (0x1000db80 / 0x1000dc60 put every entry at the HEAD of DAT_1024b320): per world
+     * part its insertion number - the load's (record includes depth first, OBJ chunks in order; the BLK..ENDB objects
+     * after the whole load, 0x10024fe0) or, for a destroyed variant, its swap's (0x10025180 -> 0x10025450); the list
+     * runs from the highest. Filled by msim_set_world (clist_order) and building_swap */
+    int         *clist_seq;
+    int          clist_seq_n, clist_next;
 } msim;
 
 /* Lancemate orders. point 0 = all points, 1 = Point 2, 2 = Point 3 ... (the lance position, engine object +0xc).
@@ -247,6 +263,10 @@ int  msim_inspect(msim *s, int actor, int thing);   /* 1 inspected, 2 out of ran
 int  msim_aim_thing(const msim *s, float yaw_deg, float cone_deg, float *distance);
 /* the engine's weapon table +0x18: the weapon is guided (LRMs, Streak SRMs, Narc) */
 int  msim_weapon_guided(int weapon);
+/* a thing's lock / homing point (engine 0x100257a0: its object's world position); 0 when gone */
+int  msim_thing_point(const msim *s, int b, float p[3]);
+/* its bounding sphere (0x10029890), for the target bracket (0x10022ea0); 0 when gone */
+int  msim_thing_sphere(const msim *s, int b, float c[3], float *r);
 /* tests: damage destructible object b (index into bld) */
 void msim_damage_building(msim *s, int b, float dmg);
 extern const char *const MSIM_STATUS_TEXT[14];   /* "None " .. "Destroyed " (0x102609e8) */
@@ -276,6 +296,16 @@ void msim_free(msim *s);
 /* obstacles for avoidance (engine 0x100201c0): rays are tested against the world's faces;
  * `world` must stay alive while the sim runs */
 void msim_set_world(msim *s, const mech3d *world);
+/* The player's autopilot obstacle avoidance (engine 0x100201c0 called from 0x10015c00 for the player's unit): heading
+ * (deg), the velocity (cm/s, along and across the heading), the throttle input (fraction of full), reverse (input +0x2f), the bearing
+ * error to the nav (deg, wrapped), the saved throttle (0x10015c00's +0x180). Returns 1 while the avoidance steers (the
+ * autopilot then skips its nav steering 0x10013600); when it wrote new inputs this check *wrote = 1 with *turn (input
+ * +0xc, of 1024) and *thr (input +8, fraction of full); between its checks (every 10 ticks) the inputs are held. */
+int  msim_player_avoid(msim *s, float heading, float along, float across, float throttle, int reverse, float goal_err,
+                       float saved_thr, int *wrote, float *turn, float *thr);
+/* TEST ONLY: one AI avoidance probe (0x100204e0 -> 0x100103e0) from p0 to p1 for no unit: 0 nothing, 1 a world entry, 2 a
+ * unit's piece; (ox, oz) the centre of what it hit */
+int  msim_test_probe(const msim *s, const float p0[3], const float p1[3], float *ox, float *oz);
 /* index of the nearest living armed enemy actor within the player's weapon range, -1 if none */
 int  msim_nearest_enemy(const msim *s, float *distance);
 /* Terrain height under (x, z) for something at height y (engine 0x10010080): over the world's type 5
@@ -298,6 +328,9 @@ int  msim_can_step(const msim *s, float x0, float z0, float x, float z, float y)
  * n (from its centre toward p1, unit length), its centre c, r1 + r2 (*rr) and its velocity ov (cm/tick). */
 int  msim_unit_contact(const msim *s, int self, const float p0[3], const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
 int  msim_can_step_hr(const msim *s, float x0, float z0, float x, float z, float y, float H, float R);   /* H centre height, R contact radius (MGEO) */
+/* the same in 3D: the move also rises / falls by dy (an airborne unit's frame, combat_jets_dy; engine 0x10019310 ->
+ * 0x1000b5e0 tests the whole (x, y, z) segment, extended by (1 - |u.y|) R + |u.y| H) */
+int  msim_can_move(const msim *s, float x0, float z0, float x, float z, float y, float dy, float H, float R);
 /* the same sphere test without the closing rule, against unit `other` only (-1 the player): is p1 inside its sphere?
  * (the engine's push-out of a unit set down inside another, 0x1000ba20) */
 int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
@@ -313,6 +346,10 @@ void msim_block_normal(float n[3]);   /* the normal of the surface that refused 
 const char *msim_block_what(void);   /* TEST ONLY: the model name of what refused it */
 int  msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, float y, float H, float R, const float n[3],
                        float heading_deg, float *speed, float *across);
+/* the same for a 3D move (msim_can_move): *dy the move's vertical part in, the vertical move made out; *vy the vertical
+ * velocity (cm/tick) in (its share of |velocity|), the reflected one out */
+int  msim_world_impact3(const msim *s, float x0, float z0, float *x, float *z, float y, float *dy, float H, float R,
+                        float heading_deg, float *speed, float *across, float *vy);
 /* Inside a type 1 obstacle's XZ box (walls, buildings: engine 0x1000d520, any height)? n = its face normal. */
 int  msim_wall_at(const msim *s, float x, float z, float n[3]);
 /* the last msim_world_impact's object takes the walking-impact damage (engine 0x1000c3c0 -> 0x10046c20) of a unit
@@ -327,6 +364,9 @@ int  msim_aim_target(const msim *s, float aim_yaw, float cone, float *distance);
  * *vel = the ground velocity along the heading (cm/s) approaching *spd. rev = -0.5 for an AI reversing (input +0x2f),
  * else 1; drive 0 = not up / immobile (c[10] cleared); slow: a walk key flagged 0x10 has run (servo T 90.5 ticks, else
  * 36.2). top = full-throttle speed, cm/s */
+/* 1: the DOS edition's integer throttle servo (MW2.EXE 0x49b80: truncating, stalls 5 / 1024 of full short at 30 fps) and
+ * servo taus 36 / 91; 0: the 3Dfx DLL's floats (36.2 / 90.5). The front end sets it by edition */
+extern int msim_dos_int;
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks);
 /* a mech's full-throttle speed c[0x22] / 64 (cm/s) on a planet of gravity_g, in DOS MW2.EXE's integer steps */
 float msim_top_speed(int walk_mp, float gravity_g);

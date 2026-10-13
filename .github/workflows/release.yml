@@ -55,8 +55,32 @@ jobs:
           name: linux
           path: dist/*.tar.gz
 
+  build-fedora:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build deps
+        run: dnf install -y git rpm-build rpmdevtools gcc gcc-c++ make SDL2-devel mesa-libGL-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Build RPM
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          rpmbuild -bb packaging/mw2port.spec \
+            --define "_sourcedir $PWD" \
+            --define "_topdir $PWD/rpmbuild" \
+            --define "_version $VERSION"
+          mkdir -p dist
+          cp rpmbuild/RPMS/x86_64/*.rpm dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fedora
+          path: dist/*.rpm
+
   release:
-    needs: [build-macos, build-linux]
+    needs: [build-macos, build-linux, build-fedora]
     runs-on: ubuntu-latest
     permissions:
       contents: write

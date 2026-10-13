@@ -238,6 +238,12 @@ void combat_override(combat_unit *u);
  * Gravity = planet g x 0.0296; the damping divisor is the planet's (not a constant).
  * Returns 1 while airborne. */
 int  combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng);
+/* the vertical displacement (cm) combat_jets would make this frame - for the 3D move test (engine 0x10019310 ->
+ * 0x1000b5e0); nothing is changed */
+float combat_jets_dy(const combat_unit *u, int jetting, float dt);
+/* a touch-down at vertical speed vy (cm/tick) as combat_jets lands: fall damage beyond 16.154 cm/tick (Collision Damage on),
+ * landed_vy set, y = ground, vy 0 - a harmless 3D impact lands the unit (engine 0x10019c4e -> 0x10019e41) */
+void combat_land(combat_unit *u, float vy, unsigned *rng);
 /* Collision damage (engine 0x1000c3c0 -> 0x1000c1f0): speed in cm/tick against a surface whose normal is
  * (nx, ny, nz); rel_deg = the surface direction relative to the unit's facing. Nothing below 3.069 cm/tick. */
 void combat_collision(combat_unit *u, float speed, float ny, float rel_deg, unsigned *rng);

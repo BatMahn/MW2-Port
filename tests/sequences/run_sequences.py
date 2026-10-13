@@ -943,15 +943,16 @@ def throttle_response(c):
     """the engine's throttle -> speed chain (msim_drive_step: servos +0x44 / +0x24, velocity 1/45 per tick) against DOSBox
     YELLSCN1 (Timber Wolf, readout = 1.5 x the true speed; top 90 kph readout): FULL from rest 64 kph at 0.71 s, 88 at
     1.36 s (T 36.2 before the first 0x10 key); STOP from full: 70 % at 0.51 s, 23 % at 1.1 s; a second start is slower
-    (T 90.5): 42 kph at 0.73 s"""
-    r = c.run(secs=18, keys=[(5, '0'), (10, '1'), (14, '0')], dump='/0.1', nostart=True)
+    (T 90.5): 42 kph at 0.73 s. The stop is pressed at 11 s, on level ground: at 9.8-10.5 s the Timber Wolf runs off a
+    crest and is airborne for 0.7 s, when the velocity is held (0x10019310: no walking approach in the air)"""
+    r = c.run(secs=20, keys=[(5, '0'), (11, '1'), (16, '0')], dump='/0.1', nostart=True)
     k = lambda t: r.at(t)['kmh'] * 1.5
     c(abs(k(5.7) - 64) < 6, 'first start: 64 kph at 0.7 s', '%.1f' % k(5.7))
     c(abs(k(6.4) - 88) < 4, 'first start: 88 kph at 1.4 s', '%.1f' % k(6.4))
-    full = k(9.9)
-    c(abs(k(10.5) / full - 0.70) < 0.08 and abs(k(11.1) / full - 0.23) < 0.08, 'stop: 70 % at 0.5 s, 23 % at 1.1 s',
-      '%.2f %.2f' % (k(10.5) / full, k(11.1) / full))
-    c(abs(k(14.7) - 42) < 6, 'second start (T 90.5): 42 kph at 0.7 s', '%.1f' % k(14.7))
+    full = k(10.9)
+    c(abs(k(11.5) / full - 0.70) < 0.08 and abs(k(12.1) / full - 0.23) < 0.08, 'stop: 70 % at 0.5 s, 23 % at 1.1 s',
+      '%.2f %.2f' % (k(11.5) / full, k(12.1) / full))
+    c(abs(k(16.7) - 42) < 6, 'second start (T 90.5): 42 kph at 0.7 s', '%.1f' % k(16.7))
 
 
 @sequence
@@ -1412,8 +1413,10 @@ def object_tasks(c):
     node): GOLDDRP1's dropship (type 0 box) blocks a mech walking into it until it has risen above the mech's centre;
     TSK types 0-4: the training targets spin (type 0) and blink (type 1 colour frames), CYANARE1's monorail loops
     its sound MECMRAIL (type 4, a RIFF WAVE record) where it is"""
+    # (5 m from the box: the start drop holds the velocity at 0 until touch-down, 0x10019310 - it reaches the box at
+    # ~1.2 s, before the dropship lifts at ~1.8 s)
     r = c.run('_drop', secs=3.5, throttle=1, nostart=True, dump='/0.25', mission='GOLDSCN1',
-              env={'MW2_START': '35000,-89000', 'MW2_START_HEADING': 0})
+              env={'MW2_START': '35000,-88500', 'MW2_START_HEADING': 0})
     z1, z2, z3 = r.at(1.5).get('z', 0), r.at(1.75).get('z', 0), r.at(3.5).get('z', 0)
     c(-87900 < z1 < -87650 and z2 <= z1 + 5, 'GOLD: the grounded dropship stops the walk at its box (no further in; the impact bounce, 0x1000b5e0, may ease it back)',
       'z %s %s' % (z1, z2))
@@ -2941,6 +2944,319 @@ def hidden_mechs_playable(c):
             out = p.stdout.decode('latin-1')
             m = re.search(r'lab chassis %d (.+), (\d+) variants' % k, out)
             c(m is not None and m.group(1) == name and int(m.group(2)) > 0, 'Wolf campaign lab: %s with its designs' % name, m.group(0) if m else out[-200:])
+
+@sequence
+def autopilot_avoids_wall(c):
+    """the player's autopilot avoids obstacles (engine 0x10015c00 -> 0x100201c0, as the AI's probes 0x100204e0 /
+    0x100103e0): TNJ4, NAV1 reached, on the way to NAV2 the box S_1BQDAS (type 0, south face z 166195) stands across the
+    line. Every 10 ticks the probes ahead (0 / 26.6 / 45 / 63.4 degrees, 5000 cm x speed x 0.12987) - a blocked one turns
+    away by 204.8 each with the throttle input at 1/256 (a quarter of full); ahead clear but the nav still off, the back
+    probe along the wall keeps turning away (409.6) at the pilot's throttle; when the avoidance lets go the saved throttle
+    (+0x180) comes back and the nav steering (0x10013600) resumes. DOSBox TNJ4 autopilot: it turns ~35 degrees at the
+    wall and is free in ~2.5 s (the port had slid along the face)"""
+    r = c.run(secs=34, keys=[(UP, '0'), (UP + 0.5, 'a')],
+              env={'MW2_START': '-133566,141377', 'MW2_START_HEADING': -24.7, 'MW2_TEST_NAVSEEN': '1,3'},
+              mission='TNJ4SCN1', dump='/0.1')
+    nav2 = (-153774, 185721)
+    brg = lambda s: math.degrees(math.atan2(nav2[0] - s['x'], nav2[1] - s['z']))
+    off = lambda s: (s['heading'] - brg(s) + 180) % 360 - 180
+    seg = r.span(UP + 1, 34)
+    slow = [s for s in seg if abs(s['throttle'] - 0.25) < 0.01]
+    c(len(slow) > 0, 'deflecting: the throttle input drops to a quarter (1/256)', 'throttles %s' % sorted(set(round(s['throttle'], 2) for s in seg)))
+    if not slow:
+        return
+    t0 = slow[0]['t']
+    c(14 < t0 < 22, 'the wall seen on the way to NAV2', 't %.1f at %d,%d' % (t0, slow[0]['x'], slow[0]['z']))
+    dev = max(abs(off(s)) for s in r.span(t0, t0 + 6))
+    c(15 < dev < 60, 'turns away from the nav by ~35 degrees (DOSBox)', '%.1f deg' % dev)
+    back = next((s['t'] for s in r.span(t0, 34) if s['throttle'] > 0.9), None)
+    c(back is not None and back - t0 < 4, 'the pilot\'s throttle restored when it lets go', 'after %s s' % (None if back is None else round(back - t0, 1)))
+    z = [s['z'] for s in r.span(t0, 34)]
+    c(max(z) > 167500, 'past the wall (no slide along its face)', 'z max %d' % max(z))
+    d = min(math.hypot(s['x'] - nav2[0], s['z'] - nav2[1]) for s in r.span(t0, 34))
+    c(d < 10000 and r.at(33)['autopilot'] == 1, 'then on to NAV2 (radius 100 m) and on', 'nearest %.0f m' % (d / 100))
+
+
+@sequence
+def autopilot_avoids_unit_at_start(c):
+    """TNJ4 start: the trainer's mech stands ahead. Full throttle then a: the probes (0x100204e0 / 0x100103e0) take a unit as
+    its pieces (type 6 spheres), the autopilot turns away at a quarter throttle (1/256), then follows round it at the
+    saved throttle (0x10015c00 +0x180 - taken as the pilot's at engagement, ASSUMED) and gets back to full and on toward
+    NAV1 - it never stops"""
+    r = c.run(secs=24, keys=[(UP, '0'), (UP + 0.5, 'a')], mission='TNJ4SCN1', dump='/0.1')
+    seg = r.span(UP + 0.6, 24)
+    c(any(abs(s['throttle'] - 0.25) < 0.01 for s in seg), 'turns away at a quarter throttle', str(sorted(set(round(s['throttle'], 2) for s in seg))))
+    # (with the units as their pieces in the probes - type 6 spheres, smaller than the r1 + r2 circle - the mech may graze
+    # the trainer: a contact sets the velocity to n x max(1, dv / 2) for a frame or two, 0x1000ba20; it must not stall)
+    slow = [s['t'] for s in r.span(UP + 3, 24) if s['kmh'] < 15]
+    c(not slow or max(slow) - min(slow) < 0.5, 'never stalls (at most a contact dip)', str(slow[:10]))
+    e = r.at(23.5)
+    b = math.degrees(math.atan2(-110617 - e['x'], 97073 - e['z']))
+    off = (e['heading'] - b + 180) % 360 - 180
+    c(e['throttle'] > 0.9 and abs(off) < 15 and e['autopilot'] == 1, 'back at full, on course for NAV1', 'throttle %.2f off %.1f deg' % (e['throttle'], off))
+
+
+@sequence
+def airborne_move_3d(c):
+    """an airborne unit's move is one 3D segment (engine 0x10019310 -> 0x1000b5e0: dx, (v + a t / 2) t, dz from the
+    centre, extended along the move by (1 - |u.y|) R + |u.y| H - straight up: H): a Summoner (centre H 10.6 m) jetting
+    straight up under AQUA's grounded dropship wing V_BDRPWS (a type 0 box from 16.85 m up) strikes its underside at
+    once - the segment reaches 2 H above the feet - and is set back to the touching point (hit - H along the move: down,
+    under the ground, so stood on it again), the vertical velocity reflected (r x |v| x -0.25): it never climbs more than
+    a few metres while the tank lasts. The port's level test let it rise through the wing (a box the centre starts
+    inside refuses only the horizontal move; free, 10 s of jets climb far above 17 m)"""
+    r = c.run(secs=UP + 12, mech='summoner/smn00std', mission='AQUASCN1', hold=[(UP, UP + 10, 'j')], dump='/0.1',
+              env={'MW2_START': '-72480,-54014,0', 'MW2_START_HEADING': 0})
+    s0 = r.at(UP - 0.3)
+    c(abs(s0['y']) < 50, 'starts on the ground under the wing', 'y %d' % s0['y'])
+    up = r.span(UP + 0.5, UP + 9.5)
+    peak = max(s['y'] for s in up)
+    c(peak < 600, 'never rises into the wing (bottom 1685)', 'peak feet %d' % peak)
+    c(up and up[-1]['fuel'] < up[0]['fuel'] - 500, 'the jets burn meanwhile', 'fuel %.0f -> %.0f' % (up[0]['fuel'], up[-1]['fuel']))
+    c(abs(r.last['y']) < 50, 'on the ground once the tank is empty', 'y %d' % r.last['y'])
+
+
+@sequence
+def collision_list_order(c):
+    """the collision list's order (walking takes the LAST entry hit whose sphere is entered before the hit so far,
+    0x10010530; probes and the ground break ties by it): every entry is put at the head (0x1000db80 / 0x1000dc60), so the
+    list runs from the last object created - the loader takes a record's chunks in order and an INCL's record there and
+    then (0x10042c60), an OBJ inside a BLK..ENDB block only after the load (0x10024fe0, table order) - and a destroyed
+    variant goes to the head when it appears (0x10025180 -> 0x10025450). YELLSCN1: the head is the last block object
+    created, YELLDRP1's dropship (V_BDRPWS); structure 5 destroyed at 11 s - its destroyed variant (and the child shown with it) head the list"""
+    r = c.run(secs=13, env={'MW2_CLIST_TRACE': '1', 'MW2_TEST_BLD_KILL': '11:5'}, dump='/1')
+    m = re.search(r'clist order YELLSCN1: (\d+) parts, (\d+) objects seen, (\d+) parts unplaced', r.out)
+    c(m is not None and m.group(3) == '0', 'every world part placed in the load order', m.group(0) if m else 'no trace')
+    heads = [(float(h.group(1)), h.group(2)) for h in re.finditer(r'clist head at ([\d.]+)s: (\S+)\(', r.out)]
+    c(heads and heads[0][1] == 'V_BDRPWS', 'at the load: the last block object created first', str(heads[:1]))
+    late = [l for l in re.findall(r'clist head at ([\d.]+)s: (.*)', r.out) if float(l[0]) >= 11.0]
+    names = re.findall(r'(\S+)\(\S+ seq', late[0][1]) if late else []
+    # YELLARE6's chemical plant: SA1CHEMB and the child S_BCHEMB shown with it (0x10025310), created in that order
+    c(names[:2] == ['S_BCHEMB', 'SA1CHEMB'], 'after the kill: the destroyed variant and its child first', str(names))
+
+@sequence
+def probe_unit_pieces(c):
+    """the AI's avoidance probes (0x100201c0 -> 0x100103e0) walk the whole collision list, where a unit is its pieces -
+    the LOD objects 0x10026430 makes, each collision type 6 (0x1000ffd0(6)): a sphere (0x10029db0 / 0x100107b0), centred
+    on the posed piece's box middle with the farthest vertex as radius; the probe's own unit skipped by its id (+0x14).
+    The port had tested a unit as a circle of r1 + r2, at any height. YELLSCN1, the standing Timber Wolf: a probe at its
+    centre height from 40 m ahead strikes one of its pieces; one 12 m above its centre passes over it"""
+    r = c.run(secs=11, env={'MW2_PROBE_TRACE': '1', 'MW2_TEST_PROBE': '10:4000:0:6000,10.5:4000:1200:6000'}, dump='/1')
+    res = re.findall(r'^testprobe (\d) at (-?\d+),(-?\d+) \(dz 4000 dy (\d+)\)', r.out, re.M)
+    pieces = re.findall(r'^probe [\d.]+s actor -2: unit -1 piece (\S+) r (\d+) at (\d+) of 6000', r.out, re.M)
+    lv = [x for x in res if x[3] == '0']
+    hi = [x for x in res if x[3] == '1200']
+    c(lv and lv[0][0] == '2', 'at the centre height: a unit (its piece)', str(res))
+    c(pieces and all(p[0].upper().startswith('TW') for p in pieces), "the Timber Wolf's pieces", str(pieces))
+    c(pieces and 4000 - 1500 < int(pieces[-1][2]) < 4000, 'struck at the piece sphere, short of the centre', str(pieces[-1:]))
+    c(hi and hi[0][0] == '0', '12 m above its centre: nothing (a circle would have caught it)', str(res))
+
+@sequence
+def wedged_between_boxes(c):
+    """a unit wider than a gap stays put pushing across it (engine 0x10019310: the impact's second try 0x10019a61, refused
+    by ANOTHER object than the first, leaves the unit where it stood - 0x10019a6a / 0x10019a76; DOS 0x26990 the same,
+    iStack_4c != iStack_60): SILV's 13.7 m alley between S_BINDPA and S_BINDPD (DOS MW2.PRJ boxes), a Rifleman (R 7.5 m)
+    at full throttle facing south does not move; facing east, along the alley, it walks off. DOSBox, SILVSCN1 with the
+    start nav patched to the alley and a Rifleman USERSTAR: the same (no motion facing 180 for 12 s, out of the alley
+    facing 90). The SILV actor 8 stall of session 15 was this"""
+    for h, moves in ((180, False), (90, True)):
+        r = c.run('_%d' % h, secs=UP + 12, mech='rifleman/rfl00std', mission='SILVSCN1', keys=[(UP, '0')], dump='/0.5',
+                  dos_look=True, nostart=True, env={'MW2_START': '111200,-22892,0', 'MW2_START_HEADING': h})
+        a, b2 = r.at(UP + 1), r.at(UP + 11.5)
+        d = math.hypot(b2['x'] - a['x'], b2['z'] - a['z'])
+        if moves:
+            c(d > 5000, 'facing %d: walks along the alley' % h, '%.0f cm' % d)
+        else:
+            c(d < 100, 'facing %d: stays put' % h, '%.0f cm' % d)
+
+@sequence
+def throttle_servo_dos_shortfall(c):
+    """the DOS edition's throttle servo is integer (MW2.EXE 0x49b80: step = frame ticks x diff / 36 truncated, tau chop(0.2
+    x 182) = 36): it stalls once ticks x |diff| < 36, short of the preset by 5 / 1024 of full at 30 fps (the port normalises
+    to 30 fps); the 3D editions keep the 3Dfx float servo (0x1003b7e0). DOSBox YELLSCN1 (Timber Wolf, start heading 158,
+    keys 4 / 8 / 0 = presets 3 / 7 / 9 from STOP): MCGA at cycles 40000 (~30 fps) reads 28 / 69 / 90 kph, 1024x768 (~5 fps,
+    frames 30+ ticks: 1 unit short) 30 / 70 / 90 - the DOS edition the first, the enhanced edition the second, at 30 and
+    60 fps"""
+    import collections
+    for ed, fps, want in (('dos', 30, (28, 69, 90)), ('dos', 60, (28, 69, 90)), ('enhanced', 30, (30, 70, 90))):
+        env = {'MW2_KPH_TRACE': '1'}
+        if fps != 30:
+            env['MW2_TEST_FPS'] = fps
+        r = c.run('_%s%d' % (ed, fps), secs=30, keys=[(5, '4'), (14, '8'), (21, '0')], dump='/1', nostart=True,
+                  edition=ed, env=env)
+        got = []
+        for a, b in ((7.5, 14), (16.5, 21), (23.5, 30)):
+            v = collections.Counter(int(m.group(2)) for m in re.finditer(r'^kph ([\d.]+)s (-?\d+) kph', r.out, re.M)
+                                    if a < float(m.group(1)) <= b)
+            got.append(v.most_common(1)[0][0] if v else None)
+        c(tuple(got) == want, '%s edition at %d fps: presets 3 / 7 / 9 read %s kph' % (ed, fps, ' / '.join(map(str, want))), str(got))
+def walk_run_carried_offset_by_anim(c):
+    """the carried walk / run offset comes from the ANIM record each mech names (BWD ANIM chunk -> 0x100401c0): the
+    Marauder (MARAANIM, walk 4 -> run 15) carries its hips 15 cm (track 1) while running; the Stormcrow runs on DIREANIM
+    (shared with the Warhawk) and carries under 1 (the 28 degrees of STRMANIM, like DAISANIM's 112 cm, belong to records
+    no mech uses). DOSBox (patched MADDANIM in a copy, docs/reference/walk_run_carried_offset_dos_vs_port.png): DOS
+    MW2.EXE 0x1aad2 adds the key deltas the same way"""
+    r = c.run('_mrd', secs=14, mech='marauder/mrd00std', keys=[(0.2, '0')], nostart=True, dump='/0.25')
+    run = [s for s in r.span(9.0, 14.0) if s.get('pseq') == 1]
+    c(len(run) >= 10, 'Marauder running (sequence 1)', str([s.get('pseq') for s in r.span(9.0, 14.0)][:5]))
+    c(run and all(abs(s['poff'] - 15.0) < 0.01 and s['poff_tr'] == 1 for s in run), 'Marauder: the hips carry 15 cm',
+      str(sorted(set((s['poff'], s['poff_tr']) for s in run))))
+    r2 = c.run('_stm', secs=14, mech='strmcrow/stm00std', keys=[(0.2, '0')], nostart=True, dump='/0.25')
+    run2 = [s for s in r2.span(9.0, 14.0) if s.get('pseq') == 1]
+    c(len(run2) >= 10, 'Stormcrow running (sequence 1)', str([s.get('pseq') for s in r2.span(9.0, 14.0)][:5]))
+    c(run2 and all(s['poff'] < 1.0 for s in run2), 'Stormcrow (DIREANIM): under 1 carried', str(sorted(set(s['poff'] for s in run2))))
+def missile_lock_structure(c):
+    """the missile lock on a targeted structure (kind 0x400): 0x10044560 refuses only no target and nav points (+0xdc &
+    0x1100), so a thing locks like a unit - the range window, 16 degrees, 0x16a ticks - at its object's position (0x1001d2d0
+    -> 0x100257a0, the model's origin); a locked LRM volley homes on that point (0x10045910 kind 0x400) and damages it.
+    YELLSCN1's middle coolant tank (structure 6) from 120 m north of it, targeted with q (0x1001d870), LRM selected as in
+    missile_lock"""
+    cyc = [(2 + 0.4 * i, 2.1 + 0.4 * i, 'enter') for i in range(7)]
+    r = c.run(secs=19, env={'MW2_START': '316839,262000', 'MW2_START_HEADING': 180, 'MW2_MISSILE_TRACE': '1', 'MW2_BLD_TRACE': '1'},
+              keys=[(UP, 'q')], hold=cyc + [(12.5, 12.6, 'space')])
+    s = r.at(UP)
+    c(s['w'][s['sel']][0] == 0, 'LRM selected', 'sel %d' % s['sel'])
+    c(r.at(12.4)['thing'] == 6, 'q targets the tank (structure 6)', 'thing %d' % r.at(12.4)['thing'])
+    on = next((x['t'] for x in r.states if x['lock'] & 0x8000), None)
+    lk = next((x['t'] for x in r.states if x['lock'] & 0x80), None)
+    c(on is not None, 'on target (0x8000) with a structure')
+    c(lk is not None, 'locked (0x80) on a structure')
+    if on is not None and lk is not None:
+        c(1.5 < lk - on < 2.6, 'lock ~2 s after acquiring (0x16a ticks)', '%.2f s' % (lk - on))
+    c(r.at(12.4)['lock'] & 0x80, 'locked when fired', 'lock 0x%x' % r.at(12.4)['lock'])
+    hom = [l for l in r.out.splitlines() if l.startswith('missile ') and l.endswith('homing -1006')]
+    c(len(hom) > 0, 'the volley homes on the structure (MSIM_TGT_THING(6))', '%d trace lines' % len(hom))
+    h0, h1 = r.at(12.4)['thing_hp'], r.at(18.4)['thing_hp']
+    hits = [l for l in r.out.splitlines() if l.startswith('bld hit') and l.endswith('by -1')]
+    c(len(hits) > 0 and (h1 < h0 or h1 == -1 or r.at(18.4)['thing'] == -1), 'the locked volley damages it',
+      'hp %d -> %d, %d hits' % (h0, h1, len(hits)))
+
+    # homing, not the aim: the torso turned 12 degrees west of the tank (inside the 16-degree cone), the tank targeted by
+    # the test hook - a locked volley curves onto tank 6 (x 3163..3181 m); one fired before the lock flies straight
+    # along the aim into tank 4 to its west
+    def hits_x(rr):
+        return [float(l.split(' at ')[1].split(',')[0]) for l in rr.out.splitlines() if l.startswith('bld hit') and l.endswith('by -1')]
+    env = {'MW2_START': '316839,267000', 'MW2_START_HEADING': 188, 'MW2_TEST_THING': '9.5:6', 'MW2_BLD_TRACE': '1'}
+    r = c.run('_off', secs=19, env=env, hold=cyc + [(12.5, 12.6, 'space')])
+    c(r.at(12.4)['lock'] & 0x80, 'off-axis: locked when fired', 'lock 0x%x' % r.at(12.4)['lock'])
+    hx = hits_x(r)
+    c(len(hx) >= 10 and all(316352 <= x <= 318146 for x in hx), 'off-axis: the locked volley homes onto tank 6',
+      '%d hits, x %s' % (len(hx), sorted(set(int(x) for x in hx))[:6]))
+    r = c.run('_unlocked', secs=16, env=env, hold=cyc + [(10.5, 10.6, 'space')])
+    c(r.at(10.4)['lock'] & 0x80 == 0, 'off-axis: not locked when fired early', 'lock 0x%x' % r.at(10.4)['lock'])
+    hx = hits_x(r)
+    c(not any(316352 <= x <= 318146 for x in hx), 'off-axis: the unlocked volley flies straight past tank 6',
+      'x %s' % sorted(set(int(x) for x in hx))[:6])
+
+
+@sequence
+def jets_terminal_from_rest_and_running(c):
+    """forward jets (GreyHome) until the tank is empty: the engine keeps ONE velocity vector (+0xf4 / +0xfc, 3Dfx
+    0x10019310, DOS 0x26990) and the directional branch's thrust and drag act on all of it, the walking part included -
+    the terminal speed is L = 2.5 x the top walking speed whether the jets start from a standstill or from a run (the
+    port had dragged only the jets' share and added the walk on top: Nova 559 kph from FULL, user report 530). DOSBox
+    ORANSCN1 (MCGA, cycles 40000, ZMBV), forward jets held for 13 s: Nova (NVA00STD) from rest 160 / 277 / 342 / 376 /
+    391 / 399 kph at 1 / 2 / 3 / 4 / 5 / 6 s, then 403 until the fuel runs out ~10 s in; from FULL (159) 277 / 342 at 1 /
+    2 s, then 403; Summoner (SMN00STD, FULL 132) 336 from rest and from FULL. With the tank empty the mech, carried off
+    the falling ground, drops back with its speed held (the readout climbs by the vertical speed) and eases to the
+    walking speed on landing"""
+    for suf, mech, full, lo, hi, top in (('_nova_rest', 'nova/nva00std', False, 400, 406, 0),
+                                          ('_nova_full', 'nova/nva00std', True, 400, 406, 160),
+                                          ('_smn_rest', 'summoner/smn00std', False, 333, 339, 0),
+                                          ('_smn_full', 'summoner/smn00std', True, 333, 339, 133)):
+        r = c.run(suf, secs=24, keys=[(1, '0')] if full else [], hold=[(8, 21, 'home')], dump='/1', nostart=True,
+                  mission='ORANSCN1', mech=mech, env={'MW2_KPH_TRACE': '1'})
+        k0, k = kph_at(r, 7.0, 7.9), kph_at(r, 8.0, 17.9)
+        term = kph_at(r, 15.0, 17.9)
+        c(k0 and min(k0) == max(k0) == top, suf + ': before the jets %d kph' % top, str(sorted(set(k0))))
+        c(term and lo <= min(term) and max(term) <= hi, suf + ': terminal %d..%d kph (DOSBox 403 / 336)' % (lo, hi),
+          str(sorted(set(term))))
+        c(k and max(k) <= hi, suf + ': never above the terminal while the jets push (the port had 559 from FULL)', str(max(k or [0])))
+        if mech.startswith('nova') and not full:
+            dos = ((1.0, 160), (2.0, 277), (3.0, 342), (4.0, 376), (5.0, 391))
+            got = [(d, (kph_at(r, 8.0 + t - 0.05, 8.0 + t + 0.05) or [0])[-1]) for t, d in dos]
+            c(all(abs(g - d) <= 12 for d, g in got), suf + ': climb within 12 kph of DOSBox', str(got))
+        if full:
+            got = [(d, (kph_at(r, 8.0 + t - 0.05, 8.0 + t + 0.05) or [0])[-1]) for t, d in ((1.0, 277), (2.0, 342))] if mech.startswith('nova') else []
+            c(all(abs(g - d) <= 12 for d, g in got), suf + ': from FULL within 12 kph of DOSBox (277 / 342 at 1 / 2 s)', str(got))
+            end = kph_at(r, 23.0, 24.0)
+            c(end and min(end) == max(end) == top, suf + ': landed, back to the walking speed', str(sorted(set(end))))
+
+
+@sequence
+def jump_velocity_held_in_air(c):
+    """airborne the velocity is not servoed (0x10019310 / DOS 0x26990: the walking approach is in the grounded branch
+    only; the throttle servos run on): FULL pressed 1 s into a standing jump changes nothing until touch-down, then the
+    speed eases up to FULL's. DOSBox ORANSCN1 Nova, j held 3 s, '0' at +1 s: the readout (the vertical speed only) is
+    the same with and without the '0' until landing (129 kph at the top of the climb, 184 just before touch-down), then
+    0 -> 159 within ~1 s; without it stays 0"""
+    ra = c.run('_full', secs=24, keys=[(9, '0')], hold=[(8, 11, 'j')], dump='/1', nostart=True, mission='ORANSCN1',
+               mech='nova/nva00std', env={'MW2_KPH_TRACE': '1'})
+    rb = c.run('_none', secs=24, hold=[(8, 11, 'j')], dump='/1', nostart=True, mission='ORANSCN1', mech='nova/nva00std',
+               env={'MW2_KPH_TRACE': '1'})
+    a, b = kph_at(ra, 8.0, 20.5), kph_at(rb, 8.0, 20.5)
+    c(a and a == b, 'in the air: the same readout with and without FULL', '%s / %s' % (a[::30], b[::30]))
+    c(a and 120 <= max(kph_at(ra, 10.0, 11.5)) <= 135, 'the climb tops out ~129 kph (vertical, DOSBox 129)', str(max(kph_at(ra, 10.0, 11.5) or [0])))
+    ea, eb = kph_at(ra, 23.0, 24.0), kph_at(rb, 23.0, 24.0)
+    c(ea and min(ea) == max(ea) == 160, 'landed: eased up to FULL (160)', str(sorted(set(ea))))
+    c(eb and max(eb) == 0, 'landed without the throttle: standing', str(sorted(set(eb))))
+def structure_bracket_zoomed(c):
+    """user (2026-10-13, ORANSCN1, TEXTURES TITANIUM, zoomed): a structure targeted with q (TARGET_AT_RETICLE,
+    0x1001d870) gets the corner brackets (0x10022830 -> 0x10022ea0) in the main view, not the nav marker - the target
+    display showing it is not enough. ORANSCN1's pump station (structure 12, nav Alpha 26 m from it) from 93 m south,
+    plain and zoomed x4 (Z held 1.5 s), then the nav point's mark back once the target is reset (Ctrl+t); the same with the
+    Titanium textures when the titanium/ folder is there. DOSBox SILVSCN1 (the other pump-station mission): q on a
+    structure draws the red corners round it (docs/reference/structure_bracket_silv_dos.png)"""
+    def check(r, what):
+        c(r.at(10.5)['thing'] == 12, what + ': q targets the pump station (structure 12)', 'thing %d' % r.at(10.5)['thing'])
+        c(r.at(10.5)['bracket'] == 2, what + ': a thing\'s corner brackets, not the nav marker', 'bracket %d' % r.at(10.5)['bracket'])
+        c(r.at(12.5)['zoom'] > 3.9 and r.at(12.5)['bracket'] == 2, what + ': zoomed x4: still the brackets',
+          'zoom %.2f bracket %d' % (r.at(12.5)['zoom'], r.at(12.5)['bracket']))
+        c(r.at(14.5)['thing'] == -1 and r.at(14.5)['bracket'] in (3, 4), what + ': target reset: the nav point\'s mark (zoomed: off the view, its X)',
+          'thing %d bracket %d' % (r.at(14.5)['thing'], r.at(14.5)['bracket']))
+    env = {'MW2_START': '93556,0', 'MW2_START_HEADING': 0}
+    keys = [(10, 'q'), (14, 'ctrl+t')]
+    hold = [(10.6, 12.1, 'z')]
+    r = c.run(secs=15, mission='ORANSCN1', env=env, keys=keys, hold=hold, dump='/0.5')
+    check(r, 'original')
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: the Titanium run skipped')
+        return
+    e2 = dict(env, MW2_CONFIG=titanium_cfg('structure_bracket_zoomed_ti', tdir), MW2_SKYGND=os.path.join(tdir, 'SKYGND.PAR'), MW2_TEXTURES='titanium')
+    t = c.run('_ti', secs=15, mission='ORANSCN1', env=e2, keys=keys, hold=hold, dump='/0.5')
+    check(t, 'titanium')
+
+
+@sequence
+def zoomed_turn_taps(c):
+    """user (2026-10-13): turning left / right while zoomed sometimes did not respond. The key ramp (0x10039ee0) steps
+    on every frame a key is seen held - the first too - and zeroes a _delta control's value on the first frame none is;
+    the port's ramp ran on a free-running 30 fps clock, so a press waited up to 1/30 s for its first step (a short tap
+    between two ticks: no turn at all) and the turn ran on up to 1/30 s after the release - at 144 fps the same 0.05 s tap
+    turned anywhere from 0 to ~1.2 degrees. Now the steps start on the press: zoomed x4, every 0.05 s tap turns the
+    same (2 steps at 144 fps: 0.071 x 5 + 0.213 x 2 frames of 90 deg/s / 144 = 0.49 degrees; 60 fps: 0.071 x 2 + 0.213 x 1
+    frame / 60 = 0.53) and the turn stops with the key"""
+    for fps in (144, 60):
+        taps = [(11.0 + 0.7 * i + 0.013 * i, 11.05 + 0.7 * i + 0.013 * i, 'left' if i % 2 else 'right') for i in range(8)]
+        hold = [(9.2, 10.7, 'z')] + taps
+        r = c.run('_%d' % fps, secs=17, env={'MW2_TEST_FPS': fps}, hold=hold, dump='/0.05')
+        c(r.at(10.8)['zoom'] > 3.9, '%d fps: zoomed x4' % fps, 'zoom %.2f' % r.at(10.8)['zoom'])
+        d = []
+        for t0, t1, k in taps:
+            a, b = r.before(t0 - 0.01)['heading'], r.at(t1 + 0.3)['heading']
+            dd = b - a
+            d.append(round(dd, 2))
+        mag = [abs(x) for x in d]
+        c(min(mag) > 0.3, '%d fps: every 0.05 s tap turns' % fps, str(d))
+        c(max(mag) - min(mag) < 0.15, '%d fps: the same turn for every tap (the steps start on the press)' % fps, str(d))
+        c(all((x > 0) == (i % 2 == 0) for i, x in enumerate(d)), '%d fps: right taps right, left taps left' % fps, str(d))
+        # the turn stops with the key: one dump interval after the release no more change
+        t0, t1, k = taps[3]
+        h1, h2 = r.at(t1 + 0.05)['heading'], r.at(t1 + 0.3)['heading']
+        c(abs(h2 - h1) < 0.02, '%d fps: no turn after the release' % fps, '%.2f -> %.2f' % (h1, h2))
+        c.note('%d fps taps: %s' % (fps, d))
+
 
 def main():
     global GLVIEW, VERBOSE

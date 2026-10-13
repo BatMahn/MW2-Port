@@ -215,4 +215,18 @@ The MW2_* environment variables remain for development and tests only.
     make dist      # dist/mw2port-linux-x86_64.tar.gz: mw2, glview, assets/, README, THIRD_PARTY.md
 
 Unpack anywhere and run `./mw2 /path/to/MW2-game` once. Needs SDL2 and OpenGL 3.3 from the system.
-On macOS: `make mw2 gl && scripts/macos_app.sh` builds "MechWarrior 2.app" (untested so far).
+On macOS: `make mw2 && sh scripts/macos_app.sh` builds "MechWarrior 2.app" in the current folder, with its icon and
+SDL2 bundled inside (no Homebrew needed to run it).
+
+### macOS: the app is not signed
+
+The app (built here or downloaded from a GitHub release) is only ad-hoc signed, not signed with an Apple Developer ID or
+notarised, so macOS blocks a downloaded copy ("is damaged and can't be opened" or "Apple could not verify..."). Clear
+the download flag once, in Terminal, from the folder holding the app:
+
+    xattr -dr com.apple.quarantine "MechWarrior 2.app"
+
+Then open it normally. A copy you built yourself is not flagged and opens directly. On first launch the app looks for
+the game in `~/MW2-game`; to use another folder, run it once from Terminal with the folder and it is remembered:
+
+    "MechWarrior 2.app/Contents/MacOS/mw2" /path/to/MW2-game

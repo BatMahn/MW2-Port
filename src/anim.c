@@ -140,7 +140,11 @@ void anim_player_init(anim_player *p, int rate)
  * a restart from key 0) and the table's pose there differs from the pose reached, the difference stays on the node:
  * p->off[track] += pose[end of the key finished] - pose[start of the key entered] (Timber Wolf / Mad Dog walk 5 -> run
  * 16: one hip 17 degrees, carried from then on - every later mismatch adds its own). The loops meet (keys 9 / 19 / 29
- * repeat the loop's first pose) and the sequences sum to the standing pose, so most transitions add nothing. */
+ * repeat the loop's first pose) and the sequences sum to the standing pose, so most transitions add nothing. DOS MW2.EXE
+ * plays the keys the same way (0x1aad2: integer deltas through 0x1dfc0 / 0x1e140, no re-sync at a jump or a sequence
+ * start); DOSBox with patched MADDANIM data shows the carried pose, not the table's
+ * (docs/reference/walk_run_carried_offset_dos_vs_port.png). Records in use: MADDANIM (Timber Wolf, Mad Dog) 17 deg,
+ * MARAANIM (Marauder) 15 cm, the rest about 1 or less (STRMANIM / DAISANIM are named by no mech). */
 static void carry(const anim_set *s, anim_player *p, int from_end, int to_start)
 {
     int k;

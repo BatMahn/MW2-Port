@@ -727,6 +727,38 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
     return 1;
 }
 
+void combat_land(combat_unit *u, float vy, unsigned *rng)
+{
+    /* combat_jets' touch-down at vertical speed vy (cm/tick): fall damage to both legs beyond 16.154 cm/tick with Collision
+     * Damage on, the landing speed kept for the sound (0x10019e54..0x10019ee0), stood on the ground */
+    if (vy < -16.154f && !u->no_collision_damage && !u->destroyed) {
+        float dmg = (vy + 16.154f) * -1.5476f;
+        combat_damage_src = "fall";
+        apply_damage_at(u, dmg, 0, 8, rng);
+        apply_damage_at(u, dmg, 0, 7, rng);
+        combat_damage_src = "weapon";
+    }
+    u->landed_vy = vy;
+    u->y = u->ground;
+    u->vy = 0;
+}
+
+float combat_jets_dy(const combat_unit *u, int jetting, float dt)
+{
+    /* combat_jets' vertical move for this frame without making it (engine 0x10019310: the move 0x1000b5e0 gets
+     * (v + a ticks / 2) ticks in y with the x / z parts) - the same fuel, thrust and standing rules */
+    const float g = 0.0296f * g_planet.gravity_g;
+    float ticks = dt * COMBAT_TICKS_PER_S, a, fuel = u->jet_fuel;
+    int held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0, jet;
+    if (held && u->jets > 0 && fuel >= 0) { fuel -= ticks; if (fuel <= 0) fuel = 0; }
+    jet = held && fuel > 0;
+    if (!jet && fabsf(u->vy) < 1e-7f && u->y <= u->ground) return 0.0f;
+    a = -g;
+    if (jet) a = u->jet_ddy - g + (u->vy > 1e-7f ? (g - u->jet_ddy) / g_planet.jet_damping * u->vy * 3620.0f : 0);
+    if (jet && u->jet_forward) a = u->vy > 1e-7f ? -g : 0;
+    return (0.5f * a * ticks + u->vy) * ticks;
+}
+
 /* engine 0x1000c1f0: where a collision lands, by the contact normal (pointing from what was struck toward the unit, y up):
  * normal y below -0.866 (struck from above: the unit ran up into it) - the head, the damage x max(1, 2 x the other's
  * tonnage / its own) when the other is a unit; normal y above 0.7071 (ground-like, or on top of a unit) - half to each

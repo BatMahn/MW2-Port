@@ -78,11 +78,23 @@ static int        g_cockpit_frame;   /* the cockpit frame (the eye's hull piece)
  * 0.5), and it drops to 0 with the keys up - legs_pan_delta reaches full turn on the 4th frame (0.13 s), so a 0.2 s
  * tap turns ~9 degrees and 0.35 s ~22 (DOSBox: 7-9 / 21). pilot_pan / tilt reach full after ~0.5 s and keep their value
  * (DOS: 0.15 s a few degrees, 0.6 s well round); the zoom 0.12 s 1.00 -> 1.17 (DOS 1.17) */
-typedef struct { float vel, val, acc; } key_ramp_t;
+typedef struct { float vel, val, acc; int on; } key_ramp_t;
 static void key_ramp(key_ramp_t *r, int plus, int minus, int shift, int delta, float dt)
 {
     const float step = 3.0f * (182.0f / 30.0f) * (float)(1 << shift) / 65536.0f;
-    r->acc += dt;
+    /* the engine steps on every frame a key is seen held - the first one too - and zeroes the velocity (a _delta
+     * control: its value) on the first frame none is: the 30 fps steps start on the press and stop on the release
+     * (a free-running 30 fps clock gave a press up to 1/30 s late, a short tap between two ticks no step at all, and
+     * a _delta control kept turning up to 1/30 s after the release) */
+    if (dt <= 0) return;   /* paused: the controls are off */
+    if (!plus && !minus) {
+        if (delta) r->val = 0;
+        r->vel = 0; r->acc = 0; r->on = 0;
+        return;
+    }
+    if (!r->on) r->acc = 1.0f / 30.0f;   /* the press: a step this frame */
+    else r->acc += dt;
+    r->on = 1;
     if (r->acc > 0.5f) r->acc = 0.5f;
     while (r->acc >= 1.0f / 30.0f) {
         r->acc -= 1.0f / 30.0f;
@@ -124,6 +136,8 @@ static msim      g_sim;
 /* GAMEKEY.MAP actions: selected target (t / r / e / f / q, Ctrl+t), nav point (n / Shift+n), radar zoom
  * (x / Shift+x), HUD (F11), damage display (F5), target display (F4), group fire (\\ ' ;) */
 static int       g_tgt_thing = -1;   /* a targeted structure (index into g_sim.bld), when g_tgt_sel < 0 */
+static int       g_bracket;          /* the HUD's target mark last drawn (tests): 0 none, 1 a mech's corners, 2 a thing's, 3 the nav
+                                      * marker, 4 the off-screen X */
 static const char *const RADAR_LABEL[4] = {"R: 250.0m", "R: 500.0m", "R: 1.0km", "R: 2.0km"};
 static const float RADAR_CM[4] = {25000.0f, 50000.0f, 100000.0f, 200000.0f};
 static int       g_tgt_sel = -1, g_nav_sel = -1, g_radar_i = 2, g_hud_off, g_dmg_off, g_tgtdisp_off, g_tgtdisp = 1;   /* target viewer (0x10021300): 1 wireframe, 2 shaded, 0 off */
@@ -136,6 +150,8 @@ static unsigned char g_nav_seen[256];   /* nav points reached (engine nav flag 0
 static int       g_radar_mode = 1;        /* engine 0x10003fb0: 1 small -> 2 large -> 0 off -> 1 */
 static hud_sprite g_hs_rgp[3], g_hs_rtgp[3], g_hs_rtgt[3], g_hs_rtof[3], g_hs_ruser, g_hs_rnp[2], g_hs_rtnp[2];   /* radar sprites, side F / E / N */
 static int       g_autopilot;   /* a: TOGGLE_AUTOPILOT (engine 0x10015c00) */
+static float     g_ap_turn, g_ap_saved_thr;   /* the autopilot's turn input (+0xc, of 1024) and saved throttle (+0x180) */
+static int       g_ap_avoiding;               /* 0x10015c00's +0x184: the obstacle avoidance steered last */
 static int       g_wcam_live;
    /* this frame: the weapon camera has a missile to follow */   /* l INFRARED: 1 light amplification; w ENHANCED_VISION: 2 image enhancement */
 static int       g_vport;   /* F7 rear / F8 down / F9 weapon viewport: 0 none, 1 rear, 2 down, 3 weapon */
@@ -169,7 +185,10 @@ static float     g_pl_across;          /* cm/s: a mech contact's velocity across
 static int       g_pl_contact = -2;    /* the mech last touched (-2 none; < -2 landed on mech -contact - 3) */
 static float     g_pl_contact_acc;     /* touching a mech or a wall: the frame time not yet run in 1/30 s moves (pl_locomote) */
 static int       g_pl_contact_hold;    /* 1/30 s moves left in contact mode without a touch (pl_locomote) */
-static float     g_jet_vx, g_jet_vz;   /* the directional jets' drift (cm/s) on top of the walking velocity */
+static float     g_jet_vx, g_jet_vz;   /* cm/s: the velocity beyond the walking one (g_pl_speed along the heading) - the
+                                        * engine keeps one velocity vector (+0xf4 / +0xfc); the port splits it in two */
+static int       g_pl_free;            /* airborne or jetting with fuel: no walking servo on the velocity (0x10019310) */
+static float     g_pl_free_h = 1e9f;   /* the heading at the last free frame (1e9: none) */
 static anim_player g_pl_ap;            /* the player's walk animation key player (engine 0x1000dec0); g_pl_t = its pose */
 static int       g_pl_ap_ok;
 static int       g_feet_to_torso;
@@ -2811,7 +2830,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
-        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on */
+        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; msim_dos_int = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on; DOS: the integer throttle servo (0x49b80) */
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
@@ -2859,14 +2878,16 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             int first = 0, cnt = 12;
             g_pl_ok = 1;
             g_frame_mech++;
-            if (getenv("MW2_START")) {   /* debug: start the player at "x,z" */
-                float sx0 = 0, sz0 = 0;
-                if (sscanf(getenv("MW2_START"), "%f,%f", &sx0, &sz0) == 2) { g_sim.player[0] = sx0; g_sim.player[2] = sz0; }
+            if (getenv("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
+                float sx0 = 0, sz0 = 0, sy0 = 0;
+                int nst = sscanf(getenv("MW2_START"), "%f,%f,%f", &sx0, &sz0, &sy0);
+                if (nst >= 2) { g_sim.player[0] = sx0; g_sim.player[2] = sz0; }
+                if (nst == 3) { g_sim.player_unit.y = sy0; g_sim.player_unit.vy = 0; }
                 if (getenv("MW2_START_HEADING")) g_sim.player_heading = (float)atof(getenv("MW2_START_HEADING"));   /* debug */
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
-            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0;
+            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
             if (getenv("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
@@ -3284,6 +3305,11 @@ static void wt_on(float x, float z, float y)   /* the type 0 box tops / type 5 p
 }
 /* ---- end TEST ONLY ---- */
 
+/* the player's vertical move this frame in the move test (engine 0x10019310 -> 0x1000b5e0: one 3D segment, as the AI's in
+ * msim.c): the frame's (v + a t / 2) t (combat_jets_dy, set before pl_locomote), the part used by the moves so far, and
+ * - once a move was refused in 3D - the impact's vertical velocity, which then stands after combat_jets */
+static float g_pl_dy_frame, g_pl_dy_done, g_pl_vy3, g_pl_dt;
+static int g_pl_imp3, g_pl_land3;
 /* one move of the player's locomotion: the drive (throttle -> speed), the move by the mean velocity, mech contact and
  * the terrain / object impact (engine 0x10019310, 0x1000b5e0); 1 when it touched a mech or was refused */
 static int pl_move(float dt, float top)
@@ -3292,6 +3318,7 @@ static int pl_move(float dt, float top)
     int touched = 0;
     msim_drive_step(&g_thr_srv, &g_spd_srv, &g_pl_speed, g_throttle_eff, 1.0f, top,
                     !(g_sim_ok && (g_sim.player_unit.shutdown || g_sim.player_unit.immobile)), g_drive_slow, dt * 182.0f);
+    if (g_pl_free) g_pl_speed = speed0;   /* airborne / jetting: the servos run, the velocity is held (0x10019310) */
     {   /* locomotion on the terrain (engine 0x10019310): steep or out-of-window steps refused */
         /* the move is the frame's mean velocity x dt - the engine's (v + a dt / 2) dt (0x10019310 local_40) */
         float nx, nz, along = 0.5f * (speed0 + g_pl_speed), across = g_pl_across;
@@ -3386,8 +3413,10 @@ static int pl_move(float dt, float top)
                 nx = (float)g_pl.origin[0]; nz = (float)g_pl.origin[2];
             } else g_pl_contact = -2;
         }
-        /* tested airborne too (0x10019310 runs 0x1000b5e0 on every move; the port's move is level: at the present height) */
-        if (msim_can_step_hr(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz, g_sim.player_unit.y, g_sim.player_centre_h, g_sim.player_radius)) {
+        /* tested airborne too, in 3D (0x10019310 runs 0x1000b5e0 on every move with the frame's vertical part) */
+        float dy_sub = g_pl_imp3 ? g_pl_vy3 * dt * 182.0f : g_pl_dt > 0.0f ? g_pl_dy_frame * dt / g_pl_dt : 0.0f;   /* this move's share */
+        if (msim_can_move(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz, g_sim.player_unit.y + g_pl_dy_done, dy_sub, g_sim.player_centre_h, g_sim.player_radius)) {
+            g_pl_dy_done += dy_sub;
             g_pl.origin[0] = (int32_t)lrintf(nx);
             g_pl.origin[2] = (int32_t)lrintf(nz);
             /* the engine's positions are floats: the fraction of a cm is kept for the next move (a wall slide moves a cm
@@ -3403,8 +3432,13 @@ static int pl_move(float dt, float top)
             float x0 = (float)g_pl.origin[0] + (touched ? g_pl_frac[0] : fx), z0 = (float)g_pl.origin[2] + (touched ? g_pl_frac[1] : fz), bx = nx, bz = nz;
             int imp;
             if (getenv("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
-            imp = msim_world_impact(&g_sim, x0, z0, &bx, &bz, g_sim.player_unit.y, g_sim.player_centre_h,
-                                    g_sim.player_radius, NULL, g_pl.heading, &g_pl_speed, &g_pl_across);
+            {
+                float dyi = dy_sub, vyi = dy_sub != 0.0f ? (g_pl_imp3 ? g_pl_vy3 : g_sim.player_unit.vy) : 0.0f;
+                imp = msim_world_impact3(&g_sim, x0, z0, &bx, &bz, g_sim.player_unit.y + g_pl_dy_done, &dyi, g_sim.player_centre_h,
+                                         g_sim.player_radius, g_pl.heading, &g_pl_speed, &g_pl_across, &vyi);
+                if (dy_sub != 0.0f) { g_pl_imp3 = 1; g_pl_vy3 = vyi; g_pl_land3 = imp & 2; }   /* airborne: the 3D impact's (walking stays level) */
+                g_pl_dy_done += dyi;
+            }
             msim_block_normal(wn);   /* the hit's normal (the second try's when refused): the engine's DAT_1024b420.. */
             g_pl.origin[0] = (int32_t)lrintf(bx); g_pl.origin[2] = (int32_t)lrintf(bz);
             g_pl_frac[0] = bx - (float)g_pl.origin[0]; g_pl_frac[1] = bz - (float)g_pl.origin[2];
@@ -3661,6 +3695,19 @@ static void test_parmor(const char *r) { float f = (float)atof(r); if (f > 0) co
 static void test_watch(const char *r) { int a = atoi(r); if (a >= 0 && a < g_actor_count) test_drop_actor = a; }
 /* MW2_TEST_DROP="t:actor:dz:height:vy:hspeed"  actor put dz cm ahead (+z) of the player, its feet `height` cm above the
  * player's, falling at vy cm/tick (negative down), carrying hspeed cm/s toward the player */
+/* MW2_TEST_PROBE="t:dz:dy:len"  one AI avoidance probe at t from dz ahead (+z) of the player, dy above its centre, len cm
+ * back along -z (msim_test_probe); prints "testprobe <kind> at <distance>" (the units' piece hits with MW2_PROBE_TRACE) */
+static void test_probe(const char *r)
+{
+    float dz = 0, dy = 0, len = 0, ox = 0, oz = 0;
+    if (sscanf(r, "%f:%f:%f", &dz, &dy, &len) < 3) return;
+    {
+        float p0[3] = {(float)g_pl.origin[0], g_sim.player_unit.y + g_sim.player_centre_h + dy, (float)g_pl.origin[2] + dz};
+        float p1[3] = {p0[0], p0[1], p0[2] - len};
+        int k = msim_test_probe(&g_sim, p0, p1, &ox, &oz);
+        printf("testprobe %d at %.0f,%.0f (dz %.0f dy %.0f)\n", k, ox, oz, dz, dy);
+    }
+}
 static void test_drop(const char *r)
 {
     int a = -1;
@@ -3724,7 +3771,7 @@ static void test_dump(const char *tag)
         printf(" fade=%.3f gnd=%.0f lvy=%.2f jolt=%.2f", (double)g_fade_level, (double)g_sim.player_unit.ground, (double)g_sim.player_unit.landed_vy, (double)g_jolt_view[3]);   /* the opening palette fade (1 = done); the ground under the player, its touch-down speed, the jolt pitch */
     }
     /* the walk-cycle keys: the player's and MW2_KILL_ACTOR's actor's (a destroyed mech keeps its pose: standing_wreck_frozen) */
-    printf(" pkey=%.3f", (double)g_pl_t);
+    printf(" pkey=%.3f bracket=%d zoom=%.2f", (double)g_pl_t, g_bracket, (double)g_zoom);
     {   /* the player's carried pose offset (anim_player_step): the largest track's, and its track */
         int q, qm = -1; float om = 0;
         for (q = 0; q < ANIM_MAX_TRACKS; q++) if (fabsf(g_pl_ap.off[q]) > om) { om = fabsf(g_pl_ap.off[q]); qm = q; }
@@ -3803,6 +3850,7 @@ static void test_frame(int w, int h)
     test_timed("MW2_TEST_THING", &d_thing, test_thing);
     test_timed("MW2_TEST_BLD_KILL", &d_bld, test_bld_kill);
     { static int d_drop; test_timed("MW2_TEST_DROP", &d_drop, test_drop); }
+    { static int d_probe; test_timed("MW2_TEST_PROBE", &d_probe, test_probe); }
     if (sd && sd[0] == '/') {
         float every = (float)atof(sd + 1);
         if (every <= 0) every = 1;
@@ -4004,7 +4052,7 @@ int main(int argc, char **argv)
         }
     }
     g_show_objectives = getenv("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
-    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3;
+    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; msim_dos_int = g_edition == PORTCFG_ED_DOS;   /* DOS: the integer throttle servo (0x49b80) */
     edition_look(&v);
     if (getenv("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
         const char *p = getenv("MW2_GROUPS");
@@ -4498,7 +4546,7 @@ int main(int argc, char **argv)
                 g_sim.world_dirty = 0;
             }
             if (g_auto_on && g_pl_ok) {   /* the held controls (a twist demand is discarded while the mech is down, as the keys') */
-                if (g_auto_throttle >= -1.5f) { g_throttle = g_auto_throttle; g_reverse = g_throttle < 0; }   /* TEST hook: throttle -9 = the keys drive it */
+                if (g_auto_throttle >= -1.5f && !(g_autopilot && g_ap_avoiding)) { g_throttle = g_auto_throttle; g_reverse = g_throttle < 0; }   /* TEST hook: throttle -9 = the keys drive it */
                 g_cockpit = g_auto_cockpit;
                 if (g_auto_twist > -900.0f && !(g_sim_ok && (g_sim.player_unit.shutdown || (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))))) g_pl.twist = g_auto_twist;   /* twist -999 = free */
             }
@@ -4656,10 +4704,19 @@ int main(int argc, char **argv)
                         hud_message_v2("Autopilot disengaged.", 65, 84);
                     }
                 }
+                if (!g_autopilot) {   /* 0x1001a180: autopilot off -> input +0xc = the pilot's +0x10. +0x180 is written only
+                                       * by 0x10015c00 and the unit record comes from a pool (0x10023d40), not cleared: its
+                                       * value at engagement is taken as the pilot's throttle (ASSUMED - 0 would stop the
+                                       * mech at the first wall follow) */
+                    g_ap_turn = 0; g_ap_avoiding = 0; g_ap_saved_thr = g_throttle;
+                }
                 if (g_autopilot) {   /* engine 0x10015c00: steer to the selected nav (else the next not visited); the pilot's
                                       * throttle stays; turn = (bearing error x 18.2044, at most 819.2) / 1024 of full - 0.8 of
                                       * full beyond 45 degrees; on arrival MECNAVPT (0xe7), the nav marked visited and the next
-                                      * one taken; past the last, autopilot off and the throttle to 0 */
+                                      * one taken; past the last, autopilot off and the throttle to 0. The obstacle avoidance
+                                      * (0x100201c0, msim_player_avoid) runs first: while it steers, the nav steering is skipped
+                                      * (+0x184 = 1); when it lets go the throttle saved before (+0x180) comes back, and +0x180
+                                      * keeps the pilot's throttle of each frame the avoidance is idle */
                     static int ap_nav = -1;
                     const unsigned char *visited = g_nav_seen;   /* set by the nav reach test (0xe7 there) */
                     int nv = g_nav_sel >= 0 && g_nav_sel < g_sim.nav_count ? g_nav_sel : ap_nav;
@@ -4679,13 +4736,24 @@ int main(int argc, char **argv)
                     if (nv == -1) { g_autopilot = 0; g_throttle = 0; }
                     else if (nv >= 0) {
                         float dx2 = g_sim.navs[nv].x - (float)g_pl.origin[0], dz2 = g_sim.navs[nv].z - (float)g_pl.origin[2];
-                        float want = atan2f(dx2, dz2) * 180.0f / 3.14159265f, dh = want - g_pl.heading, c;
+                        float want = atan2f(dx2, dz2) * 180.0f / 3.14159265f, dh = want - g_pl.heading, c, at = 0, ath = 0;
+                        int wrote = 0;
                         while (dh > 180) dh -= 360;
                         while (dh < -180) dh += 360;
-                        c = dh * 18.2044f;
-                        if (c > 819.2f) c = 819.2f;
-                        if (c < -819.2f) c = -819.2f;
-                        g_pl.heading += turn * (c / 1024.0f) * dt;
+                        if (msim_player_avoid(&g_sim, g_pl.heading, g_pl_speed, g_pl_across, fabsf(g_throttle), g_reverse, dh, g_ap_saved_thr, &wrote, &at, &ath)) {
+                            if (wrote) { g_ap_turn = at; g_throttle = ath; }   /* input +0xc / +8; held between the checks */
+                            g_ap_avoiding = 1;
+                        } else {   /* 0x10013600 */
+                            c = dh * 18.2044f;
+                            if (c > 819.2f) c = 819.2f;
+                            if (c < -819.2f) c = -819.2f;
+                            g_ap_turn = c;
+                            if (g_ap_avoiding) { g_ap_avoiding = 0; g_throttle = g_ap_saved_thr; }
+                            g_ap_saved_thr = g_throttle;
+                        }
+                        if (getenv("MW2_AP_TRACE")) printf("APTRACE t=%.3f x=%d z=%d hd=%.1f err=%.1f avoid=%d side=%d turn=%.1f thr=%.3f\n", g_sim.now / 1000.0,
+                                                           g_pl.origin[0], g_pl.origin[2], (double)g_pl.heading, (double)dh, g_ap_avoiding, g_sim.pav_side, (double)g_ap_turn, (double)g_throttle);   /* tests */
+                        g_pl.heading += turn * (g_ap_turn / 1024.0f) * dt;
                     }
                 }
                 {   /* keyboard turning builds up (legs_pan_delta's key ramp, see key_ramp) and stops on release */
@@ -4723,6 +4791,17 @@ int main(int argc, char **argv)
                 if (g_sim_ok) g_sim.player_unit.throttle_frac = fabsf(g_thr_srv) > 1.0f ? 1.0f : fabsf(g_thr_srv);
                 /* the engine's throttle -> speed chain (msim_drive_step: throttle servo T 36.2 ticks, drive servo T 90.5 ticks,
                  * velocity approach 1/45 per tick; 0x1001a180 / 0x100190d0), the throttle signed here (reverse at half) */
+                {   /* the frame's vertical move for the move test (as combat_jets below will make it) */
+                    const Uint8 *ks = test_ks();
+                    int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
+                    g_pl_dy_frame = g_sim_ok ? combat_jets_dy(&g_sim.player_unit, jet, dt) : 0.0f;
+                    /* engine 0x10019310 (DOS 0x26990): the velocity approaches heading x c[0xb] only on the ground with the
+                     * jets not firing (input +0x1d and fuel c[0x30] > 0); airborne or jetting it is left alone - momentum,
+                     * whatever the throttle - except for the directional jets' thrust and drag (the jets block below) */
+                    g_pl_free = g_sim_ok && (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f ||
+                                             (jet && g_sim.player_unit.jets > 0 && g_sim.player_unit.jet_fuel > 0));
+                    g_pl_dy_done = 0; g_pl_vy3 = 0; g_pl_imp3 = 0; g_pl_land3 = 0; g_pl_dt = dt;
+                }
                 pl_locomote(dt, top);
                 {   /* the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13]; the key player
                      * (0x1000dec0, anim_player_step - the AI's the same, msim.c) walks the keys toward it. c[0x13] more than
@@ -4787,7 +4866,7 @@ int main(int argc, char **argv)
                         if (snd2 > 0 && g_sfx && !g_sim.player_unit.destroyed) sfx_play(g_sfx, snd2, VIEW_IN_COCKPIT ? 0.4f : 0.8f, 0.0f);   /* 0x1000b567: halved in the cockpit (edx DAT_1024e678) */
                     }
                 }
-                g_pl.pose_off = g_pl_ap.off;   /* the carried offset (anim_player_step) */
+                g_pl.pose_off = getenv("MW2_NO_POSE_OFF") ? NULL : g_pl_ap.off;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
                 mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);   /* g_pl_t: the absolute key time (anim_player) */
                 if (g_plpit_ok) {
                     memcpy(g_plpit.origin, g_pl.origin, sizeof g_pl.origin);
@@ -4819,38 +4898,55 @@ int main(int argc, char **argv)
                     const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
-                         * the jets; engine physics 0x10019310): while jetting and the legs are not turning, the FIRST held
-                         * direction in the order left, right, forward, back pushes at the jets' thrust (+0xec) along it -
-                         * forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile. On the
-                         * ground the drift eases toward the walking velocity at 1/45 per tick (0x102473b4) and snaps to
-                         * zero under 0.0625 cm/tick - it does not stop dead on landing. Drag only while thrusting directionally (below). */
+                         * the jets; engine physics 0x10019310, DOS 0x26990): while jetting and the legs are not turning, the
+                         * FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
+                         * along it - forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile.
+                         * The engine has ONE velocity vector (+0xf4 / +0xfc): the thrust and the drag act on all of it, the
+                         * walking part included, so the terminal speed is L = 2.5 x the top walking speed whether the jets
+                         * start from a standstill or from a run (DOSBox ORANSCN1 Nova 403 kph both ways, Summoner 336; the
+                         * port had dragged only the jets' share and added the walk on top: 559 from FULL). Airborne or
+                         * jetting the velocity is held otherwise (g_pl_free: no walking servo, a turn does not swing it);
+                         * on the ground with the jets off it eases toward heading x c[0xb] at 1/45 per tick (0x102473b4),
+                         * so the jets' share eases to zero - it does not stop dead on landing. */
                         float jvx = g_jet_vx, jvz = g_jet_vz;
                         int l2 = H("jumpjet_fire_left"), r2 = !l2 && H("jumpjet_fire_right"), f2 = !l2 && !r2 && H("jumpjet_fire_forward");
                         int b2 = !l2 && !r2 && !f2 && H("jumpjet_fire_backward");
                         int legs_turning = H("legs_pan_minus") || H("legs_pan_plus");
                         float hh = g_pl.heading * 3.14159265f / 180.0f, dv = 0, dx = 0, dz = 0;
+                        float wx = sinf(hh) * g_pl_speed, wz = cosf(hh) * g_pl_speed;   /* the walking share (cm/s) */
+                        if (g_pl_free && g_pl_free_h < 1e8f && g_pl_free_h != g_pl.heading) {   /* free: a turn leaves the
+                                                                                                 * velocity where it was */
+                            float h0 = g_pl_free_h * 3.14159265f / 180.0f;
+                            jvx += sinf(h0) * g_pl_speed - wx; jvz += cosf(h0) * g_pl_speed - wz;
+                        }
+                        g_pl_free_h = g_pl_free ? g_pl.heading : 1e9f;
                         if (legs_turning) l2 = r2 = f2 = b2 = 0;
                         if (f2) { dx += sinf(hh); dz += cosf(hh); }
                         if (b2) { dx -= sinf(hh); dz -= cosf(hh); }
                         if (r2) { dx += cosf(hh); dz -= sinf(hh); }
                         if (l2) { dx -= cosf(hh); dz += sinf(hh); }
+                        float vx = (wx + jvx) / 182.0f, vz = (wz + jvz) / 182.0f;   /* the velocity before this frame's step */
                         combat_jets_forward(&g_sim.player_unit, (f2 || b2 || l2 || r2) && jet, dt, &dv);
                         jvx += dx * dv * 182.0f; jvz += dz * dv * 182.0f;                      /* cm/tick -> cm/s */
-                        if (dv > 0) {   /* the drag inside the directional branch (0x100194fa..0x10019618), cm/tick: T thrust,
-                                         * L = 2.5 x top ground speed (+0x88 x 0.0390625), S speed; terminal speed = L */
+                        if (dv > 0) {   /* the drag inside the directional branch (0x100194fa..0x10019618; DOS 0x26ba2), cm/tick:
+                                         * T thrust, L = 2.5 x top ground speed (+0x88 x 0.0390625), S the whole velocity's
+                                         * speed (DOS (4 max + min) >> 2 of its x / z) at the start of the frame - the step
+                                         * is v += ticks x (thrust + drag(v)), so the terminal speed is L at any frame length
+                                         * (the drag of v + thrust had settled 1.5 % short: 399 kph for DOSBox's 403) */
                             float ticks = dt * 182.0f, T = dv / (ticks > 1e-6f ? ticks : 1e-6f), kq, B;
-                            float vx = jvx / 182.0f, vz = jvz / 182.0f, ax = fabsf(vx), az = fabsf(vz);
-                            float S = ax > az ? ax + az * 0.25f : az + ax * 0.25f;   /* DOS 0x26ba2: (4 max + min) >> 2 */
+                            float ax = fabsf(vx), az = fabsf(vz);
+                            float S = ax > az ? ax + az * 0.25f : az + ax * 0.25f;
                             msim_jet_drag(T, g_pl_walk, &kq, &B);   /* L = 2.5 x the top walking speed, the DOS integers */
                             if (S > 1e-7f && (kq != 0 || B != 0)) {
                                 float f = kq * S + B;
                                 jvx -= vx * f * ticks * 182.0f; jvz -= vz * f * ticks * 182.0f;
                             }
-                            if (fabsf(jvx) < 0.0625f * 182.0f) jvx = 0;
-                            if (fabsf(jvz) < 0.0625f * 182.0f) jvz = 0;
+                            if (fabsf(wx + jvx) < 0.0625f * 182.0f) jvx = -wx;   /* components under 0.0625 cm/tick: 0 */
+                            if (fabsf(wz + jvz) < 0.0625f * 182.0f) jvz = -wz;
                         }
                         if (g_sim.player_unit.destroyed && g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f) jvx = jvz = 0;   /* state 4 on the ground: no physics (0x10019310) */
-                        if (g_sim.player_unit.y <= g_sim.player_unit.ground + 1.0f && !jet) {
+                        if (!g_pl_free) {   /* grounded, jets off: (target - v) / 45 a tick (the walking share has its own
+                                             * servo in pl_move, msim_drive_step) */
                             float k = dt * 182.0f / 45.0f;
                             if (k > 1) k = 1;
                             jvx -= jvx * k; jvz -= jvz * k;
@@ -4863,7 +4959,16 @@ int main(int argc, char **argv)
                         }
                         g_jet_vx = jvx; g_jet_vz = jvz;
                     }
-                    combat_jets(&g_sim.player_unit, jet, dt, &g_sim.rng);
+                    {
+                        float y3 = g_sim.player_unit.y + g_pl_dy_done;
+                        combat_jets(&g_sim.player_unit, jet, dt, &g_sim.rng);
+                        if (g_pl_imp3 && g_pl_land3) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);   /* harmless: landed (0x10019c4e) */
+                        else if (g_pl_imp3) {   /* a move refused in 3D (pl_move): where the impact left it, the reflected vertical velocity */
+                            g_sim.player_unit.y = y3; g_sim.player_unit.vy = g_pl_vy3; g_sim.player_unit.landed_vy = 0;
+                            if (g_sim.player_unit.y <= g_sim.player_unit.ground) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);
+                        }
+                        g_pl_imp3 = 0;
+                    }
                     if (jet && g_sim.player_unit.jet_fuel > 0) msim_jet_flames_at(&g_sim, &g_pl, (float)g_pl.origin[0], g_sim.player_unit.y, (float)g_pl.origin[2], g_pl.heading);
                     /* the damage alarm 0xd0: with each announced critical (below, by the messages: 0x100167b0 is its only caller) */
                     /* touching down on the terrain from a fall or a jump (engine 0x10019310 at 0x10019e28: faster than 5.384
@@ -5045,7 +5150,8 @@ int main(int argc, char **argv)
                     g_sim.player_eye_ok = (g_plpit_ok && !getenv("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, ep) == 0) || mech3d_head_point(&g_pl, ep) == 0;
                     if (g_sim.player_eye_ok) memcpy(g_sim.player_eye, ep, sizeof ep);
                 }
-                g_sim.player_lock_target = g_tgt_sel;   /* the lock works on the selected target (T / E / Q) */
+                /* the lock works on the selected target (T / E / Q): a unit, or a thing (kind 0x400, 0x10044560) */
+                g_sim.player_lock_target = g_tgt_sel >= 0 ? g_tgt_sel : g_tgt_thing >= 0 ? MSIM_TGT_THING(g_tgt_thing) : -1;
                 g_sim.radio_busy = g_radio_qn > 0 || g_vq_n > 0;   /* the engine's one queue (DAT_1024f6bc): radio and messages */
                 if (!g_mm_depth && !g_paused) msim_step(&g_sim, sim_ms(dt));
                 if (!g_mm_depth && !g_paused) player_upkeep();   /* self-destruct countdown, automatic ejection */
@@ -5987,6 +6093,18 @@ int main(int argc, char **argv)
                         while (yw > 180.0f) yw -= 360.0f;
                         while (yw < -180.0f) yw += 360.0f;
                         on = dd < combat_weapon_range(wid) && fabsf(yw) < 3.0f && fabsf(pt) < 3.0f;
+                    } else if (g_tgt_sel < 0 && g_tgt_thing >= 0) {
+                        /* a thing (kind 0x400: 0x10022710 refuses only kinds 0x100 / 0x1000): its point is its object's
+                         * position (0x1001d2d0 -> 0x100257a0), the bearing and distance from the player's feet (+0x50) */
+                        float tp[3];
+                        if (msim_thing_point(&g_sim, g_tgt_thing, tp)) {
+                            float dx = tp[0] - (float)g_pl.origin[0], dz = tp[2] - (float)g_pl.origin[2], dy = tp[1] - g_sim.player_unit.y;
+                            float dd = sqrtf(dx * dx + dz * dz + dy * dy);
+                            float yw = atan2f(dx, dz) * 180.0f / 3.14159265f - (g_pl.heading + g_pl.twist), pt = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / 3.14159265f - g_pitch;
+                            while (yw > 180.0f) yw -= 360.0f;
+                            while (yw < -180.0f) yw += 360.0f;
+                            on = dd < combat_weapon_range(wid) && fabsf(yw) < 3.0f && fabsf(pt) < 3.0f;
+                        }
                     }
                     {
                         const hud_sprite *R = dos ? g_hs_rcl_dos : g_hs_rcl;
@@ -6009,9 +6127,24 @@ int main(int argc, char **argv)
              * screen (behind: |depth|): the ray from the screen centre through the point clipped to the view, TGTOFFF /
              * E / N (an X) there - TGTOFFF for a nav point. */
             {
-                float wp[3];
-                int have = 0, isnav = 0, side = 1;
-                if (tgt >= 0) {
+                float wp[3], thr = 0;
+                int have = 0, isnav = 0, side = 1, isthing = 0;
+                if (tgt < 0 && g_tgt_thing >= 0 && g_tgt_thing < g_sim.bld_count && g_sim.bld[g_tgt_thing].hp > 0) {
+                    /* a thing (kind 0x400 -> 0x10022ea0): the same four corners at its collision object's bounding
+                     * sphere (0x10029890: centre, radius), by its side (0x10019060: its AFFL team's alliance, none 2).
+                     * The engine's sphere always exists; should the port's model give none, the structure's box (the
+                     * target display's centre and half diagonal) - a targeted thing never falls through to the nav marker */
+                    if (!msim_thing_sphere(&g_sim, g_tgt_thing, wp, &thr)) {
+                        const struct msim_building *gb = &g_sim.bld[g_tgt_thing];
+                        float hx = (gb->mx[0] - gb->mn[0]) * 0.5f, hy = (gb->mx[1] - gb->mn[1]) * 0.5f, hz = (gb->mx[2] - gb->mn[2]) * 0.5f;
+                        int k;
+                        for (k = 0; k < 3; k++) wp[k] = (gb->mn[k] + gb->mx[k]) * 0.5f;
+                        thr = sqrtf(hx * hx + hy * hy + hz * hz);
+                    }
+                    side = g_sim.bld[g_tgt_thing].side;
+                    if (side < 0 || side > 2) side = 1;
+                    have = isthing = 1;
+                } else if (tgt >= 0) {
                     wp[0] = (float)g_actors[tgt].mech.origin[0];
                     wp[1] = (float)g_actors[tgt].mech.origin[1] + (g_sim.centre_h ? g_sim.centre_h[tgt] : 550.0f);
                     wp[2] = (float)g_actors[tgt].mech.origin[2];
@@ -6025,6 +6158,7 @@ int main(int argc, char **argv)
                         have = isnav = 1; side = 0;
                     }
                 }
+                g_bracket = 0;
                 if (have) {
                     float tx = wp[0] - v.eye[0], ty = wp[1] - v.eye[1], tz = wp[2] - v.eye[2];
                     float zf = tx * fx + ty * fy + tz * fz, xr = tx * rx + tz * rz, yu = tx * ux + ty * uy + tz * uz;
@@ -6033,9 +6167,13 @@ int main(int argc, char **argv)
                     float nx = xr / az / (th * aspect), ny = yu / az / th;
                     float vx = 320.0f + nx * kx, vy = 240.0f - ny * 240.0f;
                     if (zf > 1.0f && vx > 320.0f - kx && vx < 320.0f + kx && vy > 0 && vy < 480) {   /* the whole view, not just its 4:3 middle */
+                        g_bracket = isnav ? 3 : isthing ? 2 : 1;
                         if (isnav) hud_draw(g_hud, &g_hs_navmk, vx, vy, NULL);
                         else {
-                            float R = g_sim.radius ? g_sim.radius[tgt] : 545.0f, hb = R / zf / (th * aspect) * kx;
+                            float R = isthing ? thr : g_sim.radius ? g_sim.radius[tgt] : 545.0f, hb = R / zf / (th * aspect) * kx;
+                            /* a thing's (0x10022ea0): half the sphere's radius (x 0.5, 0x1024764c), at most half the view's
+                             * width (+0x7c x 0.5) */
+                            if (isthing) { hb *= 0.5f; if (hb > kx) hb = kx; }
                             const hud_sprite *gp = g_hs_gp[side];
                             if (gp[0].tex) {
                                 hud_draw(g_hud, &gp[0], vx - hb, vy - hb, NULL); hud_draw(g_hud, &gp[1], vx + hb, vy - hb, NULL);
@@ -6047,6 +6185,7 @@ int main(int argc, char **argv)
                         if (fabsf(dx) < 1e-3f && fabsf(dy) < 1e-3f) dx = 1e-3f;
                         tt = fminf(fabsf(dx) > 1e-6f ? kx / fabsf(dx) : 1e9f, fabsf(dy) > 1e-6f ? 240.0f / fabsf(dy) : 1e9f);
                         if (tt > 1.0f && zf > 1.0f) tt = 1.0f;
+                        g_bracket = 4;
                         hud_draw(g_hud, &g_hs_off[isnav ? 0 : side], 320.0f + tt * dx, 240.0f + tt * dy, NULL);
                     }
                 }
