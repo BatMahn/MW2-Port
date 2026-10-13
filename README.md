@@ -23,6 +23,7 @@ Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
 
 ## Setting up the game folder
 The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy.
+Only the 3D editions' data (`3d/`) is included in this repository; everything else comes from your own copies.
 **See [FOLDER_SETUP.md](FOLDER_SETUP.md) for a complete example of a working folder and the common mistakes.**
 
     MW2-game/

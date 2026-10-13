@@ -3,9 +3,13 @@
 This is a real, working game folder (the author's), listed from top to bottom. If yours looks like this, the port
 will find everything. Folder names are lower-case and sit **directly** inside `MW2-game/`.
 
+**Only `3d/` comes from this repository** (`gamedata/3d/`), because the 3D-card editions are hard to find now.
+**Everything else you supply from your own copies:** your original DOS CD and install (`cd/`, `install/`), your MT-32
+ROMs, your CD audio rip, your Titanium Edition disc and your Gravis UltraSound package. None of those are provided here.
+
 ```
 MW2-game/
-├── 3d/                      copy of gamedata/3d/ from this repository
+├── 3d/                      PROVIDED - copy of gamedata/3d/ from this repository
 │   ├── ati/
 │   ├── mga/
 │   ├── pvr/
@@ -14,7 +18,7 @@ MW2-game/
 │   ├── skygnd.par
 │   └── textures.prj
 │
-├── cd/                      the ORIGINAL 1995 DOS CD, copied as-is (folders and all)
+├── cd/                      YOUR COPY - the ORIGINAL 1995 DOS CD, copied as-is (folders and all)
 │   ├── CFGS/
 │   ├── DEMODATA/
 │   ├── GIDDI/
@@ -27,7 +31,7 @@ MW2-game/
 │   ├── BINMOD.EXE  CPU.EXE  ENGLISH.LRM  FIXBOOT.EXE  INSTALL.EXE  INWIN.EXE
 │   ├── MW2REG.EXE  OLD_HERC.DRV  README.TXT  REGISTER.BAT  SETSOUND.EXE  VESACHK.EXE
 │
-├── install/                 the CONTENTS of C:\MECH2 after running the game's INSTALL
+├── install/                 YOUR COPY - the CONTENTS of C:\MECH2 after running the game's INSTALL
 │   ├── MEK/
 │   ├── SETUP/
 │   ├── SND/
@@ -36,22 +40,22 @@ MW2-game/
 │   ├── MW2CAR.CFG  MW2DIF.CFG  MW2MSN.CFG  MW2PRM.CFG  MW2REG.CFG  MW2SND.CFG  STAR0.CFG
 │   └── SYMLOG.TXT  TMP.OUT
 │
-├── mt32/                    Roland MT-32 ROMs (menu music)
+├── mt32/                    YOUR COPY - Roland MT-32 ROMs (menu music)
 │   ├── MT32_CONTROL.ROM
 │   └── MT32_PCM.ROM
 │
-├── music/                   CD soundtrack, optional (FLAC, MP3 or WAV)
+├── music/                   YOUR COPY - CD soundtrack ripped from your disc, optional (FLAC, MP3 or WAV)
 │   ├── Track02.mp3
 │   ├── Track03.mp3
 │   │   ...
 │   └── Track27.mp3          (26 files - there is no Track01, that's the data track)
 │
-├── titanium/                optional, 3 files from the Titanium Edition disc's Install\16bit\
+├── titanium/                YOUR COPY - optional, 3 files from the Titanium Edition disc's Install\16bit\
 │   ├── MW2.PRJ
 │   ├── SKYGND.PAR
 │   └── particle.PID
 │
-└── ultrasnd/                optional, Gravis UltraSound package (menu music without the MT-32 ROMs)
+└── ultrasnd/                YOUR COPY - optional, Gravis UltraSound package (menu music without the MT-32 ROMs)
     ├── MIDI/                ULTRAMID.INI + ~280 .PAT files - this is the part that matters
     └── ARROW.SND  EMUSET.EXE  GRAVUTIL.EXE  GUSEMU.EXE  MEGAEM.EXE ... (rest of the package, harmless)
 ```
