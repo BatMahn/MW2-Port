@@ -77,6 +77,7 @@ typedef struct {
     char          loadout[16];
     float         armor[MEK_LOC_COUNT], rear[MEK_LOC_COUNT], internal[MEK_LOC_COUNT];   /* floats, as the engine keeps them */
     int           armor_max[MEK_LOC_COUNT], rear_max[MEK_LOC_COUNT];   /* starting values (HUD damage levels) */
+    float         armor_mult;       /* the loader's armour factor (combat_set_armor_mult; 1 until set) */
     combat_weapon weapons[COMBAT_MAX_WEAPONS];
     int           weapon_count;
     float         heat, sink_per_tick;
@@ -100,6 +101,8 @@ typedef struct {
     float         seq_ticks;         /* ticks since the sequence / shutdown began (engine c[0x23]) */
     unsigned      rng;
     int           ammo_blown;        /* set when an overheat ammo explosion happened (for messages) */
+    int           ammo_boom_loc;     /* the location (1-8) of the last bin explosion, 0 none: msim puts explosion 7 there
+                                        (0x100167b0 -> 0x10045c30, a damaging effect type) and clears it */
     unsigned      breach_latch;      /* per location (bit l): its armour (front or rear) has been used up (location word
                                         flag 0x4000, 0x100171d0) */
     int           breach_sound;      /* a human pilot, up: a location's armour first used up - MECRDWA1 0xec (0x1001732e);
@@ -152,6 +155,9 @@ void combat_set_planet(const combat_planet *p);
  * 0x100171d0 applies no damage to anyone (weapon hits, splash, collisions, falls) and 0x10015e10 (BlowAmmo) does nothing.
  * The sim sets it; 1 by default (tools) */
 extern int combat_damage_live;
+extern int combat_ct_split;
+/* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
+void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */
 /* TOGGLE_AUTOEJECT (engine DAT_1024bfbc, default off; one switch for every unit): an ammunition explosion (0x100167b0)
  * then puts the unit in state 5 and calls 0x10016280 - the player ejects (hostile planet: aborted, an ordinary death);
  * an AI mech (single player, DAT_1024ffcc == 0) goes on to state 4 there, an ordinary death */
@@ -164,6 +170,11 @@ uint16_t combat_mek_rating(const mek_def *d);
  * colder than -30 / hotter than 50: Easy 0.001068 / 0.002136 / 0.001068, Medium 0.000763 / 0.001526 / 0.000687,
  * Hard 0.000687 / 0.001030 / 0.000549 (AI 'Mechs: Medium's) */
 void combat_set_player_difficulty(combat_unit *u, int difficulty);
+/* the loader's armour factor (engine 0x10041410 / DOS 0x4c760, by MW2DIF +5 difficulty 0 / 1 / 2): front and rear
+ * armour (not structure) x 4 for the player; x 3 / 3 / 4 for a unit of alliance 0 (the player's side); x 1 / 3 / 4
+ * for any other (enemy, neutral). combat_armor_mult gives the factor, combat_set_armor_mult applies it once */
+float combat_armor_mult(int player, int alliance, int difficulty);
+void combat_set_armor_mult(combat_unit *u, float mult);
 /* advance time: weapon cycles, heat, shutdown */
 void combat_tick(combat_unit *u, float dt);
 /* trigger ready weapons in range at `target` and resolve projectiles now due.

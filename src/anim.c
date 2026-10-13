@@ -108,3 +108,92 @@ int anim_loop_range(const anim_set *s, int first, int count, int *ls, int *le)
     if (*le > count) { *le = count; *ls = count - 2 * d; if (*ls < 0) *ls = 0; }
     return d;
 }
+
+/* engine 0x1000e600: a key's time by the gait (object +0x8c): 1 walk r + r/2, 2 trot r, 3 run r - r/4, 0 (stopping) r */
+int anim_key_time(int gait, int rate)
+{
+    return gait == 1 ? rate + (rate >> 1) : gait == 3 ? rate - (rate >> 2) : rate;
+}
+
+void anim_player_init(anim_player *p, int rate)
+{
+    memset(p, 0, sizeof *p);
+    p->key = -1; p->cur = -1; p->dur = rate;   /* 0x1000dec0 load: +0x94 = the TSK rate, +0x84 = -1, key -1 */
+}
+
+/* the key player (engine 0x1000dec0 case 1, one call a frame per animated node; the keys are the same for every node of
+ * a mech, so one player drives them all). req = the sequence asked for (object +0x88, set by the gait code 0x1000b3a0:
+ * -1 = stop), gait = +0x8c. A key's delta plays linearly over its time; when its time is up (one key a call, as the
+ * engine) the key just finished decides the next:
+ *   0x40  byte 5 = a sequence: go to it if it is the one asked for;
+ *   0x80  byte 5: go to it if a sequence other than the one playing is asked for;
+ *   0x100 byte 6: go to it if a stop is asked for (req -1) - the run's stop goes through the walk;
+ *         going: search from the next key (up or down by the sequence number) for that sequence's start (0x1, byte 4),
+ *         then on from there for a key flagged 0x200 whose byte 7 is the sequence playing, and continue AFTER it;
+ *   else 0x8 (always) / 0x4 (when the sequence asked for is in bytes 4-7): back to the nearest earlier key flagged 0x2;
+ *   0x400 (not jumping) or past the last key: the sequence ends - the keys sum back to the standing pose there (walk ends
+ *         at key 11, reverse at 31). Asked to stop, the mech is then idle at rest; asked to walk, it starts again at key 0.
+ * So a stopping mech finishes its stride and walks its feet together at the plain key time (gait 0), as the original.
+ * Returns ANIM_EV_* for the key entered. Not modelled: the engine adds deltas to the node, so the few transitions whose
+ * keys do not meet (e.g. Timber Wolf / Mad Dog walk 5 -> run 16: one hip 17 degrees) carry an offset while running;
+ * here the pose is the table's at the key reached. */
+int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks)
+{
+    int f, next, trans = 0, target = -1, jumped = 0, ev = 0;
+    uint32_t fl;
+    if (!p->on) {   /* idle: start when a sequence is asked for (+0x80 bit 0, the key time set; no time used this call) */
+        if (req == -1 && p->cur == -1) return 0;
+        p->on = 1;
+        p->dur = anim_key_time(gait, rate);
+        return 0;
+    }
+    if (p->key == -1) { p->key = 0; p->left = 0; p->len = 0; p->cur = 0; }   /* from the first key (sequence 0) */
+    else p->left -= ticks;
+    if (p->left > 0) {
+        p->t = (float)p->key + (p->len > 0 ? 1.0f - p->left / p->len : 1.0f);
+        return 0;
+    }
+    f = p->key;
+    next = f + 1;
+    p->left += (float)p->dur;                          /* the key time set when this key began */
+    if (p->left < -(float)p->dur) p->left = -(float)p->dur;
+    if (f < 0 || f >= s->key_count) { p->key = -1; p->on = 0; p->cur = -1; p->t = 0; return 0; }
+    fl = s->key_flags[f];
+    if (fl & 0x40) { target = (int8_t)s->key_bytes[f][1]; trans = req == target; }
+    if (fl & 0x80) { target = (int8_t)s->key_bytes[f][1]; if (req != -1 && p->cur != req) trans = 1; }
+    if (fl & 0x100) { target = (int8_t)s->key_bytes[f][2]; trans |= req == -1; }
+    if (trans) {
+        int dir = target > p->cur ? 1 : -1, j = f, found = 0;
+        for (;;) {
+            j += dir;
+            if (j >= s->key_count || j < 0) break;
+            if ((s->key_flags[j] & 0x01) && (int8_t)s->key_bytes[j][0] == target) { found = 1; break; }
+        }
+        if (found) {
+            for (found = 0; j < s->key_count && !found; j++)   /* continues past the key found (0x1000e460) */
+                if ((s->key_flags[j] & 0x200) && (int8_t)s->key_bytes[j][3] == p->cur) found = 1;
+            if (found) { next = j; jumped = 1; }
+        }
+    }
+    if (!jumped && (fl & 0xc)) {
+        int loop = 1, b;
+        if (fl & 0x4)
+            for (loop = 0, b = 0; b < 4 && (int8_t)s->key_bytes[f][b] != -1; b++) if ((int8_t)s->key_bytes[f][b] == req) { loop = 1; break; }
+        if (loop) { int j = f - 1; while (j > 0 && !(s->key_flags[j] & 0x2)) j--; next = j; }
+    }
+    if ((!jumped && (fl & 0x400)) || next >= s->key_count) { p->left = 0; next = -1; }
+    if (jumped) p->cur = target;
+    if (next != -1) {
+        p->key = next;
+        p->len = p->left;
+        p->t = (float)next;
+        p->dur = anim_key_time(gait, rate);
+        if (s->key_flags[next] & 0x10) ev |= ANIM_EV_SLOW;
+        if (s->key_flags[next] & 0x800) ev |= ANIM_EV_STEP;
+    } else {
+        p->key = -1;
+        p->t = (float)(f + 1);   /* the sequence's last key reached: the standing pose */
+        if (req == -1) { p->cur = -1; p->on = 0; }
+    }
+    return ev;
+}

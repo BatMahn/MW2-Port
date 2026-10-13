@@ -24,6 +24,26 @@ void skygnd_defaults(skygnd *s);
 /* Look up a mission (4-letter code, case-insensitive). Returns 0 if found. */
 int  skygnd_lookup(const char *path, const char *mission, skygnd *out);
 
+/* The Titanium edition's 16-bit SKYGND.PAR (its engine mercsw.dll reads it at 0x10053b00 with one sscanf,
+ * 0x1009e9e0): "mission=%4s globalintensity=%d tile_ground=%f grounddelta=%f ground_max=%f shadowtable=%d
+ * gclip=%f,%f,%f amb=%d,%d,%d wa=%d,%d,%d,%c,%f,%f,%f wb=... fog=%d,%d,%d density=%f,%f,%f sky=%d,%d,%d skyAnim=%f,%f".
+ * The text from a '#' on is dropped; the first matching line wins. The values as stored, scaled as the engine does
+ * right after the read (0x10053d1c..0x10054097): */
+typedef struct {
+    int   found;
+    int   intensity;                 /* globalintensity */
+    float tile_ground;               /* tile_ground / 128 (0x10053d34): texture repeats across the ground quad's half */
+    float ground_max;                /* ground_max x 2 (0x10053dbf): the ground quad's half size is this x 2 (0x1005548f) */
+    int   fog[3];                    /* fog=R,G,B (0-255) */
+    float dens_y, dens_m, dens_z;    /* density=Y,M,Z; Z x 10 (0x10053d22): the distance fog's full-fog depth */
+    int   sky[3];                    /* sky=R,G,B: the clear colour */
+    float anim[2];                   /* skyAnim / 181 (0x1005407f): the cloud layer's U, V drift per engine tick */
+    int   amb[3];                    /* amb=R,G,B */
+} skygnd_ti;
+/* Look up a mission (4-letter code) in a Titanium SKYGND.PAR. Fields a line lacks (or that follow one sscanf could not
+ * read) are 0; the engine keeps whatever the previous mission set there. Returns 0 if found. */
+int  skygnd_ti_lookup(const char *path, const char *mission, skygnd_ti *out);
+
 #define SKYGND_GROUND_SLOT 0x08
 #define SKYGND_SKY_SLOT    0x8C
 #define SKYGND_FOG_UNIT    0.1f   /* PowerVR density -> per game unit */

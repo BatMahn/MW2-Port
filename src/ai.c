@@ -215,7 +215,7 @@ static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
     m->man_limit = 9050.0f;                                                     /* 0x235a ticks (0x1001f290) */
     switch (man) {
     case 0: m->man_limit = (float)(ai_rand(m, 5) * 181u + 1448u); break;      /* rand(5) x 181 + 1448 */
-    case 1: m->man_limit = 3620.0f; break;
+    case 1: m->man_limit = 3620.0f; m->flank_face = 0; break;
     case 3: m->weave = ai_rand(m, 2) ? 1.0f : -1.0f; m->weave_ticks = 0; break;
     case 4: m->man_limit = 905.0f; m->throttle = 0; m->turn = 0; break;      /* 0x389 */
     case 7: {   /* 0x1001f290 case 7 -> 0x1001f630: a point 100 m from the target in a 16-way slot round its facing:
@@ -267,29 +267,44 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
     case 1: {   /* flank (0x1001f9d0): move to the slot point, re-pick every 543 ticks */
         m->flank_retarget -= ticks;
         if (m->flank_slot < 0 || m->flank_retarget <= 0) {
-            float rel = wrap180(atan2f(v->self_x - v->enemy_x, v->self_z - v->enemy_z) * 180.0f / 3.14159265f - v->enemy_heading);
-            int sector = ((int)lrintf(rel / 45.0f) + 8) % 8, slot, k2;
-            if (m->flank_slot >= 0 && v->flank_slots) v->flank_slots[m->flank_slot]--;
-            if (sector == 0) {                         /* in front: a side at random, the other if taken */
-                slot = ai_rand(m, 2) ? 2 : 6;
-                if (v->flank_slots && v->flank_slots[slot]) slot = slot == 2 ? 6 : 2;
-            } else if (sector >= 2 && sector <= 4) {
-                slot = 4;
-                for (k2 = 2; k2 <= 4; k2++) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
-            } else if (sector >= 5 && sector <= 6) {
-                slot = 4;
-                for (k2 = 6; k2 >= 4; k2--) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
-            } else {
-                slot = sector == 1 ? 3 : 5;            /* 1 -> 3, 7 -> 5 */
+            /* 0x1001ea8e: every 0x21f ticks the slot's point is placed again round the target as it stands now
+             * (0x1001f630 -> 0x1001f6b0); the slot itself is chosen once, when the manoeuvre starts (+0x184 = -1 ->
+             * 0x10020d00), and kept */
+            if (m->flank_slot < 0) {
+                float rel = wrap180(atan2f(v->self_x - v->enemy_x, v->self_z - v->enemy_z) * 180.0f / 3.14159265f - v->enemy_heading);
+                int sector = ((int)lrintf(rel / 45.0f) + 8) % 8, slot, k2;
+                if (sector == 0) {                         /* in front: a side at random, the other if taken */
+                    slot = ai_rand(m, 2) ? 2 : 6;
+                    if (v->flank_slots && v->flank_slots[slot]) slot = slot == 2 ? 6 : 2;
+                } else if (sector >= 2 && sector <= 4) {
+                    slot = 4;
+                    for (k2 = 2; k2 <= 4; k2++) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
+                } else if (sector >= 5 && sector <= 6) {
+                    slot = 4;
+                    for (k2 = 6; k2 >= 4; k2--) if (!v->flank_slots || !v->flank_slots[k2]) { slot = k2; break; }
+                } else {
+                    slot = sector == 1 ? 3 : 5;            /* 1 -> 3, 7 -> 5 */
+                }
+                if (v->flank_slots) v->flank_slots[slot]++;
+                m->flank_slot = slot;
             }
-            if (v->flank_slots) v->flank_slots[slot]++;
-            m->flank_slot = slot;
             m->flank_retarget = 543.0f;
-            {
-                float a = (v->enemy_heading + (float)slot * 45.0f) * 3.14159265f / 180.0f;
-                m->flank_x = v->enemy_x + sinf(a) * 15000.0f;
-                m->flank_z = v->enemy_z + cosf(a) * 15000.0f;
+            {   /* the 16-way table 0x1024cd70 at slot x 2: (x, z) = 15000 / (f_x, f_z) in the target's frame (0 -> 0):
+                 * the eight directions on a square - the diagonals 212 m out, the sides 150 m */
+                static const float FX[8] = {0, 1, 1, 1, 0, -1, -1, -1}, FZ[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+                float a = v->enemy_heading * 3.14159265f / 180.0f, lx = 15000.0f * FX[m->flank_slot], lz = 15000.0f * FZ[m->flank_slot];
+                m->flank_x = v->enemy_x + cosf(a) * lx + sinf(a) * lz;
+                m->flank_z = v->enemy_z - sinf(a) * lx + cosf(a) * lz;
             }
+        }
+        {   /* 0x1001f9d0: +0x184 = 0 - steer for the slot (throttle 0x100134c0 with R 4000: none within 40 m); once the
+             * throttle is none and the target is more than 5 deg (0x10247528, double) off the legs, +0x184 = 1: steer for
+             * the TARGET, stepping round at 1/640 (0x1001f910) while more than 5 deg off, else standing - until the slot
+             * is more than 45 m away (0x458ca000; a re-picked slot every 0x21f ticks) */
+            float fx = m->flank_x - v->self_x, fz = m->flank_z - v->self_z, fd = sqrtf(fx * fx + fz * fz);
+            if (m->flank_face && fd > 4500.0f) m->flank_face = 0;
+            if (!m->flank_face && fd < 4000.0f && fabsf(wrap180(v->enemy_bearing - v->heading)) > 5.0f) m->flank_face = 1;
+            if (m->flank_face) { *R = 1e9f; break; }   /* the caller steers for the target: no throttle, 10 % past 5 deg */
         }
         *R = 4000.0f;
         *dist = -1.0f;   /* tell the caller to steer to the flank point */

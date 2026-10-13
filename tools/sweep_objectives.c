@@ -472,8 +472,11 @@ static int run_scene(prj_archive *a, const char *scene)
             case MTBL_K_PROTECT: doable = protect_threat(&s, nd->target) >= 0; break;
             default: break;
             }
-            {   /* protecting comes after everything else */
-                int32_t key = s.logic.started[0][k] + (nd->kind == MTBL_K_PROTECT ? 100000000 : 0);
+            {   /* protecting comes after everything else - except that a main objective's protect (with a threat) goes
+                 * before the optional objectives (FUCH: the firebase's attackers before the optional kills outside the
+                 * mission area, now that enemy armour carries the loader's x 3, 0x10041410) */
+                int32_t key = s.logic.started[0][k] + (nd->kind == MTBL_K_PROTECT ? (nd->objective == 'M' ? 50000000 : 100000000)
+                                                                                  : (nd->objective == 'O' ? 60000000 : 0));
                 if (doable && key < best_t) { best_t = key; best = k; }
             }
         }
@@ -642,13 +645,17 @@ static int run_scene(prj_archive *a, const char *scene)
                 }
             }
             for (q = 0; q < t0->node_count && s.player_attacks; q++) {
-                if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) || !wanted[q] ||
+                if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) ||   /* hidden protects too: failing one fails the mission */
+                    
                     strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0) continue;   /* (a record both to destroy and to protect: destroy wins) */
                 for (b2 = 0; b2 < s.bld_count && s.player_attacks; b2++) {
                     struct msim_building g = s.bld[b2];
                     if (g.hp <= 0 || !(widen((unsigned)g.type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;
+                    if (getenv("MW2_SWEEP_HOLDDBG") && step % 20 == 0) printf("  holddbg %s box %.0f..%.0f x %.0f..%.0f line %.0f,%.0f -> %.0f,%.0f\n", bld_rec(&s, b2), g.mn[0], g.mx[0], g.mn[2], g.mx[2], s.player[0], s.player[2], tx, tz);
                     g.mn[0] -= 2000; g.mn[2] -= 2000; g.mx[0] += 2000; g.mx[2] += 2000;
-                    if (seg_box(&g, s.player[0], s.player[2], tx, tz)) {
+                    float fx = tx - s.player[0], fz = tz - s.player[2], fl = sqrtf(fx * fx + fz * fz);
+                    if (fl > 1) { fx = s.player[0] + fx / fl * 150000.0f; fz = s.player[2] + fz / fl * 150000.0f; } else { fx = tx; fz = tz; }
+                    if (seg_box(&g, s.player[0], s.player[2], fx, fz)) {   /* 1500 m (the aim ray): misses fly on past the target */
                         s.player_attacks = 0;
                         if (at.since > 2.0f) { at.brg += 67.5f; at.since -= 1.0f; }   /* try another side */
                         /* every side passes the protected structure (GOLDENS4 fighting inside the palace complex): after

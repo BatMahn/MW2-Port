@@ -51,7 +51,11 @@ struct glr {
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
     GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir;
     GLint  u_far;
-    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band;
+    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_tifog, u_blend;
+    /* the Titanium edition's sky dome (glr_set_skydome): triangles (pos, texel uv / (size - 1), slot) by slot */
+    GLuint dome_vao, dome_vbo, dome_tex[GLR_SLOTS];
+    float *dome_v;                          /* x, y, z, u, v per vertex (game coordinates, GL z) */
+    int    dome_n, dome_first[GLR_SLOTS], dome_count[GLR_SLOTS], dome_has[GLR_SLOTS];
     uint8_t dos_img[17][256][4];
     /* sprites (weapon effects) */
     GLuint spr_vao, spr_vbo;
@@ -109,6 +113,9 @@ static const char *FS =
     "uniform float u_ambient, u_fog_density;\n"
     "uniform int u_dos, u_dos_dir; uniform sampler2D u_dos_tab; uniform vec3 u_dos_lpos; uniform float u_dos_amb, u_dos_fogdist;\n"
     "uniform float u_alpha; uniform int u_mga_lod;\n"
+    /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), w the camera's
+     * factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
+    "uniform vec4 u_tifog; uniform int u_blend;\n"
     /* the DOS horizon fill (MW2.EXE 0x3c000): a pixel is sky when its view ray's world y >= 0 - ray = R (sx - cx) / fx +
      * U (cy - sy) / fy + F; above the line a haze band of u_hz_band pixels fades from 0xEE (on the line) to 0xE0 */
     "uniform int u_horizon; uniform vec3 u_hz_r, u_hz_u, u_hz_f; uniform vec4 u_hz_c; uniform float u_hz_band;\n"
@@ -162,12 +169,12 @@ static const char *FS =
     "    float si = lev >= 15.0 ? ti : floor(texture(u_dos_tab, vec2((ti + 0.5) / 256.0, (lev + 0.5) / 17.0)).r * 255.0 + 0.5);\n"
     "    o_color = vec4(dos_colour(si), 1.0); return;\n"
     "  }\n"
-    "  vec3 base = u_mono.a > 1.5 ? v_color : u_mono.a > 0.0 ? u_mono.rgb : v_color;\n"
+    "  vec3 base = u_mono.a > 1.5 ? v_color : u_mono.a > 0.0 ? u_mono.rgb : v_color; float ta = 1.0;\n"
     "  if (u_textured != 0 && u_mono.a <= 0.0) {\n"
     "    vec4 t;\n"
     "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, v_uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
     "    else t = texture(u_tex, v_uv / u_texsize);\n"
-    "    if (t.a < 0.5) discard; base = t.rgb; }\n"
+    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5) discard; base = t.rgb; ta = t.a; }\n"
     "  float n = length(v_normal);\n"
     "  vec3 L = u_point != 0 ? normalize(u_lpos - v_world) : u_light;\n"
     "  float diff = n > 0.0 ? abs(dot(v_normal / n, L)) : 0.5;\n"   /* two-sided: winding unknown */
@@ -181,7 +188,11 @@ static const char *FS =
     "  float fk = mod(fi, 128.0), fs = floor(fi / 128.0);\n"
     "  float ft = fk == 0.0 ? 255.0 : floor(256.0 * exp2(-fk / 128.0));\n"
     "  float ff = fs >= 9.0 ? 0.0 : floor(ft / exp2(fs)) / 256.0;\n"
-    "  o_color = vec4(lit + (u_fog_color - lit) * ff, u_alpha);\n"
+    /* Titanium (mercsw.dll): the vertex fog the D3D plugin takes as the specular alpha a (fog = 1 - a); the world, the
+     * objects and the ground (0x10053474, 0x10001b53): a = (1 - min(1, z / Z)) x the camera's factor (density Y's
+     * ground fog / low cloud, 0x1006a851); Z = 0: no distance fog */
+    "  if (u_tifog.x > 0.5) ff = 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, fz / u_tifog.y) : 1.0) * u_tifog.w;\n"
+    "  o_color = vec4(lit + (u_fog_color - lit) * ff, u_blend != 0 ? ta * u_alpha : u_alpha);\n"
     "}\n";
 
 static GLuint compile(GLenum type, const char *src)
@@ -264,6 +275,11 @@ glr *glr_create(void)
     r->u_hz_f = glGetUniformLocation(r->prog, "u_hz_f");
     r->u_hz_c = glGetUniformLocation(r->prog, "u_hz_c");
     r->u_hz_band = glGetUniformLocation(r->prog, "u_hz_band");
+    r->u_tifog = glGetUniformLocation(r->prog, "u_tifog");
+    r->u_blend = glGetUniformLocation(r->prog, "u_blend");
+    glGenVertexArrays(1, &r->dome_vao);
+    glGenBuffers(1, &r->dome_vbo);
+    glGenTextures(GLR_SLOTS, r->dome_tex);
     glGenTextures(1, &r->dos_tex);
     return r;
 }
@@ -279,6 +295,10 @@ void glr_destroy(glr *r)
     glDeleteBuffers(1, &r->spr_vbo);
     glDeleteVertexArrays(1, &r->spr_vao);
     glDeleteTextures(64, r->spr_tex);
+    glDeleteTextures(GLR_SLOTS, r->dome_tex);
+    glDeleteBuffers(1, &r->dome_vbo);
+    glDeleteVertexArrays(1, &r->dome_vao);
+    free(r->dome_v);
     {
         int l;
         for (l = 0; l < GLR_LAYERS; l++) {
@@ -293,7 +313,7 @@ void glr_destroy(glr *r)
 
 void glr_flush_textures(glr *r)
 {
-    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); }
+    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); memset(r->spr_src, 0, sizeof r->spr_src); }
 }
 
 static int g_billboards;   /* TEST ONLY: colour type 3 billboards in the last static (world) layer */
@@ -707,6 +727,47 @@ static float *env_vertex(float *f, float x, float y, float z, float nx, float ny
 }
 
 void glr_set_bank0(glr *r, texture *const bank0[GLR_SLOTS]) { if (r) r->bank0 = bank0; }
+
+void glr_set_skydome(glr *r, const wtb_object *o, texture *const slots[GLR_SLOTS])
+{
+    int i, k, s, n = 0;
+    free(r->dome_v);
+    r->dome_v = NULL;
+    r->dome_n = 0;
+    memset(r->dome_count, 0, sizeof r->dome_count);
+    memset(r->dome_has, 0, sizeof r->dome_has);
+    if (!o || o->poly_count <= 0) return;
+    for (i = 0; i < o->poly_count; i++) if (o->polys[i].n >= 3) n += (o->polys[i].n - 2) * 3;
+    if (!(r->dome_v = malloc((size_t)(n ? n : 1) * 5 * sizeof *r->dome_v))) return;
+    for (s = 0; s < GLR_SLOTS; s++) {   /* grouped by texture */
+        const texture *t = slots[s];
+        r->dome_first[s] = r->dome_n;
+        for (i = 0; i < o->poly_count; i++) {
+            const wtb_poly *p = &o->polys[i];
+            if ((p->color & 0xff) != s || p->n < 3 || !t) continue;
+            for (k = 1; k + 1 < p->n; k++) {   /* a fan */
+                int c, id[3] = {p->idx[0], p->idx[k], p->idx[k + 1]};
+                for (c = 0; c < 3; c++) {
+                    const wtb_vertex *q = &o->verts[id[c] < o->vert_count ? id[c] : 0];
+                    float *f = r->dome_v + (size_t)r->dome_n * 5;
+                    f[0] = (float)q->x; f[1] = (float)q->y; f[2] = -(float)q->z;
+                    f[3] = (float)q->a / (float)(t->w > 1 ? t->w - 1 : 1); f[4] = (float)q->b / (float)(t->h > 1 ? t->h - 1 : 1);
+                    r->dome_n++;
+                }
+            }
+        }
+        r->dome_count[s] = r->dome_n - r->dome_first[s];
+        if (!r->dome_count[s]) continue;
+        r->dome_has[s] = 1;
+        glBindTexture(GL_TEXTURE_2D, r->dome_tex[s]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   /* bilinear, no mips (dx5draw 0x100034a0) */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+}
 int glr_billboard_count(void) { return g_billboards; }
 
 void glr_set_sprites(glr *r, const glr_sprite *s, int n)
@@ -897,6 +958,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform1i(r->u_horizon, 0);
     glUniform1i(r->u_mga_lod, 0);
     glUniform1f(r->u_alpha, 1.0f);
+    glUniform1i(r->u_blend, 0);
+    glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
     glUniform1i(r->u_unlit, r->dos);            /* DOS: the sky and ground are flat palette colours, unlit (0x3c000) */
     glUniform2f(r->u_texsize, 1, 1);            /* environment UVs are in texture repeats */
     glUniform1i(r->u_textured, 1);
@@ -907,7 +970,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glUniform4fv(r->u_wire, 1, off);
         glUniform4fv(r->u_mono, 1, off);
     }
-    if (!v->wire && !v->solo && (r->env_has[0] || r->env_has[1] || r->dos)) {
+    if (!v->wire && !v->solo && (r->env_has[0] || r->env_has[1] || r->dos || r->dome_n > 0)) {
         /* Sky tent and ground quad, built around the camera each frame (vertex table
          * from the 3dfx engine). Sky: own projection, no depth, no fog. Ground:
          * world-anchored texture, fogged. GL z = -game z. */
@@ -998,11 +1061,13 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, smvp);
             glUniformMatrix4fv(r->u_view, 1, GL_FALSE, sview);
             glUniform1f(r->u_fog_density, 0);
+            glUniform4f(r->u_tifog, 0, 0, 0, 1);
             glUniform1f(r->u_ambient, 1);
             glBindTexture(GL_TEXTURE_2D, v->flat_sky && r->sky_flat ? r->sky_flat : r->env_tex[1]);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)(v->mga_mip ? GL_NEAREST : eminf));   /* Mystique sky: one level */
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)emagf);
             glDrawArrays(GL_TRIANGLES, 0, 30);   /* walls + ceiling */
+            glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
             glDepthMask(GL_TRUE);
             glEnable(GL_DEPTH_TEST);
             glUniform1f(r->u_ambient, v->ambient);
@@ -1027,6 +1092,61 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniform1f(r->u_alpha, 1.0f);
             glUniform1i(r->u_unlit, r->dos);
             glUniform1i(r->u_textured, 1);
+        }
+        if (r->dome_n > 0 && !r->dos && v->ortho_w <= 0) {
+            /* the Titanium sky dome: around the eye (its x, z; the dome's own height), no depth, unlit, not fogged,
+             * alpha-blended (the textures of type > 0: Render type 8, dx5draw 0x100044ff - SRCALPHA / INVSRCALPHA);
+             * the cloud ceiling (slot 0x8c) drifts by the skyAnim offsets (mercsw 0x1000127c) */
+            static float *dv;
+            static int dcap;
+            float dview[16], dproj[16], dmvp[16], *f;
+            int k, sl;
+            if (dcap < r->dome_n) { free(dv); dcap = r->dome_n; dv = malloc((size_t)dcap * FLOATS_PER_VERTEX * sizeof *dv); }
+            if (dv) {
+                f = dv;
+                for (sl = 0; sl < GLR_SLOTS; sl++)
+                    for (k = r->dome_first[sl]; k < r->dome_first[sl] + r->dome_count[sl]; k++) {
+                        const float *q = r->dome_v + (size_t)k * 5;
+                        float du = sl == 0x8c ? v->ti_scroll[0] : 0, dvv = sl == 0x8c ? v->ti_scroll[1] : 0;
+                        f = env_vertex(f, q[0], q[1] - eye[1], q[2], 0, 0, 0, q[3] + du, q[4] + dvv);
+                    }
+                look_at(dview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]});
+                perspective(dproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 100.0f, 2.0e8f);
+                mat_mul(dmvp, dproj, dview);
+                glBindVertexArray(r->dome_vao);
+                glBindBuffer(GL_ARRAY_BUFFER, r->dome_vbo);
+                glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)r->dome_n * FLOATS_PER_VERTEX * sizeof *dv), dv, GL_STREAM_DRAW);
+                {
+                    static const int sizes[6] = {3, 3, 2, 3, 1, 1};
+                    size_t off = 0;
+                    int a;
+                    for (a = 0; a < 6; a++) {
+                        glEnableVertexAttribArray((GLuint)a);
+                        glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float), (const void *)(off * sizeof(float)));
+                        off += (size_t)sizes[a];
+                    }
+                }
+                glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, dmvp);
+                glUniformMatrix4fv(r->u_view, 1, GL_FALSE, dview);
+                glUniform1f(r->u_fog_density, 0);
+                glUniform4f(r->u_tifog, 0, 0, 0, 1);
+                glUniform1i(r->u_unlit, 1);
+                glUniform1i(r->u_blend, 1);
+                for (sl = 0; sl < GLR_SLOTS; sl++) {
+                    if (!r->dome_count[sl]) continue;
+                    glBindTexture(GL_TEXTURE_2D, r->dome_tex[sl]);
+                    glDrawArrays(GL_TRIANGLES, r->dome_first[sl], r->dome_count[sl]);
+                }
+                glUniform1i(r->u_blend, 0);
+                glUniform1i(r->u_unlit, r->dos);
+                glUniform4f(r->u_tifog, v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
+                glDisable(GL_BLEND);
+                glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
+                glBindVertexArray(r->env_vao);
+                glBindBuffer(GL_ARRAY_BUFFER, r->env_vbo);
+            }
         }
         if (r->env_has[0] && !r->dos) {
             glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
@@ -1155,6 +1275,11 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         }
         glUniform1i(r->u_unlit, 1);
         glUniform1i(r->u_textured, 1);
+        if (v->fx_blend) {   /* Titanium: Render type 8, SRCALPHA / INVSRCALPHA (dx5draw 0x100044ff, 0x100035ab) */
+            glUniform1i(r->u_blend, 1);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
         for (k = 0; k < r->spr_n; k++) {
             glBindTexture(GL_TEXTURE_2D, sprite_texture(r, r->spr[k].tex));
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
@@ -1162,6 +1287,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniform2f(r->u_texsize, (float)r->spr[k].tex->w, (float)r->spr[k].tex->h);
             glDrawArrays(GL_TRIANGLES, k * 6, 6);
         }
+        if (v->fx_blend) { glUniform1i(r->u_blend, 0); glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
         glUniform1i(r->u_unlit, 0);
         glBindVertexArray(0);
     }

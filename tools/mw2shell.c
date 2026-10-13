@@ -80,7 +80,7 @@ static const screen_def SCREENS[] = {
 static uint8_t g_fb[W * H * 3];
 
 /* ---- music (MW2SHELL main loop): per-screen numbers for contexts Wolf / Falcon / neutral
- * (tables 0x838c8 / 0x83910 / 0x83880); 0x20000000 keep, 0x10000000 stop first, 0 no change.
+ * (tables 0x838c8 / 0x83910 / 0x83880); 0x20000000 stop (the song closed, 0x35c4c), 0x10000000 stop first, 0 no change.
  * DATABASE index = number + driver offset (ULTRA.MDI: 32, table 0x83e14); entry = index - 1. */
 static const uint32_t MUSIC[3][17] = {
     {0x25, 0x24, 0, 0, 0x20000000, 0x24, 0, 0x23, 0x20000000, 0x25, 0x20000000, 0x25, 0x24, 0x25, 0x26, 0x20000000, 0x20000000},
@@ -688,7 +688,14 @@ static void apply_music(int screen, int clan)
     long n;
     if ((!g_bank && !g_mt32) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
     v = MUSIC[clan][screen];
-    if (!v || (v & 0x20000000)) return;
+    if (!v) return;
+    if (v & 0x20000000) {   /* 0x35c4c / main loop 0x36700: the song closed and forgotten (0xa6380 = 0, 0xa6384 = 0) */
+        sfx_lock(g_sfx);
+        if ((g_song || g_msong) && getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
+        gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1;
+        sfx_unlock(g_sfx);
+        return;
+    }
     /* the song set by device (driver table 0x83e14): MT32MPU.MDI +24, ULTRA.MDI +32; DATABASE index = number + that */
     entry = (int)(v & 0xffffff) + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1;
     sfx_lock(g_sfx);
@@ -704,10 +711,16 @@ static void apply_music(int screen, int clan)
         }
         g_song_entry = entry;
         g_song_len = n; g_song_rate = sfx_rate(g_sfx);
+        if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: start entry %d (screen %d)\n", entry, screen);   /* TEST ONLY */
     }
     sfx_unlock(g_sfx);
 }
 
+/* back from a mission: the original's shell is a new process ("mw2shell sim", main 0x36700) that restores the saved
+ * screen (MW2PRM.CFG, 0x374c0) and applies its music with nothing playing - so the screen's song starts again (training
+ * 14: Wolf 0x26 / Falcon 0x29, Instant Action 7: 0x23, the roster 12: 0x24 / 0x27; the debriefing 3 has none: silent).
+ * The port's shell stays up with the song closed for the mission (launch_*): the same call restarts it */
+static void music_after_mission(int screen, int clan) { apply_music(screen, clan); }
 
 /* ================= Instant Action: "Trials of Grievance" (screen 7, FUN_00029680) =================
  * Hotspots 0x7e8a4 (25), scenarios 0x7f2fc, planet videos 0x7f2a0, clan emblem videos 0x7f328,
@@ -856,16 +869,19 @@ static void read_results(const char *dir)
 
 /* the simulation's command line: MW2_SIM if set (tests), else the glview beside this executable with the configured
  * archives; and the child's paths (the configuration, passed as its environment) */
-/* the chosen edition's files (Combat Variables RENDERER; mw2port.cfg edition=), falling back to the enhanced mix when
- * that edition's files are missing */
-static struct { char models[PORTCFG_PATH], textures[PORTCFG_PATH], kind[16], sky[PORTCFG_PATH], fog[PORTCFG_PATH]; int ed; } g_edf;
+/* the chosen look's files (Combat Variables RENDERER and TEXTURES; mw2port.cfg renderer= / textures=), falling back to
+ * the enhanced mix when that renderer's files are missing and to the ORIGINAL textures when TITANIUM can't be had (the
+ * DOS renderer, no titanium/ folder) */
+static struct { char models[PORTCFG_PATH], textures[PORTCFG_PATH], kind[16], sky[PORTCFG_PATH], fog[PORTCFG_PATH]; int ed, tx; } g_edf;
 static void edition_files(void)
 {
-    char kind[PORTCFG_PATH];
-    g_edf.ed = g_cfg.edition;
-    if (portcfg_edition(&g_cfg, g_cfg.edition, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
-        g_edf.ed = PORTCFG_ED_ENHANCED;
-        portcfg_edition(&g_cfg, PORTCFG_ED_ENHANCED, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog);
+    char kind[PORTCFG_PATH], m[PORTCFG_PATH], t[PORTCFG_PATH], s[PORTCFG_PATH], f[PORTCFG_PATH];
+    g_edf.ed = g_cfg.renderer;
+    if (portcfg_edition(&g_cfg, g_edf.ed, m, t, kind, s, f) != 0) g_edf.ed = PORTCFG_ED_ENHANCED;
+    g_edf.tx = portcfg_texset_ok(&g_cfg, g_edf.ed, g_cfg.texset) ? g_cfg.texset : PORTCFG_TX_ORIGINAL;
+    if (portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
+        g_edf.tx = PORTCFG_TX_ORIGINAL;
+        portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog);
     }
     snprintf(g_edf.kind, sizeof g_edf.kind, "%.15s", kind);
 }
@@ -900,10 +916,12 @@ static void sim_command(char *line, size_t n, const char *scen, const char *save
         if (k > 4 && strcasecmp(g_cfg.cd + k - 4, ".iso") == 0) setenv("MW2_CD_IMAGE", g_cfg.cd, 1); else setenv("MW2_CD_DIR", g_cfg.cd, 1);
     }
     edition_files();
-    /* the edition decides the sky file and the fog (only the PowerVR edition, and the enhanced mix, have fog) */
+    /* the renderer decides the sky file and the fog (only the PowerVR edition, and the enhanced mix, have fog); the
+     * TITANIUM textures bring the Titanium sky file */
     setenv_or_unset("MW2_SKYGND", g_edf.sky);
     setenv_or_unset("MW2_SKYGND_FOG", g_edf.fog);
     setenv("MW2_EDITION", PORTCFG_ED_NAME[g_edf.ed], 1);
+    setenv("MW2_TEXTURES", PORTCFG_TX_NAME[g_edf.tx], 1);
     if (g_cfg.ultrasnd[0] && !getenv("MW2_ULTRASND")) setenv("MW2_ULTRASND", g_cfg.ultrasnd, 1);
     if (g_cfg.music[0] && !getenv("MW2_MUSIC_DIR")) setenv("MW2_MUSIC_DIR", g_cfg.music, 1);
     if (cmd) snprintf(line, n, cmd, scen);
@@ -1054,6 +1072,7 @@ static int launch_ia(void)
     setenv("MW2_OE", FORM_ARG[g_ia.form[1]], 1);
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
@@ -1104,7 +1123,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                 if (h >= 14 && h <= 16) { side = 1; g_ia.mech[side][h - 14] = g_ia.mech[side][h - 14] + 1 >= g_ia.nmech ? -1 : g_ia.mech[side][h - 14] + 1; }
                 if (h == 6) g_ia.form[0] = (g_ia.form[0] + 1) % 6;
                 if (h == 2) { g_ia.scen = (g_ia.scen + 1) % 10; ia_load_scenario(); }
-                if (h == 0) { launch_ia(); snprintf(note, sizeof note, "%s", g_result); }
+                if (h == 0) { launch_ia(); music_after_mission(7, 2); snprintf(note, sizeof note, "%s", g_result); }
                 while (*c && *c != ',') c++;
                 if (*c) c++;
             }
@@ -1128,7 +1147,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                     smk_rewind(ov[2].s);
                 }
                 launch_ia();
-                apply_music(7, 2);
+                music_after_mission(7, 2);
                 play_ambient(-1);
                 snprintf(note, sizeof note, "%s", g_result);
             }
@@ -1335,6 +1354,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                     star_reset_mission(clan, k);
                     printf("roster: launch old mission %d (%s)\n", k + 1, CAMPAIGN_TITLE[clan][k]);
                     launch_campaign_m(clan, sel, k);
+                    music_after_mission(12, clan);   /* the roster is the return state (12) */
                     reg_load();
                     load_bg(clan == 1 ? 23 : 16);
                     old_list = 0;   /* the roster again, as on entering (the record panel) */
@@ -2830,6 +2850,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     setenv("MW2_PILOT", g_reg[reg].name, 1);
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
@@ -2924,7 +2945,10 @@ static void wr32(uint8_t *b, int32_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v 
  * +0x24, 1 = ON / HIGH), RESOLUTION 377 (MW2SND +0x2c: the VESA driver name, vesa480.dll / vesa768.dll), INVULNERABILITY
  * 416 (MW2DIF +1), UNLIMITED AMMO 436 (+0), NO COLLISION DAMAGE 456 (+3); sliders MUSIC / EFFECTS / VOICE at
  * (335, 128 / 152 / 176) 285 wide = MW2SND int32 16.16 at +0xc / +4 / +8. The port: RESOLUTION lists the display's
- * modes: see above. */
+ * modes: see above. The port's look rows RENDERER (y 239) and TEXTURES (y 258) head the DETAIL group: the artwork's
+ * DIFFICULTY group (its heading and HEAT TRACKING, y 219-252) is drawn 20 px higher, into the gap under the sliders
+ * (the VOICE track ends at y 192), and the DETAIL heading moves up from the OBJECT TEXTURES row to the RENDERER row -
+ * every row then 19-20 px apart as the original's, each group headed by its red word. */
 static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     uint8_t snd[60], dif[8];
@@ -2934,8 +2958,11 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     int done = 0, i, nmodes = 0, mi = -1;
     struct { int w, h; } modes[64];
     smk *logo = open_smk("AMWLOGO1");
-    static const int ROW_Y[13] = {219, 239, 277, 297, 317, 337, 357, 377, 397, 416, 436, 456, 258};   /* + the port's RENDERER */
+    /* the original's rows (DIFFICULTY and HEAT TRACKING 20 px up, see above), the port's DISPLAY, RENDERER, TEXTURES */
+    static const int ROW_Y[14] = {199, 219, 277, 297, 317, 337, 357, 377, 397, 416, 436, 456, 239, 258};
     static const char *const ED_TEXT[PORTCFG_ED_COUNT] = {"ENHANCED", "DOS", "3DFX", "ATI RAGE", "S3 VIRGE", "POWERVR", "MATROX MYSTIQUE"};
+    static const char *const TX_TEXT[PORTCFG_TX_COUNT] = {"ORIGINAL", "TITANIUM"};
+    int tx_lock;
     memset(snd, 0, sizeof snd); memset(dif, 0, sizeof dif);
     wr32(snd + 0x0c, 65536); wr32(snd + 0x04, 65536); wr32(snd + 0x08, 65536);
     for (i = 0x14; i <= 0x24; i += 4) wr32(snd + i, 1);
@@ -2956,8 +2983,11 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     load_bg(2);
     while (!done) {
         SDL_Event e;
-        int sel[13];
+        int sel[14];
         char res[32], aa[16];
+        /* TEXTURES is ORIGINAL and not changeable with the DOS renderer (its palette-indexed textures) or without the
+         * titanium/ folder; shown in grey then */
+        tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM);
         sel[0] = dif[5] <= 2 ? dif[5] : 1; sel[1] = dif[4] ? 0 : 1;
         for (i = 0; i < 5; i++) sel[2 + i] = rd32(snd + 0x14 + 4 * i) ? 0 : 1;   /* ON / HIGH first */
         /* RESOLUTION: the original's three words when the sim draws at one of them (render=), else the port's NATIVE text */
@@ -2973,7 +3003,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) || (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
-                    for (i = 0; i < 13; i++) {
+                    for (i = 0; i < 14; i++) {
                         if (x < 375 || x > 633 || y < ROW_Y[i] - 2 || y > ROW_Y[i] + 14) continue;
                         if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
                         else if (i == 1) dif[4] ^= 1;
@@ -3000,15 +3030,17 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         else if (i == 9) dif[1] ^= 1;
                         else if (i == 10) dif[0] ^= 1;
                         else if (i == 11) dif[3] ^= 1;
-                        else if (i == 12) {   /* the port's RENDERER: the look of the simulation, editions whose files are here */
-                            int e2 = pc.edition, tries;
+                        else if (i == 12) {   /* the port's RENDERER: how the simulation is drawn, editions whose files are here */
+                            int e2 = pc.renderer, tries;
                             for (tries = 0; tries < PORTCFG_ED_COUNT; tries++) {
                                 char m1[PORTCFG_PATH], m2[PORTCFG_PATH], m3[PORTCFG_PATH], m4[PORTCFG_PATH], m5[PORTCFG_PATH];
                                 e2 = (e2 + 1) % PORTCFG_ED_COUNT;
                                 if (portcfg_edition(&g_cfg, e2, m1, m2, m3, m4, m5) == 0) break;
                             }
-                            pc.edition = g_cfg.edition = e2;
+                            pc.renderer = g_cfg.renderer = e2;
                         }
+                        else if (i == 13 && !tx_lock)   /* the port's TEXTURES: ORIGINAL / TITANIUM */
+                            pc.texset = g_cfg.texset = pc.texset == PORTCFG_TX_TITANIUM ? PORTCFG_TX_ORIGINAL : PORTCFG_TX_TITANIUM;
                     }
                     for (i = 0; i < 3; i++) {   /* MUSIC / EFFECTS / VOICE: the knob's centre at x 350 + v */
                         static const int SY[3] = {128, 152, 176}, SO[3] = {0x0c, 0x04, 0x08};
@@ -3022,6 +3054,19 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             }
         }
         draw_bg();
+        {   /* the port's layout (see above): the DIFFICULTY group's artwork 20 px up, the DETAIL heading to the RENDERER row */
+            int x, y;
+            for (y = 219; y <= 252; y++) for (x = 0; x < 375; x++) {
+                uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3;
+                memcpy(q - (size_t)20 * W * 3, q, 3);
+                if (y > 252 - 20) q[0] = q[1] = q[2] = 0;
+            }
+            for (y = 276; y <= 294; y++) for (x = 0; x < 171; x++) {
+                uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3;
+                memcpy(q - (size_t)38 * W * 3, q, 3);
+                q[0] = q[1] = q[2] = 0;
+            }
+        }
         {   /* blank the value column, then the chosen words */
             int x, y;
             for (y = 124; y < 476; y++) for (x = 375; x < 634; x++) { uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3; q[0] = q[1] = q[2] = 0; }
@@ -3029,29 +3074,32 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         {   /* every value in one lettering (the port's rows had made the artwork's words look out of place): the chosen
              * value per row as text at x 393; the DISPLAY label right-aligned at 360 */
             static const char *const DIFF[3] = {"EASY", "MEDIUM", "HARD"};
-            char vals[13][32];
+            char vals[14][32];
             tt_item it;
             int k;
-            const char *lines[15];
-            int ly[15], lx[15];
-            for (k = 0; k < 13; k++) {
+            const char *lines[17];
+            int ly[17], lx[17];
+            for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
                 else if (k == 7) snprintf(vals[k], sizeof vals[k], "%s", sel[7] == 0 ? "320x200" : sel[7] == 1 ? "640x480" : sel[7] == 2 ? "1024x768" : res);
                 else if (k == 8) snprintf(vals[k], sizeof vals[k], "%s", aa);
-                else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.edition >= 0 && pc.edition < PORTCFG_ED_COUNT ? pc.edition : 0]);
+                else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.renderer >= 0 && pc.renderer < PORTCFG_ED_COUNT ? pc.renderer : 0]);
+                else if (k == 13) snprintf(vals[k], sizeof vals[k], "%s", TX_TEXT[!tx_lock && pc.texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
                 else snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "ON" : "OFF");
                 lines[k] = vals[k]; ly[k] = ROW_Y[k] + 1; lx[k] = 393;
             }
-            lines[13] = "DISPLAY"; ly[13] = 398; lx[13] = 360;
-            lines[14] = "RENDERER"; ly[14] = ROW_Y[12] + 1; lx[14] = 360;
-            for (k = 0; k < 15; k++) {
+            lines[14] = "DISPLAY"; ly[14] = 398; lx[14] = 360;
+            lines[15] = "RENDERER"; ly[15] = ROW_Y[12] + 1; lx[15] = 360;
+            lines[16] = "TEXTURES"; ly[16] = ROW_Y[13] + 1; lx[16] = 360;
+            for (k = 0; k < 17; k++) {
                 const char *t = lines[k];
+                int grey = tx_lock && (k == 13 || k == 16);   /* TEXTURES locked: its label and value greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
-                    int tx2 = k >= 13 ? lx[k] - text_width(&g_flabel, t) : lx[k];
-                    draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, -1);
-                } else if (g_text_hires) tt_text(lx[k], ly[k], t, k >= 13);
-                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = k >= 13; it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
+                    int tx2 = k >= 14 ? lx[k] - text_width(&g_flabel, t) : lx[k];
+                    draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, grey ? 6 : -1);
+                } else if (g_text_hires) { int n0 = g_ntt; tt_text(lx[k], ly[k], t, k >= 14); if (grey && g_ntt > n0) g_tt[n0].rgb[0] = g_tt[n0].rgb[1] = g_tt[n0].rgb[2] = 110; }
+                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = k >= 14; it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = grey ? 110 : 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
             }
         }
         if (logo) { smk_next(logo); blit_smk(logo, 120, 4); }
@@ -3540,6 +3588,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     setenv("MW2_PILOT", pilot, 1);
     sim_command(line, sizeof line, up, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
     loading_screen(g_load_clan);
@@ -3595,6 +3644,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                             char scen[16];
                             snprintf(scen, sizeof scen, "%s%dSCN1", clan == 1 ? "tnj" : "tnw", i + 1);
                             launch_scenario(clan, scen, reg >= 0 ? g_reg[reg].name : "Cadet");
+                            music_after_mission(14, clan);   /* user report: the training menu's song resumes */
                             load_bg(clan == 1 ? 19 : 12);
                         }
                 }
@@ -3621,6 +3671,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                 char scen[16];
                 snprintf(scen, sizeof scen, "%s%dSCN1", clan == 1 ? "tnj" : "tnw", it);
                 launch_scenario(clan, scen, reg >= 0 ? g_reg[reg].name : "Cadet");
+                music_after_mission(14, clan);
             }
         }
         if (headless) { if (f >= frames) next = -2; }
@@ -4466,6 +4517,7 @@ int main(int argc, char **argv)
         const char *pending_video = NULL;
         int next = -1, nclan = clan, f = 0;
         Uint32 last = SDL_GetTicks();
+        apply_music(screen, clan);   /* main 0x36700 applies the screen's music first - the cinematic screens 15 / 16 stop it */
         if (screen == 16) {   /* the ending (mend / mend2), then the clan hall */
             play_cinematic(rd, tx, clan == 1 ? "MEND2" : "MEND", headless);
             screen = 1;
@@ -4476,7 +4528,6 @@ int main(int argc, char **argv)
             screen = 1;
             continue;
         }
-        apply_music(screen, clan);
         if (screen == 11 && clan >= 0 && clan <= 1) {   /* the hall's READY ROOM once all 16 missions are won */
             int rg;
             reg_load();

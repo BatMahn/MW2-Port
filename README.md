@@ -4,11 +4,12 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS and Linux. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-08)
+## Status (2026-10-12)
 Complete and playable: the shell (clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables,
 Cockpit Controls, Hall of Honor, the roster), the simulation (every mission; AI, mission logic, combat, heat, movement,
-HUD, path-driven dropships / convoys) and seven looks selectable in Combat Variables > RENDERER: ENHANCED (3Dfx look +
-PowerVR fog), DOS, 3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE. Game values are traced from the original code or
+HUD, path-driven dropships / convoys) and the look chosen in Combat Variables with two settings: RENDERER - ENHANCED
+(the default: 3Dfx look + PowerVR fog), DOS, 3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE - and TEXTURES -
+ORIGINAL (each renderer's own textures, sky and ground) or TITANIUM (with the Titanium disc's files). Game values are traced from the original code or
 measured in DOSBox; what is still assumed is listed at the end of ASSUMPTIONS.md ("Open items"). AUDIT.md is the audit
 log. Test suites: `make check`, `make test_sequences` (scripted play sequences), `make sweep` (every mission's objectives).
 
@@ -27,14 +28,29 @@ The port needs the original game's files in one folder (called `MW2-game` below)
       install/    REQUIRED - the contents of your installed DOS game folder (C:\MECH2 after running the game's
                   INSTALL): the *.CFG settings, MW2REG.CFG (pilots), the *.BWD lance files, SETUP\, SND\ ... Copying
                   the whole folder is fine. The port writes pilots, saves and settings here.
-      cd/         REQUIRED - the contents of the game CD: the disc's MECH2\ folder (MW2.PRJ, DATABASE.MW2, ...),
-                  SMK\ (movies), KEATING\ (training voices) and the rest, copied as they are on the disc. Or set
-                  cd=/path/to/mw2cd.iso in the settings file to read straight from a disc image (see "Your disc image")
+      cd/         REQUIRED - the contents of the ORIGINAL DOS game CD (1995, not the Titanium disc): the disc's
+                  MECH2\ folder (MW2.PRJ, DATABASE.MW2, ...), SMK\ (movies), KEATING\ (training voices) and the
+                  rest, copied as they are on the disc. Or set cd=/path/to/mw2cd.iso in the settings file to read
+                  straight from a disc image (see "Your disc image")
       mt32/       REQUIRED for the menu music - the Roland MT-32 ROMs: MT32_CONTROL.ROM and MT32_PCM.ROM
                   (without them the menus fall back to Gravis UltraSound patches in ultrasnd/, if present)
       music/      optional - the CD soundtrack (Track02..Track27 as FLAC, MP3 or WAV; see "CD music")
       ultrasnd/   optional - Gravis UltraSound patches (menu music without the MT-32 ROMs; see below)
       3d/         the 3D editions' data - included in this repository under gamedata/3d/: copy that folder here
+      titanium/   optional - two files from the TITANIUM EDITION disc (1998), for the Titanium textures (see below)
+
+### Which disc goes where
+- **The original DOS CD** (MechWarrior 2: 31st Century Combat, 1995) goes in `cd/`, and its installed folder in
+  `install/`. This is the game itself: the missions, mechs, movies, voices and settings all come from it.
+- **The Titanium Edition disc** (1998, Windows) goes in `titanium/` - only two files from it, and only for the TITANIUM
+  textures. It can't stand in for the original CD: its data is a different, later build. Copy just:
+
+      Titanium disc  Install\16bit\MW2.PRJ     ->  MW2-game/titanium/MW2.PRJ
+      Titanium disc  Install\16bit\SKYGND.PAR  ->  MW2-game/titanium/SKYGND.PAR
+
+  Without `titanium/` everything works; TEXTURES just stays ORIGINAL.
+- **The 3D-card editions' files** (3Dfx, ATi, S3, PowerVR, Matrox) are included in this repository - copy
+  `gamedata/3d/` to `3d/` (next section).
 
 ### The 3D data (included here)
 The textured looks come from the 3D-accelerator editions of MechWarrior 2 - the 3Dfx, ATi Rage, S3 ViRGE, PowerVR and
@@ -48,6 +64,23 @@ into your game folder:
 the S3 / PowerVR / Matrox editions' archives and settings (s3/, pvr/, mga/, ati/) for those looks. Without 3d/ the
 game uses the DOS models only. These files are Activision's (see "Licences"); they are here only so owners of the game
 can rebuild a working setup.
+
+### The Titanium textures (optional, from your own disc)
+If you own *MechWarrior 2: 31st Century Combat - Titanium Edition* (1998), the game can also use its textures, sky dome
+(clouds, mountains, sun and moon), ground and fog. Copy two files from the disc's
+`Install\16bit\` folder (the 16-bit build, not `Install\8bit\`) into a `titanium/` folder in your game folder:
+
+    MW2-game/titanium/MW2.PRJ       (Install/16bit/MW2.PRJ, 64 MB)
+    MW2-game/titanium/SKYGND.PAR    (Install/16bit/SKYGND.PAR)
+
+(or set `titanium=/path/to/folder` in the settings file). COMBAT VARIABLES -> TEXTURES (and Textures in the
+in-mission Graphics menu) then switches between ORIGINAL and TITANIUM; without the folder, and with the DOS renderer,
+TEXTURES stays ORIGINAL (greyed). TITANIUM goes with any 3D renderer: the Titanium textures, sky dome and ground drawn
+with that renderer's filtering; the renderers that have fog (ENHANCED, POWERVR) draw the Titanium fog (its own colours
+and depths, made for its sky), the others (3DFX, ATI RAGE, S3 VIRGE, MATROX MYSTIQUE) none, as in their editions; the
+Titanium effects are always alpha-blended (the Titanium engine's choice for its textures). The missions, models and
+data stay the renderer's own: Titanium renamed most of its mech and building textures, so those keep the renderer's
+textures of the same name - the effects, the grounds and the sky come from the Titanium files.
 
 ### Gravis UltraSound patches (optional)
 Without the MT-32 ROMs the menu music can play through the Gravis UltraSound's General MIDI patch set instead. Get the
@@ -147,6 +180,7 @@ holds your copy of the game:
     mt32/       the MT-32 ROMs (menu music)
     ultrasnd/   Gravis UltraSound patches (menu music without the ROMs)
     3d/         the 3D editions' data - copy gamedata/3d/ from this repository (without 3d/: the DOS models, untextured)
+    titanium/   optional: MW2.PRJ + SKYGND.PAR from the Titanium disc's Install/16bit/ (the TITANIUM textures)
 
 If no folder is given, `mw2` looks in the current folder, next to itself, one level up (`MW2-game`) and in
 `~/MW2-game`, and remembers what it found in the per-user settings file:
@@ -157,16 +191,21 @@ If no folder is given, `mw2` looks in the current folder, next to itself, one le
     resolution=desktop        # desktop (native fullscreen) | window | 2560x1440 ...
     aa=4                      # anti-aliasing: 0 2 4 8
     render=native             # native | 320x200 | 640x480 | 1024x768 (the original's resolutions, scaled up in blocks)
+    renderer=enhanced         # enhanced | dos | 3dfx | ati | s3 | pvr | mga
+    textures=original         # original | titanium (the old edition= is still read: edition=titanium becomes
+                              # renderer=enhanced textures=titanium)
     # optional overrides: install= cd= music= ultrasnd= models= textures= skygnd= skygnd_fog= textures_kind=ati|3dfx
+    #                     titanium= (the Titanium files' folder)
 
-Resolution (with anti-aliasing) and the display mode are also in the game: the global menu (Esc / right button) ->
-COMBAT VARIABLES (RESOLUTION, DISPLAY). Controls follow your install's GAMEKEY.MAP / INPUT.MAP; set them up in the
+Resolution (with anti-aliasing), the display mode and the look are also in the game: the global menu (Esc / right
+button) -> COMBAT VARIABLES (RESOLUTION, DISPLAY, RENDERER, TEXTURES - RENDERER and TEXTURES head the DETAIL group). Controls follow your install's GAMEKEY.MAP / INPUT.MAP; set them up in the
 global menu -> COCKPIT CONTROLS, as in the original.
 In a mission, Esc opens the original's MAIN MENU and pauses the game: Abort Mission, Graphics (Textured Sky / Ground and
-the port's Video mode - Enhanced, 3Dfx, ATi, S3, PowerVR or Matrox, switched on the spot and kept for the next
-mission), Audio Ctrl (music / effects / voice sliders), Combat Variables (textures, detail, density, explosion chunks)
+the port's Renderer - Enhanced, 3Dfx, ATi, S3, PowerVR or Matrox - and Textures - Original or Titanium - switched on
+the spot and kept for the next mission), Audio Ctrl (music / effects / voice sliders), Combat Variables (textures, detail, density, explosion chunks)
 and Flee to Windows (leaves the game). Digits pick an item, arrows / Space change a value, 0 or Enter accepts, Esc
-backs out. Ctrl+Q still aborts the mission directly. The DOS look keeps its own archive: choose it in the shell.
+backs out. Ctrl+Q still aborts the mission directly. The DOS renderer keeps its own archive: choose it in the shell
+(in a DOS mission Renderer and Textures stay as they are).
 The MW2_* environment variables remain for development and tests only.
 
 ## Building a package

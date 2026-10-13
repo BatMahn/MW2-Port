@@ -124,7 +124,7 @@ def install_dir(name, mech):
     if mech:
         write_userstar(os.path.join(d, 'USERSTAR.BWD'), *mech.split('/'))
     with open(os.path.join(OUT, name, 'mw2port.cfg'), 'w') as f:
-        f.write('game=%s\nedition=enhanced\n' % d)
+        f.write('game=%s\nrenderer=enhanced\ntextures=original\n' % d)
     return d
 
 
@@ -530,11 +530,22 @@ def side_torso_lost(c):
 def ammo_critical_explosion(c):
     """machine-gun hits into the right arm, then the right torso (the MG ammunition), from random states that give an
     ammo critical (MW2_TEST_RNG): 'Internal ammo explosion detected', the bin's rounds x damage into the structure
-    destroys the location, the machine gun fed by it loses its rounds; a side torso / arm: not destroyed"""
-    for suffix, rng, loc, mask in (('_arm', 12347, 5, 0x10), ('_torso', 12354, 2, 0x12)):
-        r = c.run(suffix, secs=12, env={'MW2_TEST_RNG': '9.9:%d' % rng, 'MW2_TEST_PHIT': '10:%d:10:60' % loc})
+    destroys the location, the machine gun fed by it loses its rounds; a side torso / arm: not destroyed. The bin's
+    explosion (effect 7, 0x100167b0 -> 0x10045c30) is a damaging type: area damage on every location (0x10046700)"""
+    # the player's armour carries the loader's x 4 (0x10041410): 3 x the MEK armour taken off first (MG hits before the
+    # breach draw no random numbers), so the 60 hits at 10 s meet the MEK's armour and the same random states as before
+    for suffix, rng, loc, mask, pre in (('_arm', 12347, 5, 0x10, 3 * 24), ('_torso', 12354, 2, 0x12, 3 * 25)):
+        r = c.run(suffix, secs=12, env={'MW2_TEST_RNG': '9.9:%d' % rng, 'MW2_TEST_PHIT': '9:%d:10:%d,10:%d:10:60' % (loc, pre, loc),
+                                        'MW2_DAMAGE_LOG': '1'})
         t = r.msg_time('ammo explosion')
         c(t is not None, suffix[1:] + ': "Internal ammo explosion detected"')
+        # 0x100167b0: explosion 7 at the location's node (0x1000fec0), a damaging type: area damage on every location
+        # (0x10046700) when the node is within the unit's radius + the effect's (545 + 141 cm) of its feet - the right
+        # torso's node (5.5 m up) is, the arm's (8.7 m up) is not
+        area = set(int(l.split()[5]) for l in r.out.splitlines() if l.startswith('damage area player'))
+        if suffix == '_torso':
+            c(area == set(range(1, 9)), 'torso: the bin\'s explosion (effect 7) gives area damage on every location',
+              '%s' % sorted(area))
         s0, s1 = r.at(9.5), r.last
         c(s1['gone'] & mask == mask, suffix[1:] + ': location destroyed', 'gone 0x%x' % s1['gone'])
         lost = sum(a[2] - max(0, b[2]) for a, b in zip(s0['w'], s1['w']) if a[0] == 10)
@@ -667,10 +678,13 @@ def target_structure_destroyed(c):
     r = c.run(secs=20, env={'MW2_START': '315212,244208', 'MW2_START_HEADING': 0}, keys=[(UP, 'q'), (UP + 0.3, 'backslash')],
               hold=pulses(10, 18, 'space', 1.0, 0.1))
     c(r.at(UP + 0.2)['thing'] == 4, 'q targets the structure ahead', 'thing %d' % r.at(UP + 0.2)['thing'])
-    d = next((s for s in r.states if s['bld_destroyed'] > 0), None)
-    c(d is not None, 'destroyed by gunfire')
+    # (the volleys may wreck a smaller structure beside it first: the tank is the one whose destruction ends the target)
+    d = next((s for s in r.states if s['t'] > UP + 0.5 and s['thing'] == -1), None)
+    c(d is not None and d['bld_destroyed'] > 0, 'destroyed by gunfire')
     if d:
-        c(r.at(d['t'] + 0.5)['thing'] == -1, 'target dropped', 'thing %d' % r.at(d['t'] + 0.5)['thing'])
+        prev = [s for s in r.states if s['t'] < d['t']][-1]
+        c(prev['thing'] == 4 and d['bld_destroyed'] > prev['bld_destroyed'], 'target dropped as it is destroyed',
+          'thing %d -> %d, destroyed %d -> %d' % (prev['thing'], d['thing'], prev['bld_destroyed'], d['bld_destroyed']))
 
 
 @sequence
@@ -881,7 +895,8 @@ def death_red_flash(c):
 def damage_red_flash(c):
     """the damage flash (DAT_1024cce0): more than 2 points into the breached centre torso / head; n = 3 x the flashes so
     far, 0x16a x n / 15 (0x1001bda0): 72, 144, 217, 289 ticks, then a full 0x16a"""
-    r = c.run(secs=12, env={'MW2_TEST_PHIT': '4:3:4:40,5:3:4:1,6:3:4:1,7:3:4:1,8:3:4:1,9:3:4:1,10:3:4:1,11:3:4:1'}, nostart=True)   # hits from 4 s: no damage before the first start-up (DAT_1024c570) otherwise
+    # the player's armour back to the MEK's points (without the loader's x 4) so 40 hits breach the centre torso
+    r = c.run(secs=12, env={'MW2_TEST_PARMOR': '3:0.25', 'MW2_TEST_PHIT': '4:3:4:40,5:3:4:1,6:3:4:1,7:3:4:1,8:3:4:1,9:3:4:1,10:3:4:1,11:3:4:1'}, nostart=True)   # hits from 4 s: no damage before the first start-up (DAT_1024c570) otherwise
     durs = [int(x) for x in re.findall(r'^FLASH now=\d+ dur=(\d+)', r.out, re.M)]
     c(len(durs) >= 4, 'flashes on the breached torso', '%s' % durs)
     c(durs[:4] == [72, 144, 217, 289], 'durations grow with the count', '%s' % durs[:4])
@@ -905,11 +920,13 @@ def enemy_blown_apart(c):
 @sequence
 def aim_converges_on_reticle(c):
     """the player's shots converge on the reticle's line (0x10044950: the aim ray from the eye object, the camera's):
-    a mech centred in the reticle at 100 m and at 300 m is hit within 30 cm of the reticle point"""
+    a mech centred in the reticle at 100 m and at 300 m is hit within 30 cm of the reticle point - missiles (table type 3 /
+    4) aside: they leave rand(200) - 100 cm off the mount (0x10044ac0) and fly parallel to their aim"""
     for k, d in ((0, 10000), (3, 30000)):
         r = c.run('_%d' % d, secs=10, fire=1, env={'MW2_TEST_AIM': '%d,%d,0' % (k, d), 'MW2_AIM_TRACE': '1',
                                                     'MW2_TEST_IMMOBILE': '0:%d' % k, 'MW2_DEBUG_INVULN': '1'})
-        hits = [(float(m.group(1)), float(m.group(2))) for m in re.finditer(r'^AIMHIT now=\d+ unit range=(-?\d+) off_deg=[\d.]+ miss_cm=(\d+)', r.out, re.M)]
+        hits = [(float(m.group(1)), float(m.group(2))) for m in re.finditer(r'^AIMHIT now=\d+ unit range=(-?\d+) off_deg=[\d.]+ miss_cm=(\d+).* w=(\d+)$', r.out, re.M)
+                if not (0 <= int(m.group(3)) <= 9 or int(m.group(3)) == 28)]
         c(len(hits) >= 3, '%d m: the mech hit' % (d // 100), '%d hits' % len(hits))
         if hits:
             worst = max(h[1] for h in hits[:12])
@@ -1335,7 +1352,7 @@ def training_shell_launch(c):
     us = os.path.join(gd, 'USERSTAR.BWD')
     before = open(us, 'rb').read()
     with open(os.path.join(OUT, c.name, 'mw2port.cfg'), 'w') as f:
-        f.write('game=%s\nedition=enhanced\n' % gd)
+        f.write('game=%s\nrenderer=enhanced\ntextures=original\n' % gd)
     e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
     e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
               'MW2_SAVE_DIR': gd, 'MW2_SHELL_SCREEN': '14', 'MW2_SHELL_CLAN': '1', 'MW2_SHELL_FRAMES': '3',
@@ -1437,11 +1454,12 @@ def terrain_impact(c):
     c(all(1.5 < s['kmh'] < 4 for s in held), 'pressing on: about 2.6 km/h', str(sorted(set(round(s['kmh'], 1) for s in held))))
     c(max(s['z'] for s in held) - min(s['z'] for s in held) < 5 and min(s['z'] for s in held) > 251104 + 500,
       'held at the touching point (the box ends at z 251104, radius 545)', '%d..%d' % (min(s['z'] for s in held), max(s['z'] for s in held)))
-    loss = armor_loss(r.at(hit - 0.15), r.at(hit + 0.7), 'parmor')
-    # YELL's enemy star now comes for the player (node targets, 0x10014ba0): take its hits in the window out
-    shot = sum(int(n) for t, n in re.findall(r"^\s*([\d.]+)s .* hits the player's .* for (\d+)", r.out, re.M)
-               if hit - 0.15 <= float(t) <= hit + 0.7)
-    c(0.7 < loss - shot < 1.1, 'one impact: 0.9 armour', 'loss %.2f, enemy hits %d' % (loss, shot))
+    sa, sb = r.at(hit - 0.15), r.at(hit + 0.7)
+    # YELL's enemy star now comes for the player (node targets, 0x10014ba0) and its hits (whole points, front or rear) land
+    # in this window too: count only the fractional per-location losses - the impact's (v - 3.069) x 0.0501 x 3
+    d = [max(0.0, float(x) - float(y)) for x, y in zip(sa['parmor'].split(','), sb['parmor'].split(','))]
+    loss = sum(x for x in d if abs(x - round(x)) > 0.01)
+    c(0.7 < loss < 1.1, 'one impact: 0.9 armour', 'impact loss %.2f (all losses %s)' % (loss, [round(x, 2) for x in d]))
 
 
 
@@ -1538,6 +1556,544 @@ def standing_wreck_frozen(c):
     e2 = r2.at(d2['t'] + 5.0)
     c(e2.get('pkey') == d2.get('pkey'), "the player's walk key is frozen at death", '%s -> %s' % (d2.get('pkey'), e2.get('pkey')))
 
+
+
+# ---------------------------------------------------------------- the Titanium look (the user's Titanium disc files)
+
+def titanium_dir():
+    """the Titanium edition's 16-bit files (MW2.PRJ + SKYGND.PAR): the game folder's titanium/, or the test install's"""
+    for d in (os.path.join(GAME, 'titanium'), os.path.join(GTEST, 'titanium')):
+        if os.path.exists(os.path.join(d, 'MW2.PRJ')) and os.path.exists(os.path.join(d, 'SKYGND.PAR')):
+            return os.path.realpath(d)
+    return None
+
+
+def titanium_cfg(name, tdir):
+    """a configuration naming the Titanium folder (run() writes the run's own beside it)"""
+    p = os.path.join(OUT, name, 'ti.cfg')
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, 'w') as f:
+        f.write('game=%s\nrenderer=enhanced\ntextures=original\ntitanium=%s\n' % (os.path.join(OUT, name, 'game'), tdir))
+    return p
+
+
+def mean_diff(p1, p2, box=(0, 0, 1, 0.45)):
+    """mean absolute RGB difference of two shots over box (fractions of the frame); -1 if either is missing"""
+    if not (p1 and p2 and os.path.exists(p1) and os.path.exists(p2)):
+        return -1
+    import numpy as np
+    w, h, a = ppm(p1)
+    w2, h2, b = ppm(p2)
+    if (w, h) != (w2, h2):
+        return -1
+    x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+    A = np.frombuffer(a, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32)
+    B = np.frombuffer(b, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32)
+    return float(np.abs(A - B).mean())
+
+
+@sequence
+def titanium_look_start(c):
+    """TEXTURES TITANIUM from the start (CYANSCN1, the ENHANCED renderer): the Titanium archive's textures by name, its
+    sky dome, ground and SKYGND.PAR; a different picture from the enhanced mix's (skipped without the titanium/ folder)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder (MW2.PRJ + SKYGND.PAR of the Titanium 16-bit build): skipped')
+        return
+    shots = [(2.5, 'view')]
+    r = c.run(secs=3, throttle=0, nostart=True, mission='CYANSCN1', shots=shots,
+              env={'MW2_CONFIG': titanium_cfg('titanium_look_start', tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'),
+                   'MW2_TEXTURES': 'titanium'})
+    m = re.search(r'titanium: (\d+) textures from the Titanium archive, (\d+) from', r.out)
+    c(m is not None and int(m.group(1)) > 0, 'textures taken from the Titanium archive', m.group(0) if m else 'no titanium line')
+    c('no Titanium archive' not in r.out, 'the Titanium archive opens')
+    e = c.run('_enh', secs=3, throttle=0, nostart=True, mission='CYANSCN1', shots=shots)
+    d = mean_diff(r.shots.get('view'), e.shots.get('view'))
+    c(d > 8, 'the sky differs from the enhanced look', 'mean diff %.1f' % d)
+    c.note('%s; sky mean diff vs enhanced %.1f' % (m.group(0) if m else '?', d))
+
+
+@sequence
+def titanium_look_switch(c):
+    """the in-mission Textures to TITANIUM, the Renderer to 3DFX with them, and the Textures back to ORIGINAL
+    (switch_look, MW2_TEST_VIDEO): the look changes live each time; the Titanium sky stays with the 3Dfx renderer (no
+    fog: sky= as it is); the simulation goes on (skipped without the titanium/ folder)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    shots = [(2.5, 'before'), (4.0, 'titanium'), (5.5, 'ti3dfx'), (7.0, 'after')]   # (the drop has settled by 2.5 s)
+    cfg = titanium_cfg('titanium_look_switch', tdir)
+    r = c.run(secs=7.5, throttle=0, nostart=True, mission='YELLSCN1', shots=shots,
+              env={'MW2_CONFIG': cfg, 'MW2_TEST_VIDEO': '3:titanium,4.5:3dfx,6:original'})
+    i1 = r.out.find('video mode: enhanced, textures titanium')
+    i2 = r.out.find('video mode: 3dfx, textures titanium')
+    i3 = r.out.find('video mode: 3dfx, textures original')
+    c(i1 >= 0, 'Textures to titanium (renderer kept)', 'no "video mode: enhanced, textures titanium"')
+    c(i2 > i1 >= 0, 'Renderer to 3dfx (textures kept)', 'no "video mode: 3dfx, textures titanium" after it')
+    c(i3 > i2 >= 0, 'Textures back to original', 'no "video mode: 3dfx, textures original" after it')
+    c(re.search(r'titanium: [1-9]\d* textures from the Titanium archive', r.out) is not None, 'Titanium textures in use')
+    # YELL's Titanium sky: sky=64,64,200 under the clouds (the 3D editions' is a pale grey-blue): saturated blue pixels
+    blue = [count_px(r.shots.get(k), lambda R, G, B: (B > R + 80) & (B > G + 80), (0, 0, 1, 0.45)) for k in ('before', 'titanium', 'ti3dfx', 'after')]
+    c(blue[1] > 2000 and blue[2] > 2000, 'the Titanium sky with both renderers (sky=64,64,200 + clouds)', 'blue pixels %s' % blue)
+    c(0 <= blue[0] < 200 and 0 <= blue[3] < 200, 'the original sky before and after', 'blue pixels %s' % blue)
+    c(r.last.get('t', 0) >= 7.0, 'the mission runs on through the switches')
+    with open(cfg) as f:
+        saved = f.read()
+    c('renderer=3dfx' in saved and 'textures=original' in saved and 'edition=' not in saved, 'saved as renderer= / textures=', saved)
+    c.note('saturated-blue sky pixels before / titanium / 3dfx+titanium / after: %s' % blue)
+
+
+
+@sequence
+def look_menu_textures(c):
+    """the GRAPHICS menu's Textures row (port): Esc, 2 (Graphics), 4 steps Textures to Titanium, 0 accepts - the look
+    switches live and is saved; in a DOS mission the row is locked to Original (4 does nothing, no switch); the old
+    edition=titanium is read as renderer=enhanced textures=titanium (skipped without the titanium/ folder)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    cfg = titanium_cfg('look_menu_textures', tdir)
+    keys = [(3, 'esc'), (3.3, '2'), (3.6, '4'), (3.9, '0'), (4.2, 'esc')]
+    r = c.run(secs=6, throttle=0, nostart=True, mission='YELLSCN1', keys=keys, shots=[(3.75, 'menu')], env={'MW2_CONFIG': cfg})
+    c('video mode: enhanced, textures titanium' in r.out, 'Textures stepped and accepted: the Titanium textures live',
+      'no "video mode: enhanced, textures titanium"')
+    with open(cfg) as f:
+        saved = f.read()
+    c('textures=titanium' in saved and 'renderer=enhanced' in saved, 'saved for the next mission', saved)
+    d = c.run('_dos', secs=6, throttle=0, nostart=True, mission='YELLSCN1', keys=keys, dos_look=True,
+              env={'MW2_CONFIG': titanium_cfg('look_menu_textures_dos', tdir), 'MW2_TEXTURES': 'titanium'})
+    c('video mode:' not in d.out and 'titanium:' not in d.out, 'DOS: Textures locked to Original', 'a look switch in a DOS mission')
+    # the old single look, migrated
+    old = os.path.join(OUT, 'look_menu_textures', 'old.cfg')
+    with open(old, 'w') as f:
+        f.write('game=%s\nedition=titanium\ntitanium=%s\n' % (os.path.join(OUT, 'look_menu_textures', 'game'), tdir))
+    m = c.run('_old', secs=6, throttle=0, nostart=True, mission='YELLSCN1', edition='titanium',   # (the old MW2_EDITION too)
+              env={'MW2_CONFIG': old, 'MW2_TEST_VIDEO': '3:3dfx'})
+    with open(old) as f:
+        saved = f.read()
+    c('video mode: 3dfx, textures titanium' in m.out, 'edition=titanium: the Titanium textures kept on a renderer switch', m.out[-300:])
+    c('renderer=3dfx' in saved and 'textures=titanium' in saved and 'edition=' not in saved, 'migrated to renderer= / textures=', saved)
+
+
+def kph_at(r, t0, t1):
+    """the cockpit readouts (MW2_KPH_TRACE) between t0 and t1 seconds"""
+    return [int(m.group(2)) for m in re.finditer(r'^kph (\d+\.\d+)s (-?\d+) kph', r.out, re.M) if t0 <= float(m.group(1)) <= t1]
+
+
+@sequence
+def top_speed_gravity_dos(c):
+    """top speed = walk MP x 105.49 (integer c[0x22], DOS 0x4cd46) / the planet's gravity ratio (DOS 0x26973, no clamp; 3Dfx
+    0x100190d0 c[0x22] / g), presets n x 113 / 1024 (0x4684c), readout x 1.5 (0x32085). DOSBox, steady readouts on flat
+    ground: ORANSCN1 (Wolf mission 2, 0.6 g) at the start heading 180 - Timber Wolf (TBR00STD, 5 MP) FULL 133 kph, Nova
+    (NVA00STD, 6 MP - the mission's default 'Mech) FULL 160 kph; TNJ1SCN1 (1.0 g) Firemoth (FRM00TRN, 10 MP) FULL 160 kph
+    at heading 0; the Nova on ORAN (c[0x22] 633 -> 1055, the Firemoth's on 1 g) THROTTLE_8 (7 x 113 / 1024) 124 kph -
+    the user's Firemoth reading - and THROTTLE_7 106 kph"""
+    for suf, mission, mech, start, key, want in (
+            ('_tbr', 'ORANSCN1', 'timbrwlf/tbr00std', None, '0', 133),
+            ('_nva', 'ORANSCN1', 'nova/nva00std', None, '0', 160),
+            ('_frm', 'TNJ1SCN1', None, '16441,12000', '0', 160),
+            ('_frm8', 'TNJ1SCN1', None, '16441,12000', '8', 124),
+            ('_nva8', 'ORANSCN1', 'nova/nva00std', None, '8', 124),
+            ('_nva7', 'ORANSCN1', 'nova/nva00std', None, '7', 106)):
+        env = {'MW2_KPH_TRACE': '1'}
+        if start:
+            env['MW2_START'] = start
+        kw = {'mech': mech} if mech else {}
+        r = c.run(suf, secs=10, keys=[(1, key)], dump='/1', nostart=True, mission=mission, env=env, **kw)
+        got = kph_at(r, 8.5, 10)
+        c(got and min(got) == max(got) == want, '%s %s key %s: %d kph' % (mission, mech or 'FRM00TRN', key, want), str(sorted(set(got))))
+
+
+@sequence
+def kph_readout_jets(c):
+    """the readout is the controller's whole velocity (DOS 0x32085 reads +0xf4 / +0xf8 / +0xfc): the directional jets'
+    drift counts. DOSBox ORANSCN1 Nova from a standstill, forward jets (GreyHome) held: 60 / 141 / 232 / 298 / 364 / 391
+    kph over ~6 s (the port had read 0 - the drift was left out); jumping at FULL: 160 -> 184..193 while rising, back
+    toward 160 at the top (the vertical speed counts)"""
+    r = c.run(secs=12, hold=[(6, 8, 'home')], dump='/1', nostart=True, mission='ORANSCN1', mech='nova/nva00std',
+              env={'MW2_KPH_TRACE': '1'})
+    before, during = kph_at(r, 5.5, 6.0), kph_at(r, 6.1, 8.0)
+    c(before and max(before) == 0, 'standing: 0 kph', str(before[-3:]))
+    c(during and during[-1] > 200, 'forward jets: over 200 kph after 2 s', str(during[::6]))
+    c(during and all(b >= a for a, b in zip(during, during[1:])), 'rising while the jets push', str(during[::6]))
+    r2 = c.run('_jump', secs=13, keys=[(1, '0')], hold=[(9, 11, 'j')], dump='/1', nostart=True, mission='ORANSCN1',
+               mech='nova/nva00std', env={'MW2_KPH_TRACE': '1'})
+    k0, k1 = kph_at(r2, 8.0, 8.9), kph_at(r2, 10.0, 11.0)
+    c(k0 and min(k0) == max(k0) == 160, 'FULL before the jump: 160 kph', str(sorted(set(k0))))
+    c(k1 and max(k1) > 175, 'jumping at FULL: the reading rises (DOS 184..193)', str(k1[::6]))
+
+
+@sequence
+def armour_difficulty_factor(c):
+    """The loader's armour factor (engine 0x10041410, DOS 0x4c760), by Combat Variables difficulty (MW2DIF +5) 0 / 1 / 2:
+    front and rear armour - not structure - x 4 for the player whatever the difficulty, x 1 / 3 / 4 for another
+    alliance's unit (x 3 / 3 / 4 for the player's side). Damage per hit stays the weapon table's +0x30 (medium laser 5).
+    The port had loaded the MEK's points as they are, so everything died 3-4 times too fast (user report 6). Timber Wolf
+    head 9 armour + 3 structure; YELL's Jenner (actor 2) right leg 9 + 8"""
+    def loc(st, key, i):
+        return float(st[key].split(',')[i])
+    for d, k in ((0, 1), (1, 3), (2, 4)):
+        r = c.run('_d%d' % d, secs=6, nostart=True, files={'MW2DIF.CFG': bytes([0, 0, 1, 1, 1, d, 0, 0])},
+                  env={'MW2_TEST_WATCH': '1:2', 'MW2_TEST_PHIT': '3:1:23:3', 'MW2_TEST_AHIT': '3:2:7:23:1'})
+        a, b = r.at(2.0), r.at(5.0)
+        if 'parmor' not in a or 'a_armor' not in a or 'parmor' not in b:
+            c(False, 'difficulty %d: state dumps' % d)
+            continue
+        c(abs(loc(a, 'parmor', 0) - (9 * 4 + 3)) < 0.01, 'difficulty %d: player head 9 x 4 + 3' % d, a['parmor'])
+        c(abs(loc(a, 'a_armor', 6) - (9 * k + 8)) < 0.01, 'difficulty %d: enemy right leg 9 x %d + 8' % (d, k), a['a_armor'])
+        c(abs(loc(a, 'parmor', 0) - loc(b, 'parmor', 0) - 15) < 0.01, 'difficulty %d: three medium laser hits = 15' % d,
+          '%s -> %s' % (a['parmor'], b['parmor']))
+        c(abs(loc(a, 'a_armor', 6) - loc(b, 'a_armor', 6) - 5) < 0.01, 'difficulty %d: one medium laser hit = 5' % d,
+          '%s -> %s' % (a['a_armor'], b['a_armor']))
+
+
+@sequence
+def walking_contact_damage(c):
+    """Ordinary walking does not wear the mech down: CYANSCN1 at FULL for 60 s (slopes, rocks) - collision damage
+    (0x10019d84 -> 0x1000c3c0, (v - 3.069) x 0.0501 x 3 every contact frame) lands about once per impact, the impact
+    cutting the speed to a quarter (0x1000b5e0); measured 2 contacts, 1.6 points (MW2_DAMAGE_LOG). Guards the
+    session-13 removal of the once-per-contact latch (user report 6)"""
+    r = c.run(secs=60, throttle=1, twist=0, mission='CYANSCN1', env={'MW2_DAMAGE_LOG': '1'}, dump='/1')
+    hits = [float(l.split()[-1]) for l in r.out.splitlines() if l.startswith('damage terrain player') or l.startswith('damage unit player')]
+    c(r.last.get('t', 0) >= 59, 'the walk runs 60 s')
+    c(len(hits) <= 6 and sum(hits) < 5.0, 'a few contacts, under 5 points in all', '%d contacts, %.2f' % (len(hits), sum(hits)))
+    c(all(h < 1.5 for h in hits), 'each contact under 1.5 points at walking speed', str([round(h, 2) for h in hits]))
+
+
+
+@sequence
+def objectives_dustoff_shown(c):
+    """user report: the first campaign mission's "proceed to the dustoff" radio plays but the F12 list never shows the
+    dustoff. YELLSCN1 (Wolf mission 1): node 14 (toggle, all of nodes 6 + 7 done) flips the shown flag of node 10
+    "Dustoff site: Nav Eta", priority 8 (Return). The engine's list (0x10017b80 -> 0x100176d0) shows the shown nodes by
+    priority 1, 2, 4, 0, 8 - the port had listed 1, 2, 0 only (no Tertiary 4, no Return 8). DOSBox YELLSCN1 F12 (node
+    10 made visible in a PRJ copy): Primary x2, Secondary, Tertiary, Return"""
+    r = c.run(secs=4, nostart=True, throttle=0, mission='YELLSCN1', dump='0.5,3.5', env={'MW2_TEST_NODE_OK': '1:6,1:7'})
+
+    def rows(s):
+        return [tuple(int(v) for v in x.split(':')) for x in str(s.get('objs', '')).split(';') if x and x != '-']
+    a, b = rows(r.at(0.5)), rows(r.at(3.5))
+    c([(n, p) for n, p, _ in a] == [(6, 1), (7, 1), (13, 2), (20, 4)], 'start: Primary x2, Secondary, Tertiary (priority 4)', str(a))
+    c(10 not in [n for n, _, _ in a], 'the dustoff hidden at the start', str(a))
+    c(len(b) == 5 and b[-1][:2] == (10, 8), 'nodes 6 + 7 done: the dustoff (node 10, Return) listed last', str(b))
+    c([st for n, _, st in b if n in (6, 7)] == [5, 5], 'nodes 6 and 7 listed as succeeded', str(b))
+
+
+@sequence
+def autopilot_turn_announced(c):
+    """user report: a manual turn switches the autopilot off silently. The engine (0x1001a480..0x1001a4fc) turns a
+    leg-turn input with the autopilot on into the TOGGLE_AUTOPILOT request: off, and message 0x1d suffix 2 - "Autopilot"
+    (voice 65) "disengaged" (84), as the key; the HUD's "AUTOPILOT" (0x100183d0, while +0xbc is 1 / 2) goes. DOSBox
+    YELLSCN1: a, then Left held -> "Autopilot disengaged." and the AUTOPILOT text gone"""
+    r = c.run(secs=15, keys=[(UP, '0'), (UP + 0.5, 'a')], hold=[(13, 13.5, 'left')], shots=[(12.5, 'on'), (14.5, 'off')],
+              size='640x400')
+    c(r.at(12.5)['autopilot'] == 1 and r.at(13.7)['autopilot'] == 0, 'engaged, then off after the turn')
+    m = re.search(r'MSGV now=(\d+) voice=65 Autopilot disengaged\.', r.out)
+    c(m is not None and 12900 <= int(m.group(1)) <= 13700, '"Autopilot disengaged." (voice 65) at the turn', m.group(0) if m else 'none')
+    box = (0.15, 0.92, 0.36, 0.99)   # "AUTOPILOT" at (110, 456) of the 640 x 480 layout
+    g = lambda R, G, B: (G > 140) & (R < 120) & (B < 120)
+    on, off = count_px(r.shots.get('on'), g, box), count_px(r.shots.get('off'), g, box)
+    c(on > 30 and off < on / 4, 'the HUD "AUTOPILOT" shown while engaged, gone after', 'green px %d -> %d' % (on, off))
+
+
+@sequence
+def restart_powerup_sound(c):
+    """user report: a manual restart (s, s) played only the online beep. The restart takes the player through state
+    0 -> 1 again (0x1001adf0 "Powering up..." -> 0x1001ab71), which plays MECTURX2 0xf7 at the mech as at the mission
+    start; MECBSYRX 0xce when online. DOSBox YELLSCN1 (SB16 capture): BET11_1 at the shutdown, MECTURX2 0.1 s after the
+    restart key, MECBSYRX 6.4 s later"""
+    r = c.run(secs=22, keys=[(10, 's'), (13, 's')], env={'MW2_SFX_LOG': '1'})
+    t_up = r.msg_time('Powering up')
+    if not c(t_up is not None, 'restarted ("Powering up...")'):
+        return
+    snd = [(float(t) * 1000.0, int(i)) for t, i in re.findall(r'SFXLOG (-?[\d.]+) snd (\d+)', r.out)]
+    c(any(i == 247 and abs(t - t_up) < 150 for t, i in snd), 'MECTURX2 (0xf7) at the restart', str([x for x in snd if x[0] > 9000]))
+    c(any(i == 206 and t_up + 4000 < t < t_up + 9000 for t, i in snd), 'MECBSYRX (0xce) once back online')
+    c(not any(i == 247 and 9500 < t < t_up - 150 for t, i in snd), 'no MECTURX2 at the shutdown')
+
+
+@sequence
+def shell_music_after_mission(c):
+    """user report: the training menu's music did not resume after a training mission. The original's shell restarts
+    after the simulation ("mw2shell sim", 0x36700) on the saved screen with nothing playing and applies that screen's
+    music: training 14 (Falcon 0x29), Instant Action 7 (0x23) start again (the debriefing, 0 = no change, stays silent).
+    TEST ONLY hooks: MW2_SHELL_TRAIN / MW2_SHELL_CLICKS launch, MW2_SIM a no-op, MW2_SHELL_MUSICLOG"""
+    shell = os.path.join(REPO, 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    os.makedirs(os.path.join(OUT, c.name), exist_ok=True)
+    gd = install_dir(c.name, None)
+    if not os.path.exists(os.path.join(gd, 'mt32')) and not os.path.exists(os.path.join(gd, 'ultrasnd')):
+        c.note('no mt32/ or ultrasnd/ in the test game folder: skipped')
+        return
+    with open(os.path.join(OUT, c.name, 'mw2port.cfg'), 'w') as f:
+        f.write('game=%s\nedition=enhanced\n' % gd)
+    for scr, extra, label in (('14', {'MW2_SHELL_CLAN': '1', 'MW2_SHELL_TRAIN': '1'}, 'training'),
+                              ('7', {'MW2_SHELL_CLICKS': '0'}, 'Instant Action')):
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
+                  'MW2_SAVE_DIR': gd, 'MW2_SHELL_SCREEN': scr, 'MW2_SHELL_FRAMES': '3', 'MW2_SHELL_MUSICLOG': '1',
+                  'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'shell%s.ppm' % scr), 'MW2_SIM': 'echo %s'})
+        e.update(extra)
+        try:
+            p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
+            out = p.stdout.decode('latin-1')
+        except subprocess.TimeoutExpired:
+            c(False, '%s: shell run timed out' % label)
+            continue
+        with open(os.path.join(OUT, c.name, 'log%s.txt' % scr), 'w') as f:
+            f.write(out)
+        ev = re.findall(r'music: (start entry \d+|stop \(mission\))', out)
+        c(len(ev) >= 3 and ev[0].startswith('start') and ev[1] == 'stop (mission)' and ev[2] == ev[0],
+          '%s: the screen\'s song stops for the mission and starts again on return' % label, str(ev))
+
+
+# ---------------------------------------------------------------- walk animation: stopping comes to rest
+
+@sequence
+def idle_mech_rests(c):
+    """user report (training): Keating's mech "doesn't seem to rest properly.. he gets caught in a mid stride when just
+    sitting there". The key player (engine 0x1000dec0) with the gait code's request (0x1000b3a0: c[0x13] at most 1/32 of
+    full over the stop level -> sequence -1, gait 0): the stride runs on to the sequence's end key (flag 0x400 - walk key
+    11, reached from the run through key 15 flag 0x100 -> walk 6) and the keys sum back to the standing pose; the port had
+    stopped advancing the keys when the ground speed fell under 1 cm/s. TNJ1: the instructor (actor 1) stands until
+    ~25 s, walks / runs to ~50 s and stops: at rest by ~55 s and held. The player: full throttle 3.5 s, stop -> the
+    standing pose within 3 s. (Dead mechs still keep their pose: standing_wreck_frozen)"""
+    REST = (0.0, 12.0, 32.0)   # every mech's ANIM: walk 0-11, run 12-19, reverse 20-31 -> rest at key 0 / 12 / 32
+    r = c.run('_tnj1', secs=62, throttle=0, mission='TNJ1SCN1', dump='/1', env={'MW2_WATCH_ACTOR': '1'})
+    s0, w = r.at(20.0), r.span(30.0, 45.0)
+    c(s0.get('w_key') == 0.0 and s0.get('w_on') == 0, 'TNJ1: the instructor stands at first', 'key %s on %s' % (s0.get('w_key'), s0.get('w_on')))
+    c(len(set(x.get('w_key') for x in w)) > 5 and max(x.get('w_thr', 0) for x in w) > 0.5, 'TNJ1: he walks (keys move)',
+      'keys %s' % [x.get('w_key') for x in w][:6])
+    stop = next((x for x in r.states if x['t'] > 30 and x.get('w_thr', 1) <= 1 / 32.0), None)
+    c(stop is not None, 'TNJ1: he stops (throttle back to the stop level)')
+    if not stop:
+        return
+    end = r.span(stop['t'] + 4.0, 62.0)
+    c(end and all(x.get('w_key') in REST and x.get('w_on') == 0 for x in end), 'TNJ1: within 4 s of stopping he stands in the rest pose, nothing playing',
+      'stop at %.1f s; keys after %s' % (stop['t'], sorted(set(x.get('w_key') for x in end))))
+    c(end and len(set((x.get('w_x'), x.get('w_z')) for x in end)) == 1, 'TNJ1: and stays put')
+    r2 = c.run('_player', secs=9, keys=[(0.5, '0'), (4.0, '1')], nostart=True, dump='/0.25')
+    mid = r2.at(4.0)
+    c(mid.get('pkey') not in REST, 'player: mid-stride when the stop is pressed', 'key %s' % mid.get('pkey'))
+    tail = r2.span(7.0, 9.0)
+    c(tail and all(x.get('pkey') == 12.0 for x in tail), "player: the walk ends at its last key (11) -> the standing pose within 3 s",
+      'keys %s' % sorted(set(x.get('pkey') for x in tail)))
+    moved = [x['pkey'] for x in r2.span(4.0, 7.0)]
+    c(len(set(moved)) > 4, 'player: the stride finishes (keys move after the stop)', '%s' % moved[:8])
+
+
+# ---------------------------------------------------------------- AI aim: the eye ray and the aim range servos
+
+@sequence
+def ai_aim_eye_ray(c):
+    """AI aim (engine 0x10043cc0 -> 0x10044810 / 0x100448e0, DOS 0x52766 -> 0x53190 / 0x53250): each AI projectile as it
+    leaves casts the aim ray from the EYE (unit +0x44, the EYEO node as posed - lagged twist; no torso sway: the controller
+    sets the torso's rotation every frame) along the eye's world yaw and the controller's lagged pitch; a unit struck sets the range +0xb0 (2000 at the least), else it keeps its
+    value, drifting to 50000 (servo +0xa8, tau 20 s); +0xa0 follows it (tau 0.2 s) and the shot heads from its mount for the
+    point at +0xa0 on the ray. The player in the cockpit view is struck on the cockpit set (LOD 4, 0x100267d0): TW5_HEAD,
+    arms, legs. AQUASCN1, Timber Wolf standing: hits land where the eye ray meets the head (9-12 m up), not on the
+    centre (the port had aimed every shot at the target's centre); DOSBox HTAL: CT / RT front only, the arms and legs
+    only the area damage (0x10046700) of one explosion"""
+    r = c.run(secs=45, throttle=0, twist=0, mission='AQUASCN1', dump='/1', env={'MW2_AI_AIM_TRACE': '1'})
+    aim, hits, last = [], [], {}
+    for l in r.out.splitlines():
+        f = l.split()
+        if l.startswith('aiaim ') and len(f) >= 24:
+            t, a = float(f[1]), int(f[3])
+            aim.append(dict(t=t, a=a, hit=int(f[7]), dist=float(f[9]), rng=int(f[11]), conv=float(f[13]),
+                            yaw=float(f[19]), body=float(f[21]), gap=t - last.get(a, -9)))
+            last[a] = t
+        elif l.startswith('plhit ') and len(f) >= 13:
+            hits.append(dict(t=float(f[1]), group=int(f[7]), up=float(f[11])))
+    c(len(aim) >= 20, 'the AI fires (aim ray cast per projectile)', '%d projectiles' % len(aim))
+    conv_ok = [x for x in aim if x['hit'] and x['gap'] >= 0.25]
+    c(conv_ok and all(abs(x['conv'] - max(2000.0, int(x['dist']))) <= 1.0 for x in conv_ok),
+      'a struck unit sets the range and the convergence follows (0.2 s servo)',
+      '%s' % [(x['dist'], x['conv']) for x in conv_ok if abs(x['conv'] - max(2000.0, int(x['dist']))) > 1.0][:4])
+    c(all(x['conv'] < 149000 for x in aim), 'nothing struck: the range keeps its value (never the ray\'s 150000)')
+    c(all(abs(x['yaw'] - x['body']) < 0.1 for x in aim),
+      'the eye ray along the legs + lagged twist: the walk\'s rotation keys on the torso never add up (0x1001a180 sets its '
+      'rotation every frame; Gargoyle +-4 deg yaw)', '%s' % [(x['t'], x['yaw'], x['body']) for x in aim if abs(x['yaw'] - x['body']) >= 0.1][:4])
+    c(len(hits) >= 8, 'the AI hits the player', '%d hits' % len(hits))
+    c(hits and all(x['group'] == 3 and 900 <= x['up'] <= 1250 for x in hits),
+      'every hit on the cockpit set\'s head at the eye ray\'s height (not the centre ~5.5 m)',
+      '%s' % [(x['group'], x['up']) for x in hits if not (x['group'] == 3 and 900 <= x['up'] <= 1250)][:5])
+
+
+@sequence
+def ct_hit_spread_by_edition(c):
+    """a CT hit is spread over the side torsos: the 3D editions rand(3) -> LT / CT / RT (0x10017264), DOS rand(2) -> 2 / 3
+    only (MW2.EXE 0x263c8). DOSBox AQUASCN1 H T A L: one side torso and the CT take every hit, the other side none.
+    40 medium laser hits on location 3 (front armour x 4: LT / RT 116, CT 167 with structure)"""
+    def loc(st, i):
+        return float(st['parmor'].split(',')[i])
+    for ed, three in (('enhanced', True), ('dos', False)):
+        r = c.run('_' + ed, secs=6, nostart=True, env={'MW2_EDITION': ed, 'MW2_TEST_PHIT': '3:3:23:40'})
+        a, b = r.at(2.0), r.at(5.0)
+        lost = [loc(a, i) - loc(b, i) for i in (1, 2, 3)]
+        c(lost[0] > 0 and lost[1] > 0, '%s: locations 2 and 3 take damage' % ed, '%s' % lost)
+        c((lost[2] > 0) == three, '%s: location 4 %s' % (ed, 'too' if three else 'untouched'), '%s' % lost)
+
+
+@sequence
+def splash_area_damage(c):
+    """area damage (0x10046490 -> 0x10046700): a live effect of a damaging type (0x1025b180: missile / PPC hits, death
+    explosions ...) gives every unit within its contact radius + the effect's radius ticks / 256 on locations 2-8 and
+    half that on the head, each frame - the DOSBox AQUASCN1 H T A L shows every bar, legs and head too, taking a sliver
+    after a PPC hit. Combat Variables SPLASH DAMAGE (MW2DIF +2) off: none"""
+    for sp in (1, 0):
+        r = c.run('_%d' % sp, secs=60, throttle=0, twist=0, mission='AQUASCN1', dump='/2', env={'MW2_DAMAGE_LOG': '1'},
+                  files={'MW2DIF.CFG': bytes([0, 0, sp, 1, 1, 1, 0, 0])})
+        area = [l.split() for l in r.out.splitlines() if l.startswith('damage area player')]
+        if sp:
+            locs = set(int(f[5]) for f in area)
+            c(locs == set(range(1, 9)), 'splash on: every location takes area damage', '%s' % sorted(locs))
+            h = [float(f[-1]) for f in area if f[5] == '1']
+            o = [float(f[-1]) for f in area if f[5] == '7']
+            c(h and o and abs(sum(h) * 2 - sum(o)) < 0.05 * sum(o) + 0.01, 'the head half the others', '%.3f / %.3f' % (sum(h), sum(o)))
+        else:
+            c(not area, 'splash off: none', '%d lines' % len(area))
+
+
+
+# ---------------------------------------------------------------- mech-mech contact while walking: sliding round
+
+@sequence
+def tnj1_slide_round_instructor(c):
+    """agent report: TNJ1's Firemoth driven straight ahead from the start at FULL is "blocked about 4 s near z 8420, then
+    slides past". It is the instructor (TNJ1ENS2, a Mad Dog standing at TNW1ST21 17000,9500 until ~25 s), 198 cm to the
+    side of the player's line: contact spheres 550 + 500 (MGEO int[6]). The engine (0x1000b5e0 -> 0x1000ba20) projects the
+    end of every move that comes inside r1 + r2 onto that sphere and sets the velocity to n x max(1, |(dvx, dvy, the
+    other's vz)| / 2) (the mover's own z velocity is overwritten by the other's, 0x1000bc93) - walking as well as
+    airborne; the drive brings the velocity back at 1/45 a tick (its part across the heading easing off the same way) and
+    each frame moves by the mean velocity (v + a dt / 2) dt (0x10019310), the next move projected again: the mech creeps
+    round the sphere, faster at lower frame rates. Heading 0 the bounce is the 1 cm/tick floor and the contact speed
+    |(dvx, dvy)| ~ 0: no damage. DOSBox (MCGA, cycles 40000, ~32 fps): ~8 s in contact, the readout 9-28 km/h, then on at
+    full speed (~1.5 s at the SVGA default's ~5 fps); the port at 30 fps 8 s (it had pushed a walker back 60 cm at -30 %
+    speed: 4.5 s, a back-and-forth stagger)"""
+    tnj1_slide(c, 30)
+
+
+def tnj1_slide(c, fps):
+    """TNJ1's slide round the standing instructor at `fps` frames a second (MW2_TEST_FPS; 30 = the default)"""
+    r = c.run(suffix='' if fps == 30 else '_%d' % fps, secs=22, throttle=1, mission='TNJ1SCN1', dump='/0.25',
+              env={'MW2_TEST_FPS': fps} if fps != 30 else None)
+    if fps != 30:
+        c0 = c
+        c = lambda cond, what, detail='': c0(cond, '%d fps: %s' % (fps, what), detail)
+    pre = r.before(8.0)
+    c(pre.get('kmh', 0) > 100 and pre.get('x') == 16802, 'full speed straight up the start line before the instructor',
+      'kmh %s x %s' % (pre.get('kmh'), pre.get('x')))
+    slow = [s for s in r.span(8.0, 22.0) if s['kmh'] < 30]
+    c(slow and slow[0]['t'] < 8.5, 'stopped by the instructor at ~8 s', str([(s['t'], round(s['kmh'])) for s in r.span(7.5, 9.0)]))
+    if not slow:
+        return
+    t0, t1 = slow[0]['t'], slow[-1]['t']
+    c(6.0 <= t1 - t0 <= 10.0, 'in contact 6-10 s (DOSBox ~8 s at ~32 fps)', '%.2f..%.2f' % (t0, t1))
+    con = r.span(t0, t1)
+    d = [math.hypot(s['x'] - 17000, s['z'] - 9500) for s in con]
+    c(min(d) >= 1040 and max(d) < 1100, 'on the contact sphere throughout (r1 + r2 = 1050; across the ground ~1046, the centres 661 / 550 high)', '%.0f..%.0f' % (min(d), max(d)))
+    xs = [s['x'] for s in con]
+    c(all(b <= a for a, b in zip(xs, xs[1:])), 'creeps round it to the left (x never back)', str(xs[:12]))
+    c(all(s['y'] == 0 for s in con), 'feet on the ground', str(sorted(set(s['y'] for s in con))))
+    end = r.at(21.5)
+    c(end.get('kmh', 0) > 100 and end.get('z', 0) > 9500 + 5000 and abs(end.get('heading', 1)) < 0.1, 'then on past it at full speed, heading 0',
+      'kmh %s z %s heading %s' % (end.get('kmh'), end.get('z'), end.get('heading')))
+    c(r.at(1.0).get('parmor') == end.get('parmor'), 'no collision damage (contact speed |(dvx, dvy)| ~ 0)', '%s -> %s' % (r.at(1.0).get('parmor'), end.get('parmor')))
+    return t1 - t0
+
+
+
+@sequence
+def tnj1_slide_frame_rates(c):
+    """the walking contact slide is per frame in the engine (0x10019310 / 0x1000ba20: each frame's move projected onto
+    the contact sphere, the velocity reset to n x max(1, dv / 2) and restored at 1/45 a tick - DOSBox TNJ1 ~8 s at ~32
+    fps, 4.6 s at ~60, ~1.5 s at ~5); the port's standing rule normalises per-frame effects to the 30 fps reference, so
+    in contact the player's move runs in 1/30 s steps (the remainder carried): TNJ1's slide round the instructor takes the
+    30 fps time at 60, 120 and 144 fps (MW2_TEST_FPS)"""
+    ts = [tnj1_slide(c, fps) for fps in (60, 120, 144)]
+    c(all(t is not None and 6.0 <= t <= 10.0 for t in ts), 'the same ~8 s at 60 / 120 / 144 fps', str(ts))
+
+
+@sequence
+def tnj4_wall_slide(c):
+    """walking into a wall at an angle (TNJ4's S_1BQDAS, a type 0 box, its south face z 166195; the Firemoth at FULL,
+    heading -24.5, 24.5 degrees off head-on - where the walking sweep's autopilot meets it). The engine's world hit
+    (0x1000b5e0): the move cut back to the touching point, the position + r x untravelled x 0.25 (0x10247148), r = d - 2
+    (d . n) n, the velocity r x |v| x -0.25 (0x10247144), restored at 1/45 a tick (0x10019310), the next moves hit again:
+    the mech creeps west along the face. Kept along the heading (the vector's part across it dropped): ~55 cm/s at 30 fps
+    (with the whole vector ~25 cm/s, half DOSBox's: TNJ4, heading -18.5 at ~20 fps, the Beta readout 222 -> 213 m in ~38 s
+    = ~60 cm/s along the face; the port's rule there 40 at 30 fps). The engine's slide is per frame; the port's 1/30 s
+    contact steps give the same speed at 60 and 144 fps (MW2_TEST_FPS); the session-13 build had slowed it to ~33 cm/s"""
+    speeds = []
+    for fps in (30, 60, 144):
+        env = {'MW2_START': '-143500,163000', 'MW2_START_HEADING': -24.5}
+        if fps != 30:
+            env['MW2_TEST_FPS'] = fps
+        r = c.run(suffix='' if fps == 30 else '_%d' % fps, secs=30, throttle=1, mission='TNJ4SCN1', dump='/0.5', env=env)
+        hit = next((s['t'] for s in r.span(7.0, 30.0) if s['kmh'] < 30), None)
+        c(hit is not None and hit < 12, '%d fps: stopped at the wall' % fps, 'kmh %s' % [round(s['kmh']) for s in r.span(7.0, 12.0)])
+        if hit is None:
+            continue
+        seg = r.span(hit + 1.0, hit + 16.0)
+        zs = [s['z'] for s in seg]
+        c(max(zs) - min(zs) < 60 and max(zs) < 165800, '%d fps: along the face (z steady, outside the box)' % fps, '%d..%d' % (min(zs), max(zs)))
+        a, b = r.at(hit + 2.0), r.at(hit + 16.0)
+        v = (a['x'] - b['x']) / 14.0
+        speeds.append(v)
+        c(all(q['x'] <= p['x'] for p, q in zip(seg, seg[1:])), '%d fps: never back east' % fps, str([q['x'] for q in seg[:8]]))
+        c(45 <= v <= 70, '%d fps: slides west along it at ~55 cm/s' % fps, '%.1f cm/s' % v)
+    c(len(speeds) == 3 and max(speeds) - min(speeds) <= 0.1 * max(speeds), 'the same speed at 30 / 60 / 144 fps', str(speeds))
+
+@sequence
+def aqua_time_to_death(c):
+    """AQUASCN1, the player's Timber Wolf standing (DOS edition: a CT hit goes to RT / CT, rand(2)): the two attackers
+    (Gargoyle, Stormcrow) open fire from ~650 m and kill it in DOS-like time. The engine's controller (0x1001a180 ->
+    0x1000f990 -> 0x1002f070 / 0x1000f8f0) sets the torso node's (the first THNG node) whole local rotation every frame -
+    pitch, twist, roll 0 - so the walk's relative rotation keys on it (0x1000dec0 -> 0x1000f9d0; the Gargoyle's +-4 deg
+    yaw) never add up and the AI's eye ray (0x10044950: the eye node's world yaw) points along legs + lagged twist. The
+    port had added the keys to the torso: the Gargoyle's ray swung +-4 deg, missing at range, and the player lived on
+    (DOS edition, 9 AI seeds: median 70 s, three > 100 s). DOSBox: first damage ~13.5 s (a PPC at ~650 m: RT front plus
+    the PPC impact's area damage 0x10046700 on every location), death 33 / 33 / 44 / 44 / 45.5 / 50 / 52.5 s (7 runs);
+    the port now 29-60 s, mean 44 (9 seeds). Fire gate (0x100231a0: |bearing off the legs - lagged twist| < 10 deg,
+    rand(max(skill, 1) + 1) == 0 every r x 22 ticks), twist servo (0.6 s AI / 0.2 s player, 0x100190d0) and manoeuvres
+    unchanged (they match DOS 0x2e860 / 0x266e0 / 0x2c880)"""
+    r = c.run(secs=60, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
+              env={'MW2_AI_AIM_TRACE': '1', 'MW2_AI_SEED': '3'})
+    hits = [float(l.split()[1]) for l in r.out.splitlines() if l.startswith('plhit ')]
+    c(hits and 11.0 <= hits[0] <= 17.0, 'first hit at ~13 s from ~650 m (DOSBox ~13.5 s)', '%s' % hits[:3])
+    dead = [s['t'] for s in r.states if s.get('dead')]
+    c(dead and 35.0 <= dead[0] <= 55.0, 'dead within 35-55 s (DOSBox 33-52.5 s, mean 43)', '%s' % (dead[:1] or 'alive at 60 s'))
+    pre = r.before((dead[0] if dead else 60.0) - 1.0)
+    arm = [float(x) for x in str(pre.get('parmor', '')).split(',') if x]
+    full = [float(x) for x in str(r.at(1.0).get('parmor', '')).split(',') if x]
+    c(len(arm) == 8 and len(full) == 8 and all(a < f for a, f in zip(arm, full)),
+      'every location has lost a little (area damage of the PPC impacts, 0x10046700)', '%s -> %s' % (full, arm))
+    c(len(arm) == 8 and arm[1] == 0 and arm[2] < full[2] * 0.2, 'the RT armour gone and the CT nearly (DOS: CT hits to RT / CT)', '%s' % arm)
+    aim = [l.split() for l in r.out.splitlines() if l.startswith('aiaim ')]
+    c(aim and all(abs(float(f[19]) - float(f[21])) < 0.1 for f in aim), 'every AI aim ray along legs + lagged twist (no torso sway)')
+
+
+@sequence
+def death_explosion_area_damage(c):
+    """a mech's death explosion (0x1001be40, the first: effect 0x0d at the unit, 0x10045c30) is a damaging effect type
+    (0x1025b180): every unit within its contact radius + the effect's radius (0x0d: 19 m) takes ticks / 256 on every
+    location for its 579 ticks (0x10046490 -> 0x10046700) - the port had shown it without the damage. AQUASCN1, the
+    player 12 m / 25 m from the Gargoyle's start, every enemy destroyed at 3 s"""
+    for dx, near in ((1200, True), (2500, False)):
+        r = c.run('_%d' % dx, secs=8, throttle=0, twist=0, mission='AQUASCN1', dump='/1', nostart=True, edition='dos',
+                  env={'MW2_DAMAGE_LOG': '1', 'MW2_START': '%d,-20000' % (110000 + dx), 'MW2_TEST_KILL_ALL': '3:0'})
+        area = [l.split() for l in r.out.splitlines() if l.startswith('damage area player')]
+        if near:
+            c(set(int(f[5]) for f in area) == set(range(1, 9)), '12 m: area damage on every location', '%d lines' % len(area))
+            h = sum(float(f[-1]) for f in area if f[5] == '1')
+            c(1.0 <= h <= 2.0, '12 m: the head ~579 / 512 (half of 579 ticks / 256; more from the wreck\'s later blasts)', '%.3f' % h)
+        else:
+            c(not area, '25 m: outside (19.1 + 5.45 m)', '%d lines' % len(area))
 
 
 def main():

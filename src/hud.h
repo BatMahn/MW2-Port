@@ -79,6 +79,8 @@ int  hud_font_load(hud *h, prj_archive *a, const char *name);
 float hud_text(hud *h, float x, float y, const char *str, const float rgba[4]);
 /* Width of text in virtual units (as hud_text would draw it). */
 float hud_text_width(hud *h, const char *str);
+/* The font's line height in virtual units (as hud_text draws it; the engine's font height, 0x100600d8). */
+float hud_text_height(hud *h);
 /* CPIT layout rectangles (320x200 units); returns the count. */
 int  hud_layout(prj_archive *a, int rects[][4], int max);
 

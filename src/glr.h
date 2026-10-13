@@ -68,6 +68,12 @@ typedef struct {
     float far_cull;          /* > 0: objects wholly beyond this distance (cm) are not drawn - the planet's VIEW far
                               * (DOS MW2.EXE 0x3f500 / 0x4e741, 3Dfx 0x1002fba0 / 0x1003dfbc); 0 = everything */
     int   mga_mip;           /* Matrox Mystique: the ground's mip level by view depth (2500 / 5000 / 15000 cm, MYSTIQUE.PAR) */
+    /* the Titanium edition (mercsw.dll + its renderer plugins): its vertex fog ti_fog = {1 = on, Z (the full-fog depth,
+     * 0 = none), the camera's factor}; the cloud layer's drift (slot 0x8c, U and V in texture repeats); effects
+     * alpha-blended (Render type 8) instead of alpha-tested */
+    float ti_fog[3];
+    float ti_scroll[2];
+    int   fx_blend;
 } glr_view;
 
 /* Requires a current GL 3.3 core context. Returns NULL on failure (shader
@@ -94,7 +100,7 @@ int  glr_set_actors(glr *r, const mech3d *m, const uint8_t palette[256][3],
  * to disable that layer. Copies what it needs. */
 void glr_set_environment(glr *r, const texture *ground, const texture *sky, float tile_sky, float tile_ground);
 
-/* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again): new texture set */
+/* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again) and the sprites': new texture set */
 void glr_flush_textures(glr *r);
 /* Average colour of a texture (0-1 RGB), as the PowerVR engine uses for fog. */
 void glr_texture_average(const texture *t, float out[3]);
@@ -109,6 +115,11 @@ void glr_set_sprites(glr *r, const glr_sprite *s, int n);
  * The array is the caller's and must stay valid. */
 void glr_set_bank0(glr *r, texture *const bank0[GLR_SLOTS]);
 int  glr_billboard_count(void);   /* TEST ONLY: billboards in the last world layer built */
+
+/* The Titanium edition's sky dome (its SKYDOME object, POLY TL1SKYDM: the cloud ceiling, the mountain ring, the sun and
+ * the moon), drawn around the eye before the ground; each polygon's texture is slots[colour & 0xff], its texel UVs
+ * divided by the texture's size - 1 (mercsw 0x10001477). NULL removes it. */
+void glr_set_skydome(glr *r, const wtb_object *o, texture *const slots[GLR_SLOTS]);
 
 /* Draw into the currently bound framebuffer, viewport w x h. */
 void glr_draw(glr *r, const glr_view *v, int w, int h);

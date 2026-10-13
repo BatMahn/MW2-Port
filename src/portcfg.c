@@ -76,11 +76,13 @@ int portcfg_load(const char *unused, portcfg *c)
             int a = atoi(v);
             c->aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
         } else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
-        else if (strcmp(line, "edition") == 0) {
+        else if (strcmp(line, "renderer") == 0 || strcmp(line, "edition") == 0) {   /* (edition=: the old single look) */
             int e;
-            for (e = 0; e < PORTCFG_ED_COUNT; e++) if (strcmp(v, PORTCFG_ED_NAME[e]) == 0) c->edition = e;
-        }
-        STR(game); STR(install); STR(cd); STR(music); STR(ultrasnd); STR(mt32); STR(models); STR(textures); STR(skygnd); STR(skygnd_fog);
+            for (e = 0; e < PORTCFG_ED_COUNT; e++) if (strcmp(v, PORTCFG_ED_NAME[e]) == 0) c->renderer = e;
+            if (strcmp(v, "titanium") == 0) { c->renderer = PORTCFG_ED_ENHANCED; c->texset = PORTCFG_TX_TITANIUM; }   /* migrated */
+        } else if (strcmp(line, "textures") == 0 && (strcmp(v, "original") == 0 || strcmp(v, "titanium") == 0))
+            c->texset = strcmp(v, "titanium") == 0 ? PORTCFG_TX_TITANIUM : PORTCFG_TX_ORIGINAL;
+        STR(game); STR(install); STR(cd); STR(music); STR(ultrasnd); STR(mt32); STR(models); STR(textures); STR(skygnd); STR(skygnd_fog); STR(titanium);
 #undef STR
     }
     fclose(f);
@@ -98,7 +100,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "# MechWarrior 2 port settings (see portcfg.h). Paths left out are taken from the game folder.\n");
     if (c->game[0]) fprintf(f, "game=%s\n", c->game);
 #define OPT(k) if (c->k[0] && !c->game[0]) fprintf(f, #k "=%s\n", c->k)
-    OPT(install); OPT(cd); OPT(music); OPT(ultrasnd); OPT(mt32); OPT(models); OPT(textures); OPT(skygnd); OPT(skygnd_fog);
+    OPT(install); OPT(cd); OPT(music); OPT(ultrasnd); OPT(mt32); OPT(models); OPT(textures); OPT(skygnd); OPT(skygnd_fog); OPT(titanium);
 #undef OPT
     if (c->mode == 0) fprintf(f, "resolution=desktop\n");
     else if (c->mode == 1) fprintf(f, "resolution=window\n");
@@ -106,7 +108,8 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "aa=%d\n", c->aa);
     if (c->render_w) fprintf(f, "render=%dx%d\n", c->render_w, c->render_h); else fprintf(f, "render=native\n");
     fprintf(f, "speed=%.2f\n", (double)(c->speed > 0 ? c->speed : 0.85f));
-    fprintf(f, "edition=%s\n", PORTCFG_ED_NAME[c->edition >= 0 && c->edition < PORTCFG_ED_COUNT ? c->edition : 0]);
+    fprintf(f, "renderer=%s\n", PORTCFG_ED_NAME[c->renderer >= 0 && c->renderer < PORTCFG_ED_COUNT ? c->renderer : 0]);
+    fprintf(f, "textures=%s\n", PORTCFG_TX_NAME[c->texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
     fclose(f);
     return 0;
 }
@@ -161,6 +164,8 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
         if (!c->skygnd_fog[0] && exists(p)) snprintf(c->skygnd_fog, sizeof c->skygnd_fog, "%s", p);
         snprintf(p, sizeof p, "%s/3d/pvr/skygnd.par", c->game);   /* the PowerVR edition's own file: the fog densities */
         if (!c->skygnd_fog[0] && exists(p)) snprintf(c->skygnd_fog, sizeof c->skygnd_fog, "%s", p);
+        snprintf(p, sizeof p, "%s/titanium", c->game);   /* the Titanium edition's 16-bit files */
+        if (!c->titanium[0] && is_dir(p)) snprintf(c->titanium, sizeof c->titanium, "%s", p);
     }
     /* without the 3D editions' files: the DOS archive (models only, untextured) */
     if (!c->models[0] && c->install[0]) {
@@ -175,6 +180,7 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
 }
 
 const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT] = {"enhanced", "dos", "3dfx", "ati", "s3", "pvr", "mga"};
+const char *const PORTCFG_TX_NAME[PORTCFG_TX_COUNT] = {"original", "titanium"};
 
 static void cp(char *dst, const char *src) { snprintf(dst, PORTCFG_PATH, "%s", src ? src : ""); }
 
@@ -216,5 +222,32 @@ int portcfg_edition(const portcfg *c, int ed, char *models, char *textures, char
     /* the S3 edition's textures are the 3Dfx edition's, byte for byte; the Mystique's RGB555 with 0x0000 keyed */
     cp(kind, ed == PORTCFG_ED_S3 ? "3dfx" : ed == PORTCFG_ED_MGA ? "mga" : "pvr");
     cp(fog, ed == PORTCFG_ED_PVR && exists(b) ? b : "");
+    return 0;
+}
+
+int portcfg_titanium(const portcfg *c, char *prj, char *sky)
+{
+    char a[PORTCFG_PATH], b[PORTCFG_PATH];
+    if (!c->titanium[0] || !find_ci(c->titanium, "MW2.PRJ", a, sizeof a)) return -1;
+    if (!find_ci(c->titanium, "SKYGND.PAR", b, sizeof b)) b[0] = 0;
+    if (prj) cp(prj, a);
+    if (sky) cp(sky, b);
+    return 0;
+}
+
+int portcfg_texset_ok(const portcfg *c, int renderer, int texset)
+{
+    if (texset == PORTCFG_TX_ORIGINAL) return 1;
+    return texset == PORTCFG_TX_TITANIUM && renderer != PORTCFG_ED_DOS && portcfg_titanium(c, NULL, NULL) == 0;
+}
+
+int portcfg_look(const portcfg *c, int renderer, int texset, char *models, char *textures, char *kind, char *sky, char *fog)
+{
+    char a[PORTCFG_PATH];
+    if (portcfg_edition(c, renderer, models, textures, kind, sky, fog) != 0 || !portcfg_texset_ok(c, renderer, texset)) return -1;
+    if (texset == PORTCFG_TX_TITANIUM) {   /* the Titanium sky file (its sky dome, ground, fog colours and depths) */
+        if (portcfg_titanium(c, NULL, a) != 0 || !models[0]) return -1;
+        cp(sky, a); cp(fog, "");
+    }
     return 0;
 }

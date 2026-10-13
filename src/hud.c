@@ -635,3 +635,8 @@ float hud_text_width(hud *h, const char *str)
     }
     return w * font_scale(h) / h->k;
 }
+
+float hud_text_height(hud *h)
+{
+    return h->font_tex ? (float)h->font_h * font_scale(h) / h->k : 0.0f;
+}

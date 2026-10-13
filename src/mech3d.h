@@ -72,6 +72,7 @@ typedef struct {
     float        pose_t;
     int          eye_node;       /* EYEO chunk: the skeleton node of the pilot's eye (-1 if none) */
     float        eye_pos[3];     /* its world position after mech3d_pose */
+    float        eye_rot[9];     /* its world rotation (row-major; forward = column 2: rot[2], rot[5], rot[8]) */
     int          eye_ok;
     /* POFO {i16 node, i16 slot} (engine 0x1003eb09: object +0x68[slot]): mount points. Slots by the skeletons'
      * geometry (Timber Wolf, Mad Dog): 0 head, 1 right torso, 2 centre torso, 3 left torso, 4 right arm, 5 left arm,
@@ -89,6 +90,9 @@ int  mech3d_mount_slot(int loc);
  * torso twist included, moved to origin) when it has been posed, else the rest pose turned to heading; returns 0,
  * or -1 if the mech has no such mount */
 int  mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float heading, float out[3]);
+/* the world position of the node carrying the location (OBJL group 1-8) - the first part of that group, else of the centre
+ * torso (3), as 0x1000fec0 finds it - for the mech at origin with heading, in its last pose; -1 if none */
+int  mech3d_group_point(const mech3d *m, int group, const float origin[3], float heading, float out[3]);
 
 void mech3d_use_skeleton(mech3d *dst, const mech3d *src);   /* dst's meshes posed on src's skeleton (the engine's LOD swap) */
 int  mech3d_load(prj_archive *a, const char *record, int repr, mech3d *out);

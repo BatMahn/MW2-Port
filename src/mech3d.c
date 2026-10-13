@@ -747,6 +747,12 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
                     float v;
                     if (m->bind_node[k] != m->skel_index[i] || tr < 0 || tr >= anim->track_count) continue;
                     v = anim_value(anim, tr, t);
+                    /* the torso (the record's first THNG node = the twist node, every mech) gets its whole local rotation
+                     * from the controller each frame (0x1001a180 -> 0x1000f990 -> 0x1002f070 / 0x1000f8f0: pitch, twist,
+                     * roll 0), so the walk's rotation keys on it (0x1000dec0 -> 0x1000f9d0, small relative turns) never
+                     * add up: no torso sway (Gargoyle +-4 deg yaw, Battlemaster / Hellbringer / Summoner +-2.6, Firemoth
+                     * pitch). Its translation keys stay */
+                    if (anim->tracks[tr].type > 2 && m->skel_index[i] == m->twist_node) continue;
                     if (anim->tracks[tr].type <= 2) lpos[anim->tracks[tr].type] += v;
                     else { mat3_axis(tmp, anim->tracks[tr].type - 3, v); mat3_mul(lrot, lrot, tmp); }
                 }
@@ -784,6 +790,28 @@ static void mounts_local(mech3d *m)
                 memcpy(m->mount_local[q], wpos[k], sizeof m->mount_local[q]);
                 m->mount_local_ok |= 1u << q;
             }
+}
+int mech3d_group_point(const mech3d *m, int group, const float origin[3], float heading, float out[3])
+{
+    float wrot[MECH3D_MAX_NODES][9], wpos[MECH3D_MAX_NODES][3], c, sn;
+    int done[MECH3D_MAX_NODES], i, k, g, node = -1;
+    mech3d tmp = *m;
+    for (g = group; g >= 0 && node < 0; g = g == 3 ? -1 : 3)   /* 0x1000fec0(group), else 0x1000fec0(3) */
+        for (i = 0; i < m->part_count && node < 0; i++) if (m->parts[i].group == g && m->parts[i].node >= 0) node = m->parts[i].node;
+    if (node < 0) return -1;
+    tmp.origin[0] = tmp.origin[1] = tmp.origin[2] = 0;
+    tmp.heading = 0;
+    solve_nodes(&tmp, (const anim_set *)m->pose_anim, m->pose_t, wrot, wpos, done);
+    for (k = 0; k < m->skel_count; k++) {
+        const float *l = wpos[k];
+        if (m->skel_index[k] != node || !done[k]) continue;
+        c = cosf(heading * 3.14159265f / 180.0f); sn = sinf(heading * 3.14159265f / 180.0f);
+        out[0] = origin[0] + c * l[0] + sn * l[2];   /* mat3_axis about y: x' = c x + s z, z' = -s x + c z */
+        out[1] = origin[1] + l[1];
+        out[2] = origin[2] - sn * l[0] + c * l[2];
+        return 0;
+    }
+    return -1;
 }
 int mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float heading, float out[3])
 {
@@ -827,6 +855,7 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
         int q;
         if (m->eye_node >= 0 && m->skel_index[k] == m->eye_node && done[k]) {
             memcpy(m->eye_pos, wpos[k], sizeof m->eye_pos);
+            memcpy(m->eye_rot, wrot[k], sizeof m->eye_rot);
             m->eye_ok = 1;
         }
         for (q = 0; q < 8; q++)

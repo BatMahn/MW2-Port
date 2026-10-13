@@ -124,6 +124,7 @@ typedef struct {
     float man_ticks, man_limit;
     int   flank_slot;        /* manoeuvre 1: slot taken (-1 none) */
     float flank_x, flank_z, flank_retarget;
+    int   flank_face;        /* manoeuvre 1: +0x184 = 1 - at the slot, turning to face the target (0x1001f9d0) */
     int   jet;               /* jet input this tick */
     int   jet_forward;       /* horizontal jet thrust input (+0x20) */
     int   man_phase;         /* manoeuvre 5/9 phase (engine +0x180) */

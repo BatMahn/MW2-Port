@@ -75,7 +75,7 @@ def parse(log):
             if m:
                 g = m.groups()
                 rows.append(dict(t=float(g[0]), x=float(g[1]), y=float(g[2]), z=float(g[3]), g=float(g[4]), ap=int(g[8]),
-                                 seen=set(int(v) for v in g[10].split(',') if v), near=int(g[12]), nd=float(g[13]),
+                                 seen=set(int(v) for v in g[10].split(',') if v), near=int(g[12]), nd=float(g[13]), blk=int(g[11]),
                                  out=int(g[14]), leg=int(g[15]), extra=g[16].strip()))
     return navs, rows, blks, start
 
@@ -111,6 +111,7 @@ def analyse(scene, tag, navs, rows, blks):
         # never arriving: on this leg far longer than the straight walk needs
         if d < 3 * max(n['r'], 6000):
             near_t0 = near_t0 if near_t0 is not None and near_nav == tgt else r['t']; near_nav = tgt
+            if r['blk'] and i > 0: near_t0 += r['t'] - rows[i - 1]['t']   # sliding along a wall (refused steps) is not circling
         leg_len = r['t'] - near_t0 if near_t0 is not None and near_nav == tgt else 0
         if leg_len > 30 and ('circ', tgt) not in reported:
             reported.add(('circ', tgt))
