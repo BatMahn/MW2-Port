@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build "MechWarrior 2.app" from a macOS build (make mw2) in the current directory (CI: the repo root).
 # Layout: the binary in Contents/MacOS, the font in Contents/Resources/assets (SDL_GetBasePath() returns
-# Contents/Resources inside a bundle; codesign rejects non-code files in Contents/MacOS), the icon (packaging/macos/mw2port.icns, an original design drawn by tools/make_icon.py) in
+# Contents/Resources inside a bundle; codesign rejects non-code files in Contents/MacOS), the icon (packaging/macos/mw2port.icns, made from the box art by tools/make_icon.py) in
 # Contents/Resources, and the SDL2 dylib the binary was linked against copied into Contents/Frameworks so the
 # app runs without Homebrew. The bundle is ad-hoc signed (codesign -s -), not notarised: a downloaded copy
 # needs  xattr -dr com.apple.quarantine "MechWarrior 2.app"  once (README).

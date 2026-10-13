@@ -7,7 +7,10 @@
 | Liberation Sans Bold (assets/fonts) | the port's own settings text, matched to the original artwork | SIL Open Font License 1.1 |
 | SDL2 (system library) | window, input, audio output | zlib |
 
-MechWarrior 2's own data (archives, art, music, text) is not part of the port: it is read from your copy of the game.
+MechWarrior 2's own data (archives, art, music, text) is read from your copy of the game. The exceptions, all
+Activision's and included only so owners of the game can rebuild a working setup: the 3D editions' data
+(`gamedata/3d/`), the original game icon (`packaging/windows/`, the Windows exe icon) and the box art the macOS app
+icon is made from (`packaging/macos/mw2-boxart.jpg`).
 
 ## mt32emu (Munt)
 

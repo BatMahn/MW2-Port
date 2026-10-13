@@ -1,64 +1,48 @@
 #!/usr/bin/env python3
-"""Draw the port's app icon (an original design: HUD target brackets around a generic walker) and write
-packaging/macos/mw2port.icns + packaging/mw2port.png. Developer tool only (needs Pillow); the build uses the
-committed files. Nothing here comes from the game's data."""
+"""Build the macOS app icon (packaging/macos/mw2port.icns) from the original MechWarrior 2 box art
+(packaging/macos/mw2-boxart.jpg): the cover inset in a gunmetal macOS-style rounded square, so the rounded corners
+don't clip the MECHWARRIOR 2 title. Developer tool only (needs Pillow); the build uses the committed .icns.
+The Windows icon is separate: packaging/windows/mw2port.ico (the original game icon)."""
 import io, struct, sys
 from PIL import Image, ImageDraw, ImageFilter
 
-S = 1024
-G = (64, 224, 96)        # HUD green
-def icon():
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    # macOS-style rounded square with a dark gunmetal gradient
-    bg = Image.new("RGBA", (S, S))
-    d = ImageDraw.Draw(bg)
-    for y in range(S):
-        t = y / S
-        d.line([(0, y), (S, y)], fill=(int(38 - 20 * t), int(46 - 22 * t), int(52 - 24 * t), 255))
-    mask = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([100, 100, S - 100, S - 100], radius=185, fill=255)
-    im.paste(bg, (0, 0), mask)
-    d = ImageDraw.Draw(im)
-    # faint radar rings and grid
-    glow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    g = ImageDraw.Draw(glow)
-    cx, cy = S // 2, S // 2 + 10
-    for r in (330, 230, 130):
-        g.ellipse([cx - r, cy - r, cx + r, cy + r], outline=G + (60,), width=6)
-    g.line([(cx, 170), (cx, S - 170)], fill=G + (45,), width=5)
-    g.line([(170, cy), (S - 170, cy)], fill=G + (45,), width=5)
-    glow = Image.composite(glow, Image.new("RGBA", (S, S), (0, 0, 0, 0)), mask)
-    im.alpha_composite(glow)
-    # generic two-legged walker silhouette (original): box torso, side pods, digitigrade legs
-    m = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    w = ImageDraw.Draw(m)
-    body = (14, 18, 22, 255)
-    w.polygon([(420, 360), (604, 360), (640, 420), (620, 500), (404, 500), (384, 420)], fill=body)   # torso
-    w.rectangle([470, 330, 554, 366], fill=body)                                                   # cockpit
-    w.polygon([(476, 340), (548, 340), (540, 360), (484, 360)], fill=(200, 60, 40, 255))           # canopy glow
-    for sx in (-1, 1):
-        x0 = cx + sx * 118
-        w.rectangle([min(x0, x0 + sx * 30), 395, max(x0, x0 + sx * 30), 430], fill=body)                 # shoulder
-        x1 = x0 + sx * 30
-        w.rounded_rectangle([min(x1, x1 + sx * 62), 370, max(x1, x1 + sx * 62), 470], radius=12, fill=body)  # pods
-        w.rectangle([min(x1, x1 + sx * 62) + 18, 470, max(x1, x1 + sx * 62) - 18, 500], fill=body)          # barrel
-        hip = (cx + sx * 62, 500)
-        knee = (cx + sx * 96, 588)
-        ank = (cx + sx * 72, 690)
-        w.line([hip, knee, ank], fill=body, width=46, joint="curve")
-        w.polygon([(ank[0] - 50, 720), (ank[0] + 50, 720), (ank[0] + 30, 690), (ank[0] - 30, 690)], fill=body)
-    edge = m.split()[3].filter(ImageFilter.MaxFilter(13))
-    rim = Image.new("RGBA", (S, S), G + (255,))
-    rim.putalpha(edge.point(lambda a: 150 if a else 0))
-    im.alpha_composite(rim)
-    im.alpha_composite(m)
-    # target brackets (red, locked) and a centre pip
-    R = (235, 60, 40, 255)
-    a, b, L, T = 245, S - 245, 100, 24
-    for (x, y, dx, dy) in ((a, a, 1, 1), (b, a, -1, 1), (a, b, 1, -1), (b, b, -1, -1)):
-        d.rectangle([min(x, x + dx * L), min(y, y + dy * T), max(x, x + dx * L), max(y, y + dy * T)], fill=R)
-        d.rectangle([min(x, x + dx * T), min(y, y + dy * L), max(x, x + dx * T), max(y, y + dy * L)], fill=R)
-    return im
+S, BODY, RADIUS = 1024, 824, 185     # Apple's icon grid: 824 px rounded square on a 1024 canvas
+INSET, ART_RADIUS = 58, 14           # inset >= RADIUS * (1 - 1/sqrt 2) keeps the art's corners inside the curve
+
+def icon(boxart):
+    off = (S - BODY) // 2
+    out = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    # drop shadow
+    shm = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(shm).rounded_rectangle([off, off + 12, off + BODY, off + BODY + 12], RADIUS, fill=110)
+    sh = Image.new("RGBA", (S, S), (0, 0, 0, 0)); sh.putalpha(shm.filter(ImageFilter.GaussianBlur(14)))
+    out = Image.alpha_composite(out, sh)
+    # gunmetal frame
+    frame = Image.new("RGBA", (BODY, BODY)); d = ImageDraw.Draw(frame)
+    for y in range(BODY):
+        c = int(78 - 38 * y / BODY)
+        d.line([(0, y), (BODY, y)], fill=(c, c + 2, c + 6, 255))
+    m = Image.new("L", (BODY, BODY), 0)
+    ImageDraw.Draw(m).rounded_rectangle([0, 0, BODY - 1, BODY - 1], RADIUS, fill=255)
+    layer = Image.new("RGBA", (S, S), (0, 0, 0, 0)); layer.paste(frame, (off, off), m)
+    out = Image.alpha_composite(out, layer)
+    # the cover, with a dark keyline
+    a = BODY - 2 * INSET
+    art = boxart.convert("RGB").resize((a, a), Image.LANCZOS)
+    art = art.filter(ImageFilter.UnsharpMask(radius=2, percent=60, threshold=2)).convert("RGBA")
+    ring = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(ring).rounded_rectangle([off + INSET - 3, off + INSET - 3, off + INSET + a + 2, off + INSET + a + 2],
+                                           ART_RADIUS + 3, fill=(0, 0, 0, 200))
+    out = Image.alpha_composite(out, ring)
+    am = Image.new("L", (a, a), 0)
+    ImageDraw.Draw(am).rounded_rectangle([0, 0, a - 1, a - 1], ART_RADIUS, fill=255)
+    layer = Image.new("RGBA", (S, S), (0, 0, 0, 0)); layer.paste(art, (off + INSET, off + INSET), am)
+    out = Image.alpha_composite(out, layer)
+    # faint edge highlight
+    edge = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    ImageDraw.Draw(edge).rounded_rectangle([off, off, off + BODY - 1, off + BODY - 1], RADIUS,
+                                           outline=(255, 255, 255, 55), width=3)
+    return Image.alpha_composite(out, edge)
 
 def icns(im):
     chunks = []
@@ -73,7 +57,6 @@ def icns(im):
 
 if __name__ == "__main__":
     root = sys.argv[1] if len(sys.argv) > 1 else "."
-    im = icon()
-    im.save(root + "/packaging/mw2port.png")
+    im = icon(Image.open(root + "/packaging/macos/mw2-boxart.jpg"))
     open(root + "/packaging/macos/mw2port.icns", "wb").write(icns(im))
-    print("wrote packaging/mw2port.png, packaging/macos/mw2port.icns")
+    print("wrote packaging/macos/mw2port.icns")
