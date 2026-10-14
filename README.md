@@ -10,7 +10,7 @@ Cockpit Controls, Hall of Honor, the roster), the simulation (every mission; AI,
 HUD, path-driven dropships / convoys) and the look chosen in Combat Variables with two settings: RENDERER - ENHANCED
 (the default: 3Dfx look + PowerVR fog), DOS, 3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE - and TEXTURES -
 ORIGINAL (each renderer's own textures, sky and ground) or TITANIUM (with the Titanium disc's files). Game values are traced from the original code or
-measured in DOSBox; what is still assumed is listed at the end of ASSUMPTIONS.md ("Open items"). AUDIT.md is the audit
+measured in DOSBox; what is still assumed is listed at the end of ASSUMPTIONS.md ("Open items"); KNOWN_ISSUES.md is the plain-language list of what is still open. AUDIT.md is the audit
 log. Test suites: `make check`, `make test_sequences` (scripted play sequences), `make sweep` (every mission's objectives).
 
 ## Build
