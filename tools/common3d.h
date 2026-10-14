@@ -250,6 +250,40 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
     c3d_ti_scene = ts;   /* kept: the Titanium models' textures */
     c3d_ti_have_scene = 1;
     glr_set_titanium(r, c3d_ti_scene.slot, c3d_ti_camo);
+    {   /* its bank-0 bitmaps (the models' colour type 3 billboards) and the palette shade of its colour type 1 polygons
+         * (mercsw 0x1002f5e3): the planet's LITE (0x10071631: +8 / +12 / +16 the light vector, 999999 x 3 no light term
+         * (0x10097cb4), 888888 x 3 a point light at the eye (0x100ad320; no Titanium mission uses either); +20 the ambient
+         * level, +22 directional, +24 the fog range (0x1009e99c)) and SKYGND.PAR's globalintensity (0x1002e8b7: clamped
+         * to 0..128) */
+        glr_ti_shade sh;
+        char name[16];
+        prj_record pr;
+        memset(&sh, 0, sizeof sh);
+        snprintf(name, sizeof name, "%.4sPLT1", mission);
+        if (prj_read_named(keep, "BWD", name, &pr) == PRJ_OK) {
+            bwd_chunk lc[64];
+            int nlc = bwd_chunks(pr.data, pr.size, lc, 64), q;
+            for (q = 0; q < nlc; q++)
+                if (strcmp(lc[q].tag, "LITE") == 0 && lc[q].size >= 24) {
+                    const uint8_t *d = lc[q].data;
+                    int32_t x = (int32_t)(d[8] | d[9] << 8 | d[10] << 16 | (uint32_t)d[11] << 24);
+                    int32_t y = (int32_t)(d[12] | d[13] << 8 | d[14] << 16 | (uint32_t)d[15] << 24);
+                    int32_t z = (int32_t)(d[16] | d[17] << 8 | d[18] << 16 | (uint32_t)d[19] << 24);
+                    sh.on = 1;
+                    sh.lvec[0] = (float)x; sh.lvec[1] = (float)y; sh.lvec[2] = (float)z;
+                    sh.light = !((x == 999999 && y == 999999 && z == 999999) || (x == 888888 && y == 888888 && z == 888888));
+                    sh.amb = (float)(int16_t)(d[20] | d[21] << 8);
+                    sh.dir = (int16_t)(d[22] | d[23] << 8) != 0;
+                    sh.eye = x == 888888 && y == 888888 && z == 888888;
+                    if (lc[q].size >= 28) sh.range = (float)(int32_t)(d[24] | d[25] << 8 | d[26] << 16 | (uint32_t)d[27] << 24);
+                }
+            prj_record_free(&pr);
+        }
+        sh.gi = c3d_ti_sg.intensity < 1 ? 0 : c3d_ti_sg.intensity > 128 ? 128 : c3d_ti_sg.intensity;
+        glr_set_titanium_extra(r, c3d_ti_scene.bank0, &sh);
+        printf("titanium: shade %s amb %.0f light %d dir %d vec %.0f %.0f %.0f gi %d eye %d range %.0f\n", sh.on ? "LITE" : "none", (double)sh.amb, sh.light, sh.dir,
+               (double)sh.lvec[0], (double)sh.lvec[1], (double)sh.lvec[2], sh.gi, sh.eye, (double)sh.range);
+    }
     for (k = 0; k < 3; k++) { v->fog_color[k] = (float)c3d_ti_sg.fog[k] / 255.0f; v->sky_color[k] = (float)c3d_ti_sg.sky[k] / 255.0f; }
     v->fog_density = 0;
     /* fog: with a renderer that fogs (glview look_fog: the PowerVR edition, the enhanced mix) the Titanium fog; else none,

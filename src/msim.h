@@ -60,6 +60,8 @@ typedef struct {
                                   * the next tick it hits the target there (0x10044f60) */
     unsigned id;                 /* serial number, 1.. (shots are not kept in order: the camera follows one by id) */
     float aim_o[3], aim_d[3];    /* TEST ONLY: the player's aim line when it was fired (the eye, the reticle's direction) */
+    int   first;                 /* drawing only: the first projectile of its weapon's volley (combat volley_start) - the
+                                  * Titanium engine gives that one a light (mercsw 0x1006c470 / 0x1006cd6c) */
 } msim_shot;
 
 /* the engine's integer servo (0x1003b700 set-up, 0x1003b740 step): value += (now - t) x (target - value) / tau in ticks,
@@ -108,9 +110,15 @@ typedef struct {
     combat_planet planet;        /* the mission's PLNT values */
     /* called for every projectile launched; first = the volley's first (weapon sound) */
     void       (*on_shot)(void *user, int weapon, int owner, int first, float x, float z);
+    int          shot_loc;       /* during a player's on_shot (owner -1): the weapon's MEK location (slot +0x28) */
     /* weapon effects (fx.h): type and position (cm, game coordinates) - impacts on mechs and the
      * ground (engine 0x10045d00), and a mech's death explosion */
     void       (*on_effect)(void *user, int type, const float pos[3]);
+    int          fx_player_hit;   /* while on_effect runs for a hit on the player still alive: the effect type's flag 0x4000
+                                   * (0x10045557) - its sound is not halved in the cockpit (0x1004643b) */
+    float        fx_rot[9];       /* while fx_rot_ok: the orientation of the effect on_effect is starting - a muzzle flash's /
+                                   * jet flame's mount node (0x10044a70: the node's world matrix copied to the effect object) */
+    int          fx_rot_ok;
     int          fx_refused;      /* set by on_effect when the effect pool refused the effect (0x10045d00: a neighbour of the
                                   * type within 5 m, or no free slot) - then neither the effect nor its chunks */
     void       (*on_sound)(void *user, int sound, const float pos[3]);   /* a positional sound at pos (footsteps ...); -1 = the collision clang; pos NULL = a cockpit sound at volume 0x32 */
@@ -174,10 +182,6 @@ typedef struct {
     int         *seen_node;      /* per actor: the star's node last applied (0x10014520 runs on a change) */         /* per actor: whom it attacks (state 3), -1 the player, -2 none */    /* PLNT payload +0x38 == 0: explosions may take the scene light (0x1003de48 -> DAT_1025a6a8) */
     float       *centre_h;       /* per actor: centre above the feet, cm (MGEO int[0]: the climbable rise) */
     float        player_centre_h;
-    /* the player's autopilot obstacle avoidance (0x100201c0 on the player's unit record): +0x190 avoid side, +0x188 the
-     * object the first blocked probe hit (nonzero: avoiding), +0x18c the next check (ticks), +0x192 probe length factor */
-    int          pav_side, pav_hit;
-    float        pav_next, pav_len;
     int         *cmd;            /* per actor: commanded AI state (2 attack, 5 follow, 7 patrol, 8 godirect, 11 shutdown), 0 none */
     int         *cmd_target;     /* per actor: the commanded target actor (attack / defend), -1 none */
     int         *engage;         /* per actor: engine +0x154 "engage at will" (0x100124a0: 0 in the player's star, 1 elsewhere) */
@@ -296,13 +300,7 @@ void msim_free(msim *s);
 /* obstacles for avoidance (engine 0x100201c0): rays are tested against the world's faces;
  * `world` must stay alive while the sim runs */
 void msim_set_world(msim *s, const mech3d *world);
-/* The player's autopilot obstacle avoidance (engine 0x100201c0 called from 0x10015c00 for the player's unit): heading
- * (deg), the velocity (cm/s, along and across the heading), the throttle input (fraction of full), reverse (input +0x2f), the bearing
- * error to the nav (deg, wrapped), the saved throttle (0x10015c00's +0x180). Returns 1 while the avoidance steers (the
- * autopilot then skips its nav steering 0x10013600); when it wrote new inputs this check *wrote = 1 with *turn (input
- * +0xc, of 1024) and *thr (input +8, fraction of full); between its checks (every 10 ticks) the inputs are held. */
-int  msim_player_avoid(msim *s, float heading, float along, float across, float throttle, int reverse, float goal_err,
-                       float saved_thr, int *wrote, float *turn, float *thr);
+void msim_test_power(msim *s, int actor, int up);   /* TEST ONLY: power an actor down (0) / wake it (1) */
 /* TEST ONLY: one AI avoidance probe (0x100204e0 -> 0x100103e0) from p0 to p1 for no unit: 0 nothing, 1 a world entry, 2 a
  * unit's piece; (ox, oz) the centre of what it hit */
 int  msim_test_probe(const msim *s, const float p0[3], const float p1[3], float *ox, float *oz);

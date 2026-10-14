@@ -333,7 +333,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
                 if (o->verts[q].z > mxz) mxz = o->verts[q].z;
             }
             e = mxx - mnx > mxz - mnz ? mxx - mnx : mxz - mnz;
-            if (e > 0) world3d_scrg_step = ((e >> 14) + 1) * 0x4000;   /* the object's +4 non-zero branch (INFERRED) */
+            if (e > 0) world3d_scrg_step = ((e >> 14) + 1) * 0x4000;   /* the object's +4 (first child) non-zero branch: every SCRG object has its 8 tiles as children */
         }
         if (p->model.object_count) {   /* flat pieces lying in the ground plane (T_1LINE, T_1SPOTA ...) raised 4 cm */
             const wtb_object *o = &p->model.objects[0];
@@ -376,10 +376,36 @@ done:
 }
 
 /* BLKX (36 bytes, in world records before an INCL): the included block's placement - i32 scale x / y / z (always 1),
- * i32 pitch / yaw / roll in degrees (only yaw used: 0, +-45, +-90, 359), i32 x / y / z. E.g. YELLWLD1 sets its terrain
- * tiles 90 m down (y -9000) and its firebase block at Nav Zeta; nested blocks add up along the include chain. */
+ * i32 pitch / yaw / roll in 16.16 degrees (engine 0x10024e90: x DAT_10247678 = 1/65536; only yaw used: 0, +-45, +-90,
+ * 270, 359), i32 x / y / z. E.g. YELLWLD1 sets its terrain tiles 90 m down (y -9000) and its firebase block at Nav Zeta.
+ * The included record's BLK (0x10024ba0) takes it: its matrix turns about the centre of the BLK's box {i32 x, y, z,
+ * w, h, d} (a negative size counts down from the corner) and then moves by the offset - p' = R(p - c) + t + c (built
+ * T(-c), R, T(t), T(c) with 0x1002f380 / 0x1002ef10) - and the enclosing blocks' matrices follow, so nested blocks
+ * compose along the include chain. */
 typedef struct { char name[11]; float yaw, t[3]; int set; } blk_place;
 static int32_t rd32s(const uint8_t *p) { return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24); }
+/* the centre (x, z) of a record's first BLK box (0x10024ba0: size < 0 -> corner + size, size = -size; centre x 0.5);
+ * 0 when the record has none */
+static int blk_centre(const bwd_mission *m, const char *name, float c[2])
+{
+    int r, k;
+    for (r = 0; r < m->record_count; r++) {
+        if (strcasecmp(m->records[r].name, name) != 0) continue;
+        for (k = 0; k < m->records[r].chunk_count; k++) {
+            const bwd_chunk *b = &m->records[r].chunks[k];
+            if (strcmp(b->tag, "BLK") == 0 && b->size >= 24) {
+                int32_t x0 = rd32s(b->data), z0 = rd32s(b->data + 8), w = rd32s(b->data + 12), d = rd32s(b->data + 20);
+                if (w < 0) { x0 += w; w = -w; }
+                if (d < 0) { z0 += d; d = -d; }
+                c[0] = ((float)x0 + (float)x0 + (float)w) * 0.5f;
+                c[1] = ((float)z0 + (float)z0 + (float)d) * 0.5f;
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
 
 int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d *out)
 {
@@ -402,10 +428,15 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
                 uint16_t id;
                 char nm[11];
                 if (bwd_incl(c, &id, nm) == 0 && have && nb < m.record_count * 8) {
-                    float yaw = (float)rd32s(bx + 16), x = (float)rd32s(bx + 24), y = (float)rd32s(bx + 28), z = (float)rd32s(bx + 32);
-                    float h = pyaw * 3.14159265f / 180.0f;
+                    float yaw = (float)rd32s(bx + 16) / 65536.0f, x = (float)rd32s(bx + 24), y = (float)rd32s(bx + 28), z = (float)rd32s(bx + 32);
+                    float h = pyaw * 3.14159265f / 180.0f, cc[2];
                     blk_place *e = &bp[nb++];
                     snprintf(e->name, sizeof e->name, "%s", nm);
+                    if (yaw != 0 && blk_centre(&m, nm, cc)) {   /* turned about the block's centre: t + c - R c */
+                        float hy = yaw * 3.14159265f / 180.0f, cy = cosf(hy), sy = sinf(hy);
+                        x += cc[0] - (cy * cc[0] + sy * cc[1]);
+                        z += cc[1] - (-sy * cc[0] + cy * cc[1]);
+                    } else if (yaw != 0) yaw = 0;   /* no BLK to take it: not turned (ASSUMED; PINKSCN1's second pinkscri) */
                     e->yaw = pyaw + yaw;   /* the parent's turn, then its offset */
                     e->t[0] = pt[0] + cosf(h) * x + sinf(h) * z;
                     e->t[1] = pt[1] + y;
@@ -870,6 +901,15 @@ int mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float h
     return 0;
 }
 
+void mech3d_mount_rot(const mech3d *m, int slot, float heading, float rot[9])
+{
+    float c = cosf(heading * 3.14159265f / 180.0f), sn = sinf(heading * 3.14159265f / 180.0f);
+    if (slot >= 0 && slot < 8 && (m->mount_ok & (1u << slot))) { memcpy(rot, m->mount_rot[slot], 9 * sizeof *rot); return; }
+    rot[0] = c;   rot[1] = 0; rot[2] = sn;   /* mat3_axis about y */
+    rot[3] = 0;   rot[4] = 1; rot[5] = 0;
+    rot[6] = -sn; rot[7] = 0; rot[8] = c;
+}
+
 int mech3d_mount_slot(int loc)
 {
     /* POFO slot = the location index (head, RT, CT, LT, RA, LA, RL, LL): the model's slot 4 sits on the arm its OBJL group
@@ -897,6 +937,7 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
         for (q = 0; q < 8; q++)
             if (m->pofo_node[q] >= 0 && m->skel_index[k] == m->pofo_node[q] && done[k]) {
                 memcpy(m->mount_pos[q], wpos[k], sizeof m->mount_pos[q]);
+                memcpy(m->mount_rot[q], wrot[k], sizeof m->mount_rot[q]);
                 m->mount_ok |= 1u << q;
             }
     }
@@ -1746,34 +1787,74 @@ int mech3d_fly_loc(const mech3d *m, int q, unsigned mask)
 
 /* ---- the Titanium edition's models (TEXTURES TITANIUM; drawing only) ------------------------------------------ */
 
-/* The Titanium POLY records are in the DOS layout: no stored normals. Its engine lights per vertex from a normal
- * (mercsw 0x1002ecaa: vertex +0x20..+0x28, one-sided); how it derives them is not traced - here each vertex sums its
- * faces' normals (area-weighted). The faces' winding: (v1 - v0) x (v2 - v0) points into the mesh for most of them
- * (Titanium MD1*: 187 of 226 faces, TW1*: 213 / 247, S_1*: 10152 / 14031, against the face centre from the object's
- * centre), so the outward normal is its negation (INFERRED). */
+/* The Titanium POLY records are in the DOS layout: no stored normals. Its engine makes them at load (mercsw 0x10074xxx ->
+ * 0x10003df0) in the model's own frame, and never turns them with the object: the lights (0x1002ecaa) take the vertex's
+ * +0x40 normal as it is (copied by 0x10056860), while the transform 0x10004934 moves only the positions and the
+ * polygons' normals to the world - so an object is lit as if it stood unturned (glr.c draws them so).
+ * Each polygon's normal (0x10004127): a triangle's -((v1 - v0) x (v2 - v1)) normalised (0x10046439); with more corners
+ * the longest edge a - b (the engine's length 0x100462fe, from the last corner round) and, of the other corners from
+ * the last, the one making the largest triangle a, b, c (stopping at one whose |cross| root passes 16) - its normal;
+ * under 3 corners (1, 0, 0). Polygons from the last to the first add theirs to each corner's vertex normal, which is
+ * normalised at once by 0x100462fe's length (largest component + a quarter of the others, 0x1004650b) - so the result
+ * is not quite unit length off the axes (up to ~1.15), as in the engine. The winding: (v1 - v0) x (v2 - v0) points into
+ * the mesh for most faces (Titanium MD1*: 187 of 226, TW1*: 213 / 247, S_1*: 10152 / 14031 against the face centre),
+ * the engine's negation outward. */
+static float ti_len3(float x, float y, float z)   /* engine 0x100462fe */
+{
+    float a = fabsf(x), b = fabsf(y), c = fabsf(z), m = a > b ? (a > c ? a : c) : (b > c ? b : c);
+    return m + (a + b + c - m) * 0.25f;
+}
+static float ti_tri_normal(const wtb_vertex *p0, const wtb_vertex *p1, const wtb_vertex *p2, float n[3])   /* 0x10046439 */
+{
+    float ax = (float)(p1->x - p0->x), ay = (float)(p1->y - p0->y), az = (float)(p1->z - p0->z);
+    float bx = (float)(p2->x - p1->x), by = (float)(p2->y - p1->y), bz = (float)(p2->z - p1->z);
+    float x = -(ay * bz - by * az), y = -(az * bx - bz * ax), z = -(ax * by - bx * ay), l = sqrtf(x * x + y * y + z * z);
+    if (l > 0) { n[0] = x / l; n[1] = y / l; n[2] = z / l; }
+    return sqrtf(l);
+}
+static void ti_face_normal(const wtb_object *o, const wtb_poly *q, float n[3])   /* 0x10004127 */
+{
+    n[0] = 1; n[1] = 0; n[2] = 0;
+    if (q->n < 3) return;
+    if (q->n == 3) { ti_tri_normal(&o->verts[q->idx[0]], &o->verts[q->idx[1]], &o->verts[q->idx[2]], n); return; }
+    {
+        const wtb_vertex *prev = &o->verts[q->idx[0]], *ea = NULL, *eb = NULL;
+        float best = 0, area = -1;
+        int c;
+        for (c = q->n - 1; c >= 0; c--) {
+            const wtb_vertex *cur = &o->verts[q->idx[c]];
+            float l = ti_len3((float)(prev->x - cur->x), (float)(prev->y - cur->y), (float)(prev->z - cur->z));
+            if (l > best) { best = l; ea = cur; eb = prev; }
+            prev = cur;
+        }
+        if (!ea || sqrtf(best) < 1e-7f) return;
+        for (c = q->n - 1; c >= 0; c--) {
+            const wtb_vertex *cv = &o->verts[q->idx[c]];
+            float t[3] = {1, 0, 0}, s;
+            if (cv == ea || cv == eb) continue;
+            s = ti_tri_normal(ea, eb, cv, t);
+            if (s > area) { area = s; memcpy(n, t, sizeof t); }
+            if (s > 16.0f) break;
+        }
+    }
+}
 void mech3d_ti_normals(wtb_model *m)
 {
     int oi, k, j;
     for (oi = 0; m && oi < m->object_count; oi++) {
         wtb_object *o = &m->objects[oi];
         for (k = 0; k < o->vert_count; k++) o->verts[k].normal[0] = o->verts[k].normal[1] = o->verts[k].normal[2] = 0;
-        for (k = 0; k < o->poly_count; k++) {
-            const wtb_poly *q = &o->polys[k];
-            const wtb_vertex *a, *b, *c;
-            float e1[3], e2[3], n[3];
-            if (q->n < 3) continue;
-            a = &o->verts[q->idx[0]]; b = &o->verts[q->idx[1]]; c = &o->verts[q->idx[2]];
-            e1[0] = (float)(b->x - a->x); e1[1] = (float)(b->y - a->y); e1[2] = (float)(b->z - a->z);
-            e2[0] = (float)(c->x - a->x); e2[1] = (float)(c->y - a->y); e2[2] = (float)(c->z - a->z);
-            n[0] = -(e1[1] * e2[2] - e1[2] * e2[1]); n[1] = -(e1[2] * e2[0] - e1[0] * e2[2]); n[2] = -(e1[0] * e2[1] - e1[1] * e2[0]);
-            for (j = 0; j < q->n; j++) {
-                wtb_vertex *v = &o->verts[q->idx[j]];
-                v->normal[0] += n[0]; v->normal[1] += n[1]; v->normal[2] += n[2];
+        for (k = o->poly_count - 1; k >= 0; k--) {
+            wtb_poly *q = &o->polys[k];
+            float n[3];
+            ti_face_normal(o, q, n);
+            memcpy(q->normal, n, sizeof n);   /* (kept for the palette shade, glr.c; has_normal stays 0) */
+            for (j = q->n - 1; j >= 0; j--) {
+                float *vn = o->verts[q->idx[j]].normal, l;
+                vn[0] += n[0]; vn[1] += n[1]; vn[2] += n[2];
+                l = ti_len3(vn[0], vn[1], vn[2]);
+                if (l > 1e-7f) { vn[0] /= l; vn[1] /= l; vn[2] /= l; }
             }
-        }
-        for (k = 0; k < o->vert_count; k++) {
-            float *n = o->verts[k].normal, l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-            if (l > 0) { n[0] /= l; n[1] /= l; n[2] /= l; }
         }
     }
 }
@@ -1803,6 +1884,7 @@ int world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store)
         mech3d_part *p = &world->parts[i];
         prj_record mr;
         p->ti_model = NULL;
+        p->ti_insignia = 0;
         if (!p->rec[0] || strncasecmp(p->rec, "MW2_", 4) == 0) continue;   /* (the shared effect pools: laid out anew) */
         if (p->scrg) {
             /* a scrub patch (SCRG): the Titanium build's scenes include none - its SCN1 records for all 59 of the 3D
@@ -1821,6 +1903,23 @@ int world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store)
                 nc = bwd_chunks(r.data, r.size, NULL, 0);
                 if (nc > 0 && (chunks = calloc((size_t)nc, sizeof *chunks))) bwd_chunks(r.data, r.size, chunks, nc);
                 else nc = 0;
+            }
+        }
+        {   /* its insignia slot 0x3f (mercsw 0x100748ab, a world object's model loaded with the slot remap on - an object
+             * a GT chunk joined to a structure, 0x1005fad3; created after the load, so in a BLK, 0x10071e50 / 0x10008ccf):
+             * + the structure's team (0x1025f44c: the AFFL value before its GT, 0x100714d3 -> 0x10072766) unless -1. Its
+             * camouflage slots stay (0x100749d0 adds 0: the offset is read after the add). In the 59 missions only the
+             * dropships' decals use 0x3f, all with AFFL 0 or no GT. */
+            int affl = -1, inblk = 0;
+            for (k = 0; k < nc; k++) {
+                const uint8_t *d = chunks[k].data;
+                if (strcmp(chunks[k].tag, "BLK") == 0) inblk = 1;
+                else if (strcmp(chunks[k].tag, "ENDB") == 0) inblk = 0;
+                else if (strcmp(chunks[k].tag, "AFFL") == 0 && chunks[k].size >= 4) affl = (int32_t)((uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 | (uint32_t)d[3] << 24);
+                else if (strcmp(chunks[k].tag, "GT") == 0 && chunks[k].size >= 4 && inblk && affl != -1) {
+                    int a = (int16_t)(d[0] | d[1] << 8), b = (int16_t)(d[2] | d[3] << 8);
+                    if (a == p->obj_index || b == p->obj_index) p->ti_insignia = affl;
+                }
             }
         }
         for (k = 0; k < nc; k++) {

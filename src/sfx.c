@@ -11,7 +11,7 @@
 #define SFX_CACHE  512
 
 typedef struct { unsigned char *data; int len; Uint32 last; } clip;
-typedef struct { const clip *c; double pos, step; float l, r; int loop, is_voice, index, prio; clip own; } voice;
+typedef struct { const clip *c; double pos, step; float l, r; int loop, is_voice, index, prio; clip own; } voice;   /* pos < 0: a delayed start (sfx_play_at) */
 /* the engine's sound table (0x1024e6a8, copied by 0x10030590): {sound, priority, playing cap, rate}; -1 = none
  * (priority default 0x32, no cap, the default rate). A later entry for the same sound replaces the earlier (64). */
 static const short SND_TABLE[][4] = {
@@ -267,7 +267,9 @@ static void mix(void *user, Uint8 *stream, int len)
         voice *vc = &s->v[k];
         if (!vc->c) continue;
         for (f = 0; f < frames; f++) {
-            int i = (int)vc->pos, n = vc->c->len;
+            int i, n = vc->c->len;
+            if (vc->pos < 0) { vc->pos += vc->step; continue; }   /* not started yet: the sound's travel time */
+            i = (int)vc->pos;
             float smp, fr, a, b, env = 1.0f;
             if (i >= n) {
                 if (vc->loop) { vc->pos = 0; i = 0; }
@@ -321,6 +323,7 @@ void sfx_destroy(sfx *s)
 }
 
 static void sfx_play_g(sfx *s, int index, float volume, float pan);
+static double s_delay;   /* the next sfx_play_g starts this many seconds late (sfx_play_at) */
 void sfx_set_gains(sfx *s, float effects, float voice)
 {
     if (!s) return;
@@ -345,15 +348,19 @@ double sfx_log_time = -1;   /* TEST ONLY (MW2_SFX_LOG): the caller's clock (s) p
  * not while the audio device plays it - headless runs go faster than real time, so voice order is checkable */
 static double s_sim_voice_end = -1;
 static void sim_voice(int samples) { if (getenv("MW2_SFX_SIMCLOCK")) s_sim_voice_end = sfx_log_time + samples / 11025.0; }
-static void sfx_log(const char *what, int index, float volume, int voice)
+static void sfx_log(const char *what, int index, float volume, int voice, float pan)
 {
-    if (getenv("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f%s\n", sfx_log_time, what, index, (double)volume, voice ? " voice" : "");
+    char pn[32] = "";
+    if (!getenv("MW2_SFX_LOG")) return;
+    if (pan != 0.0f) snprintf(pn, sizeof pn, " pan %.2f", (double)pan);   /* off centre only */
+    if (s_delay > 0) fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f delay %.3f%s\n", sfx_log_time, what, index, (double)volume, s_delay, pn);
+    else fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f%s%s\n", sfx_log_time, what, index, (double)volume, voice ? " voice" : "", pn);
 }
 static void sfx_play_g(sfx *s, int index, float volume, float pan)
 {
     clip *c;
     int k, best = 0;
-    if (s && index > 0) sfx_log("snd", index, volume, s->next_is_voice);   /* TEST ONLY */
+    if (s && index > 0) sfx_log("snd", index, volume, s->next_is_voice, pan);   /* TEST ONLY */
     if (!s || index <= 0 || index >= SFX_CACHE || volume <= 0.01f) return;
     c = &s->cache[index];
     if (!c->data) { c->len = sfx_decode(s->a, index, &c->data); if (c->len <= 0) return; }
@@ -379,14 +386,15 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     s->v[best].loop = 0;
     if (s->next_is_voice) sim_voice(c->len);   /* TEST ONLY */
     s->v[best].is_voice = s->next_is_voice; s->next_is_voice = 0;
-    s->v[best].pos = 0;
+    s->v[best].pos = -s_delay * 11025.0;   /* the handle is taken now, the sample starts after the delay (0x100328e0 +0x3a8) */
     s->v[best].step = 11025.0 / (double)s->rate;    /* engine rate: 11025 Hz */
     s->v[best].l = volume * (pan <= 0 ? 1.0f : 1.0f - pan);
     s->v[best].r = volume * (pan >= 0 ? 1.0f : 1.0f + pan);
     SDL_UnlockAudioDevice(s->dev);
 }
 
-void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw)
+void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw) { sfx_play_at_h(s, index, dx, dz, listener_yaw, 0); }
+void sfx_play_at_h(sfx *s, int index, float dx, float dz, float listener_yaw, int half)
 {
     float d = sqrtf(dx * dx + dz * dz) / 100.0f, a, rel, vol;
     if (!s) return;
@@ -395,14 +403,22 @@ void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw)
     while (rel > 180.0f) rel -= 360.0f;
     while (rel < -180.0f) rel += 360.0f;
     {   /* engine 0x10032f60: volume % = 100 - 100 (d / 500 m)^2 in whole metres, nothing beyond 500 m (half at 354 m);
-         * pan 0x10032c10: 64 + 64 sin(angle) clamped to 15..111 of 0..127 = +-0.766 */
-        int m = (int)d;
-        float pan = sinf(rel * 3.14159265f / 180.0f);
+         * halved (>> 1) when the caller passes the flag (0x10032ad0 edx: DAT_1024e678, the cockpit view); pan 0x10032c10:
+         * 64 + 64 sin(angle) clamped to 15..111 of 0..127 = +-0.766; the start delayed by the distance x 0x1024a984
+         * (0.00549 = 1 / 182.15 ticks per cm, DOS 0x40bc0: x 0x168 / 65536) - sound at 182 cm a tick, 331 m/s - when
+         * that is more than the frame's ticks (0x100328e0 / DOS 0x409b0: start time +0x3a8 = now + delay; port: one
+         * 30 fps frame) */
+        int m = (int)d, v;
+        float pan = sinf(rel * 3.14159265f / 180.0f), ticks = sqrtf(dx * dx + dz * dz) * 0.00549f;
         if (m >= 500) return;
-        vol = (float)(100 - m * m * 100 / 250000) / 100.0f;
+        v = 100 - m * m * 100 / 250000;
+        if (half) v >>= 1;
+        vol = (float)v / 100.0f;
         if (pan > 0.766f) pan = 0.766f;
         if (pan < -0.766f) pan = -0.766f;
+        s_delay = ticks > 182.0f / 30.0f ? ticks / 182.0f : 0.0;
         sfx_play(s, index, vol * 0.8f, pan);
+        s_delay = 0;
     }
 }
 
@@ -410,7 +426,7 @@ int sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volu
 {
     if (s) volume *= gain_of(s->gain_fx);   /* the EFFECTS slider */
     int k, best = -1;
-    if (s && pcm) sfx_log("pcm", len, volume, s->next_is_voice);   /* TEST ONLY */
+    if (s && pcm) sfx_log("pcm", len, volume, s->next_is_voice, 0.0f);   /* TEST ONLY */
     if (!s || !pcm || len <= 0 || rate <= 0) return -1;
     SDL_LockAudioDevice(s->dev);
     for (k = 0; k < SFX_VOICES; k++) if (!s->v[k].c) { best = k; break; }

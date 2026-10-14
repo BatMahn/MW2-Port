@@ -64,11 +64,36 @@ int fx_impact_type(int visual, int flags)
     return t;
 }
 
+/* a 0x8000 / 0xb000 card's polygons (0x10026e80), not the 0x3000 billboard: pool slot si of the type */
+static void card_polys(fx_defs *d, int type, int si, const wtb_object *o, const float sc3[3])
+{
+    int pq, vq, cq;
+    if (o->poly_count <= 0 || !(o->polys[0].color & 0x8000)) return;
+    for (pq = 0; pq < o->poly_count && d->card_n[type][si] < 2; pq++) {
+        const wtb_poly *pp = &o->polys[pq];
+        int ci = d->card_n[type][si];
+        if (pp->n < 3 || pp->n > 4) continue;
+        for (vq = 0; vq < pp->n; vq++) {
+            const wtb_vertex *vv = &o->verts[pp->idx[vq]];
+            d->card_v[type][si][ci][vq][0] = (float)vv->x * sc3[0];
+            d->card_v[type][si][ci][vq][1] = (float)vv->y * sc3[1];
+            d->card_v[type][si][ci][vq][2] = (float)vv->z * sc3[2];
+            d->card_uv[type][si][ci][vq][0] = (float)vv->a / 64.0f;
+            d->card_uv[type][si][ci][vq][1] = (float)vv->b / 64.0f;
+        }
+        if (pp->n == 3) for (cq = 0; cq < 3; cq++) { d->card_v[type][si][ci][3][cq] = d->card_v[type][si][ci][2][cq]; if (cq < 2) d->card_uv[type][si][ci][3][cq] = d->card_uv[type][si][ci][2][cq]; }
+        for (cq = 0; cq < 3; cq++) d->card_nrm[type][si][ci][cq] = -pp->normal[cq];
+        d->card_nv[type][si][ci] = pp->n;
+        d->card_n[type][si]++;
+    }
+}
+
 int fx_load(prj_archive *a, fx_defs *d)
 {
     prj_record r;
     bwd_chunk *c;
     int n, k, model = -1, scale = 1, run[FX_FRAMES], nrun = 0, run_closed = 0;
+    float sc3[3] = {1, 1, 1};
     memset(d, 0, sizeof *d);
     for (k = 0; k < FX_TYPES; k++) d->anim[k] = -1;
 
@@ -109,11 +134,29 @@ int fx_load(prj_archive *a, fx_defs *d)
             model = (uint16_t)rd16(c[k].data + 48);
             scale = (int32_t)(c[k].data[6] | c[k].data[7] << 8 | c[k].data[8] << 16 | (uint32_t)c[k].data[9] << 24);   /* OBJ scale x */
             if (scale < 1) scale = 1;
+            {
+                int q;
+                for (q = 0; q < 3; q++) {
+                    const uint8_t *d3 = c[k].data + 6 + 4 * q;
+                    sc3[q] = (float)(int32_t)(d3[0] | d3[1] << 8 | d3[2] << 16 | (uint32_t)d3[3] << 24);
+                    if (sc3[q] == 0) sc3[q] = 1;   /* 0x100420b0: 0 -> 1 */
+                }
+            }
         }
         else if (strcmp(c[k].tag, "XPLO") == 0 && c[k].size >= 6) {
             int texslot = rd16(c[k].data + 2), type = rd16(c[k].data + 4);
+            int si;
             if (type < 0 || type >= FX_TYPES) continue;
-            if (d->slots[type]++ == 0) {
+            si = d->slots[type]++;
+            if (si > 0 && si < FX_CARD_SLOTS && d->card_n[type][0] > 0 && model >= 0) {   /* a card type's later pool slot: its own model */
+                prj_record mr;
+                if (prj_read(a, prj_find_type(a, "POLY"), model, &mr) == 0) {
+                    wtb_model m;
+                    if (wtb_parse(mr.data, mr.size, &m) == 0 && m.object_count > 0) { card_polys(d, type, si, &m.objects[0], sc3); wtb_free(&m); }
+                    prj_record_free(&mr);
+                }
+            }
+            if (si == 0) {
                 prj_record mr;
                 d->anim[type] = texslot >= 0 && texslot < 512 ? texslot : -1;
                 if (model >= 0 && prj_read(a, prj_find_type(a, "POLY"), model, &mr) == 0) {   /* card size */
@@ -144,6 +187,7 @@ int fx_load(prj_archive *a, fx_defs *d)
                         /* the card's colour picks its texture slot: bit 15 set -> 0x100 + low byte (DEATH0,
                          * JET0, MZL0); otherwise bits 4-11 (LAS0, XPL0, PPC0, BUL0: equal to XPLO's field) */
                         if (o->poly_count > 0 && (o->polys[0].color & 0x8000)) d->anim[type] = 0x100 | (o->polys[0].color & 0xFF);
+                        card_polys(d, type, 0, o, sc3);
                         wtb_free(&m);
                     }
                     prj_record_free(&mr);
@@ -159,13 +203,15 @@ int fx_load(prj_archive *a, fx_defs *d)
 int fx_detail_low;
 int fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_t now)
 {
-    int k, alive = 0, near = 0, free_i = -1;
+    int k, alive = 0, near = 0, free_i = -1, slot;
+    uint32_t used = 0;
     if (type < 0 || type >= FX_TYPES || d->slots[type] <= 0 || fx_duration(type) <= 0) return -1;
     for (k = 0; k < FX_LIVE; k++) {
         const fx_live *e = &w->e[k];
         if (!e->alive) { if (free_i < 0) free_i = k; continue; }
         if (e->type != type) continue;
         alive++;
+        if (e->slot >= 0 && e->slot < 32) used |= 1u << e->slot;
         if (type < 0x17) {   /* 0x10045d00: neighbours of the type within 5 m (0x102485f0) - DISPLAY DETAIL high allows two
                               * (three together), low none */
             float dx = e->pos[0] - pos[0], dy = e->pos[1] - pos[1], dz = e->pos[2] - pos[2];
@@ -173,6 +219,8 @@ int fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_
         }
     }
     if (alive >= d->slots[type] || free_i < 0) return -1;   /* no free pool slot of the type */
+    for (slot = 0; slot < 31 && (used >> slot & 1); slot++) {}   /* 0x10045d00: the type's first free pool entry (pool order) */
+    w->e[free_i].slot = slot;
     w->e[free_i].type = type;
     w->e[free_i].alive = 1;
     memcpy(w->e[free_i].pos, pos, sizeof w->e[free_i].pos);

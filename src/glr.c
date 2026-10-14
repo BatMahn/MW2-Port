@@ -24,18 +24,39 @@
  * bitmaps (colour type 3 billboards); textures: tex[0..255] surfaces, tex[256 + n] bank 0 */
 #define GLR_B0      (GLR_SLOTS + 3)
 #define GLR_TI      (GLR_B0 + GLR_SLOTS)    /* + n: the Titanium models' slot n (glr_set_titanium); textures tex[512 + n] */
-#define GLR_BATCHES (GLR_TI + GLR_SLOTS)   /* 0: main mech or static world, 1: actors (re-uploaded per frame) */
+#define GLR_TB      (GLR_TI + GLR_SLOTS)    /* + n: the Titanium bank-0 bitmap n (its models' colour type 3 billboards,
+                                             * glr_set_titanium_extra); textures tex[768 + n] */
+#define GLR_BATCHES (GLR_TB + GLR_SLOTS)   /* 0: main mech or static world, 1: actors (re-uploaded per frame) */
+
+/* A Titanium polygon coloured per vertex on the CPU, as mercsw does (glr_draw -> ti_colours): its fan's vertices are
+ * first .. first + 3 (n - 2) - 1 in the layer's buffer (corner 0, j, j + 1 per triangle) */
+typedef struct {
+    int     first, n;
+    uint8_t kind;      /* 1 lit (textured kinds 5-7: Gouraud, 0x1002ecaa + 0x1002f238), 2 colour kind 1 (a palette shade,
+                        * 0x1002f5e3), 3 colour kind 2 (the shade with intensity 0xa0 / 0xd0; textures off only) */
+    uint8_t c;         /* kinds 1 / 2: the shade's intensity >> 1 */
+    uint8_t ramp;      /* kinds 1 / 2: the palette ramp x 16 */
+    float   nrm[3], v0[3];   /* kinds 1 / 2: the polygon's normal and corner 0 in the model's frame (game coordinates) */
+} glr_tipoly;
 
 typedef struct {
     GLuint  vao, vbo;
     GLuint  sph_vbo;   /* per vertex: its object's bounding sphere (GL centre, radius) for the view-distance cull */
+    GLuint  tic_vbo;   /* per vertex: the Titanium CPU colour (rgb) and its use (a: 0 none, 1 x the texel (lit), 2 the
+                        * colour (a palette shade), 3 kind 2: the colour, drawn only with its textures off) */
     GLint   batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
     GLsizei batch_count[GLR_BATCHES];
     GLsizei vertex_count;
+    float      *tic;       /* vertex_count x 4: what tic_vbo holds */
+    float      *tipn;      /* vertex_count x 6: the GL position and the normal the lights use (lit polygons) */
+    float      *tistat;    /* vertex_count x 3: the static lights' colour (lit polygons) */
+    glr_tipoly *tip;
+    int         tip_n, tic_static_ok, tic_dyn;
+    float       tic_key[24];   /* the static lights tistat was made with */
 } glr_layer;
 
 struct glr {
-    GLuint prog, tex[GLR_SLOTS * 3];
+    GLuint prog, tex[GLR_SLOTS * 4];
     texture *const *bank0;                  /* glr_set_bank0 (the caller's array) */
     glr_layer layer[GLR_LAYERS];
     GLuint env_vao, env_vbo, env_tex[2];   /* 0 ground, 1 sky */
@@ -43,10 +64,13 @@ struct glr {
     GLuint sky_flat;                       /* 1x1: the sky texture's average colour (Textured Sky off) */
     int    env_has[2];
     float  tile_sky, tile_ground;
-    int    tex_w[GLR_SLOTS * 3], tex_h[GLR_SLOTS * 3], has_tex[GLR_SLOTS * 3];
-    const texture *tex_src[GLR_SLOTS * 3];  /* skip re-uploading the same texture */
+    int    tex_w[GLR_SLOTS * 4], tex_h[GLR_SLOTS * 4], has_tex[GLR_SLOTS * 4];
+    const texture *tex_src[GLR_SLOTS * 4];  /* skip re-uploading the same texture */
     texture *const *ti_slots;               /* glr_set_titanium (the caller's array), NULL off */
     int    ti_camo[8];
+    texture *const *ti_bank0;               /* glr_set_titanium_extra: the Titanium bank-0 bitmaps (billboards) */
+    glr_ti_shade ti_shade;                  /* glr_set_titanium_extra: the palette shade of its colour type 1 polygons */
+    uint8_t ti_pal[2][256][3];              /* per layer: the palette its colour kinds 1 / 2 shade in (set_layer) */
     GLint  u_tilit, u_tiamb, u_tilt, u_tilv, u_tilc, u_tignd, u_tidn, u_tidp, u_tidc;
 
     float  center[3], radius;
@@ -60,7 +84,8 @@ struct glr {
     /* the palette fade of the 3D editions (0x1002ad50): textured polygons in a flat colour, untextured ones toward a
      * target palette by their palette index (glr_set_world_fade) */
     GLuint ptab_tex;
-    GLint  u_tint, u_pfade, u_ptab, u_notex;
+    GLint  u_tint, u_pfade, u_ptab, u_notex, u_tinton, u_dsign;
+    int    dsign;                           /* glr_set_damage_shade */
     float  tint[3], pfade;
     int    tint_on;
     GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_tifog, u_blend;
@@ -91,13 +116,20 @@ static const char *VS =
     "layout(location=4) in float a_texsel;\n"
     "layout(location=5) in float a_edge;\n"
     "layout(location=6) in vec4 a_sphere;\n"
+    "layout(location=7) in vec4 a_tic;\n"
     "uniform mat4 u_mvp, u_view;\n"
     "uniform float u_far; uniform vec2 u_vp;\n"
     "out vec3 v_normal; out vec2 v_uv; out vec3 v_color; flat out int v_texsel; out vec3 v_viewpos; out vec3 v_world;\n"
-    "out vec3 v_bary; flat out int v_emask, v_bb; flat out vec4 v_sph;\n"
+    "out vec3 v_bary; flat out int v_emask, v_bb, v_tif, v_dnib; flat out vec4 v_sph;\n"
+    "out vec3 v_tic; flat out int v_ticm;\n"
     "void main() {\n"
     "  int e = int(a_edge + 0.5);\n"
+    "  v_dnib = e / 2048; e -= v_dnib * 2048;\n"   /* a mech location's damage nibble (glr_set_damage_shade) */
     "  v_bb = e >= 1024 ? 1 : 0;\n"
+    /* Titanium (edge code + 256: its model normal, length kept; + 512: a flat palette colour, unlit) */
+    "  v_tif = 0;\n"
+    "  if (e < 1024 && e >= 512) { v_tif |= 2; e -= 512; }\n"
+    "  if (e < 1024 && e >= 256) { v_tif |= 1; e -= 256; }\n"
     "  vec3 p = a_pos, nrm = a_normal;\n"
     "  gl_Position = u_mvp * vec4(p, 1.0);\n"
     /* a colour type 3 billboard (edge code + 1024; engine 0x10026fc7 -> 0x1002a8e0, mode 0): a_pos the foot (texel u 0,
@@ -107,10 +139,21 @@ static const char *VS =
      * corners (0,0) (1,0) (1,1) (0,1); screen-linear (q = 1), no lighting (0x1002c880 with intensity -1: colour 255) */
     "  if (e >= 1024) {\n"
     "    vec4 cb = u_mvp * vec4(a_pos, 1.0), ca = u_mvp * vec4(a_normal, 1.0);\n"
-    "    int k = int(a_texsel + 0.5);\n"
-    "    e -= 1024; nrm = vec3(0.0);\n"
+    "    int k = int(a_texsel + 0.5), tib = k >= 4 ? 1 : 0;\n"
+    "    e -= 1024; nrm = vec3(0.0); k -= 4 * tib;\n"
     "    if (ca.w <= 1.0 || cb.w <= 1.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
-    "    else {\n"
+    "    else if (tib != 0) {\n"
+    /* Titanium (mercsw 0x1004ef4c, mode 0): T the top's and F the foot's screen point, dx = (F.y - T.y) / 2, dy = (F.x -
+     * T.x) / 2: corner 0 (T.x - dx, T.y - dy), 1 (F.x - dx, F.y + dy), 2 (T.x + dx, F.y - dy), 3 (F.x + dx, T.y + dy) -
+     * the square of 0x10026fc7 for an upright edge, not square once it leans (the engine's own mix of T and F); the
+     * corners' sz: 0 and 3 the top's, 1 and 2 the foot's (+0x18 of each, 0x1004f121..0x1004f1a5) */
+    "      vec2 h = 0.5 * u_vp, T = ca.xy / ca.w * h, F = cb.xy / cb.w * h;\n"
+    "      T.y = -T.y; F.y = -F.y;\n"
+    "      float dx = 0.5 * (F.y - T.y), dy = 0.5 * (F.x - T.x);\n"
+    "      vec2 c = k == 0 ? vec2(T.x - dx, T.y - dy) : k == 1 ? vec2(F.x - dx, F.y + dy) : k == 2 ? vec2(T.x + dx, F.y - dy) : vec2(F.x + dx, T.y + dy);\n"
+    "      gl_Position = vec4(c.x / h.x, -c.y / h.y, k == 0 || k == 3 ? ca.z / ca.w : cb.z / cb.w, 1.0);\n"
+    "      p = k == 0 || k == 3 ? a_normal : a_pos;\n"
+    "    } else {\n"
     "      vec2 h = 0.5 * u_vp, A = ca.xy / ca.w * h, B = cb.xy / cb.w * h;\n"
     "      A.y = -A.y; B.y = -B.y;\n"
     "      vec2 d = 0.5 * (B - A), c = k == 0 ? A + vec2(-d.y, d.x) : k == 1 ? A + vec2(d.y, -d.x) : k == 2 ? B + vec2(d.y, -d.x) : B + vec2(-d.y, d.x);\n"
@@ -126,20 +169,22 @@ static const char *VS =
     "  }\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
     "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(a_texsel + 0.5); v_sph = a_sphere;\n"
+    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5);\n"
     "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
     "  v_bary = vec3(corner == 0 ? 1.0 : 0.0, corner == 1 ? 1.0 : 0.0, corner == 2 ? 1.0 : 0.0); v_emask = (e / 3) | (hi << 3);\n"
     "}\n";
 
 static const char *FS =
     "#version 330 core\n"
-    "in vec3 v_normal; in vec2 v_uv; in vec3 v_color; flat in int v_texsel; in vec3 v_viewpos; in vec3 v_world;\n"
-    "in vec3 v_bary; flat in int v_emask, v_bb; flat in vec4 v_sph;\n"
+    "in vec3 v_normal; in vec2 v_uv; in vec3 v_color; flat in int v_texsel; in vec3 v_viewpos; in vec3 v_world; flat in int v_dnib;\n"
+    "in vec3 v_bary; flat in int v_emask, v_bb, v_tif; flat in vec4 v_sph;\n"
+    "in vec3 v_tic; flat in int v_ticm;\n"
     "uniform int u_point; uniform vec3 u_lpos;\n"
     /* the Titanium lights (mercsw 0x1002ecaa): u_tilit 1 objects, 2 the ground (one colour, 0x1005527e); the ambient, two
      * world lights (type 1 directional - the unit vector the light travels along -, 2 point - its position), the
      * explosion lights (u_tidp: position, radius; 0x1002f238) */
     "uniform int u_tilit; uniform vec3 u_tiamb, u_tignd; uniform ivec2 u_tilt; uniform vec3 u_tilv[2], u_tilc[2];\n"
-    "uniform int u_tidn; uniform vec4 u_tidp[4]; uniform vec3 u_tidc[4];\n"
+    "uniform int u_tidn; uniform vec4 u_tidp[8]; uniform vec3 u_tidc[8];\n"
     /* the engine's vector length (0x100462fe): the largest component + a quarter of the other two */
     "float ti_len(vec3 v) { vec3 a = abs(v); float m = max(a.x, max(a.y, a.z)); return m + (a.x + a.y + a.z - m) * 0.25; }\n"
     "vec3 ti_light(vec3 nn) {\n"
@@ -150,16 +195,21 @@ static const char *FS =
     "    else c += u_tilc[i];\n"
     "  }\n"
     "  c = min(c, vec3(1.0));\n"
-    /* an explosion light lights an object if one of its vertices is inside the light's +-radius box (0x1002eb36): here
-     * the object's bounding sphere's box against it (INFERRED); N.L / |L|, no falloff, added and clamped again */
-    "  for (int j = 0; j < 4; j++) {\n"
+    /* an explosion / projectile light lights an object's polygon if one of its vertices is inside the light's +-radius
+     * box (0x1002eb36): here the object's bounding sphere's box against it (INFERRED); N.L / |L|, no falloff. The engine's
+     * sums (0x1002f3f9..0x1002f5d5) are never cleared after the static lights: each vertex gets the running total, which
+     * starts at the polygon's LAST vertex's lit colour - so a light that reaches an object adds that colour again on top
+     * of its own (here this point's colour, INFERRED: the vertices' lit colours alike), clamped */
+    "  vec3 acc = c; bool hit = false;\n"
+    "  for (int j = 0; j < 8; j++) {\n"
     "    if (j >= u_tidn) break;\n"
     "    vec3 dd = abs(v_sph.xyz - u_tidp[j].xyz);\n"
     "    if (v_sph.w > 0.0 && (dd.x > u_tidp[j].w + v_sph.w || dd.y > u_tidp[j].w + v_sph.w || dd.z > u_tidp[j].w + v_sph.w)) continue;\n"
     "    vec3 l = u_tidp[j].xyz - v_world; float d = dot(l, nn);\n"
-    "    if (d > 0.0) c = min(c + u_tidc[j] * d / max(ti_len(l), 1e-3), vec3(1.0));\n"
+    "    hit = true;\n"
+    "    if (d > 0.0) acc += u_tidc[j] * d / max(ti_len(l), 1e-3);\n"
     "  }\n"
-    "  return c;\n"
+    "  return hit ? min(c + acc, vec3(1.0)) : c;\n"
     "}\n"
     "uniform sampler2D u_tex;\n"
     "uniform vec2 u_texsize;\n"
@@ -169,7 +219,7 @@ static const char *FS =
     "uniform vec3 u_light, u_fog_color;\n"
     "uniform float u_ambient, u_fog_density;\n"
     "uniform mat4 u_view;\n"
-    "uniform vec3 u_tint; uniform float u_pfade; uniform sampler2D u_ptab; uniform int u_notex;\n"
+    "uniform vec3 u_tint; uniform float u_pfade; uniform sampler2D u_ptab; uniform int u_notex, u_tinton, u_dsign;\n"
     "uniform int u_dos, u_dos_dir; uniform sampler2D u_dos_tab; uniform vec3 u_dos_lpos; uniform float u_dos_amb, u_dos_fogdist;\n"
     "uniform float u_alpha; uniform int u_mga_lod;\n"
     /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), w the camera's
@@ -237,21 +287,30 @@ static const char *FS =
     "    float si = lev >= 15.0 ? ti : floor(texture(u_dos_tab, vec2((ti + 0.5) / 256.0, (lev + 0.5) / 17.0)).r * 255.0 + 0.5);\n"
     "    o_color = vec4(dos_colour(si), 1.0); return;\n"
     "  }\n"
-    "  vec3 base = u_mono.a > 1.5 ? v_color : u_mono.a > 0.0 ? u_mono.rgb : v_color; float ta = 1.0;\n"
+    /* a Titanium colour kind 2 polygon (mercsw 0x1001b466 / 0x10053280): drawn only as the kind 1 shade its object's
+     * texture switch makes it (its class in -v_texsel switched off, 0x1001b47a..0x1001b4f3) - or as an outline (above) */
+    "  if (v_ticm == 3 && ((-v_texsel) & u_notex) == 0) discard;\n"
+    "  vec3 base = u_mono.a > 1.5 ? v_color : u_mono.a > 0.0 ? u_mono.rgb : v_ticm >= 2 ? v_tic : v_color; float ta = 1.0; bool tinted = false;\n"
     /* the Combat Variables texture switches (0x1002a8a0 render flags DAT_1024e228, 0x1002a748..): a textured polygon whose
      * object class (-v_texsel: 1 OBJECT, 2 TERRAIN) is switched off is drawn in its texture's average colour (v_color) */
     "  if (u_textured != 0 && u_mono.a <= 0.0 && (v_texsel >= 0 || ((-v_texsel) & u_notex) == 0)) {\n"
     "    vec4 t;\n"
     "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, v_uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
     "    else t = texture(u_tex, v_uv / u_texsize);\n"
-    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5) discard; base = t.rgb * u_tint; ta = t.a; }\n"
+    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
     /* an untextured polygon's palette colour toward the fade's target palette (its index + 1 in v_texsel) */
     "  else if (u_pfade > 0.0 && v_texsel > 0 && v_bb == 0) base = mix(base, texture(u_ptab, vec2((float(v_texsel - 1) + 0.5) / 256.0, 0.5)).rgb, u_pfade);\n"
     "  float n = length(v_normal);\n"
     "  vec3 L = u_point != 0 ? normalize(u_lpos - v_world) : u_light;\n"
     "  float diff = n > 0.0 ? abs(dot(v_normal / n, L)) : 0.5;\n"   /* two-sided: winding unknown */
-    "  vec3 lit = u_unlit != 0 || v_bb != 0 ? base : u_tilit == 1 ? base * ti_light(n > 0.0 ? v_normal / n : vec3(0.0))\n"
-    "           : u_tilit == 2 ? base * u_tignd : base * min(1.0, u_ambient + diff);\n"   /* SGL: ambient + parallel light, saturating */
+    /* a tinted textured polygon (the 3D editions' palette fades, 0x1002c880 with DAT_1024e494): the tint is its vertex
+     * colour - unlit. A mech location (type word 0x100) by its damage nibble n (0x1002b9b0, DAT_1024e428 = PLNT +52):
+     * the light x (1 - n / 15), or x (1 + n / 15) when the planet's flag is set, at most full */
+    "  float ds = v_dnib > 0 ? (u_dsign != 0 ? 1.0 + float(v_dnib) / 15.0 : 1.0 - float(v_dnib) / 15.0) : 1.0;\n"
+    /* Titanium: a polygon lit per vertex (v_ticm 1: the colour the lights gave its corners, interpolated - Gouraud, as
+     * mercsw 0x1002ecaa / 0x1002f238 and dx5draw's SHADEMODE) */
+    "  vec3 lit = u_unlit != 0 || v_bb != 0 || tinted || (v_tif & 2) != 0 ? base : u_tilit == 1 ? base * (v_ticm == 1 ? v_tic : ti_light((v_tif & 1) != 0 ? v_normal : n > 0.0 ? v_normal / n : vec3(0.0)))\n"
+    "           : u_tilit == 2 ? base * u_tignd : base * min(1.0, (u_ambient + diff) * ds);\n"   /* SGL: ambient + parallel light, saturating */
     /* PowerVR PCX2 table fog (Imagination's Series 1 driver source, MIT: dlcamera.c sgl_set_fog, rncamera.c, simulat3
      * hwsabren.c Fog / texas.c): per pixel, from the depth 1/w: index i = depth >> shift = K / z (K below, z the view depth
      * in game units), the 8-bit fog f = PowerTable[i & 127] >> min(i >> 7, 9) with PowerTable[k] = 256 x 2^(-k/128)
@@ -320,9 +379,10 @@ glr *glr_create(void)
             glGenVertexArrays(1, &r->layer[l].vao);
             glGenBuffers(1, &r->layer[l].vbo);
             glGenBuffers(1, &r->layer[l].sph_vbo);
+            glGenBuffers(1, &r->layer[l].tic_vbo);
         }
     }
-    glGenTextures(GLR_SLOTS * 3, r->tex);
+    glGenTextures(GLR_SLOTS * 4, r->tex);
     glGenVertexArrays(1, &r->env_vao);
     glGenBuffers(1, &r->env_vbo);
     glGenTextures(2, r->env_tex);
@@ -332,10 +392,13 @@ glr *glr_create(void)
     r->u_far = glGetUniformLocation(r->prog, "u_far");
     r->u_vp = glGetUniformLocation(r->prog, "u_vp");
     r->u_tint = glGetUniformLocation(r->prog, "u_tint");
+    r->u_tinton = glGetUniformLocation(r->prog, "u_tinton");
+    r->u_dsign = glGetUniformLocation(r->prog, "u_dsign");
     r->u_pfade = glGetUniformLocation(r->prog, "u_pfade");
     r->u_ptab = glGetUniformLocation(r->prog, "u_ptab");
     r->u_notex = glGetUniformLocation(r->prog, "u_notex");
     glVertexAttrib4f(6, 0, 0, 0, 0);   /* the sky, ground and sprites: no sphere, never culled */
+    glVertexAttrib4f(7, 0, 0, 0, 0);   /* nor a Titanium CPU colour */
     r->u_unlit = glGetUniformLocation(r->prog, "u_unlit");
     r->u_wire = glGetUniformLocation(r->prog, "u_wire");
     r->u_shadow = glGetUniformLocation(r->prog, "u_shadow");
@@ -369,7 +432,7 @@ glr *glr_create(void)
 void glr_destroy(glr *r)
 {
     if (!r) return;
-    glDeleteTextures(GLR_SLOTS * 3, r->tex);
+    glDeleteTextures(GLR_SLOTS * 4, r->tex);
     glDeleteTextures(2, r->env_tex);
     glDeleteTextures(1, &r->dos_tex);
     glDeleteTextures(1, &r->ptab_tex);
@@ -389,6 +452,8 @@ void glr_destroy(glr *r)
         for (l = 0; l < GLR_LAYERS; l++) {
             glDeleteBuffers(1, &r->layer[l].vbo);
             glDeleteBuffers(1, &r->layer[l].sph_vbo);
+            glDeleteBuffers(1, &r->layer[l].tic_vbo);
+            free(r->layer[l].tic); free(r->layer[l].tipn); free(r->layer[l].tistat); free(r->layer[l].tip);
             glDeleteVertexArrays(1, &r->layer[l].vao);
         }
     }
@@ -454,13 +519,66 @@ static void part_sphere(const mech3d_part *part, float out[4])
     free(w);
 }
 
+/* A Titanium colour kind 1 polygon's palette shade (mercsw 0x1001b5e4 -> 0x1002f5e3, the 16-bit build's DOS-style
+ * level): L = the LITE ambient (0x10248b0c) + max(0, I x globalintensity / 128) - the LITE's term when it has one
+ * (0x10097cb4), or a point light at the eye when its vector is 888888 x 3 (0x100ad320 -> the camera position
+ * 0x1009e954, 0x1002f641) -; less (depth / LITE range) >> 4 when the range is > 1e-7 (0x1002f6cb; depth = the polygon's
+ * deepest corner, 0x100575d3..0x1005761f), at least 0; then with Multiple Lights (0x10097cb8) and L < 0x80 each
+ * explosion / projectile light whose +-radius box holds one of its corners (0x1002eb36) adds its I as a point light,
+ * unscaled, until L reaches 0x80 (0x1002f70a..0x1002f7ba); level = L x ((w & 0xff) >> 1) / 0x440, 0..15. Without the
+ * LITE: 8. The polygon's normal and corner 0 are in the MODEL's frame (poly +8, vertex +0), the lights in the world's,
+ * as the engine has them. */
+/* I (0x10056e9b -> 0x10056f13): 128 (n . v) clamped to +-127 (ftol, the short clamp), v a directional light's vector as
+ * stored (0x10057a80), else (light - corner 0) / its engine length (0x100462fe; within 1e-7 of it: 127) */
+static int ti_shade_i(const float n[3], const float v0[3], const float lv[3], int dir)
+{
+    float d;
+    int I;
+    if (dir) d = 128.0f * (n[0] * lv[0] + n[1] * lv[1] + n[2] * lv[2]);
+    else {
+        float dx = lv[0] - v0[0], dy = lv[1] - v0[1], dz = lv[2] - v0[2];
+        float ax = fabsf(dx), ay = fabsf(dy), az = fabsf(dz), mx = ax > ay ? (ax > az ? ax : az) : (ay > az ? ay : az);
+        float len = mx + (ax + ay + az - mx) * 0.25f;
+        if (ax < 1e-7f && ay < 1e-7f && az < 1e-7f) return 127;
+        d = 128.0f * (n[0] * dx + n[1] * dy + n[2] * dz) / len;
+    }
+    d = d < -32768.0f ? -32768.0f : d > 32767.0f ? 32767.0f : d;
+    I = (int)d;
+    return I < -127 ? -127 : I > 127 ? 127 : I;
+}
+/* L before the fog and the Multiple Lights terms; eye: the camera in game coordinates (NULL: none known) */
+static int ti_shade_base(const glr_ti_shade *sh, const float n[3], const float v0[3], const float *eye)
+{
+    int L = (int)sh->amb, I;
+    if (sh->eye && eye) I = ti_shade_i(n, v0, eye, 0);   /* (0x1002f641: the vector replaced, 0x10248b00 = 0: a point) */
+    else if (sh->light) I = ti_shade_i(n, v0, sh->lvec, sh->dir);
+    else return L;
+    I = I * sh->gi / 128;   /* (imul, cdq / and 0x7f / sar 7: toward zero) */
+    return I > 0 ? L + I : L;
+}
+static int ti_shade_finish(int L, int c)
+{
+    int lev = L * c / 0x440;
+    return lev < 1 ? 0 : lev > 15 ? 15 : lev;
+}
+static int ti_shade_level(const glr *r, const wtb_object *o, const wtb_poly *q, int c)
+{
+    const glr_ti_shade *sh = &r->ti_shade;
+    const wtb_vertex *v0 = &o->verts[q->idx[0]];
+    const float c0[3] = {(float)v0->x, (float)v0->y, (float)v0->z};
+    if (!sh->on) return 8;
+    return ti_shade_finish(q->n >= 3 ? ti_shade_base(sh, q->normal, c0, NULL) : (int)sh->amb, c);
+}
+
 static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256][3],
                      texture *const slots[GLR_SLOTS], int camo, int clan, int bounds)
 {
+    const int ti_world_normals = getenv("MW2_TEST_TI_WORLDN") != NULL;   /* TEST ONLY: turn them as the 3D editions do */
     glr_layer *L = &r->layer[li];
     size_t cap = 0, n = 0, *count, *pos;
-    float *buf = NULL, *sph = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-    int pi, k, j, a, pass, b;
+    float *buf = NULL, *sph = NULL, *tic = NULL, *tipn = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    glr_tipoly *tip = NULL;
+    int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0;
 
     for (pi = 0; pi < m->part_count; pi++) {
         const wtb_model *pm = r->ti_slots && m->parts[pi].ti_model ? m->parts[pi].ti_model : &m->parts[pi].model;
@@ -472,9 +590,12 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     }
     buf = malloc((cap ? cap : 1) * FLOATS_PER_VERTEX * sizeof *buf);
     sph = malloc((cap ? cap : 1) * 4 * sizeof *sph);
+    tic = calloc((cap ? cap : 1) * 4, sizeof *tic);
+    tipn = calloc((cap ? cap : 1) * 6, sizeof *tipn);
     count = calloc(GLR_BATCHES, sizeof *count);
     pos = calloc(GLR_BATCHES, sizeof *pos);
-    if (!buf || !sph || !count || !pos) { free(buf); free(sph); free(count); free(pos); return -1; }
+    if (!buf || !sph || !tic || !tipn || !count || !pos) { free(buf); free(sph); free(tic); free(tipn); free(count); free(pos); return -1; }
+    if (r->ti_slots) memcpy(r->ti_pal[li], palette, sizeof r->ti_pal[li]);
 
     /* two passes: count triangles per texture batch, then write them grouped */
     for (pass = 0; pass < 2; pass++) {
@@ -498,6 +619,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             else if (part->objtype & 0x100) { int cn = (part->objtype & 0xf0) >> 4; wire_code = cn < 1 ? 1 : cn < 12 ? 3 : 2; }
             else if (part->wire_hi) wire_code = 1;
             if (part->hidden || part->moving || !o) continue;   /* moving: a path-carried world part, drawn on the actor layer */
+            const int dnib = !r->dos && !ti && part->dmg_nib > 0 && part->dmg_nib < 16 ? part->dmg_nib : 0;
             /* the texture switches by the object's type word (0x1002a768: DAT_1024e228 & type, and with the OBJECT bit 0x100
              * also class 5): OBJECT TEXTURES (0x100652f0: bits 0x100 mechs, 0x200) -> class 1, TERRAIN TEXTURES (0x10065340:
              * bit 0x800) -> class 2; other objects (type 0 rocks, buildings) keep their textures */
@@ -507,12 +629,18 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             for (k = 0; k < o->poly_count; k++) {
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3], ti_vmin;
-                int c0, pidx;
+                int c0, pidx, ti_flat, tk4, tk2, tik = 0, k2c = 0, k2cls = 0;
                 const wtb_vertex *v0, *v1, *v2;
                 int slot = q->color & 0xFF, batch = GLR_SLOTS;
                 float ground_lift = 0.0f;
                 if (q->n < 3) continue;
-                if (((q->color >> 12) & 7) == 3 && !part->shadow && !ti) {
+                /* Titanium (mercsw 0x10053280, the draw by colour kind in the normal view): kind 2 has no case there - not drawn
+                 * (lattices, rotor blades, shields, the hex glass) unless its object's texture switch is off (then the kind 1
+                 * shade 0x1001b050 makes of it, v_ticm 3 below) or in image enhancement (0x10055a5d: outlines); kind 3 only
+                 * with low nibble 0 or 3 (0x1004eef0) */
+                tk2 = ti && ((q->color >> 12) & 7) == 2;
+                if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
+                if (((q->color >> 12) & 7) == 3 && !part->shadow) {
                     /* colour type 3 (0x3240 ...): a billboard of bank-0 bitmap (w >> 4) & 0xff (engine 0x10026fc7 ->
                      * 0x1002a8e0): of the triangle's corners (by texel u / v) the foot (u 0, v > 0) and the top (u 0, v 0)
                      * make the vertical edge; the engine draws a screen square of that edge's projected length centred on
@@ -520,8 +648,13 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                      * u > 0, only orients the bitmap). The scrub records (TNJ1SCRI: tan_rk, tan_rk2, rrock, cact_2) are
                      * rocks and cacti; each is stored twice, once per winding (two-sided), and drawn once. No bitmap in
                      * the table: nothing drawn (0x1002c880 returns 0 for an empty bitmap entry, 0x1015f0f6 / f0f8) */
+                    /* Titanium (0x1004ef4c, mode 0): the same corners (u 0: v 0 the top, v > 0 the foot) and square on
+                     * the edge's screen length, corner UVs (0,0) (0,1) (1,1) (1,0) (0x1009dfe0); its bitmap from the
+                     * Titanium bank 0 (0x10001375 without + 0x100), the vertex colour 0xc8 grey (drawn below) */
                     int bs = (q->color >> 4) & 0xff, ft = -1, tp = -1, k2;
-                    const texture *bt = r->bank0 ? r->bank0[bs] : NULL;
+                    texture *const *bk = ti ? r->ti_bank0 : r->bank0;
+                    const int bb0 = ti ? GLR_TB : GLR_B0;
+                    const texture *bt = bk ? bk[bs] : NULL;
                     if (!bt || !bt->rgba || bt->w <= 0 || bt->h <= 0) continue;
                     if (k > 0 && o->polys[k - 1].color == q->color && o->polys[k - 1].n == q->n) {   /* the other winding */
                         int same = 1, k3, k4;
@@ -538,7 +671,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         if (vv->b == 0) tp = q->idx[k2]; else ft = q->idx[k2];
                     }
                     if (ft < 0 || tp < 0) continue;
-                    if (pass == 0) { count[GLR_B0 + bs] += 6; continue; }
+                    if (pass == 0) { count[bb0 + bs] += 6; continue; }
                     {
                         const wtb_vertex *vf = &o->verts[ft], *vt = &o->verts[tp];
                         float dx = (float)(vt->x - vf->x), dy = (float)(vt->y - vf->y), dz = (float)(vt->z - vf->z);
@@ -573,21 +706,23 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         if (r->dos && !model->extended) { col[0] = 4; col[1] = 0; col[2] = 255; }   /* DOS: the texels unshaded */
                         else glr_texture_average(bt, col);   /* the untextured view: the bitmap's colour */
                         for (a = 0; a < 6; a++) {
-                            float *f = buf + pos[GLR_B0 + bs] * FLOATS_PER_VERTEX;
+                            float *f = buf + pos[bb0 + bs] * FLOATS_PER_VERTEX;
                             int c, kc = BBK[a];
-                            memcpy(sph + pos[GLR_B0 + bs] * 4, psph, sizeof psph);
+                            memcpy(sph + pos[bb0 + bs] * 4, psph, sizeof psph);
                             f[0] = foot[0]; f[1] = foot[1]; f[2] = foot[2];
                             f[3] = top[0]; f[4] = top[1]; f[5] = top[2];
                             f[6] = (kc == 1 || kc == 2) ? (float)bt->w : 0.0f; f[7] = kc >= 2 ? (float)bt->h : 0.0f;
+                            if (ti) { f[6] = kc >= 2 ? (float)bt->w : 0.0f; f[7] = (kc == 1 || kc == 2) ? (float)bt->h : 0.0f; }   /* (0x1009dfe0: corners (0,0) (0,1) (1,1) (1,0); the flip for a corner u or v < 0, 0x1004f29f..0x1004f2ea, swaps the u
+                                                                                                                                              * of corners 0 / 1 and 2 / 3 - equal in that table: no change) */
                             for (c = 0; c < 3; c++) f[8 + c] = part->tint ? (float)((part->tint >> (16 - 8 * c)) & 0xff) / 255.0f : col[c];
-                            f[11] = (float)kc;
+                            f[11] = (float)(kc + (ti ? 4 : 0));   /* (+ 4: the Titanium corners, VS) */
                             f[12] = (float)(1024 + CORNER[a] + 3 * MASK[a] + 32 * wire_code);
                             for (c = 0; c < 3; c++) {
                                 float lo = f[c] < f[3 + c] ? f[c] : f[3 + c], hi = f[c] < f[3 + c] ? f[3 + c] : f[c];
                                 if (lo - 0.5f * h < mn[c]) mn[c] = lo - 0.5f * h;
                                 if (hi + 0.5f * h > mx[c]) mx[c] = hi + 0.5f * h;
                             }
-                            pos[GLR_B0 + bs]++;
+                            pos[bb0 + bs]++;
                             n++;
                         }
                     }
@@ -606,8 +741,9 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     int ty = (q->color >> 12) & 7, ls = q->color & 0xff, star = part->tex_offset < 0 ? 0 : part->tex_offset > 7 ? 7 : part->tex_offset;
                     if (part->ti && ls <= 0xa && !(ls & 1)) { int cs = r->ti_camo[star] & 7; ls = cs < 2 ? ls + cs : TI_CAMO_BASE[cs] + ls / 2; }
                     else if (part->ti && ls == 0x3f) ls += star;
+                    else if (!part->ti && ls == 0x3f) ls += part->ti_insignia;   /* a world object: its structure's team */
                     batch = GLR_SLOTS;
-                    if ((ty == 2 || ty >= 5) && !part->flat && ls < GLR_SLOTS && r->ti_slots[ls]) batch = GLR_TI + ls;
+                    if (ty >= 5 && !part->flat && ls < GLR_SLOTS && r->ti_slots[ls]) batch = GLR_TI + ls;
                 }
                 if (r->dos && !model->extended) {   /* DOS bitmaps: types 5-7 bitmap = low byte; type 3 (scrub / effect cards,
                                                      * 0x3250 ...) bitmap = (word >> 4) & 0xff, transparent texels */
@@ -649,11 +785,22 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 {   /* textured: the vertex colour = the polygon's average texel colour, so the untextured view
                      * (Combat Variables TEXTURES off) shows each polygon in its texture's colours */
                     float pc[3];
-                    /* (a Titanium flat polygon - kinds 0, 1, 3, 4: the DOS colour word's palette entry, INFERRED: ramp x 16 + 8
-                     * for kinds 1 and 4, (w >> 4) & 0xff for 0 and 3; the 16-bit flat path is not traced) */
+                    /* a Titanium flat polygon (mercsw 0x10053280, palette colours 0x10286d40 straight into the vertices,
+                     * no lights): kind 0 entry ((w >> 8) & 0xf) << 4 | ((w >> 4) & 0xf) (0x1001b3dc), kind 1 entry
+                     * ramp x 16 + the palette shade (0x1001b7bd, ti_shade_level), kind 4 each vertex's own entry (its
+                     * texel u, 0x100535d2 - set per vertex below; ramp x 16 + 8 stands for the polygon) */
                     const int tk = (q->color >> 12) & 7;
-                    const texture *tt = batch >= GLR_TI ? r->ti_slots[batch - GLR_TI] : NULL;
-                    pidx = ti ? (tk == 1 || tk == 4 ? (((q->color >> 8) & 0xf) << 4) | 8 : (q->color >> 4) & 0xff)
+                    const texture *tt = batch >= GLR_TI && batch < GLR_TB ? r->ti_slots[batch - GLR_TI] : NULL;
+                    /* kind 2 with its texture switch off (0x1001b47a..0x1001b4f3, the switch mask 0x1009e9a8 - INFERRED to be the
+                     * 3D editions' OBJECT 0x300 / TERRAIN 0x800 bits): kind 1, ramp (w >> 8) & 0xf, intensity 0xa0 for a
+                     * mech (type 0x100) or class 0x50 object, else 0xd0 */
+                    if (tk2) {
+                        k2cls = (part->objtype & 0x300) || (part->objtype & 0xf0) == 0x50 ? 1 : (part->objtype & 0x800) ? 2 : 0;
+                        k2c = ((part->objtype & 0x100) || (part->objtype & 0xf0) == 0x50 ? 0xa0 : 0xd0) >> 1;
+                    }
+                    pidx = ti ? (tk == 1 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, (int)(q->color & 0xff) >> 1)
+                                : tk2 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, k2c)
+                                : tk == 4 ? (((q->color >> 8) & 0xf) << 4) | 8 : (q->color >> 4) & 0xff)
                          : batch == GLR_SLOTS + 2 ? (q->color >> 4) & 0xff : model->extended && (q->color >> 12) == 1 ? (((q->color >> 8) & 0xf) << 4) | 0xf : q->color >> 8;
                     for (c0 = 0; c0 < 3; c0++) pc[c0] = (float)palette[pidx][c0] / 255.0f;
                     if (batch < GLR_SLOTS && slots[batch] && slots[batch]->rgba && slots[batch]->w > 0 && slots[batch]->h > 0)
@@ -696,8 +843,24 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     for (k3 = 0; k3 < q->n && gnd; k3++) { long wy = (long)o->verts[q->idx[k3]].y + part->pos[1]; if (wy > 2 || wy < -2) gnd = 0; }
                     ground_lift = gnd && !part->has_rot ? 3.0f : 0.0f;
                 }
+                ti_flat = ti && batch == GLR_SLOTS && (((q->color >> 12) & 7) <= 1 || ((q->color >> 12) & 7) == 4 || tk2);
+                /* coloured per vertex on the CPU each frame (glr_draw -> ti_colours): the lit polygons, colour kinds 1 / 2 */
+                if (ti && !part->tint && !part->shadow && (batch == GLR_SLOTS || (batch >= GLR_TI && batch < GLR_TB)))
+                    tik = tk2 ? 3 : !ti_flat ? 1 : ((q->color >> 12) & 7) == 1 ? 2 : 0;
+                if (tik && pass == 1) {
+                    glr_tipoly *tp;
+                    if (tip_n == tip_cap) { glr_tipoly *g = realloc(tip, (size_t)(tip_cap = tip_cap ? 2 * tip_cap : 256) * sizeof *tip); if (!g) { tik = 0; goto no_tip; } tip = g; }
+                    tp = &tip[tip_n++];
+                    tp->first = (int)pos[batch]; tp->n = q->n; tp->kind = (uint8_t)tik;
+                    tp->c = (uint8_t)(tik == 3 ? k2c : (int)(q->color & 0xff) >> 1);
+                    tp->ramp = (uint8_t)(((q->color >> 8) & 0xf) << 4);
+                    memcpy(tp->nrm, q->normal, sizeof tp->nrm);
+                    tp->v0[0] = (float)v0->x; tp->v0[1] = (float)v0->y; tp->v0[2] = (float)v0->z;
+                }
+                no_tip:
+                tk4 = ((q->color >> 12) & 7) == 4;
                 ti_vmin = 0.0f;
-                if (batch >= GLR_TI) {   /* (the Titanium type > 0 rule below: the polygon's least texel v) */
+                if (batch >= GLR_TI && batch < GLR_TB) {   /* (the Titanium type > 0 rule below: the polygon's least texel v) */
                     int k4;
                     ti_vmin = 1e9f;
                     for (k4 = 0; k4 < q->n; k4++) if ((float)o->verts[q->idx[k4]].b < ti_vmin) ti_vmin = (float)o->verts[q->idx[k4]].b;
@@ -737,9 +900,12 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                             f[4] = ny;
                             f[5] = -(-sy * nx + cy * nz);
                         }
+                        /* Titanium: the model's own normal, unturned (mercsw 0x1002ecaa reads the vertex's +0x40 as made at
+                         * load, 0x10003df0; 0x10004934 turns only positions and polygon normals), its length kept */
+                        if (ti && !ti_world_normals) { f[3] = nx; f[4] = ny; f[5] = -nz; }
                         f[6] = (float)v->a;
                         f[7] = (float)v->b;
-                        if (batch >= GLR_TI) {   /* Titanium (mercsw 0x10001081, every textured kind via 0x10053280): a texture of
+                        if (batch >= GLR_TI && batch < GLR_TB) {   /* Titanium (mercsw 0x10001081, every textured kind via 0x10053280): a texture of
                                                   * type > 0 (not slot 0x8c) U = u / w, V = (v - the polygon's least v) / h
                                                   * (0x10001175..0x1000122a); type 0: texel / (size - 1) (0x1000124c); the
                                                   * shader divides by the size */
@@ -757,14 +923,23 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                             f[7] = v->a >= 48 ? (float)(v->a & ~15) : (float)v->a;
                         }
                         if (part->tint) { f[8] = (float)((part->tint >> 16) & 0xff) / 255.0f; f[9] = (float)((part->tint >> 8) & 0xff) / 255.0f; f[10] = (float)(part->tint & 0xff) / 255.0f; }
+                        else if (ti_flat && tk4) for (c = 0; c < 3; c++) f[8 + c] = (float)palette[v->a & 0xff][c] / 255.0f;   /* 0x100535d2 */
                         else for (c = 0; c < 3; c++) f[8 + c] = poly_col[c];
                         /* a palette-coloured polygon (untextured, 3D editions): its index + 1 for the palette fades; a
                          * textured one: minus its texture switch class (notex_class) */
-                        f[11] = batch >= GLR_SLOTS && !part->tint && !(r->dos && !model->extended) ? (float)(pidx + 1) : batch < GLR_SLOTS ? (float)-notex_cls : 0.0f;
+                        f[11] = batch >= GLR_SLOTS && !part->tint && !(r->dos && !model->extended) ? (float)((ti_flat && tk4 ? v->a & 0xff : pidx) + 1) : batch < GLR_SLOTS ? (float)-notex_cls : 0.0f;
+                        if (tk2) f[11] = (float)-k2cls;   /* (v_ticm 3: drawn only with its class's textures off) */
+                        if (tik) {
+                            float *t = tic + pos[batch] * 4;
+                            memcpy(tipn + pos[batch] * 6, f, 6 * sizeof *f);
+                            if (tik == 1) t[0] = t[1] = t[2] = 1.0f;
+                            else for (c = 0; c < 3; c++) t[c] = (float)palette[pidx][c] / 255.0f;
+                            t[3] = (float)tik;
+                        }
                         /* the wireframe's edges: this corner (0-2) + 3 x the polygon's own edges in this fan triangle
                          * (bit 0: corner 1 - 2, always; bit 1: corner 2 - 0 when it closes the polygon; bit 2: corner 0 - 1
                          * when it starts it), so the triangulation's diagonals are not drawn (DOS draws polygon outlines) */
-                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code);
+                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat ? 512 : 0) + 2048 * dnib);
                         for (c = 0; c < 3; c++) {
                             if (f[c] < mn[c]) mn[c] = f[c];
                             if (f[c] > mx[c]) mx[c] = f[c];
@@ -804,6 +979,14 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *sph), sph, GL_STATIC_DRAW);
     glEnableVertexAttribArray(6);
     glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
+    glBindBuffer(GL_ARRAY_BUFFER, L->tic_vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *tic), tic, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(7);
+    glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
+    free(L->tic); free(L->tipn); free(L->tistat); free(L->tip);
+    L->tic = tic; L->tipn = tipn; L->tistat = NULL; L->tip = tip; L->tip_n = tip_n;
+    L->tic_static_ok = 0; L->tic_dyn = 1;
+    tic = tipn = NULL; tip = NULL;
     glBindVertexArray(0);
     L->vertex_count = (GLsizei)n;
     for (b = 0; b < GLR_SLOTS; b++)
@@ -812,12 +995,160 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         if (L->batch_count[GLR_B0 + b] > 0) upload_texture(r, GLR_SLOTS + b, r->bank0 ? r->bank0[b] : NULL);
     for (b = 0; b < GLR_SLOTS; b++)
         if (L->batch_count[GLR_TI + b] > 0) upload_texture(r, 2 * GLR_SLOTS + b, r->ti_slots ? r->ti_slots[b] : NULL);
+    for (b = 0; b < GLR_SLOTS; b++)
+        if (L->batch_count[GLR_TB + b] > 0) upload_texture(r, 3 * GLR_SLOTS + b, r->ti_bank0 ? r->ti_bank0[b] : NULL);
     if (li == 0) {   /* tests: the static layer's billboards */
         g_billboards = 0;
         for (b = 0; b < GLR_SLOTS; b++) g_billboards += (int)L->batch_count[GLR_B0 + b] / 6;
     }
-    free(buf); free(sph); free(count); free(pos);
+    free(buf); free(sph); free(count); free(pos); free(tic); free(tipn); free(tip);
     return 0;
+}
+
+/* A fan triangle vertex's corner: vertex first + 3 t + a of a polygon is corner 0 (a 0) or t + a */
+static int ti_corner_vertex(const glr_tipoly *tp, int k)
+{
+    return k == 0 ? tp->first : k <= tp->n - 2 ? tp->first + 3 * (k - 1) + 1 : tp->first + 3 * (tp->n - 3) + 2;
+}
+
+/* the engine's vector length (0x100462fe): the largest component + a quarter of the other two */
+static float ti_len3(float x, float y, float z)
+{
+    float ax = fabsf(x), ay = fabsf(y), az = fabsf(z), m = ax > ay ? (ax > az ? ax : az) : (ay > az ? ay : az);
+    return m + (ax + ay + az - m) * 0.25f;
+}
+
+/* The Titanium per-vertex colours of a layer (mercsw's granularity), each frame before it is drawn:
+ *  - lit polygons (kinds 5-7): each corner's static lights (0x1002ecaa: the ambient, then each light - directional
+ *    -L.N, point N.(L - P) / |L - P| - x its colour, at most 255), interpolated across the polygon (Gouraud, dx5draw's
+ *    SHADEMODE 0x10002b6f); then (Multiple Lights) each explosion / projectile light whose +-radius box holds one of the
+ *    polygon's corners (0x1002eb36, per polygon) adds, corner by corner, a running sum S - started at the polygon's LAST
+ *    corner's static colour and never reset, + the light's colour x N.(L - P) / |L - P| (when > 0) x 255 - to the corner
+ *    (0x1002f3f9..0x1002f5d5), at most 255. All in GL coordinates (the shader's), the normal the model's own (unturned);
+ *  - colour kinds 1 / 2 (flat): the palette shade of 0x1002f5e3 (ti_shade_base / _finish) with its fog term (the
+ *    polygon's deepest corner, 0x100575d3) and Multiple Lights term, one colour per polygon. */
+static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], const float eye_gl[3])
+{
+    glr_layer *L = &r->layer[li];
+    const glr_ti_shade *sh = &r->ti_shade;
+    float key[24], lv[2][3], dp[GLR_TI_DYN][4], dc[GLR_TI_DYN][3];
+    int lt[2], nd = v->ti_dyn_n < GLR_TI_DYN ? v->ti_dyn_n : GLR_TI_DYN, k, i, j, c, lo = -1, hi = -1;
+    const float eye_g[3] = {eye_gl[0], eye_gl[1], -eye_gl[2]};
+    if (L->tip_n <= 0 || !L->tic || !L->tipn) return;
+    for (k = 0; k < 2; k++) {
+        float x = v->ti_lvec[k][0], y = v->ti_lvec[k][1], z = -v->ti_lvec[k][2], l = sqrtf(x * x + y * y + z * z);
+        lt[k] = v->ti_ltype[k];
+        if (lt[k] == 1 && l > 0) { x /= l; y /= l; z /= l; }   /* (0x1002f9f5) */
+        lv[k][0] = x; lv[k][1] = y; lv[k][2] = z;
+    }
+    for (k = 0; k < nd; k++) {
+        dp[k][0] = v->ti_dyn[k][0]; dp[k][1] = v->ti_dyn[k][1]; dp[k][2] = -v->ti_dyn[k][2]; dp[k][3] = v->ti_dyn[k][3];
+        dc[k][0] = v->ti_dyn[k][4]; dc[k][1] = v->ti_dyn[k][5]; dc[k][2] = v->ti_dyn[k][6];
+    }
+    memset(key, 0, sizeof key);
+    memcpy(key, v->ti_amb, 3 * sizeof *key);
+    memcpy(key + 3, lv, 6 * sizeof *key);
+    memcpy(key + 9, v->ti_lcol, 6 * sizeof *key);
+    key[15] = (float)lt[0]; key[16] = (float)lt[1];
+    if (!L->tistat) L->tistat = calloc((size_t)L->vertex_count * 3 + 1, sizeof *L->tistat);
+    if (!L->tistat) return;
+    if (!L->tic_static_ok || memcmp(key, L->tic_key, sizeof key) != 0) {   /* the static lights: once per mission */
+        for (i = 0; i < L->tip_n; i++) {
+            const glr_tipoly *tp = &L->tip[i];
+            int e = tp->first + 3 * (tp->n - 2);
+            if (tp->kind != 1) continue;
+            for (j = tp->first; j < e; j++) {
+                const float *P = L->tipn + (size_t)j * 6, *N = P + 3;
+                float col[3];
+                memcpy(col, v->ti_amb, sizeof col);
+                for (k = 0; k < 2; k++) {
+                    float d;
+                    if (lt[k] == 1) { d = -(lv[k][0] * N[0] + lv[k][1] * N[1] + lv[k][2] * N[2]); if (d <= 0) continue; }
+                    else if (lt[k] == 2) {
+                        float lx = lv[k][0] - P[0], ly = lv[k][1] - P[1], lz = lv[k][2] - P[2], ll = ti_len3(lx, ly, lz);
+                        d = lx * N[0] + ly * N[1] + lz * N[2];
+                        if (d <= 0) continue;
+                        d /= ll > 1e-3f ? ll : 1e-3f;
+                    } else d = 1.0f;
+                    for (c = 0; c < 3; c++) col[c] += v->ti_lcol[k][c] * d;
+                }
+                for (c = 0; c < 3; c++) L->tistat[(size_t)j * 3 + c] = col[c] > 1.0f ? 1.0f : col[c];
+            }
+        }
+        memcpy(L->tic_key, key, sizeof key);
+        L->tic_static_ok = 0;
+    }
+    for (i = 0; i < L->tip_n; i++) {
+        const glr_tipoly *tp = &L->tip[i];
+        int e = tp->first + 3 * (tp->n - 2), hit[GLR_TI_DYN], nh = 0;
+        for (k = 0; k < nd; k++) {   /* 0x1002eb36: one of its corners inside the light's +-radius box (edges included) */
+            hit[k] = 0;
+            for (j = 0; j < tp->n && !hit[k]; j++) {
+                const float *P = L->tipn + (size_t)ti_corner_vertex(tp, j) * 6;
+                hit[k] = fabsf(P[0] - dp[k][0]) <= dp[k][3] && fabsf(P[1] - dp[k][1]) <= dp[k][3] && fabsf(P[2] - dp[k][2]) <= dp[k][3];
+            }
+            nh += hit[k];
+        }
+        if (tp->kind == 1) {
+            float col[WTB_MAX_POLY_VERTS][3], S[3];
+            if (!nh && L->tic_static_ok && !L->tic_dyn) continue;   /* (unchanged) */
+            for (j = 0; j < tp->n; j++) memcpy(col[j], L->tistat + (size_t)ti_corner_vertex(tp, j) * 3, sizeof col[j]);
+            memcpy(S, col[tp->n - 1], sizeof S);
+            for (k = 0; k < nd; k++) {
+                if (!hit[k]) continue;
+                for (j = 0; j < tp->n; j++) {
+                    const float *P = L->tipn + (size_t)ti_corner_vertex(tp, j) * 6, *N = P + 3;
+                    float lx = dp[k][0] - P[0], ly = dp[k][1] - P[1], lz = dp[k][2] - P[2], d = lx * N[0] + ly * N[1] + lz * N[2];
+                    if (d > 0) {
+                        float ll = ti_len3(lx, ly, lz);
+                        d /= ll > 1e-3f ? ll : 1e-3f;
+                        for (c = 0; c < 3; c++) S[c] += dc[k][c] * d;
+                    }
+                    for (c = 0; c < 3; c++) { col[j][c] += S[c]; if (col[j][c] > 1.0f) col[j][c] = 1.0f; }
+                }
+            }
+            for (j = tp->first; j < e; j++) {
+                int t = (j - tp->first) / 3, a = (j - tp->first) % 3, cn = a == 0 ? 0 : t + a;
+                memcpy(L->tic + (size_t)j * 4, col[cn], 3 * sizeof(float));
+            }
+        } else if (sh->on) {   /* colour kinds 1 / 2: the shade, flat */
+            int lev, Lv, done = 0;
+            float depth = -1e30f;
+            Lv = tp->n >= 3 ? ti_shade_base(sh, tp->nrm, tp->v0, eye_g) : (int)sh->amb;
+            if (sh->range > 1e-7f) {   /* 0x1002f6cb: (depth / range) >> 4 off, at least 0 */
+                for (j = 0; j < tp->n; j++) {
+                    const float *P = L->tipn + (size_t)ti_corner_vertex(tp, j) * 6;
+                    float z = -(view[2] * P[0] + view[6] * P[1] + view[10] * P[2] + view[14]);
+                    if (z > depth) depth = z;
+                }
+                Lv -= (int)(depth / sh->range) >> 4;
+                if (Lv < 0) Lv = 0;
+            }
+            for (k = 0; k < nd && Lv < 0x80 && !done && tp->n >= 3; k++) {   /* Multiple Lights: a point at the light */
+                const float lg[3] = {dp[k][0], dp[k][1], -dp[k][2]};
+                int I;
+                if (!hit[k]) continue;
+                I = ti_shade_i(tp->nrm, tp->v0, lg, 0);
+                if (I > 0) { Lv += I; if (Lv >= 0x80) done = 1; }
+            }
+            lev = ti_shade_finish(Lv, tp->c);
+            {
+                const uint8_t *pe = r->ti_pal[li][(tp->ramp | lev) & 0xff];
+                float cc[3] = {pe[0] / 255.0f, pe[1] / 255.0f, pe[2] / 255.0f};
+                float *t0 = L->tic + (size_t)tp->first * 4;
+                if (t0[0] == cc[0] && t0[1] == cc[1] && t0[2] == cc[2] && L->tic_static_ok) continue;
+                for (j = tp->first; j < e; j++) memcpy(L->tic + (size_t)j * 4, cc, sizeof cc);
+            }
+        } else continue;
+        if (lo < 0 || tp->first < lo) lo = tp->first;
+        if (e > hi) hi = e;
+    }
+    L->tic_dyn = nd > 0;
+    L->tic_static_ok = 1;
+    if (lo >= 0 && hi > lo) {
+        glBindBuffer(GL_ARRAY_BUFFER, L->tic_vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)((size_t)lo * 4 * sizeof(float)), (GLsizeiptr)((size_t)(hi - lo) * 4 * sizeof(float)), L->tic + (size_t)lo * 4);
+    }
 }
 
 int glr_set_mech(glr *r, const mech3d *m, const uint8_t palette[256][3],
@@ -836,6 +1167,13 @@ void glr_set_titanium(glr *r, texture *const slots[GLR_SLOTS], const int camo[8]
 {
     r->ti_slots = slots;
     if (camo) memcpy(r->ti_camo, camo, sizeof r->ti_camo); else memset(r->ti_camo, 0, sizeof r->ti_camo);
+    if (!slots) { r->ti_bank0 = NULL; memset(&r->ti_shade, 0, sizeof r->ti_shade); }
+}
+
+void glr_set_titanium_extra(glr *r, texture *const bank0[GLR_SLOTS], const glr_ti_shade *shade)
+{
+    r->ti_bank0 = bank0;
+    if (shade) r->ti_shade = *shade; else memset(&r->ti_shade, 0, sizeof r->ti_shade);
 }
 
 void glr_texture_average(const texture *t, float out[3])
@@ -1084,6 +1422,8 @@ void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float 
     }
 }
 
+void glr_set_damage_shade(glr *r, int sign) { if (r) r->dsign = sign != 0; }
+
 void glr_set_dos_palette(glr *r, const uint8_t pal[256][3])
 {
     int x;
@@ -1173,6 +1513,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform1i(r->u_tex, 0);
     glUniform1i(r->u_dos, 0);
     if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1);
+    glUniform1i(r->u_tinton, r->tint_on && !r->dos && !r->ti_slots);   /* (not the Titanium look: its renderer not traced) */
+    glUniform1i(r->u_dsign, r->dsign);
     glUniform1f(r->u_pfade, 0);
     glUniform1i(r->u_horizon, 0);
     glUniform1i(r->u_mga_lod, 0);
@@ -1336,7 +1678,11 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniform1i(r->u_textured, 1);
         }
         if (r->dome_n > 0 && !r->dos && v->ortho_w <= 0) {
-            /* the Titanium sky dome: around the eye (its x, z; the dome's own height), no depth, unlit, not fogged,
+            /* the Titanium sky dome: around the eye (its x, z; the dome's own height), no depth (the 16-bit engine has no
+             * working depth test: its vertices' sz is the view depth in cm (objects, 0x10056753; the ground's / 4,
+             * 0x1000180b), far outside D3D's 0..1, under ZFUNC LESSEQUAL (dx5draw 0x10002b95; a billboard's is 1.0,
+             * 0x1004f117) - the order is its depth sort's (0x10057723), and the dome is drawn first,
+             * 0x100557da, so behind everything), unlit, not fogged,
              * alpha-blended (the textures of type > 0: Render type 8, dx5draw 0x100044ff - SRCALPHA / INVSRCALPHA);
              * the cloud ceiling (slot 0x8c) drifts by the skyAnim offsets (mercsw 0x1000127c), not turned with the
              * heading: the sky is drawn in mode 2 (0x1009e974 = 2 at 0x100327ee), which skips that rotation (0x100012a0) */
@@ -1445,6 +1791,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform1i(r->u_tilit, v->ti_light && !r->dos ? 1 : 0);   /* Titanium: the objects' lights (0x1002ecaa) */
     for (int li = 0; li < GLR_LAYERS; li++) {
     const glr_layer *L = &r->layer[li];
+    if (r->ti_slots && !r->dos) ti_colours(r, li, v, view, eye);   /* the Titanium per-vertex colours */
     if (v->solo && li == 0) continue;
     {   static const float off0[4] = {0, 0, 0, 0}; glUniform4fv(r->u_mono, 1, li == 1 ? v->mono : off0); }
     {   /* image enhancement: lines, world red, actors (mechs, cockpit) blue (DOS w) */
@@ -1483,6 +1830,27 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glUniform2f(r->u_texsize, (float)r->tex_w[GLR_SLOTS + s], (float)r->tex_h[GLR_SLOTS + s]);
         glUniform1i(r->u_textured, 1);
         glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_B0 + s], L->batch_count[GLR_B0 + s]);
+    }
+    for (s = 0; s < GLR_SLOTS; s++) {   /* Titanium billboards (0x1004ef4c): the bitmap x the vertex colour 0xc8 (200 / 255),
+                                         * Render type 8 (alpha-blended) for a texture of type > 0, else type 2 (0x1000131e);
+                                         * the vertices' diffuse alpha 0x80 (0x1004f364) is not used: dx5draw never sets
+                                         * TEXTUREMAPBLEND (states set: 2-9, 0x11-0x14, 0x16, 0x17, 0x1a-0x1d, 0x22, 0x29;
+                                         * 0x10002b60, 0x100034xx-0x1000373b), so D3D's default MODULATE takes the alpha
+                                         * from a texture that has one (the type > 0 ARGB4444) and the type 2 draw does
+                                         * not blend */
+        const texture *bt = r->ti_bank0 ? r->ti_bank0[s] : NULL;
+        int blend = bt && bt->type > 0 && !v->wire;
+        if (L->batch_count[GLR_TB + s] <= 0) continue;
+        glBindTexture(GL_TEXTURE_2D, r->tex[3 * GLR_SLOTS + s]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+        glUniform2f(r->u_texsize, (float)r->tex_w[3 * GLR_SLOTS + s], (float)r->tex_h[3 * GLR_SLOTS + s]);
+        glUniform1i(r->u_textured, !(li == 0 ? v->notex_world : v->notex_actors));
+        glUniform3f(r->u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);
+        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); glUniform1i(r->u_blend, 1); }
+        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_TB + s], L->batch_count[GLR_TB + s]);
+        if (blend) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); glUniform1i(r->u_blend, 0); }
+        if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1);
     }
     if (L->batch_count[GLR_SLOTS + 2] > 0) {   /* unlit plain colours (type 0: the laser bolts) */
         glUniform1i(r->u_textured, 0);
@@ -1597,6 +1965,14 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             int j;
             if (v->wire) {   /* image enhancement: the card's outline in its type's colour, its inside black (hidden lines) */
                 int wc = sp->wire_code ? sp->wire_code : 4;
+                if (sp->quad) {   /* the card's own quad */
+                    static const int QK[6] = {0, 1, 2, 0, 2, 3}, CORNER[6] = {0, 1, 2, 0, 1, 2}, MASK[6] = {5, 5, 5, 3, 3, 3};
+                    for (j = 0; j < 6; j++) {
+                        f = env_vertex(f, sp->qv[QK[j]][0], sp->qv[QK[j]][1], -sp->qv[QK[j]][2], 0, 0, 0, 0, 0);
+                        f[-1] = (float)(CORNER[j] + 3 * MASK[j] + 32 * wc);
+                    }
+                    continue;
+                }
                 if (sp->has_tri) {
                     for (j = 0; j < 6; j++) {
                         const float *t = sp->tri[j < 3 ? j : 2];
@@ -1628,6 +2004,14 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 q[1][j] = c[j] + right[j] * sp->half_w - up[j] * sp->half_h;
                 q[2][j] = c[j] + right[j] * sp->half_w + up[j] * sp->half_h;
                 q[3][j] = c[j] - right[j] * sp->half_w + up[j] * sp->half_h;
+            }
+            if (sp->quad) {   /* a card in its own orientation (0x1002c880): two triangles of its corners */
+                static const int QK[6] = {0, 1, 2, 0, 2, 3};
+                for (j = 0; j < 6; j++) {
+                    const int qk = QK[j];
+                    f = env_vertex(f, sp->qv[qk][0], sp->qv[qk][1], -sp->qv[qk][2], 0, 0, 0, sp->quv[qk][0] * tw, sp->quv[qk][1] * th);
+                }
+                continue;
             }
             if (sp->bb) {   /* the engine billboard (the vertex shader's edge code 1024): foot, top, corner */
                 static const int BBK[6] = {0, 1, 2, 0, 2, 3}, CORNER[6] = {0, 1, 2, 0, 1, 2}, MASK[6] = {5, 5, 5, 3, 3, 3};

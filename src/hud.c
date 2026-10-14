@@ -30,6 +30,12 @@ struct hud_s {
     int    font_h, cell_w, glyph_w[128], font_sw, font_sh;   /* font_sw / sh: atlas cell strides (1 px gutter) */
 };
 
+/* every loaded sprite's indices, kept so a palette change (hud_repalette) can redraw its texture */
+typedef struct { unsigned tex; int w, h, from, to; uint8_t *pix, *mask; uint32_t used[8]; } hud_src;
+static hud_src *g_src;
+static int      g_src_n, g_src_cap;
+static uint8_t  g_src_used[256];   /* the palette indices the loaded sprites use */
+
 static GLuint compile(GLenum t, const char *src)
 {
     GLuint s = glCreateShader(t);
@@ -112,6 +118,8 @@ void hud_destroy(hud *h)
     glDeleteVertexArrays(1, &h->vao);
     glDeleteProgram(h->prog);
     free(h);
+    while (g_src_n > 0) { g_src_n--; free(g_src[g_src_n].pix); free(g_src[g_src_n].mask); }
+    memset(g_src_used, 0, sizeof g_src_used);
 }
 
 int hud_sprite_load(hud *h, prj_archive *a, const char *name, int frame, hud_sprite *out)
@@ -149,31 +157,24 @@ static uint32_t *scale3x(const uint32_t *in, int aw, int ah)
     return out;
 }
 
-int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, int from, int to, hud_sprite *out)
+/* the sprite's indices through the current palette into texture `tex` (the Scale3x upscale, see bind_sprite) */
+static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask, int w, int hg, int from, int to, unsigned tex)
 {
-    prj_record r;
-    shp_frame f;
-    uint8_t *rgba;
-    int i, tw, th;
-    memset(out, 0, sizeof *out);
-    if (prj_read_named(a, "SHP", name, &r) != PRJ_OK) return -1;
-    if (shp_decode(r.data, r.size, frame, &f) != 0) { prj_record_free(&r); return -1; }
-    prj_record_free(&r);
-    rgba = malloc((size_t)f.w * (size_t)f.h * 4);
-    if (!rgba) { shp_frame_free(&f); return -1; }
-    tw = f.w; th = f.h;
-    for (i = 0; i < f.w * f.h; i++) {
-        int c = (from >= 0 && f.pix[i] == from) ? to : f.pix[i];
+    uint8_t *rgba = malloc((size_t)w * (size_t)hg * 4);
+    int i, tw = w, th = hg;
+    if (!rgba) return;
+    for (i = 0; i < w * hg; i++) {
+        int c = (from >= 0 && pix[i] == from) ? to : pix[i];
         rgba[i * 4 + 0] = h->pal[c][0];
         rgba[i * 4 + 1] = h->pal[c][1];
         rgba[i * 4 + 2] = h->pal[c][2];
-        rgba[i * 4 + 3] = f.mask[i] ? 255 : 0;
+        rgba[i * 4 + 3] = mask[i] ? 255 : 0;
     }
     {   /* the texture is the Scale3x upscale (see bind_sprite); transparent texels are all 0 here, so they match */
         uint8_t *up;
-        for (i = 0; i < f.w * f.h; i++) if (!rgba[i * 4 + 3]) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 0;
-        up = (uint8_t *)scale3x((const uint32_t *)rgba, f.w, f.h);
-        if (up) { free(rgba); rgba = up; tw = f.w * 3; th = f.h * 3; }
+        for (i = 0; i < w * hg; i++) if (!rgba[i * 4 + 3]) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 0;
+        up = (uint8_t *)scale3x((const uint32_t *)rgba, w, hg);
+        if (up) { free(rgba); rgba = up; tw = w * 3; th = hg * 3; }
     }
     {   /* bleed colour into transparent texels so bilinear edges don't darken (alpha stays 0) */
         int x, y, pass;
@@ -193,23 +194,74 @@ int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, i
                     if (n) { t[0] = (uint8_t)(acc[0] / n); t[1] = (uint8_t)(acc[1] / n); t[2] = (uint8_t)(acc[2] / n); }
                 }
     }
-    glGenTextures(1, &out->tex);
-    glBindTexture(GL_TEXTURE_2D, out->tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    free(rgba);
+}
+
+int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, int from, int to, hud_sprite *out)
+{
+    prj_record r;
+    shp_frame f;
+    int i;
+    memset(out, 0, sizeof *out);
+    if (prj_read_named(a, "SHP", name, &r) != PRJ_OK) return -1;
+    if (shp_decode(r.data, r.size, frame, &f) != 0) { prj_record_free(&r); return -1; }
+    prj_record_free(&r);
+    glGenTextures(1, &out->tex);
+    upload_sprite(h, f.pix, f.mask, f.w, f.h, from, to, out->tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     out->w = f.w; out->h = f.h; out->left = f.left; out->top = f.top;
-    free(rgba);
-    shp_frame_free(&f);
+    if (g_src_n == g_src_cap) {
+        hud_src *g = realloc(g_src, (size_t)(g_src_cap ? g_src_cap * 2 : 64) * sizeof *g);
+        if (g) { g_src = g; g_src_cap = g_src_cap ? g_src_cap * 2 : 64; }
+    }
+    if (g_src_n < g_src_cap) {   /* keeps the frame's buffers */
+        hud_src *e = &g_src[g_src_n++];
+        e->tex = out->tex; e->w = f.w; e->h = f.h; e->from = from; e->to = to; e->pix = f.pix; e->mask = f.mask;
+        memset(e->used, 0, sizeof e->used);
+        for (i = 0; i < f.w * f.h; i++)
+            if (f.mask[i]) { int ci = (from >= 0 && f.pix[i] == from) ? to : f.pix[i]; g_src_used[ci] = 1; e->used[ci >> 5] |= 1u << (ci & 31); }
+    } else shp_frame_free(&f);
     return 0;
 }
 
 void hud_sprite_free(hud_sprite *s)
 {
-    if (s->tex) glDeleteTextures(1, &s->tex);
+    int k;
+    if (s->tex) {
+        for (k = 0; k < g_src_n; k++)
+            if (g_src[k].tex == s->tex) { free(g_src[k].pix); free(g_src[k].mask); g_src[k] = g_src[--g_src_n]; break; }
+        glDeleteTextures(1, &s->tex);
+    }
     memset(s, 0, sizeof *s);
+}
+
+int hud_repalette(hud *h, const uint8_t *p6)
+{
+    uint8_t pal[256][3];
+    uint32_t diff[8] = {0};
+    int i, k, changed = 0, redraw = 0;
+    if (!h || !p6) return 0;
+    for (i = 0; i < 256; i++)
+        for (k = 0; k < 3; k++) {
+            int v = p6[i * 3 + k] & 63;
+            pal[i][k] = (uint8_t)((v << 2) | (v >> 4));
+            if (pal[i][k] != h->pal[i][k]) { changed = 1; if (g_src_used[i]) { redraw = 1; diff[i >> 5] |= 1u << (i & 31); } }
+        }
+    if (!changed) return 0;
+    memcpy(h->pal, pal, sizeof pal);
+    h->have_pal = 1;
+    if (redraw)   /* only the sprites holding a changed colour */
+        for (k = 0; k < g_src_n; k++) {
+            int q, hit = 0;
+            for (q = 0; q < 8 && !hit; q++) hit = (g_src[k].used[q] & diff[q]) != 0;
+            if (hit) upload_sprite(h, g_src[k].pix, g_src[k].mask, g_src[k].w, g_src[k].h, g_src[k].from, g_src[k].to, g_src[k].tex);
+        }
+    return 1;
 }
 
 void hud_begin_stretched(hud *h, int w, int hp)

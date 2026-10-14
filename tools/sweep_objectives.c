@@ -647,7 +647,9 @@ static int run_scene(prj_archive *a, const char *scene)
             for (q = 0; q < t0->node_count && s.player_attacks; q++) {
                 if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) ||   /* hidden protects too: failing one fails the mission */
                     
-                    strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0) continue;   /* (a record both to destroy and to protect: destroy wins) */
+                    (t0->nodes[best].kind != MTBL_K_PROTECT && strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0)) continue;   /* (a record both
+                                                                         * to destroy and to protect: destroy wins; defending it, its own protect counts too -
+                                                                         * BROWSCN1's Command Vehicle stands between the player and the threat) */
                 for (b2 = 0; b2 < s.bld_count && s.player_attacks; b2++) {
                     struct msim_building g = s.bld[b2];
                     if (g.hp <= 0 || !(widen((unsigned)g.type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;

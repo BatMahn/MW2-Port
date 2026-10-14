@@ -24,6 +24,10 @@ void hud_destroy(hud *h);
  * entries, RGB555 from the PAL record of the mission's current PALG slot - 0x101b0d20, set from the PALG chunk by
  * 0x1003e104); hud_create starts with the COCKPIT record. */
 void hud_set_palette(hud *h, const uint8_t *p6);
+/* A palette change while the sprites are loaded (the engine reloading 0x10260324, 0x1002ac40; the DOS edition's VGA
+ * palette fades): the new palette (768 bytes of 6-bit values) for everything drawn from now on, and every loaded sprite
+ * that uses a changed colour redrawn. Returns 1 if any colour changed. */
+int  hud_repalette(hud *h, const uint8_t *p6);
 /* the current palette's colour idx as RGBA 0..1 */
 void hud_pal_color(const hud *h, int idx, float rgba[4]);
 /* Load SHP `name` frame `frame`; returns 0 on success. */

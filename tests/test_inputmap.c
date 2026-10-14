@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdlib.h>
 #include "inputmap.h"
 #include "inputmap_defaults.h"
@@ -15,4 +16,9 @@ int main(int argc, char **argv){ inputmap m; char a[1100], b[1100]; snprintf(a, 
  ks[SDL_SCANCODE_Z]=1; CHK(im_held(&m,"zoom_factor_plus",ks) && !im_held(&m,"zoom_factor_minus",ks)); ks[SDL_SCANCODE_RSHIFT]=1; CHK(im_held(&m,"zoom_factor_minus",ks)); memset(ks,0,sizeof ks);
  ks[SDL_SCANCODE_SEMICOLON]=1; CHK(im_action_held(&m,"FIRE_WEAPON_GROUP",ks));
  { FILE *f = fmemopen((void *)IM_DEFAULT_GAMEKEY, strlen(IM_DEFAULT_GAMEKEY), "r"); inputmap d; memset(&d, 0, sizeof d); im_parse_gamekey(&d, f); fclose(f); f = fmemopen((void *)IM_DEFAULT_INPUT, strlen(IM_DEFAULT_INPUT), "r"); im_parse_input(&d, f); fclose(f); CHK(d.nbinds == m.nbinds); CHK(d.nrules == m.nrules); }
+ /* the throttle axis (FLTSTCK / MSJSTICK 0x10a00): v / 0.8 rounded up to the next 1/32, no dead zone, full at 80 %; the
+  * mouse (MOUSE.DLL 0x10350): the box offset / 512 */
+ CHK(im_stick_shape(3, 0.0f) == 0.0f); CHK(fabsf(im_stick_shape(3, 0.4f) - 17.0f / 32.0f) < 1e-6f); CHK(fabsf(im_stick_shape(3, -0.4f) + 17.0f / 32.0f) < 1e-6f);
+ CHK(im_stick_shape(3, 0.8f) == 1.0f); CHK(im_stick_shape(3, 1.0f) == 1.0f); CHK(fabsf(im_stick_shape(3, 0.01f) - 1.0f / 32.0f) < 1e-6f);
+ { im_cond mc = {-1, 2, 101}; g_im_dev.mouse_y = 256; CHK(fabsf(im_cond_axis(&mc) + 0.5f) < 1e-6f); mc.sign = 1; mc.code = 100; g_im_dev.mouse_x = -512; CHK(im_cond_axis(&mc) == -1.0f); g_im_dev.mouse_x = g_im_dev.mouse_y = 0; }
  printf("inputmap: %d bindings, %d control rules, %s\n", m.nbinds, m.nrules, fails ? "FAILED" : "all checks passed"); return fails != 0;}
