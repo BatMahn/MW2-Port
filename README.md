@@ -1,17 +1,29 @@
 # MechWarrior 2 (DOS, 1995) - 64-bit port
 
 A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt module by module from the original
-MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS and Linux. You need your own copy of
+MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-12)
-Complete and playable: the shell (clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables,
-Cockpit Controls, Hall of Honor, the roster), the simulation (every mission; AI, mission logic, combat, heat, movement,
-HUD, path-driven dropships / convoys) and the look chosen in Combat Variables with two settings: RENDERER - ENHANCED
-(the default: 3Dfx look + PowerVR fog), DOS, 3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE - and TEXTURES -
-ORIGINAL (each renderer's own textures, sky and ground) or TITANIUM (with the Titanium disc's files). Game values are traced from the original code or
-measured in DOSBox; what is still assumed is listed at the end of ASSUMPTIONS.md ("Open items"); KNOWN_ISSUES.md is the plain-language list of what is still open. AUDIT.md is the audit
-log. Test suites: `make check`, `make test_sequences` (scripted play sequences), `make sweep` (every mission's objectives).
+## Status (2026-10-14)
+Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
+a Linux tarball, a Fedora RPM and a Windows zip.
+
+- **Shell:** clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables, Cockpit Controls,
+  Hall of Honor, the roster and both clans' Archives. The pilot-name easter-egg mechs (Elemental, Tarantula, Battle
+  Master IIC) are unlocked everywhere at their real tonnage.
+- **Simulation:** every mission, with AI, mission logic, combat, heat, movement, jump jets, HUD, autopilot and
+  path-driven dropships / convoys. Locked missiles home on the target's centre; destroyed buildings stay destroyed.
+- **Look:** chosen in Combat Variables with two settings. RENDERER: ENHANCED (the default: 3Dfx look + PowerVR fog), DOS,
+  3DFX, ATI RAGE, S3 VIRGE, POWERVR or MATROX MYSTIQUE. TEXTURES: ORIGINAL (each renderer's own textures, sky and
+  ground) or TITANIUM (with the Titanium disc's files, its own models and lighting).
+- **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
+  MT-32 emulator or Gravis UltraSound patches.
+- **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling.
+
+Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
+ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 156 of them) and
+`make sweep` (every mission's objectives).
 
 ## Build
 Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
