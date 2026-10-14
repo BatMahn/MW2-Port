@@ -3322,13 +3322,18 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             text_layer_cull(0, 0x1cc, W, H);
         }
         if (logo) blit_smk(logo, 120, 4);
-        /* FUN_00021400: one pixel a pass of its loop, nothing else pacing it (no timer, no retrace wait: DOSBox, cycles
-         * max, 0-3 px a 70 Hz frame, 96 px/s on average - the port scrolls at that average); the list is never started
-         * again (the first line drawn only moves on; once the last has passed the window stays empty until a key or a
-         * click); the logo clip steps at its own rate (AMWLOGO1 100 ms; DOSBox the same) */
+        /* FUN_00021400: one pixel a pass of its loop and nothing else pacing it - no timer read, no retrace wait (the
+         * logo's FUN_000391e0 only skips while SmackWait 0x4e8e0 says "not yet"; FUN_000378a0 -> FUN_0003e1f0 blits the
+         * dirty rectangle without waiting; the shell's only retrace loop, 0x5b0d5, is reached from the sound code), so
+         * the speed is the machine's. Pinned to a period machine: DOSBox cycles=fixed 26800 (the usual DOSBox figure for
+         * a 486DX2-66, MW2INFO.TXT's "486-66's and up" for 640x480) scrolls 79 px/s, measured in emulated time from the
+         * DOSBox video capture (1.13 px a 70 Hz refresh over 840 refreshes, twice); 50000 cycles 138 px/s; cycles=max
+         * 69-211 px/s with the host's load (the old 96 was such an average). The list is never started again (the first
+         * line drawn only moves on; once the last has passed the window stays empty until a key or a click); the logo
+         * clip steps at its own rate (AMWLOGO1 100 ms; DOSBox the same) */
         frames++;
         if (headless) top--;
-        else top = 0x1cc - (int)((SDL_GetTicks() - t0) * 96u / 1000u);
+        else top = 0x1cc - (int)((SDL_GetTicks() - t0) * 79u / 1000u);
         if (headless) { if (frames >= (getenv("MW2_KESHIK_FRAMES") ? atoi(getenv("MW2_KESHIK_FRAMES")) : 300)) done = 1; continue; }
         while (SDL_PollEvent(&e))
             if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) done = 1;
@@ -3778,8 +3783,10 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
  * 00 02 text (\n line, \t tab, \aNN = the next word links to this page's link NN; raw line ends are nothing); 00 ff end.
  * Background: the holo-room (entry 11 / 18; its magenta panel is part of the picture). Text in shell font 0x20
  * (DAT_00091184 = DATABASE entry 31) - measured against DOSBox (docs/reference/dos_archive_*.png, 38 / 38 wrapped lines
- * and every pixel of the text): the title in entry 29's capitals centred on x 320 at y 50; the text from (88, 70),
- * 12 px a line, 19 lines a page, wrapped at 460 px, tab stops every 36 px (a tab opening a continued page is dropped),
+ * and every pixel of the text; the Jade Falcon archive the same, DOSBox 2026-10-13: its first page, Clan History and
+ * the three pages of Clan Origins): the title in entry 29's capitals centred on x 320 at y 50; the text box
+ * FUN_0003c410(.., 0x58, 0x46, 0x1d2, 0xde) for both clans: from (88, 70), 12 px a line, 19 lines a page, a word wrapped
+ * when it and the spaces after it pass the box's 466 px, tab stops every 36 px (a tab opening a continued page is dropped),
  * colour 5 (187 grey: the font's colour 1 remapped), link words in the font's own white. Hotspots 0x7d75c / 0x7e0c4
  * (4: ~EXIT, ~PREV PAGE, ~NEXT PAGE, ~BACK; '~' = the label (entry 27) only under the pointer; PREV / NEXT only when
  * there is such a page - DOSBox) */
@@ -3788,14 +3795,14 @@ static const int ARCH_HS[2][4][6] = {
     {{0, 440, 639, 479, 320, 455}, {405, 372, 479, 405, 449, 354}, {480, 372, 556, 405, 511, 408}, {67, 358, 120, 410, 92, 408}},
     {{0, 440, 639, 479, 320, 455}, {405, 364, 479, 397, 449, 346}, {480, 364, 556, 397, 511, 400}, {67, 358, 120, 410, 92, 400}}};
 static const char *const ARCH_LABEL[4] = {"EXIT", "PREV PAGE", "NEXT PAGE", "BACK"};
-enum { ARCH_X = 88, ARCH_Y = 70, ARCH_LH = 12, ARCH_LINES = 19, ARCH_W = 460, ARCH_TAB = 36 };
+enum { ARCH_X = 88, ARCH_Y = 70, ARCH_LH = 12, ARCH_LINES = 19, ARCH_W = 466, ARCH_TAB = 36 };
 static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
     char path[700];
     uint8_t *d = NULL;
     long len = 0;
     FILE *f;
-    int page = 0, hist[64], nh = 0, next = -1, fr = 0, sub = 0;
+    int page = 0, hist[64], hsub[64], nh = 0, next = -1, fr = 0, sub = 0, back = 0;
     const int (*hs)[6] = ARCH_HS[clan == 1];
     snprintf(path, sizeof path, "%s", gpath(clan == 1 ? "ARCHJF.MW2" : "ARCHWO.MW2"));
     if ((f = fopen(path, "rb"))) { fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET); d = malloc((size_t)len); if (d && fread(d, 1, (size_t)len, f) != (size_t)len) len = 0; fclose(f); }
@@ -3840,7 +3847,13 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                             while (q < L && t[q] != ' ' && t[q] != '\n' && t[q] != '\r' && t[q] != '\\' && wl < 39) k->word[wl++] = t[q++];
                             k->word[wl] = 0;
                             k->w = text_width(&g_fthin, k->word);
-                            if (x + k->w > ARCH_W && nt > 0 && tok[nt - 1].line == line) { x = 0; line++; }
+                            {   /* FUN_0003ca70 measures a word with the spaces that follow it (appended to the token,
+                                 * 0x3cba8..): a word before a backslash code or the text's end may run to the box's edge */
+                                size_t e2 = q;
+                                int ns = 0;
+                                while (e2 < L && t[e2] == ' ') { ns++; e2++; }
+                                if (x + k->w + ns * sp > ARCH_W && nt > 0 && tok[nt - 1].line == line) { x = 0; line++; }
+                            }
                             k->x = x; k->line = line; k->link = pending; pending = -1;
                             x += k->w;
                             nt++;
@@ -3865,7 +3878,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                     if (e.key.keysym.sym == SDLK_ESCAPE) next = 1;
                     if ((e.key.keysym.sym == SDLK_DOWN || e.key.keysym.sym == SDLK_PAGEDOWN) && en[2]) sub++;
                     if ((e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_PAGEUP) && en[1]) sub--;
-                    if (e.key.keysym.sym == SDLK_BACKSPACE && nh) { page = hist[--nh]; sub = 0; }
+                    if (e.key.keysym.sym == SDLK_HOME || e.key.keysym.sym == SDLK_BACKSPACE) back = 1;   /* Home (0x8047) = BACK */
                 }
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y, h = -1;
@@ -3873,19 +3886,40 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                     if (h == 0) next = 1;                                   /* EXIT: the hall */
                     else if (h == 1) sub--;                                 /* PREV PAGE */
                     else if (h == 2) sub++;                                 /* NEXT PAGE */
-                    else if (h == 3) { if (nh) { page = hist[--nh]; sub = 0; } }   /* BACK: the page linked from (none at the first: ASSUMED) */
+                    else if (h == 3) back = 1;                              /* BACK */
                     else for (i = 0; i < nt; i++) {
                         const arch_tok *k = &tok[i];
                         int ky = ARCH_Y + (k->line - sub * ARCH_LINES) * ARCH_LH;
                         if (k->line / ARCH_LINES != sub) continue;
                         if (k->link >= 0 && k->link < nl && links[k->link] >= 0 && links[k->link] < n && x >= ARCH_X + k->x && x < ARCH_X + k->x + k->w && y >= ky && y < ky + ARCH_LH) {
-                            if (nh < 64) hist[nh++] = page;
+                            if (nh < 64) { hsub[nh] = sub; hist[nh++] = page; }
                             page = links[k->link]; sub = 0;
                             break;
                         }
                     }
                 }
             }
+        }
+        {   /* TEST ONLY: MW2_ARCH_FROM=page,sub - the page a link was followed from; MW2_ARCH_BACK=n - BACK n times */
+            static int tb = -1;
+            if (tb < 0) {
+                int fp, fs;
+                tb = getenv("MW2_ARCH_BACK") ? atoi(getenv("MW2_ARCH_BACK")) : 0;
+                if (getenv("MW2_ARCH_FROM") && sscanf(getenv("MW2_ARCH_FROM"), "%d,%d", &fp, &fs) == 2) { hsub[0] = fs; hist[0] = fp; nh = 1; }
+            }
+            if (tb > 0) { tb--; back = 1; }
+        }
+        if (back) {   /* BACK (FUN_00027160 case 3, Home): on a later sub-page the entry's first one; on the first, the
+                       * page the link was followed from at the sub-page it was on (the nested viewer returns -2,
+                       * FUN_00027050 -> 5); on the Archive's own first page it leaves as EXIT does (-2 out of
+                       * FUN_00026b50) - DOSBox (Jade Falcon, 2026-10-13): Clan Origins 3 -> 1 -> Clan History ->
+                       * the archive's first page -> the hall */
+            back = 0;
+            if (sub > 0) sub = 0;
+            else if (nh) { nh--; page = hist[nh]; sub = hsub[nh]; }
+            else next = 1;
+            if (getenv("MW2_ARCH_BACK")) printf("archive back: page %d sub %d next %d\n", page, sub, next);
+            continue;
         }
         draw_bg();
         {

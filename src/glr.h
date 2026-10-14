@@ -81,9 +81,9 @@ typedef struct {
     int   ti_light;
     float ti_amb[3], ti_lcol[2][3], ti_lvec[2][3], ti_gnd[3];
     int   ti_ltype[2];
-#define GLR_TI_DYN 4
+#define GLR_TI_DYN 8
     int   ti_dyn_n;
-    float ti_dyn[GLR_TI_DYN][7];     /* x, y, z (game), radius, r, g, b */
+    float ti_dyn[GLR_TI_DYN][7];     /* x, y, z (game), radius, r, g, b: the explosion and projectile lights */
 } glr_view;
 
 /* Requires a current GL 3.3 core context. Returns NULL on failure (shader
@@ -123,7 +123,11 @@ void glr_texture_average(const texture *t, float out[3]);
 /* Image enhancement (view.wire): a sprite is drawn as its card's polygon outline (DOS 0x38ae3 / 3Dfx 0x1002a4b0 colour
  * the object type picks) - wire_code 2 red (colour 0xb, type word 0x400: the projectile pool), else dark red (8: the
  * effect pool's type 0x20); has_tri: that triangle (world, game coordinates), else the card's rectangle. */
-typedef struct { float pos[3]; float half_w, half_h; const texture *tex; float top[3]; int bb; int wire_code, has_tri; float tri[3][3]; } glr_sprite;
+/* quad: a card drawn as the 3D polygon it is (colour 0x8xxx / 0xbxxx cards - muzzle flashes, jet flames, the death
+ * explosion: 0x1002a4b0 -> 0x10026e80 -> 0x1002c880): its four corners qv (world, game coordinates) with texel
+ * coordinates quv (0-1 of the bitmap), as they are - not turned to the camera. */
+typedef struct { float pos[3]; float half_w, half_h; const texture *tex; float top[3]; int bb; int wire_code, has_tri; float tri[3][3];
+                 int quad; float qv[4][3], quv[4][2]; } glr_sprite;
 void glr_set_sprites(glr *r, const glr_sprite *s, int n);
 
 /* The Titanium particles (mercsw particle.PID, 0x1004d7ba): screen squares of size_px pixels (at 640 x 480; scaled to the
@@ -149,6 +153,23 @@ void glr_set_skydome(glr *r, const wtb_object *o, texture *const slots[GLR_SLOTS
  * slots NULL: off. The arrays are the caller's and must stay valid; call before glr_set_mech / glr_set_actors. */
 void glr_set_titanium(glr *r, texture *const slots[GLR_SLOTS], const int camo[8]);
 
+/* The rest of the Titanium models' look (call after glr_set_titanium, before glr_set_mech / glr_set_actors):
+ * bank0 - its bank-0 bitmaps (texture indices below 0x100: the colour type 3 billboards' bitmap (w >> 4) & 0xff,
+ *         mercsw 0x10053830 -> 0x1004eef0 -> 0x1004ef4c -> 0x10001375 without the + 0x100 of the mission's slots);
+ * shade - the palette shade of its colour type 1 polygons (mercsw 0x1002f5e3): the planet's LITE (ambient, light
+ *         vector, directional flag) and SKYGND.PAR's globalintensity. NULL: none (level 15 - 8 = the mid shade). */
+typedef struct {
+    int   on;          /* LITE read */
+    int   light;       /* the light term on (0x10097cb4; off when LITE's vector is 999999 x 3) */
+    int   dir;         /* LITE +22: directional (0x10248b00) */
+    float amb;         /* LITE +20 ambient level (camera +0x2a -> 0x10248b0c) */
+    float lvec[3];     /* LITE +8 / +12 / +16 (game coordinates, as stored) */
+    int   gi;          /* globalintensity, clamped 0..128 (0x1002e8b7) */
+    int   eye;         /* LITE vector 888888 x 3: a point light at the eye (0x100ad320) */
+    float range;       /* LITE +24: the fog range (0x1009e99c; the shade less (depth / range) >> 4 when > 1e-7) */
+} glr_ti_shade;
+void glr_set_titanium_extra(glr *r, texture *const bank0[GLR_SLOTS], const glr_ti_shade *shade);
+
 /* Draw into the currently bound framebuffer, viewport w x h. */
 void glr_draw(glr *r, const glr_view *v, int w, int h);
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h);
@@ -167,5 +188,9 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma);
  * (k 0: off). Not used by the DOS look. */
 void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float tint[3]);
 void glr_set_dos_palette(glr *r, const uint8_t pal[256][3]);
+/* The 3D editions' damage shading (0x1002b9b0): a part whose mech3d_part.dmg_nib n is 1-15 (a mech location's damage,
+ * the type-0x100 objects' nibble) is lit x (1 - n / 15), or x (1 + n / 15) (at most full) when sign (PLNT +52,
+ * DAT_1024e428) is set. Not the DOS look, not Titanium models. */
+void glr_set_damage_shade(glr *r, int sign);
 
 #endif

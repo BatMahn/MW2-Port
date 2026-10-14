@@ -31,7 +31,12 @@ typedef struct { int sign, device, code; } im_cond;   /* device 0 keyboard (code
                                                        * Twist, 3 Throttle), 200 + hat direction (0 up 1 right 2 down 3 left),
                                                        * else the button number */
 /* the live state of the non-keyboard devices (set by the front end each frame) */
-typedef struct { SDL_Joystick *joy; Uint32 mouse_buttons; float mouse_dx, mouse_dy; } im_devstate;
+/* the mouse as the GIDDI driver keeps it (MOUSE.DLL): INT 33h reset, limits 0..(1024 - 1) x 8 on both axes (fn 7 / 8,
+ * 0x10bc1 / 0x10cc7), 1 mickey per 8 pixels on both (fn 0Fh CX = DX = 1, 0x10dcd), the pointer centred (fn 4,
+ * 0x10870); its event handler (fn 0Ch) leaves the position in 0x4f2 / 0x4f4, read >> 3 (0x107b0) - a 1024 x 1024 box
+ * moved 1 unit a mickey and stopped at its edges; an axis reads ((2 pos - 1024) << 16) / 1024 (0x10350). Kept here as
+ * the offset from the centre, -512..511; one SDL relative-motion unit is taken as one mickey (port) */
+typedef struct { SDL_Joystick *joy; Uint32 mouse_buttons; int mouse_x, mouse_y; } im_devstate;
 static im_devstate g_im_dev;
 typedef struct { char name[40]; int ncond; im_cond c[6]; } im_rule;
 typedef struct { char action[40]; SDL_Keycode key; int ctrl, alt, shift; } im_bind;
@@ -227,7 +232,15 @@ static float im_stick_shape(int ax, float v)
     float dz = ax == 2 ? 0.2f : 0.125f, a = v < 0 ? -v : v, y;
     Uint32 now = SDL_GetTicks();
     int k = ax & 7;
-    if (ax >= 3) y = v;   /* the fourth axis: no calibration (stored raw) */
+    if (ax == 3) {   /* "Throttle" (FLTSTCK.DLL / MSJSTICK.DLL, the only drivers naming it): calibrated from its two ends
+                      * (0x10540 / MSJ 0x10560): the centre between them, the ends pulled in by a fifth of the half travel,
+                      * so full (0x10000) at 80 % of the half travel; no dead zone (+0x40 = 0); the magnitude rounded up to
+                      * the next 1/32 (0x10a00); stored as read - no (2 last + new) / 3 smoothing (0x109ca) */
+        y = a <= 0.0f ? 0.0f : a / 0.8f;
+        if (y > 0) { y = (float)((int)(y * 32.0f) + 1) / 32.0f; if (y > 1) y = 1; }
+        return v < 0 ? -y : y;
+    }
+    if (ax > 3) y = v;   /* further axes: no calibration (stored raw) */
     else {
         y = a <= dz ? 0.0f : (a - dz) / (1.0f - dz - 0.125f);
         if (y > 0) { y = (float)((int)(y * 32.0f) + 1) / 32.0f; if (y > 1) y = 1; }
@@ -251,7 +264,7 @@ static float im_cond_axis(const im_cond *c)
         int ax = c->code - 100;
         if (ax < SDL_JoystickNumAxes(g_im_dev.joy)) v = (float)SDL_JoystickGetAxis(g_im_dev.joy, ax) / 32767.0f;
         v = im_stick_shape(ax, v);
-    } else if (c->device == 2) v = c->code == 100 ? g_im_dev.mouse_dx : c->code == 101 ? g_im_dev.mouse_dy : 0;
+    } else if (c->device == 2) v = c->code == 100 ? (float)g_im_dev.mouse_x / 512.0f : c->code == 101 ? (float)g_im_dev.mouse_y / 512.0f : 0;   /* MOUSE.DLL 0x10350 */
     return c->sign < 0 ? -v : v;
 }
 
@@ -277,7 +290,8 @@ static int im_cond_held(const im_cond *c, const Uint8 *ks)
 }
 
 /* the control's axis value now: the sum over its blocks whose other conditions hold (an analog control in INPUT.MAP:
- * throttle, legs_pan_delta, torso_pan, torso_tilt, ...) on device 1 (stick) or 2 (mouse); *present = it has such a block */
+ * throttle, legs_pan_delta, torso_pan, torso_tilt, ...) on device 1 (stick) or 2 (mouse); *present = it has such a block
+ * (2: and one whose other conditions hold now - the engine reads an axis only then, 0x100396e0) */
 static float im_axis(const inputmap *m, const char *control, const Uint8 *ks, int device, int *present)
 {
     int i, k;
@@ -293,7 +307,7 @@ static float im_axis(const inputmap *m, const char *control, const Uint8 *ks, in
         }
         if (axis < 0) continue;
         if (present) *present = 1;
-        if (ok) v += im_cond_axis(&r->c[axis]);
+        if (ok) { v += im_cond_axis(&r->c[axis]); if (present) *present = 2; }   /* 2: a block's other conditions hold */
     }
     return v;
 }

@@ -23,6 +23,7 @@
 #define FX_TYPES   32
 #define FX_LIVE    256
 #define FX_FRAMES  32
+#define FX_CARD_SLOTS 16   /* pool slots kept per type for the 3D cards (MZL0: 16) */
 
 /* hit flags (engine projectile flags) */
 #define FX_HIT_UNIT    0x100
@@ -43,13 +44,24 @@ typedef struct {
      * corners, cm from the effect's position (x 0..2: game x, y, z; the pool objects are unrotated, 0x10045c30) */
     int     bb[FX_TYPES];
     float   bb_foot[FX_TYPES][3], bb_top[FX_TYPES][3];
+    /* a card drawn as a 3D polygon (colour 0x8xxx: MZL / JET, 0xbxxx: DEATH - 0x1002a4b0 -> 0x10026e80 -> 0x1002c880, not
+     * the billboard): each pool object's polygons (up to 2, 3-4 corners) x its OBJ scale, in the object's frame (game x,
+     * y, z), texel u / v as 0-1 of the bitmap, and each polygon's normal as the engine holds it (the file's negated,
+     * 0x10042140) - drawn when (corner 0 - eye) . normal < 0 (0x1002b9b0). Per pool slot (the type's XPLO entries in
+     * MW2_SHT1 order, 0x1003ed70): the slots' models differ (MZL0_2 / MZL0_3: one polygon, the others two) */
+    int     card_n[FX_TYPES][FX_CARD_SLOTS], card_nv[FX_TYPES][FX_CARD_SLOTS][2];
+    float   card_v[FX_TYPES][FX_CARD_SLOTS][2][4][3], card_uv[FX_TYPES][FX_CARD_SLOTS][2][4][2], card_nrm[FX_TYPES][FX_CARD_SLOTS][2][3];
     fx_anim tex[512];                 /* texture slots (u16, engine 0x1002d060: < 0x200) */
 } fx_defs;
 
 typedef struct {
     int     type, alive;
+    int     slot;                     /* the pool slot of its type: the first free one (0x10045d00) */
     float   pos[3];
     int32_t start, end;               /* ticks */
+    int     has_rot;                  /* rot: the object's orientation (row-major, game coordinates) - a muzzle flash's or
+                                       * jet flame's, its mount node's (0x10044a70); otherwise unrotated (0x10045c30) */
+    float   rot[9];
 } fx_live;
 
 typedef struct {

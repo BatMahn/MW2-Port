@@ -38,6 +38,7 @@ typedef struct {
     int       tex_offset;    /* added to texture slots 0x00 (camo) and 0x14 (insignia): the owner star's STAR value
                                 (engine 0x10042000: star record +0, set from the STAR chunk's first u32, 0x10042d40) */
     int       wire_hi;       /* image enhancement: drawn in the mechs' blue (an active building) */
+    int       dmg_nib;       /* a mech location's damage nibble 0-15 (type word 0x100: object +0 bits 4-7), set by the caller (glr_set_damage_shade) */
     int       wire_dmg;      /* image enhancement: a mech location's damage colour, 0 unset, 1 blue, 2 red, 3 yellow, 4 colour 8 (dark red, a wreck) */
     int       shadow;        /* a flat shadow piece on the ground: drawn as a translucent darkening */
     int       coll;          /* world objects: OBJ collision type (0 box, 1 XZ box, 4 none, 5 terrain...); -1 none */
@@ -52,6 +53,7 @@ typedef struct {
     int       ti;            /* `model` is a Titanium one (mech3d_ti_load): drawn with the Titanium texture table */
     const wtb_model *ti_model;   /* world objects: the Titanium archive's model at the same record / OBJ index
                                   * (world3d_ti_attach), drawn in place of `model`; NULL none */
+    int       ti_insignia;   /* world objects: added to that model's slot 0x3f (its structure's AFFL team, mercsw 0x100748ab) */
 } mech3d_part;
 
 #define MECH3D_MAX_NODES 64
@@ -86,6 +88,7 @@ typedef struct {
      * 6 / 7 the jump jets (right / left) */
     int          pofo_node[8];   /* -1 = none */
     float        mount_pos[8][3];/* world positions after mech3d_pose */
+    float        mount_rot[8][9];/* and the nodes' world orientations (row-major) */
     unsigned     mount_ok;       /* bit per slot */
     float        mount_local[8][3];   /* rest pose, heading 0, origin 0 (filled by mech3d_load) */
     float        mount_from[3];       /* the origin mount_pos was posed at */
@@ -97,6 +100,8 @@ int  mech3d_mount_slot(int loc);
  * torso twist included, moved to origin) when it has been posed, else the rest pose turned to heading; returns 0,
  * or -1 if the mech has no such mount */
 int  mech3d_mount_world(const mech3d *m, int slot, const float origin[3], float heading, float out[3]);
+/* the mount node's world orientation (row-major 3 x 3, game coordinates): as posed by mech3d_pose, else the heading's yaw */
+void mech3d_mount_rot(const mech3d *m, int slot, float heading, float rot[9]);
 /* the world bounding centre of the object of the node carrying the location (OBJL group 1-8) - the first part of that
  * group, else of the centre torso (3), as 0x1000fec0 finds it; 0x1000f760 -> 0x10029890: the box middle of its vertices
  * placed by the node - for the mech at origin with heading, in its last pose; -1 if none */
@@ -258,13 +263,16 @@ void mech3d_free(mech3d *m);
 /* The Titanium edition's own models (its 16-bit MW2.PRJ): the same records and OBJ structure as the 3D editions', but
  * remodelled meshes in the DOS layout (no normals; UVs in texels) with their own texture table, and the mechs on their own
  * skeleton offsets (the ANIM records are byte-identical). For drawing only. */
-/* a mech (or vehicle) record from the Titanium archive, every part marked ti, smooth vertex normals added */
+/* a mech (or vehicle) record from the Titanium archive, every part marked ti, the engine's vertex normals added */
 int  mech3d_ti_load(prj_archive *ti, const char *record, int repr, mech3d *out);
 /* each world part (its record and OBJ index): the Titanium record's model at that OBJ index, parsed into *store (one per
- * part, the caller frees with world3d_ti_free) and set as the part's ti_model. Returns the parts given one. */
+ * part, the caller frees with world3d_ti_free) and set as the part's ti_model (and ti_insignia: its slot 0x3f offset).
+ * Returns the parts given one. */
 int  world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store);
 void world3d_ti_free(wtb_model *store, int count);
-/* smooth vertex normals for a DOS-layout model: per vertex the sum of its faces' outward normals, normalised */
+/* the Titanium engine's vertex normals for a DOS-layout model (mercsw 0x10003df0, in the model's own frame): each
+ * polygon's unit normal (0x10004127; also kept in its normal[], has_normal 0) added to its vertices', normalised by the
+ * engine's length at every step */
 void mech3d_ti_normals(wtb_model *m);
 
 #endif
