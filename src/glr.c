@@ -68,6 +68,7 @@ struct glr {
     float  tile_sky, tile_ground;
     int    tex_w[GLR_SLOTS * 4], tex_h[GLR_SLOTS * 4], has_tex[GLR_SLOTS * 4];
     const texture *tex_src[GLR_SLOTS * 4];  /* skip re-uploading the same texture */
+    const texture *slot_frame[GLR_SLOTS];   /* glr_slot_frame: the current frame of an animated slot (NULL: the slot's own) */
     texture *const *ti_slots;               /* glr_set_titanium (the caller's array), NULL off */
     int    ti_camo[8];
     texture *const *ti_bank0;               /* glr_set_titanium_extra: the Titanium bank-0 bitmaps (billboards) */
@@ -468,10 +469,18 @@ static float aval[GLR_SLOTS][3];
 void glr_flush_textures(glr *r)
 {
     memset(asrc, 0, sizeof asrc);
-    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); memset(r->spr_src, 0, sizeof r->spr_src); }
+    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); memset(r->spr_src, 0, sizeof r->spr_src); memset(r->slot_frame, 0, sizeof r->slot_frame); }
 }
 
 static int g_billboards;   /* TEST ONLY: colour type 3 billboards in the last static (world) layer */
+
+static void upload_texture(glr *r, int slot, const texture *t);
+void glr_slot_frame(glr *r, int slot, const texture *t)
+{
+    if (!r || slot < 0 || slot >= GLR_SLOTS || r->slot_frame[slot] == t) return;
+    r->slot_frame[slot] = t;
+    if (t && r->has_tex[slot]) upload_texture(r, slot, t);   /* a slot the layers draw with */
+}
 
 static void upload_texture(glr *r, int slot, const texture *t)
 {
@@ -1002,7 +1011,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     glBindVertexArray(0);
     L->vertex_count = (GLsizei)n;
     for (b = 0; b < GLR_SLOTS; b++)
-        if (L->batch_count[b] > 0) upload_texture(r, b, slots[b]);
+        if (L->batch_count[b] > 0) upload_texture(r, b, r->slot_frame[b] && slots[b] ? r->slot_frame[b] : slots[b]);
     for (b = 0; b < GLR_SLOTS; b++)
         if (L->batch_count[GLR_B0 + b] > 0) upload_texture(r, GLR_SLOTS + b, r->bank0 ? r->bank0[b] : NULL);
     for (b = 0; b < GLR_SLOTS; b++)
@@ -2061,7 +2070,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                     int kc = BBK[j];
                     f = env_vertex(f, sp->pos[0], sp->pos[1], -sp->pos[2], sp->top[0], sp->top[1], -sp->top[2],
                                    (kc == 1 || kc == 2) ? tw : 0.0f, kc >= 2 ? th : 0.0f);
-                    f[-2] = (float)kc;
+                    if (sp->ti) { f[-7] = kc >= 2 ? tw : 0.0f; f[-6] = (kc == 1 || kc == 2) ? th : 0.0f; }   /* Titanium 0x1009dfe0: (0,0) (0,1) (1,1) (1,0) */
+                    f[-2] = (float)(kc + (sp->ti ? 4 : 0));   /* (+ 4: the Titanium corners, VS) */
                     f[-1] = (float)(1024 + CORNER[j] + 3 * MASK[j]);
                 }
                 continue;
@@ -2094,7 +2104,9 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
             glUniform2f(r->u_texsize, (float)r->spr[k].tex->w, (float)r->spr[k].tex->h);
+            if (r->spr[k].ti) glUniform3f(r->u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);   /* mercsw 0x1004f33a: diffuse 0xc8 */
             glDrawArrays(GL_TRIANGLES, k * 6, 6);
+            if (r->spr[k].ti) { if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1); }
         }
         if (v->fx_blend) { glUniform1i(r->u_blend, 0); glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
         glUniform1i(r->u_unlit, 0);

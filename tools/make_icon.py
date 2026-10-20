@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build the macOS app icon (packaging/macos/mw2port.icns) from the original MechWarrior 2 box art
+"""NOTE (2026-10-20): packaging/macos/mw2port.icns is now the user-supplied MechWarrior-2.icns - do not regenerate it with
+this script unless asked. Formerly: build the macOS app icon (packaging/macos/mw2port.icns) from the original MechWarrior 2 box art
 (packaging/macos/mw2-boxart.jpg): the cover inset in a gunmetal macOS-style rounded square, so the rounded corners
 don't clip the MECHWARRIOR 2 title. Developer tool only (needs Pillow); the build uses the committed .icns.
 The Windows icon is separate: packaging/windows/mw2port.ico (the original game icon)."""

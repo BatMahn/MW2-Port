@@ -19,6 +19,9 @@
  *   aa=0 | 2 | 4 | 8
  *   render=native | 320x200 | 640x480 | 1024x768   (the sim's picture: the display's resolution, or one of the
  *                          original's RESOLUTION choices, drawn at that size and scaled up in blocks to 4:3)
+ *   system_shortcuts=block | allow   (macOS: block, the default, turns the system's keyboard shortcuts - Mission
+ *                          Control's Ctrl+arrows, Cmd+Tab, Spotlight - off while a mission is played with the window in
+ *                          front (not in the MAIN MENU or paused); allow leaves them on. Other systems: no effect)
  * The game folder is found on first run (the command line, the current folder, next to the executable, ~/MW2-game)
  * and remembered. */
 #ifndef PORTCFG_H
@@ -37,6 +40,7 @@ typedef struct {
     int  textures_ati;
     int  renderer;            /* PORTCFG_ED_*: how the simulation is drawn (Combat Variables RENDERER) */
     int  texset;              /* PORTCFG_TX_*: the texture set (Combat Variables TEXTURES) */
+    int  system_shortcuts;    /* 0 block (default): the system's shortcuts off while playing (macOS); 1 allow */
 } portcfg;
 enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA, PORTCFG_ED_COUNT };
 extern const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT];   /* "enhanced", "dos", ... (the file's words) */

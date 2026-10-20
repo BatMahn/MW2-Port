@@ -4,24 +4,22 @@ What is still open in the port as of 2026-10-20. Technical detail, engine addres
 [ASSUMPTIONS.md](ASSUMPTIONS.md) under "Open items". None of these blocks play.
 
 ## Needs confirming
-- **Zoomed turning** - short left/right taps while zoomed sometimes didn't register. Tap timing was fixed; if it still
-  happens, note the keys used and the frame rate (macOS Mission Control takes Ctrl+arrows).
+- **macOS shortcuts** - text input is now off during play (no accent popup on Z + arrows) and Mission Control / Cmd+Tab
+  are blocked while a mission runs (`system_shortcuts=allow` in mw2port.cfg to keep them). Needs a check on the Mac.
 
 ## Gameplay
-- **AQUA enemy fire** - in AQUASCN1 the player dies a few seconds sooner than in DOS on some seeds.
+- **AQUA enemy fire** - in AQUASCN1 the player is usually killed around 30 s; in the original that happens less often and
+  many runs last much longer.
+- **Fleeing trainees (ORANSCN1)** - the trainees at Nav Alpha run differently from DOS, so a different one tends to be
+  nearest for E.
+
+- **Trainer at the start (TNJ1 / TNJ4)** - the instructor stands dead ahead when the autopilot is engaged early, so the
+  autopilot deflects off him; in the original he has usually moved away by then.
 
 ## Visuals
-- **Titanium PPC / gauss cards** - drawn at full brightness; the original's billboard tints them to 200 / 255.
-
-## Sound
-- **Glancing** - while a glance is held, your own footsteps and start-up sound pan the opposite way to the original.
+- **DOS look fires** - MARO's street fire is drawn as smoke in the DOS look; the original shows an orange flame there.
 
 ## Other
-- **Autopilot** - drives straight to the nav point with no obstacle avoidance, as the original does. Why the original's
-  avoidance code never steers is still unknown.
-- **PINKSCN1** - one building group's rotation is a guess.
-- **Tests** - `node_task_guard_patrol` fails and is disabled.
-- **MARO** - can't be started directly in DOSBox for comparison; needs a launch through the game's menus.
 - **macOS downloads** - the app isn't notarised: run `xattr -dr com.apple.quarantine "MechWarrior 2.app"` once (README).
 
 ## Not planned

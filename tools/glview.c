@@ -24,6 +24,10 @@
 #if defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
+#include <dlfcn.h>   /* the system-shortcut switch, looked up at run time (syskeys_apply) */
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *)-2)   /* <dlfcn.h>'s value, hidden under strict POSIX */
+#endif
 #elif defined(_WIN32)
 #include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
 #else
@@ -154,6 +158,8 @@ static int       g_radar_mode = 1;        /* engine 0x10003fb0: 1 small -> 2 lar
 static hud_sprite g_hs_rgp[3], g_hs_rtgp[3], g_hs_rtgt[3], g_hs_rtof[3], g_hs_ruser, g_hs_rnp[2], g_hs_rtnp[2];   /* radar sprites, side F / E / N */
 static int       g_autopilot;   /* a: TOGGLE_AUTOPILOT (engine 0x10015c00) */
 static float     g_ap_turn;   /* the autopilot's turn input (+0xc, of 1024) */
+static int       g_ap_avoiding;   /* +0x17e: the avoidance (0x2db80) steered last time - its throttle is undone when it lets go */
+static float     g_ap_saved_thr;  /* +0x17a: the pilot's throttle saved by the autopilot while the avoidance is idle */
 static int       g_wcam_live;
    /* this frame: the weapon camera has a missile to follow */   /* l INFRARED: 1 light amplification; w ENHANCED_VISION: 2 image enhancement */
 static int       g_vport;   /* F7 rear / F8 down / F9 weapon viewport: 0 none, 1 rear, 2 down, 3 weapon */
@@ -1193,12 +1199,15 @@ static int unit_targetable(int q, int side, float *dist)
  * points (refused by every cycling key: 0x1001cea0 refuses flags & 0xe), round again - from the target's entry one step
  * on; with nothing selected (+0xdc 0x1000) from the first unit going forward whichever key; from a selected nav point
  * the rest of the navs, so forward the first unit, backward the last thing (or unit). Returns the ring entries passing
- * in walk order (units 0.., things n2..) into out[] (at most one round), their count */
+ * in walk order (units 0.., things n2..) into out[] (at most one round), their count. step 0: 0x1001cca0 with param_2
+ * 0 - restart at the first unit going forward whatever is selected (e's first call, 0x1001dba4 xor ecx / DOS 0x2acf0
+ * uVar5 = 0) */
 static int target_walk(int step, int side, int *out, int max)
 {
     int n2 = g_actor_count, nb = g_sim.bld_count, n = n2 + nb, cur, i, k = 0;
     if (n <= 0) return 0;
-    if (g_tgt_sel >= 0) cur = g_tgt_sel + step;
+    if (step == 0) { cur = 0; step = 1; }
+    else if (g_tgt_sel >= 0) cur = g_tgt_sel + step;
     else if (g_tgt_thing >= 0) cur = n2 + g_tgt_thing + step;
     else if (g_nav_sel >= 0 && step < 0) cur = n - 1;
     else { cur = 0; step = 1; }
@@ -1722,10 +1731,35 @@ static void scrub_follow(glr *r, float camx, float camz)
                 if (g_mech.parts[k].scrg) { g_mech.parts[k].pos[0] += dx; g_mech.parts[k].pos[2] += dz; }
             gx += dx; gz += dz; cellx = nx; cellz = nz;
             moved = 1;
-            if (getenv("MW2_STATE_DUMP")) printf("SCRG now=%d at %d,%d\n", (int)g_sim.now, gx, gz);   /* TEST hook */
+            if (getenv("MW2_STATE_DUMP")) {   /* TEST hook: the grid point and the patch's first piece */
+                const mech3d_part *pp = NULL;
+                for (k = 0; k < g_mech.part_count && !pp; k++) if (g_mech.parts[k].scrg) pp = &g_mech.parts[k];
+                printf("SCRG now=%d at %d,%d piece %d,%d\n", (int)g_sim.now, gx, gz, pp ? (int)pp->pos[0] : 0, pp ? (int)pp->pos[2] : 0);
+            }
         }
     }
     if (moved) glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
+}
+/* The animated bank-1 slots (fires, smoke, flags: MAROMAP1 0x9b..0x9e a9fir201..217 at 10..16 ticks a frame), engine
+ * 0x1002ce50 every frame (0x1000915e): from the slot's first update a frame every rate ticks round its group (a cel
+ * id < 1 ends it), mode 2 once - back to frame 0 and still at the wrap; rate 0 or mode 0: still. Here from the mission
+ * clock (182 ticks a second). Not for the Titanium look (mercsw's own texture handling not traced) */
+static void scene_anim(glr *r)
+{
+    int i;
+    long t = (long)((int64_t)g_sim.now * 182 / 1000);
+    for (i = 0; i < GLR_SLOTS; i++) {
+        long st;
+        int f;
+        if (g_scene.nfr[i] < 2 || g_scene.rate[i] <= 0 || g_scene.mode[i] == 0 || c3d_ti) continue;
+        st = t / g_scene.rate[i];
+        f = g_scene.mode[i] == 2 && st >= g_scene.nfr[i] ? 0 : (int)(st % g_scene.nfr[i]);
+        glr_slot_frame(r, i, g_scene.fr[i][f]);
+        if (getenv("MW2_ANIM_LOG") && i == (int)strtol(getenv("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
+            static int last = -1;
+            if (f != last) { last = f; printf("ANIM t=%.3f slot %#x frame %d of %d rate %d\n", g_sim.now / 1000.0, i, f, g_scene.nfr[i], g_scene.rate[i]); }
+        }
+    }
 }
 /* the camera modes, after the cockpit / chase camera is set (engine 0x1002dc90) */
 static void camera_modes(glr_view *v)
@@ -4287,6 +4321,12 @@ static void test_dump(const char *tag)
     }
     /* the walk-cycle keys: the player's and MW2_KILL_ACTOR's actor's (a destroyed mech keeps its pose: standing_wreck_frozen) */
     printf(" pkey=%.3f bracket=%d zoom=%.2f", (double)g_pl_t, g_bracket, (double)g_zoom);
+    {   /* per unit: the range e would see (unit_targetable side 1, cm; -1 refused) and its weapon count */
+        printf(" erng=");
+        for (i = 0; i < g_actor_count; i++) { float dd = -1.0f; if (!unit_targetable(i, 1, &dd)) dd = -1.0f; printf("%s%.0f", i ? ";" : "", (double)dd); }
+        printf(" uwpn=");
+        for (i = 0; i < g_actor_count; i++) printf("%s%d", i ? ";" : "", g_sim.armed[i] ? g_sim.units[i].weapon_count : -1);
+    }
     {   /* the player's carried pose offset (anim_player_step): the largest track's, and its track */
         int q, qm = -1; float om = 0;
         for (q = 0; q < ANIM_MAX_TRACKS; q++) if (fabsf(g_pl_ap.off[q]) > om) { om = fabsf(g_pl_ap.off[q]); qm = q; }
@@ -4419,6 +4459,46 @@ static void test_frame(int w, int h)
 }
 /* ---- end TEST ONLY ---- */
 
+/* port (not an original behaviour - the DOS game had the whole keyboard): the system's keyboard shortcuts while a
+ * mission is played (mw2port.cfg system_shortcuts=block, the default | allow). macOS serves its own shortcuts
+ * (Mission Control's Ctrl+Left / Ctrl+Right "Move a space", Cmd+Tab, Spotlight) before the game sees the keys. SDL's
+ * keyboard grab would turn them off with CGSSetGlobalHotKeyOperatingMode, but SDL2 2.30 and SDL3 3.2 make that call
+ * only when built with SDL_MAC_NO_SANDBOX, which no SDL build defines (Cocoa_SetWindowKeyboardGrab in both
+ * SDL_cocoakeyboard.m) - so SDL_SetWindowKeyboardGrab does nothing on a Mac and the port makes the same call itself,
+ * looked up at run time (no link change; skipped if missing). The shortcuts come back in the MAIN MENU, while paused,
+ * without the window's focus and at exit. Other systems: nothing changes. */
+static int g_syskeys_allow;   /* system_shortcuts=allow */
+static int g_syskeys_off;     /* the shortcuts are off now */
+static void syskeys_apply(int off)
+{
+#if defined(__APPLE__)
+    static int (*conn)(void);
+    static int (*mode)(int, int);
+    static int looked;
+    if (!looked) {   /* CoreGraphics (SkyLight underneath) is already loaded with AppKit; else open it */
+        void *h = RTLD_DEFAULT;
+        looked = 1;
+        if (!dlsym(h, "CGSSetGlobalHotKeyOperatingMode")) h = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
+        if (h) { conn = (int (*)(void))dlsym(h, "_CGSDefaultConnection"); mode = (int (*)(int, int))dlsym(h, "CGSSetGlobalHotKeyOperatingMode"); }
+        if (!conn || !mode) fprintf(stderr, "system shortcuts: CGSSetGlobalHotKeyOperatingMode not found - left on\n");
+    }
+    if (conn && mode) mode(conn(), off ? 1 : 0);   /* CGSGlobalHotKeyDisable 1 / CGSGlobalHotKeyEnable 0 (SDL's enum) */
+#else
+    (void)off;
+#endif
+}
+static void syskeys_restore(void) { if (g_syskeys_off) { syskeys_apply(0); g_syskeys_off = 0; } }
+static void syskeys_update(int want)
+{
+    static int registered;
+    want = want && !g_syskeys_allow;
+    if (want == g_syskeys_off) return;
+    if (!registered) { atexit(syskeys_restore); registered = 1; }   /* any exit gives them back */
+    syskeys_apply(want);
+    g_syskeys_off = want;
+    if (getenv("MW2_STATE_DUMP")) printf("SYSKEYS now=%d %s text=%d\n", (int)g_sim.now, want ? "off" : "on", (int)SDL_IsTextInputActive());   /* TEST hook */
+}
+
 int main(int argc, char **argv)
 {
     char err[256], title[256];
@@ -4483,6 +4563,7 @@ int main(int argc, char **argv)
             win = SDL_CreateWindow("MechWarrior 2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
         }
         if (!aa) msaa = 0;
+        g_syskeys_allow = pc.system_shortcuts;
     }
     if (!win || !(ctx = SDL_GL_CreateContext(win))) {
         fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError());
@@ -4499,6 +4580,12 @@ int main(int argc, char **argv)
     }
 #endif
     SDL_GL_SetSwapInterval(1);
+    /* port: no text input in the simulation - SDL2 starts it with the video (SDL_VideoInit) and sdl2-compat on every new
+     * window (FinishWindowCreation), and on macOS active text input passes the keys through the input method
+     * (Cocoa_HandleKeyEvent -> interpretKeyEvents): holding z (zoom) opened the press-and-hold accent picker and the
+     * arrow keys then moved in it. Nothing here reads SDL_TEXTINPUT (the keys come as SDL_KEYDOWN) */
+    SDL_StopTextInput();
+    if (getenv("MW2_STATE_DUMP")) printf("TEXTINPUT active=%d\n", (int)SDL_IsTextInputActive());   /* TEST hook */
     { int dw0, dh0; SDL_GL_GetDrawableSize(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
     glr_default_view(&v);
     g_view = &v;
@@ -4705,6 +4792,8 @@ int main(int argc, char **argv)
                 q++;
             }
         }
+        /* the system's shortcuts off while the mission is played in front (see syskeys_update) */
+        syskeys_update(g_world && !g_mm_depth && !g_paused && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS));
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if ((g_mm_depth || g_paused) && (e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEWHEEL)) continue;   /* controls off (0x1003a3c0) */
@@ -4810,11 +4899,15 @@ int main(int argc, char **argv)
                     else if (A("TARGET_AT_RETICLE")) {}
                     else if (A("TARGET_NEAREST_ENEMY")) {
                         /* 0x1001db60: walks 0x1001cca0 with 0x40008 (0x1001db40: units and things of alliance 1 -
-                         * 0x10019040 / 0x10019060 - by the 0x1001d050 / 0x1001d2d0 rules) from the selector one step on,
-                         * keeping the first nearest (+0xc4, strict <); none, or the nearest beyond 1750 m (a 0x1000
-                         * thing): the old selector put back - the target stays (DOSBox TNJ1SCN1: e with only the neutral
-                         * Instructor and the resting Timber Wolf: nothing; t, then e: still the Instructor) */
-                        int wl[512], nw = target_walk(1, 1, wl, 512), k;
+                         * 0x10019040 / 0x10019060 - by the 0x1001d050 / 0x1001d2d0 rules) one full round from the FIRST
+                         * entry (the first call with step 0, then +1; DOS 0x2acf0 the same), keeping the first nearest
+                         * (+0xc4, strict <); none, or the nearest beyond 1750 m (a 0x1000 thing): the old selector put
+                         * back - the target stays (DOSBox TNJ1SCN1: e with only the neutral Instructor and the resting
+                         * Timber Wolf: nothing; t, then e: still the Instructor). So e never cycles: every press takes
+                         * the nearest enemy, armed or not (DOSBox ORANSCN1 at Nav Alpha: e the Trainer Maddog / the
+                         * unarmed Training Firemoth, whichever is nearer at the press; t cycles Maddog, Kitfox,
+                         * Firemoth, Nova) */
+                        int wl[512], nw = target_walk(0, 1, wl, 512), k;
                         int n2 = g_actor_count;
                         for (k = 0; k < nw; k++) {
                             float dd = 1e30f;
@@ -4875,7 +4968,7 @@ int main(int argc, char **argv)
                     else { pu2->shutdown = 1; pu2->manual_down = 1; g_throttle = 0; hud_message_v("Shutting down", 14); if (g_sfx) { float p3[3]; snd_player_pos(p3); snd_at(0xf2, p3, 0, snd_cockpit()); } }   /* message 0xd {14, "Shutting down"}; MECSHTD1 0xf2 at the mech (0x1001b060, positional, halved in the cockpit 0x1001b04e; DOSBox: at s, not on a heat shutdown 0x10016054) */
                 }
                 else if (g_world && g_sim_ok && A("TOGGLE_AUTOPILOT") && g_pilot) {
-                    g_autopilot = !g_autopilot && g_sim.nav_count > 0;
+                    g_autopilot = !g_autopilot;   /* 0x1001a4b5: toggles whether or not there is a nav (none: no steering) */
                     hud_message_v2(g_autopilot ? "Autopilot engaged." : "Autopilot disengaged.", 65, g_autopilot ? 80 : 84);
                 }
                 else if (g_world && (A("INFRARED") || A("ENHANCED_VISION")) && g_pilot) {
@@ -5338,44 +5431,73 @@ int main(int argc, char **argv)
                         hud_message_v2("Autopilot disengaged.", 65, 84);
                     }
                 }
-                if (!g_autopilot) g_ap_turn = 0;   /* 0x1001a180: autopilot off -> input +0xc = the pilot's +0x10 */
-                if (g_autopilot) {   /* engine 0x10015c00: steer to the selected nav (else the next not visited); the pilot's
-                                      * throttle stays; turn = (bearing error x 18.2044, at most 819.2) / 1024 of full - 0.8 of
-                                      * full beyond 45 degrees; on arrival MECNAVPT (0xe7), the nav marked visited and the next
-                                      * one taken; past the last, autopilot off and the throttle to 0. No obstacle avoidance:
-                                      * the 3Dfx code calls 0x100201c0 first (DOS 0x24ca0 -> 0x2db80), but in DOSBox (TNJ4 x 3,
-                                      * YELLSCN1) the player's autopilot never steered - it walks straight at the nav and keeps
-                                      * pushing into whatever is in the way until disengaged (user, 2026-10-13: "it straight
-                                      * shot.. it keeps bumping until you disengage"); the AI's avoidance is unchanged */
-                    static int ap_nav = -1;
-                    const unsigned char *visited = g_nav_seen;   /* set by the nav reach test (0xe7 there) */
-                    int nv = g_nav_sel >= 0 && g_nav_sel < g_sim.nav_count ? g_nav_sel : ap_nav;
-                    if (nv >= 0 && nv < g_sim.nav_count && nv < 256 && visited[nv]) {   /* arrived: the next one, off past the last */
-                        int k3;
-                        if (g_nav_sel == nv) g_nav_sel = -1;
-                        for (k3 = nv + 1; k3 < g_sim.nav_count && k3 < 256 && (visited[k3] || !g_sim.navs[k3].selectable); k3++) {}
-                        if (k3 >= g_sim.nav_count || k3 >= 256) { g_autopilot = 0; g_throttle = 0; ap_nav = -1; nv = -2; }   /* 0x10015d5c: silently (no message call in 0x10015c00) */
-                        else nv = k3;
-                    }
-                    if (nv == -1 || nv >= g_sim.nav_count) {
-                        for (nv = 0; nv < g_sim.nav_count && nv < 256 && (visited[nv] || !g_sim.navs[nv].selectable); nv++) {}
+                if (!g_autopilot) {   /* 0x1001a180: autopilot off -> input +0xc = the pilot's +0x10. +0x17a is written only by
+                                       * the autopilot (0x24ca0) and the unit record comes from a pool, not cleared: its value
+                                       * at engagement is taken as the pilot's throttle (ASSUMED - 0 would stop the mech at
+                                       * the first wall follow) */
+                    g_ap_turn = 0; g_ap_avoiding = 0; g_ap_saved_thr = g_throttle;
+                }
+                if (g_autopilot) {   /* engine 0x10015c00 (state +0xbc 1): steer to the nav in the selector (+0xdc kind 0x100,
+                                      * visited or not); with none there (nothing, a unit / thing target, or 0x1000) first take
+                                      * the first selectable nav that is not visited (flag 0x20), stepping 0x1001dac0 - all
+                                      * visited: nothing selected (0x1000) and no steering, the autopilot stays on and the leg
+                                      * input +0xc keeps its last value. Arrival (0x10015cb4): the nav's horizontal distance
+                                      * (+0xc0, 0x1001cea0 -> 0x1001d970) under its radius (NAVP +0x10, no minimum): flag 0x20
+                                      * and MECNAVPT 0xe7 (0x10032b60(0xe7, 0x64, 0x40, 5, 0x50)) if not yet visited, then the
+                                      * selector steps to the next selectable nav (0x1001dac0(0) step 1, visited or not,
+                                      * wrapping to the first); only when that wraps to a LOWER index (0x10015d4d: past the
+                                      * last nav) is the autopilot off and the throttle 0 (+0x4c +8 = 0, +0x24 = 1), silently -
+                                      * otherwise it walks on to the next nav without stopping. DOSBox TNJ1 (a at 13 s, full
+                                      * throttle): Nav Alpha passed at 150 kph, Nav Beta taken at once, still 150 kph; around
+                                      * Nav Beta (radius 30 m) it circled at 35-220 m for 50 s without arriving. The pilot's
+                                      * throttle is otherwise left alone, also on a manual disengage. Then (DOS 0x24ca0) the
+                                      * obstacle avoidance 0x2db80 (msim_player_avoid): while it steers the nav steering 0x229e0
+                                      * is skipped and +0x17e set; when it lets go the throttle saved before (+0x17a) comes
+                                      * back, and +0x17a keeps the pilot's throttle of each frame it is idle. Its DOS probe
+                                      * sees an object only at contact (see msim dos_broad_reject): DOSBox TNJ4 walks straight
+                                      * into S_1BQDAS, 12 / 31 kph for ~2 s, turned away to the left, follows the face and
+                                      * resumes; terrain (mountains) never deflects it */
+                    int nv = g_nav_sel >= 0 && g_nav_sel < g_sim.nav_count && g_nav_sel < 256 ? g_nav_sel : -1;
+                    if (nv < 0) {   /* 0x10015c2f-0x10015c93 */
+                        for (nv = 0; nv < g_sim.nav_count && nv < 256 && (g_nav_seen[nv] || !g_sim.navs[nv].selectable); nv++) {}
                         if (nv >= g_sim.nav_count || nv >= 256) nv = -1;
+                        else g_nav_sel = nv;   /* the autopilot's nav goes into the selector */
                     }
-                    ap_nav = nv >= 0 ? nv : -1;
-                    if (nv >= 0) g_nav_sel = nv;   /* 0x10015c00: the autopilot's nav goes into the selector (0x1001dac0) */
+                    if (nv >= 0) {   /* 0x10015c94: arrival at the selected nav (the player only) */
+                        float ax = g_sim.navs[nv].x - (float)g_pl.origin[0], az = g_sim.navs[nv].z - (float)g_pl.origin[2];
+                        if (sqrtf(ax * ax + az * az) < g_sim.navs[nv].radius) {
+                            int nx = nav_step(nv, 1);
+                            if (!g_nav_seen[nv]) { g_nav_seen[nv] = 1; if (g_sfx) sfx_play(g_sfx, 0xe7, SFX_V64, 0.0f); }
+                            if (nx < nv) { g_autopilot = 0; g_throttle = 0; g_nav_sel = -1; nv = -2; }   /* 0x10015d4f: no message call */
+                            else g_nav_sel = nv = nx;
+                        }
+                    }
                     if (getenv("MW2_TEST_NAVAUTO")) { static int once; if (!once++) fprintf(stderr, "nav autopilot: nav %d\n", nv); }
-                    if (nv == -1) { g_autopilot = 0; g_throttle = 0; }
+                    if (nv == -1) {   /* nothing to steer to: +0xc held */
+                        g_pl.heading += turn * (g_ap_turn / 1024.0f) * dt;
+                        if (fabsf(g_ap_turn) >= 1e-7f) g_pl_legs_turn = 1;
+                    }
                     else if (nv >= 0) {
                         float dx2 = g_sim.navs[nv].x - (float)g_pl.origin[0], dz2 = g_sim.navs[nv].z - (float)g_pl.origin[2];
                         float want = atan2f(dx2, dz2) * 180.0f / 3.14159265f, dh = want - g_pl.heading, c;
                         while (dh > 180) dh -= 360;
                         while (dh < -180) dh += 360;
-                        c = dh * 18.2044f;   /* 0x10013600 */
-                        if (c > 819.2f) c = 819.2f;
-                        if (c < -819.2f) c = -819.2f;
-                        g_ap_turn = c;
-                        if (getenv("MW2_AP_TRACE")) printf("APTRACE t=%.3f x=%d z=%d hd=%.1f err=%.1f turn=%.1f thr=%.3f\n", g_sim.now / 1000.0,
-                                                           g_pl.origin[0], g_pl.origin[2], (double)g_pl.heading, (double)dh, (double)g_ap_turn, (double)g_throttle);   /* tests */
+                        int wrote = 0;
+                        float at = 0, ath = 0;
+                        if (msim_player_avoid(&g_sim, g_pl.heading, g_pl_speed, g_pl_across, fabsf(g_throttle), g_reverse,
+                                              g_pl_walk * g_sim.player_unit.speed_gain <= 0.0f, dh, g_ap_saved_thr, &wrote, &at, &ath)) {
+                            if (wrote) { g_ap_turn = at; g_throttle = ath; }   /* input +0xc / +8; held between the checks */
+                            g_ap_avoiding = 1;
+                        } else {   /* 0x229e0 (3Dfx 0x10013600) */
+                            c = dh * 18.2044f;
+                            if (c > 819.2f) c = 819.2f;
+                            if (c < -819.2f) c = -819.2f;
+                            g_ap_turn = c;
+                            if (g_ap_avoiding) { g_ap_avoiding = 0; g_throttle = g_ap_saved_thr; }
+                            g_ap_saved_thr = g_throttle;
+                        }
+                        if (getenv("MW2_AP_TRACE")) printf("APTRACE t=%.3f x=%d z=%d hd=%.1f err=%.1f avoid=%d side=%d turn=%.1f thr=%.3f\n", g_sim.now / 1000.0,
+                                                           g_pl.origin[0], g_pl.origin[2], (double)g_pl.heading, (double)dh, g_ap_avoiding, g_sim.pav_side, (double)g_ap_turn, (double)g_throttle);   /* tests */
                         g_pl.heading += turn * (g_ap_turn / 1024.0f) * dt;
                         if (fabsf(g_ap_turn) >= 1e-7f) g_pl_legs_turn = 1;
                     }
@@ -6215,7 +6337,7 @@ int main(int argc, char **argv)
                 texture *t;
                 if (!e->alive || !(t = fx_texture(fx_frame(&g_fxd, e, now)))) continue;
                 memcpy(spr[n].pos, e->pos, sizeof spr[n].pos);
-                spr[n].quad = 0;
+                spr[n].quad = 0; spr[n].ti = 0;
                 int cs = e->slot >= 0 && e->slot < FX_CARD_SLOTS ? e->slot : 0;   /* the pool slot's own model (MZL0_2 / _3: one polygon) */
                 if (g_fxd.card_n[e->type][0] > 0 && g_tex_kind != 3 && !c3d_ti) {
                     /* a 0x8xxx / 0xbxxx card (muzzle flash, jet flame, death explosion): a 3D polygon in the effect object's
@@ -6272,7 +6394,7 @@ int main(int argc, char **argv)
                 slot = g_card_slot[cs][kind == 6 ? 0 : 1];   /* from the pool object (load_projectiles) */
                 if (cs) {
                     t = c3d_ti_scene.bank0[slot];
-                    { static int said; if (!said) { said = 1; printf("titanium: card drawn from the Titanium pool, bank 0 slot 0x%02x\n", slot); } }
+                    { static int said; if (!said) { said = 1; printf("titanium: card drawn from the Titanium pool, bank 0 slot 0x%02x, billboard 0x1004ef4c tint 0xc8\n", slot); } }
                 } else {
                     an = &g_fxd.tex[slot];
                     if (an->frames <= 0) continue;
@@ -6282,6 +6404,7 @@ int main(int argc, char **argv)
                 if (!t->rgba) continue;
                 spr[n].pos[0] = sh->x; spr[n].pos[1] = sh->y; spr[n].pos[2] = sh->z;
                 spr[n].quad = 0;
+                spr[n].ti = cs;   /* the Titanium card: mercsw 0x1004ef4c's corners and its 0xc8 tint */
                 spr[n].half_w = spr[n].half_h = g_card_half[cs][kind == 6 ? 0 : 1];
                 spr[n].tex = t;
                 {   /* the card's foot (0, -100) and top (0, 100) x its scale (PPCSHOT1 2, GAS0_0 1) on the shot's own up axis
@@ -6343,7 +6466,7 @@ int main(int argc, char **argv)
                         spr[n].pos[0] = sh->x - sh->vx * b; spr[n].pos[1] = sh->y - sh->vy * b; spr[n].pos[2] = sh->z - sh->vz * b;
                         spr[n].half_w = hw; spr[n].half_h = hw;
                         spr[n].tex = &glow[kind];
-                        spr[n].bb = 0; spr[n].quad = 0;
+                        spr[n].bb = 0; spr[n].quad = 0; spr[n].ti = 0;
                         spr[n].wire_code = 2; spr[n].has_tri = 0;
                         n++;
                     }
@@ -6524,6 +6647,7 @@ int main(int argc, char **argv)
         if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
         world_fade(r);
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
+        if (g_world) scene_anim(r);
         glr_draw(r, &v, w, h);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
@@ -6954,20 +7078,37 @@ int main(int argc, char **argv)
                     }
                 }
                 if (!g_satmap) { if (g_hs_ruser.tex) hud_draw(g_hud, &g_hs_ruser, px, py, NULL); else hud_rect(g_hud, px - 4.0f, py - 1.0f, 8.0f, 4.0f, green); }
-                {   /* blips (0x10003d40): mechs RGPF / E / N; the selected target RTGTGP (a plus), RTGTOF at the edge when
-                     * beyond the radar; nav points RNP (RRNP once reached), the targeted one RTGTNP / RRTGTNP */
+                {   /* blips (0x10003830): nav points (0x10003c10) RNP (RRNP once reached), the targeted one RTGTNP /
+                     * RRTGTNP; then 0x10003960: every unit but the player with +0x14 & 0x1400 and none of 0x4816 - so not
+                     * destroyed (2 / 4) and not powered down (0x10: shut down, resting / held by a node) - and every thing
+                     * with flags & 0x1400 (the dropships, gunships, engagement spheres...) and none of 0x1e, RGPF / E / N by
+                     * side (0x10019040 / 0x10019060); then the target (0x10003a60, whatever its power state): RTGTGP (a
+                     * plus; a thing without 0x1400: RTGTGT), RTGTOF at the edge when beyond the radar. DOSBox MAROSCN1: the
+                     * resting Nova / Mad Dog (480 / 590 m) are not shown, the moving hover cars (things 0x400) are */
+                    int nblip_u = 0, nblip_t = 0;
                     float ly = g_satmap ? 0.0f : g_pl.heading * 3.14159265f / 180.0f;
                     float rcm = g_satmap ? 50000.0f / (float)(1 << g_sat_i) : RADAR_CM[g_radar_i], rr2 = g_satmap ? 320.0f : rad;
                     int nvt = tgt < 0 ? current_nav(NULL) : -1;
-                    for (q = -1 - g_sim.nav_count; q < g_actor_count; q++) {
+                    for (q = -1 - g_sim.nav_count; q < g_actor_count + g_sim.bld_count; q++) {
                         float wx, wz, ddx, ddz, ax, ay, bx, by, dd2;
-                        int sd = 1, istgt, nvq = -1;
+                        int sd = 1, istgt, nvq = -1, set3 = 0;
                         const hud_sprite *sp;
-                        if (q >= 0) {
+                        if (q >= g_actor_count) {   /* a thing (0x10003960's second list; the target 0x10003a60) */
+                            const int b = q - g_actor_count;
+                            float tp[3];
+                            istgt = tgt < 0 && b == g_tgt_thing;
+                            if (g_sim.bld[b].hp <= 0) continue;   /* destroyed (the thing's flag 4 / 2) */
+                            if (!istgt && !(g_sim.bld[b].flags & 0x1400)) continue;   /* (bits 0x1e: runtime - destroyed - ASSUMED otherwise clear) */
+                            if (!msim_thing_point(&g_sim, b, tp)) continue;
+                            wx = tp[0]; wz = tp[2];
+                            sd = g_sim.bld[b].side >= 0 && g_sim.bld[b].side <= 2 ? g_sim.bld[b].side : 2;
+                            set3 = !(g_sim.bld[b].flags & 0x1400);
+                        } else if (q >= 0) {
                             if (!g_sim.armed[q] || g_sim.units[q].destroyed) continue;
+                            istgt = q == tgt;
+                            if (!istgt && ((g_sim.powered_down && g_sim.powered_down[q]) || g_sim.units[q].shutdown)) continue;   /* +0x14 & 0x10 */
                             wx = (float)g_actors[q].mech.origin[0]; wz = (float)g_actors[q].mech.origin[2];
                             sd = g_actors[q].friendly ? 0 : g_actors[q].alliance == 2 ? 2 : 1;
-                            istgt = q == tgt;
                         } else if (q <= -2) {
                             nvq = -2 - q;
                             if (!g_sim.navs[nvq].selectable) continue;   /* engine 0x10003c10: shown, the player's side */
@@ -6986,9 +7127,14 @@ int main(int argc, char **argv)
                         } else if (nvq >= 0) {
                             int rch = nvq < 256 && g_nav_seen[nvq];
                             sp = istgt ? &g_hs_rtnp[rch] : &g_hs_rnp[rch];
-                        } else sp = istgt ? &g_hs_rtgp[sd] : &g_hs_rgp[sd];
+                        } else sp = istgt ? (set3 ? &g_hs_rtgt[sd] : &g_hs_rtgp[sd]) : &g_hs_rgp[sd];
                         if (sp->tex) hud_draw(g_hud, sp, bx, by, NULL);
                         else if (nvq < 0) hud_rect(g_hud, bx - 1.5f, by - 1.5f, 3.0f, 3.0f, blipc);
+                        if (nvq < 0 && !istgt) { if (q >= g_actor_count) nblip_t++; else nblip_u++; }
+                    }
+                    if (getenv("MW2_RADAR_LOG")) {   /* TEST hook: the plain blips drawn (units, things) */
+                        static double last = -1;
+                        if (g_sim.now / 1000.0 >= last + 1.0) { last = g_sim.now / 1000.0; printf("RADAR t=%.1f units %d things %d\n", g_sim.now / 1000.0, nblip_u, nblip_t); }
                     }
                 }
             }
@@ -7563,6 +7709,7 @@ int main(int argc, char **argv)
     if (g_pl_ok) mech3d_free(&g_pl);
     sfx_destroy(g_sfx);
     glr_destroy(r);
+    syskeys_update(0);   /* the system's shortcuts back (atexit too, for the other ways out) */
     SDL_GL_DeleteContext(ctx);
     SDL_DestroyWindow(win);
     SDL_Quit();

@@ -427,16 +427,23 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
             else if (strcmp(c->tag, "INCL") == 0) {
                 uint16_t id;
                 char nm[11];
-                if (bwd_incl(c, &id, nm) == 0 && have && nb < m.record_count * 8) {
+                /* BLKX (0x10024e90) only stores a pending placement (DAT_1024dad0..daf0); the next BLK chunk processed
+                 * (0x10024ba0) takes it and resets it (from DAT_1024daf8). INCL (0x10042c60) processes the included record
+                 * there and then (0x1003de10, depth first, again for every INCL), so an included record with no BLK leaves
+                 * it pending - it is neither turned nor moved. The one such case in either archive, PINKSCN1's second
+                 * pinkscri (yaw 90, offset 354960 0 410427), is the scene's last chunk: nothing takes it. (Its scrub patch is
+                 * placed by 0x10011570 at the camera's grid point, absolute, either way.) */
+                float cc[2];
+                if (bwd_incl(c, &id, nm) == 0 && have && nb < m.record_count * 8 && blk_centre(&m, nm, cc)) {
                     float yaw = (float)rd32s(bx + 16) / 65536.0f, x = (float)rd32s(bx + 24), y = (float)rd32s(bx + 28), z = (float)rd32s(bx + 32);
-                    float h = pyaw * 3.14159265f / 180.0f, cc[2];
+                    float h = pyaw * 3.14159265f / 180.0f;
                     blk_place *e = &bp[nb++];
                     snprintf(e->name, sizeof e->name, "%s", nm);
-                    if (yaw != 0 && blk_centre(&m, nm, cc)) {   /* turned about the block's centre: t + c - R c */
+                    if (yaw != 0) {   /* turned about the block's centre: t + c - R c */
                         float hy = yaw * 3.14159265f / 180.0f, cy = cosf(hy), sy = sinf(hy);
                         x += cc[0] - (cy * cc[0] + sy * cc[1]);
                         z += cc[1] - (-sy * cc[0] + cy * cc[1]);
-                    } else if (yaw != 0) yaw = 0;   /* no BLK to take it: not turned (ASSUMED; PINKSCN1's second pinkscri) */
+                    }
                     e->yaw = pyaw + yaw;   /* the parent's turn, then its offset */
                     e->t[0] = pt[0] + cosf(h) * x + sinf(h) * z;
                     e->t[1] = pt[1] + y;

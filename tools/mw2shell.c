@@ -1287,15 +1287,19 @@ static const char *roster_title(int clan, int k)
 }
 static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
-    int next = -1, f = 0, editing = -1, i, confirm_del = 0, old_list = 0;
+    int next = -1, f = 0, editing = -1, i, confirm_del = 0, old_list = 0, text_on = 0;
     char edit[16] = "";
     reg_load();
     load_bg(clan == 1 ? 23 : 16);
-    if (!headless) { SDL_StartTextInput(); shell_sound(0x51, 0x1e); }   /* 0x384f8: DATABASE sound 0x51 at volume 0x1e on entering */
+    if (!headless) shell_sound(0x51, 0x1e);   /* 0x384f8: DATABASE sound 0x51 at volume 0x1e on entering */
     while (next == -1) {
         SDL_Event e;
         int sel = reg_selected(clan), hover = -1, nclick = 0, c;
         int enabled[15], click[16][2];
+        if (!headless && (editing >= 0) != text_on) {   /* port: text input only while a new pilot's name is typed (see main) */
+            text_on = editing >= 0;
+            if (text_on) SDL_StartTextInput(); else SDL_StopTextInput();
+        }
         if (f == 0 && getenv("MW2_SHELL_CLICKS")) {   /* tests: "x,y;x,y;..." clicks on the first frame */
             const char *q = getenv("MW2_SHELL_CLICKS");
             while (*q && nclick < 16) {
@@ -1451,7 +1455,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
             SDL_Delay(10);
         }
     }
-    if (!headless) { SDL_StopTextInput(); shell_sound_stop(0x51); }   /* 0x387a0: the sound object is freed on leaving */
+    if (!headless) { if (text_on) SDL_StopTextInput(); shell_sound_stop(0x51); }   /* 0x387a0: the sound object is freed on leaving */
     return next;
 }
 
@@ -4639,6 +4643,10 @@ int main(int argc, char **argv)
         if (pc.mode == 0) wf |= SDL_WINDOW_FULLSCREEN_DESKTOP;        /* native fullscreen (default); the 640x480 art letterboxed */
         else if (pc.mode == 2) wf |= SDL_WINDOW_FULLSCREEN_DESKTOP;   /* the shell's art is 640x480: the desktop mode serves it */
         win = g_win = SDL_CreateWindow("MechWarrior 2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W * 2, H * 2, wf);
+        /* port: text input off - SDL2 starts it with the video and sdl2-compat on every new window; on macOS it passes
+         * the keys through the input method (the press-and-hold accent picker). Only the roster's pilot name turns it
+         * on, while it is typed (run_roster) */
+        SDL_StopTextInput();
         rd = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
         SDL_RenderSetLogicalSize(rd, W, H);
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");   /* the artwork smoothly scaled; the text sharp, at full resolution */

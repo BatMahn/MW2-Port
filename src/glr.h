@@ -112,6 +112,9 @@ void glr_set_environment(glr *r, const texture *ground, const texture *sky, floa
 
 /* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again) and the sprites': new texture set */
 void glr_flush_textures(glr *r);
+/* an animated bank-1 slot (engine 0x1002ce50): draw it with frame t from now on (NULL: the slot's own texture again); the
+ * texture must stay valid. Cheap when unchanged. glr_flush_textures forgets the frames. */
+void glr_slot_frame(glr *r, int slot, const texture *t);
 /* Average colour of a texture (0-1 RGB), as the PowerVR engine uses for fog. */
 void glr_texture_average(const texture *t, float out[3]);
 
@@ -126,8 +129,10 @@ void glr_texture_average(const texture *t, float out[3]);
 /* quad: a card drawn as the 3D polygon it is (colour 0x8xxx / 0xbxxx cards - muzzle flashes, jet flames, the death
  * explosion: 0x1002a4b0 -> 0x10026e80 -> 0x1002c880): its four corners qv (world, game coordinates) with texel
  * coordinates quv (0-1 of the bitmap), as they are - not turned to the camera. */
+/* ti: a TEXTURES TITANIUM card drawn by mercsw's billboard 0x1004ef4c (mode 0): its corners and UVs (bb = 1) and the
+ * texels x the vertex colour 0xc8 (200 / 255, 0x1004f33a..0x1004f356; D3D's default MODULATE). */
 typedef struct { float pos[3]; float half_w, half_h; const texture *tex; float top[3]; int bb; int wire_code, has_tri; float tri[3][3];
-                 int quad; float qv[4][3], quv[4][2]; } glr_sprite;
+                 int quad; float qv[4][3], quv[4][2]; int ti; } glr_sprite;
 void glr_set_sprites(glr *r, const glr_sprite *s, int n);
 
 /* The Titanium particles (mercsw particle.PID, 0x1004d7ba): screen squares of size_px pixels (at 640 x 480; scaled to the

@@ -25,6 +25,10 @@ typedef struct {
      * editions' palette fades (0x1002ad50) */
     uint8_t  slotpal[20][256][3];
     int      slot_ok[20];
+    /* bank-1 frame groups (bwd_texmap frames; engine 0x1002ce50 steps them): frame 0 is slot[]; fr[k] k >= 1 the rest
+     * (owned); rate in ticks a frame (0: still), mode 0 still / 1 loop / 2 once */
+    int      nfr[GLR_SLOTS], rate[GLR_SLOTS], mode[GLR_SLOTS];
+    texture *fr[GLR_SLOTS][BWD_TEXMAP_FRAMES];
 } c3d_scene;
 
 /* Textures come from `texs`. An ATi archive has one format (ARGB1555). For 3dfx/S3
@@ -67,8 +71,11 @@ static void c3d_free_scene(c3d_scene *s)
     int i;
     for (i = 0; i < GLR_SLOTS; i++)
     {
+        int k;
         if (s->slot[i]) { tex_free(s->slot[i]); free(s->slot[i]); s->slot[i] = NULL; }
         if (s->bank0[i]) { tex_free(s->bank0[i]); free(s->bank0[i]); s->bank0[i] = NULL; }
+        for (k = 1; k < BWD_TEXMAP_FRAMES; k++) if (s->fr[i][k]) { tex_free(s->fr[i][k]); free(s->fr[i][k]); s->fr[i][k] = NULL; }
+        s->nfr[i] = 0;
     }
 }
 
@@ -118,9 +125,16 @@ static int c3d_load_scene(prj_archive *models, prj_archive *texs, int ati, const
                 for (i = 0; i < GLR_SLOTS; i++)
                     if (map.present[i]) {
                         texture *t = c3d_texture(texs, ati, map.name[i], 0);
+                        int f;
                         if (!t) continue;
                         if (s->slot[i]) { tex_free(s->slot[i]); free(s->slot[i]); } else s->textures_loaded++;
                         s->slot[i] = t;
+                        for (f = 1; f < BWD_TEXMAP_FRAMES; f++) if (s->fr[i][f]) { tex_free(s->fr[i][f]); free(s->fr[i][f]); s->fr[i][f] = NULL; }
+                        s->nfr[i] = 1; s->rate[i] = map.rate[i]; s->mode[i] = map.mode[i];
+                        s->fr[i][0] = t;
+                        for (f = 1; f < map.frames[i]; f++)   /* the group's other frames (a missing one ends the group) */
+                            if (!(s->fr[i][f] = c3d_texture(texs, ati, map.frame[i][f], 0))) break;
+                            else s->nfr[i] = f + 1;
                     }
                 for (i = 0; i < GLR_SLOTS; i++)   /* bank 0: only the scrub bitmaps matter here (effects load their own) */
                     if (map.b0_present[i]) {

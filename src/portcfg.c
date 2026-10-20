@@ -82,7 +82,8 @@ int portcfg_load(const char *unused, portcfg *c)
         } else if (strcmp(line, "aa") == 0) {
             int a = atoi(v);
             c->aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
-        } else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
+        } else if (strcmp(line, "system_shortcuts") == 0) c->system_shortcuts = strcmp(v, "allow") == 0;
+        else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
         else if (strcmp(line, "renderer") == 0 || strcmp(line, "edition") == 0) {   /* (edition=: the old single look) */
             int e;
             for (e = 0; e < PORTCFG_ED_COUNT; e++) if (strcmp(v, PORTCFG_ED_NAME[e]) == 0) c->renderer = e;
@@ -117,6 +118,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "speed=%.2f\n", (double)(c->speed > 0 ? c->speed : 0.85f));
     fprintf(f, "renderer=%s\n", PORTCFG_ED_NAME[c->renderer >= 0 && c->renderer < PORTCFG_ED_COUNT ? c->renderer : 0]);
     fprintf(f, "textures=%s\n", PORTCFG_TX_NAME[c->texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
+    fprintf(f, "system_shortcuts=%s\n", c->system_shortcuts ? "allow" : "block");
     fclose(f);
     return 0;
 }

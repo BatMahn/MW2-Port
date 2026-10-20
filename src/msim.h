@@ -172,6 +172,11 @@ typedef struct {
     float        player_radius;
     float        player_vel[3];  /* the player's velocity, cm/tick (x, y, z; set by the front end): mech contacts use the
                                   * relative speed (engine 0x1000c160) */
+    /* the player's autopilot obstacle avoidance (DOS 0x2db80 / 0x100201c0 on the player's unit record): +0x18a avoid side,
+     * +0x182 the object the first blocked probe hit (nonzero: avoiding), +0x186 the next check (ticks), +0x18c the probe
+     * length factor */
+    int          pav_side, pav_hit;
+    float        pav_next, pav_len;
     int          fx_light_ok;
     int         *ai_focus;       /* per actor: the attacker it turned on (0x10012520): -1 the player, -2 none */
     int         *ai_who;
@@ -308,6 +313,14 @@ void msim_set_world(msim *s, const mech3d *world);
 void msim_test_power(msim *s, int actor, int up);   /* TEST ONLY: power an actor down (0) / wake it (1) */
 /* TEST ONLY: one AI avoidance probe (0x100204e0 -> 0x100103e0) from p0 to p1 for no unit: 0 nothing, 1 a world entry, 2 a
  * unit's piece; (ox, oz) the centre of what it hit */
+/* The player's autopilot obstacle avoidance (DOS 0x2db80 from the autopilot 0x24ca0; 3Dfx 0x100201c0 from 0x10015c00) with
+ * the DOS probe's broad phase (0x3a745, see probe_engine): heading (deg), the velocity (cm/s along / across the heading),
+ * the throttle input (fraction of full), reverse (input +0x2f), immobile (physics +0x88 == 0), the bearing error to the
+ * nav (deg, wrapped), the saved throttle (+0x17a). Returns 1 while the avoidance steers (the autopilot then skips its nav
+ * steering 0x229e0); when it wrote new inputs this check *wrote = 1 with *turn (input +0xc, of 1024) and *thr (input +8,
+ * fraction of full); between its checks (every 10 ticks) the inputs are held. */
+int  msim_player_avoid(msim *s, float heading, float along, float across, float throttle, int reverse, int immobile,
+                       float goal_err, float saved_thr, int *wrote, float *turn, float *thr);
 int  msim_test_probe(const msim *s, const float p0[3], const float p1[3], float *ox, float *oz);
 /* TEST ONLY: the units a shot step o..o+dv strikes (the shots' own test): 1 with the unit (-1 the player), the piece's
  * location (0 none) and the step fraction, 0 for none */

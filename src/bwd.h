@@ -136,6 +136,7 @@ typedef struct {
 int bwd_tsk_decode(const bwd_chunk *c, bwd_tsk *out);
 
 #define BWD_TEXMAP_SLOTS 256
+#define BWD_TEXMAP_FRAMES 32   /* frames a group holds (0x1002cf10: 0x20) */
 typedef struct {
     int      present[BWD_TEXMAP_SLOTS];
     uint16_t cel_id[BWD_TEXMAP_SLOTS];
@@ -146,6 +147,14 @@ typedef struct {
      * BMID (single-frame entries such as TNJ1SCRI's tan_rk / rrock / cact_2) */
     int      b0_present[BWD_TEXMAP_SLOTS];
     char     b0_name[BWD_TEXMAP_SLOTS][13];
+    /* bank 1 frame groups (engine 0x1002cf10 / 0x1002d060 / 0x1002ce50): BMPJ adds its cel to the current group, the first
+     * BMPJ after a BMID starts a new one (DAT_1024e48c), and every BMID takes the current group - so a run of BMIDs after
+     * one run of BMPJs shares it (MAROMAP1 0x9b..0x9e: a9fir201..217, rates 10..16). A slot starts at frame 0 (+2 = 0);
+     * rate (+4, ticks a frame): 0x2d for a group of 2+ frames, else 0 (still), BSEC {slot | bank << 8, rate} sets it, BMEN
+     * {slot, mode} the mode (+6: 0 still, 1 loop, 2 once; 0x1002d150, 0x2d if the rate is 0). name[] = frame 0 */
+    int      frames[BWD_TEXMAP_SLOTS];
+    char     frame[BWD_TEXMAP_SLOTS][BWD_TEXMAP_FRAMES][13];
+    int      rate[BWD_TEXMAP_SLOTS], mode[BWD_TEXMAP_SLOTS];
 } bwd_texmap;
 
 /* Read the slot -> texture table from a MAP record payload. Returns 0 on success. */

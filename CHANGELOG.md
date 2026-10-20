@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.4.5 (2026-10-20)
+
+- **Autopilot at obstacles**: drives straight, and after bumping into a building or mech turns away, follows the wall
+  and carries on, as the original does.
+- **Autopilot nav to nav**: walks on from one nav point to the next and stops only after the last one, as in the
+  original; disengaging (turning) keeps your throttle.
+- **macOS keys**: no accent popup on Z + arrows (text input off during play); Mission Control / Cmd+Tab blocked while a
+  mission runs (`system_shortcuts=allow` to keep them).
+- **Animated fires and smoke** in every map (bank-1 texture frame groups were not animated or textured).
+- **Radar** hides powered-down units and shows the original's flagged things (e.g. MARO's cars).
+- **PINKSCN1** ground scrub is back (a placement record with nothing to place was applied anyway).
+- **Titanium PPC / gauss** shots tinted as in the original.
+- **Mac app icon** replaced.
+- Confirmed as the original: E takes the nearest enemy on every press (T cycles); the autopilot voice waits behind
+  queued radio messages.
+
 ## v0.4.4 (2026-10-20)
 
 Every change below was traced in the original game code and, where possible, checked against the original running in

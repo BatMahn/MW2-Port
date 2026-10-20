@@ -2278,24 +2278,32 @@ def walk_run_carried_offset(c):
     c(run and all(abs(s['poff'] - 17.0) < 0.01 for s in run), 'running: the hip carries 17 degrees', str(sorted(set(s['poff'] for s in run))))
     c(back and all(s['pseq'] == 0 and s['poff'] < 0.01 for s in back), 'back to walking: taken off again', str([(s['pseq'], s['poff']) for s in back[:3]]))
 
-def node_task_guard_patrol(c):   # not registered: fails (Open items)
+@sequence
+def node_task_guard_patrol(c):
     """an enemy star's protect node (kind 4) on a thing (0x10014ba0 -> state 7 with the target, 0x10013f00): four 30 m nav
     points at x - R, z - R, x + R, z + R round it (R 250 m for a thing), the goal the first own point in the nav table; on
     arriving the DEFLT state-7 rule (condition 3, ref 0x2a) re-enters patrol with the target (ref2 0x40): every other
     point deleted (0x10013e90 steps on past each deletion), four more made, the goal again the first left - the -z point
     of the first ring next. SILVSCN1: the Gargoyle (actor 3, table 2) guards silvare2 (3050, -1058) for 30 s - the port
     had left kind 4 unapplied (the leader stood, its wingman followed)"""
-    r = c.run(secs=34, throttle=0, twist=0, mission='SILVSCN1', dump='/1', nostart=True,
+    r = c.run(secs=34, throttle=0, twist=0, mission='SILVSCN1', dump='/0.25', nostart=True,
               env={'MW2_WATCH_ACTOR': '3', 'MW2_DEBUG_NODE_TASKS': '1'})
     tasks = [l for l in r.out.splitlines() if l.startswith('node task') and 'kind 0x4 ' in l and 'silvare2' in l]
     c(len(tasks) == 2 and all('-> 7 ' in l for l in tasks), 'both members of table 2 put in state 7 on silvare2', str(tasks))
+    # the protect node completes at 31 s (then kind 2 on the userstar): the Gargoyle, online only after its start-up
+    # (0x43e + rand(0x16a) ticks, 0x1001ab97), reaches the first point at ~28.5 s - so the turn for the second is checked
+    # over the last ~2.5 s, sampled every 0.25 s (the 1 s dump had left one sample there: the test, not the port, was wrong)
     pts = [(s['t'], s['w_x'], s['w_z']) for s in r.states if 'w_x' in s and s['t'] <= 31.0]
     d = [((x + 21950) ** 2 + (z + 1058) ** 2) ** 0.5 for t, x, z in pts]
     k = d.index(min(d)) if d else -1
     c(d and min(d) < 3500, 'reaches the first point, x - 250 m (-21950, -1058)', '%.0f cm' % (min(d) if d else -1))
-    later = [z for t, x, z in pts[k + 1:k + 5]] if k >= 0 else []
-    c(len(later) >= 2 and later[-1] < pts[k][2] - 2000 and all(b < a for a, b in zip([pts[k][2]] + later, later)),
-      'then heads for the second, z - 250 m (3050, -26058)', '%s -> %s' % (pts[k][2] if k >= 0 else '-', later))
+    later = pts[k + 1:] if k >= 0 else []
+    ok = len(later) >= 4 and later[-1][2] < pts[k][2] - 2000
+    if ok:   # the last leg's bearing within 30 deg of the second point's (3050, -26058)
+        ex, ez = later[-1][1] - later[-5][1], later[-1][2] - later[-5][2]
+        gx, gz = 3050 - later[-5][1], -26058 - later[-5][2]
+        ok = (ex * gx + ez * gz) / max(1.0, math.hypot(ex, ez) * math.hypot(gx, gz)) > math.cos(math.radians(30))
+    c(ok, 'then heads for the second, z - 250 m (3050, -26058)', '%s -> %s' % (pts[k][1:] if k >= 0 else '-', [p[1:] for p in later]))
 
 
 @sequence
@@ -2969,38 +2977,52 @@ def hidden_mechs_playable(c):
             c(m is not None and m.group(1) == name and int(m.group(2)) > 0, 'Wolf campaign lab: %s with its designs' % name, m.group(0) if m else out[-200:])
 
 @sequence
-def autopilot_straight_line_bumps(c):
-    """user (2026-10-13): "autopilot doesn't steer around stuff, it straight shot.. if you bump into things.. it keeps
-    bumping until you disengage, turn your mech and then go" - as our DOSBox runs (TNJ4 x 3, YELLSCN1: no turn, walked
-    into a mountain). The player's autopilot steers only at the nav (0x10013600: bearing error x 18.2044, cap 819.2) at
-    the pilot's throttle - no obstacle avoidance (the AI's is unchanged). TNJ4, NAV1 reached, on the way to NAV2 the box
-    S_1BQDAS (south face z 166195) stands across the line: it walks into the face and stays there pushing (the contact
-    slide creeps it along the face), on course and at full throttle, until a turn (Left) disengages it. At the start the
-    trainer's mech stands ahead: it walks into it and keeps pushing (no quarter-throttle deflection, no turn away)"""
-    r = c.run(secs=26, keys=[(UP, '0'), (UP + 0.5, 'a')], hold=[(24, 24.5, 'left')],
+def autopilot_contact_deflect(c):
+    """user decision (2026-10-20): the player's autopilot as the original at obstacles. DOS 0x24ca0 -> 0x2db80 does avoid,
+    but its probe's broad phase (0x3a745) drops an object as an "overflow" (the carry of a signed 64-bit add) unless its
+    centre lies ahead of the probe in x AND z, so it sees most things only once the probe's start is inside their sphere.
+    DOSBox TNJ4 (docs/reference/autopilot_contact_deflect_dos.jpg; a 100 m probe called from the kph readout: 0 all the way
+    to S_1BQDAS): straight at full speed until ~216 m from Nav Beta, 12 / 31 kph for ~2 s, turned away to the LEFT, 120
+    then 147 kph along the face and on to the nav. TNJ4 from NAV1 toward NAV2: no deflection from range, the quarter
+    throttle (0x100) only within the box's sphere (< 35 m from the south face z 166195), slowed for 0.5-4 s, turns left,
+    never through the face, the pilot's throttle back (+0x17a) and NAV2 reached, autopilot still on. From the start to
+    NAV1 (open desert, the mountains): no deflection (terrain never deflects)"""
+    r = c.run(secs=40, keys=[(UP, '0'), (UP + 0.5, 'a')],
               env={'MW2_START': '-133566,141377', 'MW2_START_HEADING': -24.7, 'MW2_TEST_NAVSEEN': '1,3'},
               mission='TNJ4SCN1', dump='/0.1')
+    face = 166195
     nav2 = (-153774, 185721)
     brg = lambda s: math.degrees(math.atan2(nav2[0] - s['x'], nav2[1] - s['z']))
     off = lambda s: (s['heading'] - brg(s) + 180) % 360 - 180
-    seg = r.span(UP + 3, 23.9)
-    c(seg and not any(abs(s['throttle'] - 0.25) < 0.01 for s in seg) and min(s['throttle'] for s in seg) > 0.9,
-      'never deflects: the throttle stays the pilot\'s (full)', str(sorted(set(round(s['throttle'], 2) for s in seg))))
-    c(seg and max(abs(off(s)) for s in seg) < 5, 'heading on the nav throughout (no turn away)', '%.1f deg' % max(abs(off(s)) for s in seg))
-    c(seg and max(s['z'] for s in seg) < 166195, 'stopped at the wall (never past its face)', 'z max %d' % max(s['z'] for s in seg))
-    push = r.span(20, 23.9)
-    c(push and all(s['autopilot'] == 1 for s in push) and max(s['kmh'] for s in push) < 40, 'still engaged and pushing at the face',
-      'kmh %s' % sorted(set(round(s['kmh']) for s in push)))
-    c(r.at(25)['autopilot'] == 0 and r.msg_time('Autopilot disengaged') is not None, 'a turn disengages it')
-    r = c.run('_unit', secs=14, keys=[(UP, '0'), (UP + 0.5, 'a')], mission='TNJ4SCN1', dump='/0.1')
-    seg = r.span(UP + 0.6, 14)
-    c(seg and not any(abs(s['throttle'] - 0.25) < 0.01 for s in seg), 'the trainer ahead: no quarter-throttle deflection',
+    seg = r.span(UP + 1.5, 39.9)
+    first = next((s for s in seg if abs(s['throttle'] - 0.25) < 0.01 and s['z'] > face - 3500), None)
+    c(first is not None, 'deflects at the box, inside its sphere (quarter throttle 0x100 within 35 m of the face)')
+    if first is None:
+        return
+    t0 = first['t']
+    pre = r.span(UP + 1.5, t0 - 0.05)
+    blip = [s for s in pre if abs(s['throttle'] - 0.25) < 0.01]
+    # from range the box (sphere centre x -140633) passes the DOS broad phase only while its centre is ahead in x as well
+    # as z: the moment between the face coming within the probe's ~108 m and the mech passing x -140633 (2 checks)
+    c(pre and len(blip) <= 3 and max(abs(off(s)) for s in pre) < 5 and pre[-1]['throttle'] > 0.9 and pre[-1]['kmh'] > 100,
+      'straight at the nav and at full speed until then (no deflection from range)',
+      '%d quarter-throttle samples before, off course %.1f deg' % (len(blip), max(abs(off(s)) for s in pre)))
+    ep = r.span(t0, t0 + 6)
+    c(min(s['heading'] for s in ep) < first['heading'] - 20, 'turns away to the left (as DOSBox)',
+      'heading %.1f -> min %.1f' % (first['heading'], min(s['heading'] for s in ep)))
+    slow = [s for s in ep if s['kmh'] < 60]
+    c(slow and 0.5 <= slow[-1]['t'] - slow[0]['t'] <= 4.0, 'slowed for 0.5-4 s (DOSBox ~2 s at 12 / 31 kph)',
+      '%.1f s' % (slow[-1]['t'] - slow[0]['t'] if slow else -1))
+    c(max(s['z'] for s in r.span(t0, t0 + 4) if abs(s['x'] - first['x']) < 1500) < face, 'never through the face')
+    back = next((s for s in r.span(t0, 39.9) if s['throttle'] > 0.9), None)
+    c(back is not None and back['t'] - t0 < 5, "the pilot's throttle back within 5 s (+0x17a)", '%.1f s' % ((back['t'] - t0) if back else -1))
+    arrive = next((s for s in r.span(t0, 39.9) if s['nav'] != 2), None)
+    c(arrive is not None and arrive['t'] - t0 < 15 and all(s['autopilot'] == 1 for s in r.span(t0, arrive['t'])),
+      'resumes and reaches NAV2 within 15 s, still engaged', '%.1f s' % ((arrive['t'] - t0) if arrive else -1))
+    r = c.run('_desert', secs=78, keys=[(UP, '0'), (UP + 0.5, 'a')], mission='TNJ4SCN1', dump='/0.5')
+    seg = r.span(14, 77)
+    c(seg and min(s['throttle'] for s in seg) > 0.9, 'start to NAV1 and on: no deflection over open ground / mountains',
       str(sorted(set(round(s['throttle'], 2) for s in seg))))
-    b = lambda s: abs((s['heading'] - math.degrees(math.atan2(-110617 - s['x'], 97073 - s['z'])) + 180) % 360 - 180)
-    grow = max((b(q) - b(p) for p, q in zip(seg, seg[1:])), default=99)
-    c(grow < 1.0, 'only ever turns toward NAV1 (no turn away)', 'largest error growth %.2f deg' % grow)
-    hit = [s for s in r.span(10.5, 14) if s['kmh'] < 15]
-    c(hit and all(s['autopilot'] == 1 for s in r.span(10.5, 14)), 'bumps the trainer and stays engaged', '%d slow samples' % len(hit))
 
 
 @sequence
@@ -4275,7 +4297,8 @@ def titanium_ppc_card_pool(c):
     """TEXTURES TITANIUM: the PPC / gauss cards from the Titanium archive's own MW2_SHT1 pool - mercsw's projectile maker
     takes the first free pool entry of the weapon's kind for every kind (0x1006ca96..0x1006cac3), the 16-bit engine has
     only its own archive: PPCSHOT1 0x3520 / GAS0_0 0x35a0 -> Titanium bank-0 slots 0x52 / 0x5a (the 3D pool: 0x0b /
-    0x0d). A Warhawk (4 ER PPC) firing, CYANSCN1 (skipped without the titanium/ folder)"""
+    0x0d), drawn by mercsw's billboard 0x1004ef4c: its mode-0 corners / UVs and the vertex colour 0xc8 (texels x 200 / 255).
+    A Warhawk (4 ER PPC) firing, CYANSCN1 (skipped without the titanium/ folder)"""
     tdir = titanium_dir()
     if not tdir:
         c.note('no titanium/ folder: skipped')
@@ -4285,7 +4308,8 @@ def titanium_ppc_card_pool(c):
     r = c.run(secs=4, throttle=0, nostart=True, mission='CYANSCN1', mech='warhawk/whk00std', shots=[(2.6, 'ppc')], env=env)
     m = re.search(r'titanium: cards PPC slot 0x(\w+) half (\d+), gauss slot 0x(\w+) half (\d+)', r.out)
     c(m is not None and (m.group(1), m.group(3)) == ('52', '5a'), 'the Titanium pool\'s cards: PPC 0x52, gauss 0x5a', m.group(0) if m else r.out[-300:])
-    c('titanium: card drawn from the Titanium pool, bank 0 slot 0x52' in r.out, 'a PPC shot drawn with the Titanium card', r.out[-300:])
+    c('titanium: card drawn from the Titanium pool, bank 0 slot 0x52, billboard 0x1004ef4c tint 0xc8' in r.out,
+      'a PPC shot drawn with the Titanium card, its billboard and 0xc8 tint (0x1004f33a)', r.out[-300:])
 
 
 @sequence
@@ -4369,6 +4393,206 @@ def target_enemy_friendly_sides(c):
     seq = [r.at(t + 0.3)['tgt'] for t, _ in keys]
     c(seq == [-1, -1, 1, 1, -1], 'e -, f -, t Instructor, e keeps it, f clears', str(seq))
 
+
+
+@sequence
+def glance_own_sounds_eye(c):
+    """the cockpit camera (the sounds' listener) sits at the eye node: 0x1002e0f0 -> 0x1002eb50 on the EYEO object's world
+    matrix (+0x3c) with (0, controller +0xc4, 0); a glance only adds yaw / pitch (0x1002e750; DOS 0x395d0 / 0x39c50) - no
+    other pivot. So the player's own near sounds pan by where that eye sits against the unit position (+0x50): the Mad
+    Dog's eye is ~2 m BEHIND it, the Timber Wolf's ~2.4 m ahead. DOSBox YELLSCN1 (its player is a Mad Dog), walking at
+    throttle 5: footsteps (camera - unit, 0x1000b370) centred; Keypad 9 (PageUp) held: right (R / (L + R) 0.62-0.67),
+    Keypad 7 (Home): left (0.32-0.38); a restart's MECTURX2 (unit - camera, 0x1001ac01) under Keypad 9: left, Keypad 7:
+    right. The Timber Wolf the other way round"""
+    snd = lambda r: [(float(t), int(i), float(p) if p else 0.0) for t, i, v, d, p in
+                     re.findall(r'SFXLOG (-?[\d.]+) snd (\d+) vol ([\d.]+)(?: delay ([\d.]+))?(?: pan (-?[\d.]+))?', r.out)]
+    for mech, sign in (('maddog/mdg00std', 1), ('timbrwlf/tbr00std', -1)):
+        nm = mech.split('/')[0]
+        for g, gs in (('kp9', 1), ('kp7', -1)):
+            r = c.run('_%s_%s' % (nm, g), secs=UP + 8, mech=mech, env={'MW2_SFX_LOG': '1'}, keys=[(UP, '5')], hold=[(UP + 3, UP + 7, g)])
+            s = snd(r)
+            fs0 = [x[2] for x in s if x[1] in (214, 215, 216, 217) and x[0] < UP + 3]
+            fs = [x[2] for x in s if x[1] in (214, 215, 216, 217) and UP + 3.3 < x[0] < UP + 7]
+            c(fs0 and all(abs(p) <= 0.1 for p in fs0), '%s: footsteps centred without a glance' % nm, str(fs0[:3]))
+            c(fs and all(p * sign * gs > 0.5 for p in fs), '%s %s: footsteps pan %s' % (nm, g, 'right' if sign * gs > 0 else 'left'), str(fs[:3]))
+        r = c.run('_%s_restart' % nm, secs=UP + 10, mech=mech, env={'MW2_SFX_LOG': '1'}, keys=[(UP, 's'), (UP + 4, 'ctrl+s')], hold=[(UP + 3, UP + 9, 'kp9')])
+        tu = [x[2] for x in snd(r) if x[1] == 0xf7 and x[0] > UP + 3.5]
+        c(len(tu) == 1 and tu[0] * sign < -0.5, '%s kp9: the restart MECTURX2 pans %s' % (nm, 'left' if sign > 0 else 'right'), str(tu))
+
+
+@sequence
+def blkx_without_blk(c):
+    """BLKX (0x10024e90) only stores a pending placement; the next BLK processed (0x10024ba0) takes it and resets it, and
+    INCL (0x10042c60 -> 0x1003de10) processes the included record at once. PINKSCN1's last chunks are a BLKX (yaw 90, offset
+    354960 0 410427) and a second INCL of pinkscri - a record with no BLK (its 9 OBJ are the SCRG scrub patch): nothing
+    takes the BLKX, so the record is neither turned nor moved, and its patch is placed at the camera's grid point
+    (0x10011570, absolute). The port had moved it 355 / 410 km away - no scrub in PINKSCN1; DOSBox PINKSCN1: scrub
+    rocks all round the start"""
+    r = c.run(secs=3, mission='PINKSCN1', nostart=True, mech=None, env={'MW2_STATE_DUMP': '1'})
+    m = re.findall(r'^SCRG now=\d+ at (-?\d+),(-?\d+) piece (-?\d+),(-?\d+)', r.out, re.M)
+    c(m and all(abs(int(a) - int(x)) < 20000 and abs(int(b) - int(z)) < 20000 for a, b, x, z in m),
+      'the scrub patch at the camera grid point (not moved by the BLKX)', str(m[:2]))
+
+
+
+@sequence
+def radar_blip_rules(c):
+    """the radar's blips (0x10003960): units but the player with +0x14 & 0x1400 and none of 0x4816 - destroyed (2 / 4) or
+    powered down (0x10: shut down, resting / held by a node) are not shown - and the things with flags & 0x1400 (the
+    dropships, gunships, spheres, MARO's patrol and hover cars) and none of 0x1e, by side (0x10019040 / 0x10019060).
+    DOSBox MAROSCN1 (direct launch): no red blips in the first 30 s - the resting Falcon Nova / Mad Dog at 480 / 590 m are
+    not shown - and green blips for the moving cars; the port had shown every armed unit and no things"""
+    r = c.run(secs=12, mission='MAROSCN1', mech=None, env={'MW2_RADAR_LOG': '1'})
+    m = [(float(t), int(u), int(b)) for t, u, b in re.findall(r'^RADAR t=([\d.]+) units (\d+) things (\d+)', r.out, re.M)]
+    c(m and all(u == 1 for t, u, b in m), 'units: only the moving hover limo (the resting enemies hidden)', str(m[:3]))
+    c(m and all(b == 6 for t, u, b in m if t < 10), 'things: the six cars (flags 0x400)', str(m[:3]))
+
+
+@sequence
+def bank1_texture_frames(c):
+    """the bank-1 frame groups (0x1002cf10 / 0x1002d060 / 0x1002ce50): BMPJ cels gather in the current group until a BMID,
+    every BMID takes that group - MAROMAP1's run a9fir201..217 serves 0x9b..0x9f (BSEC rates 10..18 ticks) - frame 0
+    first, then a frame every rate ticks, round the group. The port had kept only the first BMID of a run (with the
+    run's LAST cel) and drew 0x9c..0x9f untextured: MARO's FIR1_3 (0x8f9e) a grey card, SMO2_2 (0x8fb6) too; 34 such
+    slots in every mission's map (fires, smoke, flags). DOSBox MAROSCN1: the fire changes shape shot to shot"""
+    r = c.run(secs=3.2, mission='MAROSCN1', mech=None, nostart=True, env={'MW2_ANIM_LOG': '0x9e'})
+    a = [(float(t), int(f), int(n), int(rt)) for t, f, n, rt in re.findall(r'^ANIM t=([\d.]+) slot 0x9e frame (\d+) of (\d+) rate (\d+)', r.out, re.M)]
+    c(a and all(n == 17 and rt == 16 for t, f, n, rt in a), 'slot 0x9e: 17 frames, 16 ticks each', str(a[:2]))
+    c(len(set(f for t, f, n, rt in a)) == 17, 'every frame shown in 3 s (17 x 16 ticks = 1.5 s a round)', str(sorted(set(f for t, f, n, rt in a))))
+    c(a and all(f == int(t * 182 / 16 + 1e-6) % 17 or f == (int(t * 182 / 16) - 1) % 17 for t, f, n, rt in a),
+      'frame = (ticks / 16) mod 17 from the mission start', str(a[:4]))
+
+
+TNJ1_NAVS = {1: (-14863, 46816, 3000), 2: (3436, 65623, 3000), 3: (16733, 46814, 3000), 4: (-688, 21962, 2000)}   # x, z, radius (cm)
+
+
+@sequence
+def autopilot_nav_to_nav_and_voice_queue(c):
+    """user (2026-10-20): "disabling autopilot puts throttle to 0 - stopped ... you want it to hit nav a, then go to b on
+    its own. no stopping" and "I don't hear the autopilot engage / disable until after all of the instructor audio plays".
+    Engine 0x10015c00: on arrival - the selected nav's horizontal distance (+0xc0) under its radius (NAVP +0x10, TNJ1 30 m,
+    no 60 m minimum) - the selector steps to the next nav (0x1001dac0) and the autopilot walks on at the pilot's throttle;
+    only past the last nav is it off with the throttle 0. DOSBox TNJ1: Nav Alpha -> Beta and Gamma -> Delta at 150-165 kph
+    without a stop. The voice: "Autopilot" (65) "engaged" (80) is an ordinary queued message (0x10031870 -> 0x10031150,
+    priority -1: voice 65 has no record in 0x1024e6a8), and mission radio (0x100318c0, priority 0x50) is put ahead of it,
+    also radio queued after the key - DOSBox TNJ1: a during trn1_01S, "Autopilot engaged" after trn1_02S and trn1_03S"""
+    r = c.run(secs=92, keys=[(UP, '0'), (UP + 0.5, 'a')], mission='TNJ1SCN1', dump='/0.1',
+              env={'MW2_SFX_LOG': '1', 'MW2_SFX_SIMCLOCK': '1', 'MW2_RADIO_TRACE': '1', 'MW2_TEST_PASSIVE': '1'})
+    seq, sw = [], []
+    for p, q in zip(r.states, r.states[1:]):
+        if q['nav'] != p['nav'] and q['nav'] >= 0:
+            seq.append(q['nav'])
+            if p['nav'] in TNJ1_NAVS:
+                x, z, rad = TNJ1_NAVS[p['nav']]
+                sw.append((p['nav'], math.hypot(q['x'] - x, q['z'] - z), rad))
+    c(seq[:4] == [1, 2, 3, 4], 'Alpha, Beta, Gamma, Delta in turn', str(seq))
+    t4 = next((s['t'] for s in r.states if s['nav'] == 4), None)
+    run_ = [s for s in r.states if UP + 1 <= s['t'] <= (t4 or 0)]
+    c(run_ and all(s['autopilot'] == 1 and s['throttle'] > 0.9 for s in run_), 'never stops or disengages at Alpha, Beta, Gamma',
+      str(sorted(set((s['autopilot'], round(s['throttle'], 2)) for s in run_))))
+    c(len(sw) >= 3 and all(d < rad + 400 for n, d, rad in sw), 'each nav taken within its own radius (+ one 0.1 s step)',
+      ' '.join('%d:%.0fm' % (n, d / 100) for n, d, rad in sw))
+    v = [(t, i) for t, i in voice_plays(r) if i in (65, 80)]
+    radio = [(float(t), int(n)) for n, t in re.findall(r'radio node (\d+) at (\d+) ms', r.out)]
+    pcm = [float(t) * 1000.0 for t in re.findall(r'SFXLOG (-?[\d.]+) pcm \d+ vol [\d.]+ voice', r.out)]
+    c(v[:2] and [i for t, i in v[:2]] == [65, 80], '"Autopilot" "engaged" said', str(v))
+    if v:
+        t65 = v[0][0]
+        after_key = [t for t, n in radio if UP * 1000 < t < t65]
+        c(after_key, 'radio queued after the key (nav arrivals) ...', str(radio))
+        c(t65 > max(pcm), '... and every radio line queued before the voice plays first', 'voice %.0f, radio starts %s' % (t65, pcm))
+
+
+@sequence
+def autopilot_last_nav_and_visited(c):
+    """engine 0x10015c00: the autopilot goes to the nav in the selector; arriving at the LAST nav (the step wraps to a lower
+    index, 0x10015d4d) turns it off silently with the throttle 0 and nothing selected - DOSBox TNJ1 n x 4 (Nav Delta), 0, a:
+    AUTOPILOT and the nav gone on arrival, 165 -> 0 kph. The step to the next nav does not skip visited ones (only the first
+    pick, with nothing selected, steps past flag 0x20): with Beta already visited, Alpha -> Beta. All visited: the
+    autopilot engages (HUD "AUTOPILOT") but has no nav - no steering, the throttle kept; a leg turn disengages it and the
+    throttle stays (0x1001a4dc: only +0xbc cleared; DOSBox TNJ1 Left: 163-165 kph after)"""
+    r = c.run(secs=30, keys=[(UP, 'n'), (UP + 0.3, 'n'), (UP + 0.6, 'n'), (UP + 0.9, 'n'), (UP + 1.2, '0'), (UP + 1.5, 'a')],
+              mission='TNJ1SCN1', dump='/0.1')
+    on = [s for s in r.states if s['autopilot'] == 1]
+    c(on and all(s['nav'] == 4 for s in on), 'straight to the selected Nav Delta', str(sorted(set(s['nav'] for s in on))))
+    off = next((s for s in r.states if s['t'] > UP + 2 and s['autopilot'] == 0), None)
+    c(off is not None and off['nav'] == -1 and off['throttle'] == 0, 'off at Delta, throttle 0, nothing selected', str(off and (off['nav'], off['throttle'])))
+    if off:
+        x, z, rad = TNJ1_NAVS[4]
+        c(math.hypot(off['x'] - x, off['z'] - z) < rad + 400, 'within Delta\'s 20 m', '%.0f m' % (math.hypot(off['x'] - x, off['z'] - z) / 100))
+        c(r.at(off['t'] + 4)['kmh'] < 1, 'stopped')
+    c(r.msg_time('Autopilot disengaged') is None, 'silently')
+    r = c.run('_visited', secs=30, keys=[(UP, '0'), (UP + 0.5, 'a')], mission='TNJ1SCN1', dump='/0.1', env={'MW2_TEST_NAVSEEN': '2'})
+    seq = [q['nav'] for p, q in zip(r.states, r.states[1:]) if q['nav'] != p['nav']]
+    c(seq[:2] == [1, 2], 'Alpha, then the visited Beta (not skipped to Gamma)', str(seq))
+    r = c.run('_allseen', secs=UP + 7, keys=[(UP, '0'), (UP + 0.5, 'a')], hold=[(UP + 4, UP + 4.3, 'left')], mission='TNJ1SCN1',
+              dump='/0.1', env={'MW2_TEST_NAVSEEN': '1,2,3,4', 'MW2_START': '655,31181', 'MW2_START_HEADING': -40})   # open ground on the way to Alpha (not the compound)
+    a, b = r.at(UP + 1), r.at(UP + 3.9)
+    c(a['autopilot'] == 1 and b['autopilot'] == 1 and b['nav'] == -1, 'engaged with no nav', '%d %d nav %d' % (a['autopilot'], b['autopilot'], b['nav']))
+    c(abs(a['heading'] - b['heading']) < 0.5 and b['throttle'] > 0.9, 'no steering, throttle kept', '%.1f -> %.1f thr %.2f' % (a['heading'], b['heading'], b['throttle']))
+    e = r.at(UP + 6)
+    c(e['autopilot'] == 0 and e['throttle'] > 0.9 and e['kmh'] > 80, 'a turn disengages it; the throttle stays', 'ap %d thr %.2f kmh %.0f' % (e['autopilot'], e['throttle'], e['kmh']))
+
+
+@sequence
+def system_keys_text_input(c):
+    """port (macOS keys, 2026-10-20 report): SDL text input is off in the simulation (on macOS it sent z + arrows into the
+    press-and-hold accent picker); the system's shortcuts (Mission Control's Ctrl+arrows) are switched off while the
+    mission is played in front and back on in the MAIN MENU, while paused and at exit; system_shortcuts=allow keeps them
+    (the switch is macOS only, the state is logged on every system)"""
+    keys = [(10, 'esc'), (11, 'esc'), (12, 'alt+p'), (13.5, 'p')]
+    r = c.run(secs=15, keys=keys, hold=[(UP - 1, UP, 'z'), (UP - 0.5, UP, 'left')])   # (the offscreen window has the focus)
+    c(re.search(r'^TEXTINPUT active=0$', r.out, re.M) is not None, 'text input off once the window is up', '')
+    sk = re.findall(r'^SYSKEYS now=(-?\d+) (on|off) text=(\d)', r.out, re.M)
+    c([s for _, s, _ in sk] == ['off', 'on', 'off', 'on', 'off', 'on'], 'shortcuts off playing, on in the MAIN MENU, off, on paused, off, on at exit', str(sk))
+    c(len(sk) == 6 and 0 < int(sk[2][0]) - int(sk[1][0]) <= 100 and 0 < int(sk[4][0]) - int(sk[3][0]) <= 100,
+      'back off on the first frame after the MAIN MENU / pause (the simulation stood still there)', str(sk))
+    c(all(t == '0' for _, _, t in sk), 'text input still off at every switch (z / arrows held)', str(sk))
+    cfg = os.path.join(OUT, c.name + '_allow.cfg')
+    with open(cfg, 'w') as f:
+        f.write('renderer=enhanced\ntextures=original\nsystem_shortcuts=allow\n')
+    r2 = c.run('_allow', secs=11, env={'MW2_CONFIG': cfg})
+    c(not re.search(r'^SYSKEYS', r2.out, re.M), 'system_shortcuts=allow: never switched off', '')
+
+
+
+
+@sequence
+def target_nearest_enemy_no_cycle(c):
+    """e (TARGET_NEAREST_ENEMY, 0x1001db60 / DOS 0x2acf0) does not cycle: every press walks the 0x40008 ring one round
+    from the first entry (0x1001cca0 with step 0) and takes the nearest alliance-1 unit within 1750 m - armed or not.
+    User report 2026-10-20 (Wolf mission 2 "Flame Tongue", ORANSCN1: the two trainees - "unarmed" to the user, but
+    ORANENS1 gives them ktf00std / frm00std; they flee - and the Trainer Maddog run at Nav Alpha). DOSBox ORANSCN1 (autopilot to Nav Alpha, stop, e t t t t e e x 3, 1 s apart): e Trainer Maddog, t
+    Kitfox, Firemoth, Maddog, Kitfox, e Maddog, Maddog, Firemoth; t Nova, Maddog 354m, Kitfox 384m, Firemoth 307m, e
+    Firemoth 319m / 343m / 368m; t Nova 1.54k, Maddog 378m, Kitfox 445m, Firemoth 523m, e Maddog 420m / 435m - e the
+    nearest each time, the unarmed trainees included; t cycles all four"""
+    seq = ('e t t t t e e ' * 3).split()
+    keys = [(10, 'a'), (11, '0'), (40, '1')] + [(43 + i, k) for i, k in enumerate(seq)]
+    r = c.run(secs=43 + len(seq) + 0.5, mission='ORANSCN1', keys=keys, dump='/0.1')
+    s0 = r.at(42)
+    w = [int(x) for x in str(s0['uwpn']).split(';')]
+    c(w[0] > 0 and w[1] > 0 and w[2] > 0, 'ORANENS1: the trainees carry their standard loadouts (ktf00std, frm00std) - they flee, not unarmed', str(w))
+    es, ts = [], set()
+    for i, k in enumerate(seq):
+        st = r.at(43 + i + 0.2)
+        if k == 't':
+            ts.add(st['tgt'])
+            continue
+        rg = [float(x) for x in str(st['erng']).split(';')]
+        cand = [(d, q) for q, d in enumerate(rg) if d >= 0]
+        es.append((st['tgt'], min(cand)[1] if cand else -1, ['%.0f' % d for d in rg[:3]]))
+    c(es and all(t == n for t, n, _ in es), 'every e takes the nearest enemy (no cycling)', str(es))
+    c({0, 1, 2} <= ts, 't cycles the trainer and both unarmed trainees', str(sorted(ts)))
+    # near the Training Firemoth's start (76989, 1767): it wakes and is the nearest - e takes the unarmed trainee
+    r = c.run('_fm', secs=16, mission='ORANSCN1', keys=[(12 + 0.5 * i, 'e') for i in range(6)], dump='/0.1',
+              env={'MW2_START': '74000,-2000'})
+    got = [(r.at(12.2 + 0.5 * i)['tgt'], r.at(12.2 + 0.5 * i)['erng']) for i in range(6)]
+    near = []
+    for t, e in got:
+        rg = [float(x) for x in str(e).split(';')]
+        cand = [(d, q) for q, d in enumerate(rg) if d >= 0]
+        near.append(min(cand)[1] if cand else -1)
+    c([g[0] for g in got] == near and 2 in near, 'e from beside the Firemoth: the unarmed trainee, as the nearest', str([(g[0], n) for g, n in zip(got, near)]))
 
 def main():
     global GLVIEW, VERBOSE

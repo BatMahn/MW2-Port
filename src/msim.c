@@ -3706,10 +3706,30 @@ static int cobj_seg(const msim *s, const cobj_t *c, const float box[6], const fl
     }
 }
 
+/* The DOS probe's broad phase (MW2.EXE 0x1c3f0 -> 0x3a745, integer cm): an entry whose bounding sphere holds the start
+ * is a candidate (entry 10); otherwise the dot product of (centre - start) with the segment is summed as 64-bit products
+ * dx*sx + dy*sy, then + dz*sz with add / adc, and a carry out of that last add (jae 0x3a7de) rejects the entry as an
+ * "overflow". The products are signed, so the carry is set whenever the two partial sums differ in sign and the total is
+ * >= 0, or both are negative: a thing ahead is seen only when its centre lies ahead in x AND in z of the probe's own
+ * direction (or a component is 0) - the rest only once the start is inside their sphere, i.e. at contact. DOSBox TNJ4
+ * (the 100 m step-0 probe called from the kph readout): 0 all the way to S_1BQDAS, 1 only at contact; with the jae
+ * patched to jmp the probe sees things from range everywhere (and the autopilot wanders off course). Returns 1 when the
+ * DOS code rejects the entry */
+static int dos_broad_reject(const float sph[4], const float p0[3], const float p1[3])
+{
+    double dx = (double)sph[0] - p0[0], dy = (double)sph[1] - p0[1], dz = (double)sph[2] - p0[2], r = sph[3];
+    double a, b;
+    if (dx * dx + dy * dy + dz * dz < r * r) return 0;   /* inside: 10 */
+    a = dx * ((double)p1[0] - p0[0]) + dy * ((double)p1[1] - p0[1]);
+    b = dz * ((double)p1[2] - p0[2]);
+    return (a < 0 && b < 0) || ((a < 0) != (b < 0) && a + b >= 0);
+}
+
 /* the list against a segment. walk = 1: a unit's move (0x10010530) - type 6 left out (0x1000be60 takes those), every
  * entry whose sphere is entered before the hit found so far is tested with the whole segment and its hit replaces the
- * one found so far even when farther; walk = 0: a probe (0x100103e0) - the nearest hit. *t: the hit's length along the
- * segment, *ci: the entry */
+ * one found so far even when farther; walk = 0: a probe (0x100103e0) - the nearest hit; walk = 2: the same probe with the
+ * DOS broad phase (dos_broad_reject: the player's autopilot avoidance). *t: the hit's length along the segment, *ci: the
+ * entry */
 static int clist_seg(const msim *s, const float p0[3], const float p1[3], int walk, float *t, float n[3], int *ci)
 {
     const terrain_t *tt = (const terrain_t *)s->terrain;
@@ -3727,11 +3747,12 @@ static int clist_seg(const msim *s, const float p0[3], const float p1[3], int wa
         if (walk && c->type == 6) continue;
         if (!cobj_now(s, c, box, sph)) continue;
         if (tt->thing_of && c->part < tt->nparts && tt->thing_of[c->part] >= 0 && s->bld[tt->thing_of[c->part]].hp <= 0) continue;
+        if (walk == 2 && dos_broad_reject(sph, p0, p1)) continue;
         e = eseg_sphere(sph, &g0);
         if (!(e < best)) continue;
         g = g0;
         if (!cobj_seg(s, c, box, sph, e, &g, nn)) continue;
-        if (!walk && !(g.len < best)) continue;
+        if (walk != 1 && !(g.len < best)) continue;
         best = g.len; hit = cand[k];
         n[0] = nn[0]; n[1] = nn[1]; n[2] = nn[2];
     }
@@ -4472,13 +4493,20 @@ static int piece_sphere(const mech3d_part *p, float sph[4])
     return 1;
 }
 
+static int probe_engine_ex(const msim *s, int self, const float p0[3], const float p1[3], int dos, int *climb, float *ox, float *oz);
 static int probe_engine(const msim *s, int self, const float p0[3], const float p1[3], int *climb, float *ox, float *oz)
+{
+    return probe_engine_ex(s, self, p0, p1, 0, climb, ox, oz);
+}
+
+/* dos: the DOS broad phase (dos_broad_reject) for the world entries and the units' pieces */
+static int probe_engine_ex(const msim *s, int self, const float p0[3], const float p1[3], int dos, int *climb, float *ox, float *oz)
 {
     const terrain_t *t = (const terrain_t *)s->terrain;
     float tt = 3.4e38f, n[3] = {0, 1, 0}, dx = p1[0] - p0[0], dz = p1[2] - p0[2], l2 = dx * dx + dz * dz, len = sqrtf(l2);
     int ci, hit = 0, k;
     *climb = 0;
-    if (t && clist_seg(s, p0, p1, 0, &tt, n, &ci)) {
+    if (t && clist_seg(s, p0, p1, dos ? 2 : 0, &tt, n, &ci)) {
         const cobj_t *c = &t->co[ci];
         float box[6], sph[4];
         hit = 1;
@@ -4502,6 +4530,7 @@ static int probe_engine(const msim *s, int self, const float p0[3], const float 
                 const mech3d_part *pp = &mq->parts[q];
                 float sph[4], e, hl;
                 if (pp->hidden || !piece_sphere(pp, sph)) continue;
+                if (dos && dos_broad_reject(sph, p0, p1)) continue;
                 e = eseg_sphere(sph, &g0);
                 hl = e > 0.0f ? e : g0.len;   /* 0x100107b0: the end stays when the entry is 0 */
                 if (!(e < tt) || !(hl < tt)) continue;
@@ -4579,6 +4608,83 @@ static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, floa
         s->avoid_turn[i] = 0;
     }
     s->avoid_next[i] = side == 0 ? 181.0f : 90.0f;
+}
+
+/* The player's autopilot obstacle avoidance: DOS 0x2db80 (from the autopilot 0x24ca0), the same scan as the AI's
+ * (avoid_obstacles, 3Dfx 0x100201c0) with the player's differences - and the DOS probe's broad phase (dos_broad_reject):
+ *  - checked every 10 ticks (DAT_0009581c + 10; AI 0x5b / 0xb6); between checks it returns "+0x182 != 0": the inputs it
+ *    (or the nav steering) wrote last are held;
+ *  - exits at once (0) when the unit cannot move (physics +0x88 == 0), or the throttle input is 0 with no side set, or the
+ *    reverse input +0x2f is set;
+ *  - the probe length factor +0x18c (recomputed only while no side is set): the velocity's size as the engine's
+ *    (4 max + mid + min) / 4 of |+0xf4|, 0, |+0xfc| (16.16 cm/tick), << 16 / 500000 (0x7a120), a mech (class 1) not
+ *    halved, at least 0x4ccc (0.3, the compare against 19660.8 at 0x90af4); the probe x 5000 cm (0x13880000);
+ *  - probes 0 / 26.6 / 45 / 63.4 degrees toward the side (table 0x96374: local (x, z) = len / (0,1), (2,1), (1,1),
+ *    (1,2) through the unit object's world matrix - DOSBox: the matrix is the player's own pose, translation = +0x50 /
+ *    +0x58); a probe hit that is not climbable (0x1c2e0: a ground-type entry hit on a face with normal y >= 0xc41b, or
+ *    class 0x50) sets the side away from the thing hit (0x2e060) and adds side x 204.8 (0x90afc x 0.25); a free step-0
+ *    probe with the bearing error to the nav within 1 degree (0x230d0 < 0x10001) clears the side; with a side set and
+ *    step 0 free, the wall follow: a probe 26.6 degrees back toward the goal from the unit's side R - 1 cm out
+ *    (0x2df30 param 6) that hits something not climbable adds side x 409.6 (0x90b0c);
+ *  - turn clamped to +-819.2 (0x3333333), throttle input 0x100 (a quarter of full) when a probe was blocked, else the
+ *    saved +0x17a (the pilot's throttle) for the wall follow; input +0xc = turn.
+ * Because of the DOS broad phase the probes see an object only at contact (its sphere holding the probe's start) unless
+ * its centre lies ahead in both x and z: DOSBox TNJ4 the autopilot walks straight into S_1BQDAS, is pinned ~1-2 s, turns
+ * away, follows the face and resumes toward the nav */
+int msim_player_avoid(msim *s, float heading, float along, float across, float throttle, int reverse, int immobile,
+                      float goal_err, float saved_thr, int *wrote, float *turn, float *thr)
+{
+    static const float ANG[4] = {0.0f, 26.565f, 45.0f, 63.435f}, LEN[4] = {1.0f, 1.118f, 1.414f, 1.118f};
+    float now = (float)s->now * 0.182f, x = s->player[0], z = s->player[2], accum = 0, len;
+    float yc = s->player_unit.y + s->player_centre_h, R = s->player_radius;
+    int step, side = s->pav_side;
+    *wrote = 0;
+    if (!s->terrain || immobile || (side == 0 && throttle == 0) || reverse) return 0;
+    if (now < s->pav_next) return s->pav_hit != 0;
+    if (side == 0) {   /* 0x2dbea-0x2dc5e */
+        float hr = heading * 3.14159265f / 180.0f;
+        float vx = fabsf((along * sinf(hr) + across * cosf(hr)) / 182.0f), vz = fabsf((along * cosf(hr) - across * sinf(hr)) / 182.0f);
+        float mx = vx > vz ? vx : vz, mn = vx > vz ? vz : vx;
+        s->pav_len = (4.0f * mx + mn) / 4.0f * 65536.0f / 500000.0f;
+        if (s->pav_len < 0.3f) s->pav_len = 0.3f;
+    }
+    len = s->pav_len * 5000.0f;
+    for (step = 0; step < 4; step++) {
+        float a = (heading + (float)side * ANG[step]) * 3.14159265f / 180.0f, L = len * LEN[step];
+        float p0[3] = {x, yc, z}, p1[3] = {x + sinf(a) * L, yc, z + cosf(a) * L}, ox = 0, oz = 0;
+        int climb, hit = probe_engine_ex(s, -1, p0, p1, 1, &climb, &ox, &oz);
+        if (!hit) {
+            if (step == 0) {
+                if (fabsf(goal_err) <= 1.0f) { s->pav_hit = 0; side = 0; }   /* on course: the side cleared */
+                if (side != 0) {   /* the wall follow: 26.6 degrees back toward the goal from the side R - 1 cm out */
+                    float bh = (heading - (float)side * ANG[1]) * 3.14159265f / 180.0f, Lb = len * LEN[1];
+                    float hr = heading * 3.14159265f / 180.0f, off = (float)(-side) * (R - 1.0f);
+                    float q0[3] = {x + cosf(hr) * off, yc, z - sinf(hr) * off}, q1[3];
+                    int bclimb;
+                    q1[0] = q0[0] + sinf(bh) * Lb; q1[1] = yc; q1[2] = q0[2] + cosf(bh) * Lb;
+                    if (probe_engine_ex(s, -1, q0, q1, 1, &bclimb, &ox, &oz) && !bclimb) accum += (float)side * 409.6f;
+                }
+            }
+            break;
+        }
+        if (climb) break;   /* 0x2dce5 */
+        if (side == 0) {   /* 0x2e060: away from the thing hit; +0x182 = it */
+            float ob = atan2f(ox - x, oz - z) * 180.0f / 3.14159265f;
+            side = wrap180(ob - heading) < 0 ? 1 : -1;
+            s->pav_hit = 1;
+        }
+        accum += (float)side * 204.8f;
+    }
+    s->pav_side = side;
+    if (accum != 0) {
+        if (accum > 819.2f) accum = 819.2f;
+        if (accum < -819.2f) accum = -819.2f;
+        *wrote = 1; *turn = accum;
+        *thr = step != 0 ? 0.25f : saved_thr;   /* 0x100 of the 0x400 full scale */
+    }
+    s->pav_next = now + 10.0f;
+    if (getenv("MW2_PAV_TRACE")) fprintf(stderr, "pav %.2fs side %d hit %d steps %d turn %.1f len %.0f\n", s->now / 1000.0, side, s->pav_hit, step, (double)accum, (double)len);   /* TEST ONLY */
+    return accum != 0;
 }
 
 /* engine 0x10015090 (AI pilots below level 5): no fire when the line to the target hits the world */

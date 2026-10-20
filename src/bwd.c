@@ -175,9 +175,9 @@ int bwd_gps_decode(const bwd_chunk *c, bwd_gps *out)
 int bwd_texmap_decode(const uint8_t *rec, size_t len, bwd_texmap *out)
 {
     bwd_chunk *c;
-    int n = bwd_chunks(rec, len, NULL, 0), k, have = 0;
+    int n = bwd_chunks(rec, len, NULL, 0), k, have = 0, gn = 0, newg = 0, q;
     uint16_t id = 0;
-    char name[13] = "";
+    char name[13] = "", grp[BWD_TEXMAP_FRAMES][13];
 
     memset(out, 0, sizeof *out);
     if (n < 0 || !(c = calloc((size_t)(n ? n : 1), sizeof *c))) return -1;
@@ -187,10 +187,14 @@ int bwd_texmap_decode(const uint8_t *rec, size_t len, bwd_texmap *out)
             id = rd16(c[k].data);
             copy_str(name, sizeof name, c[k].data + 2, c[k].size - 2);
             have = 1;
-        } else if (strcmp(c[k].tag, "BMID") == 0 && c[k].size >= 2 && have) {
-            int slot = c[k].data[0];
+            if (newg) { gn = 0; newg = 0; }   /* 0x1002cf10: the first BMPJ after a BMID starts a group */
+            if (gn < BWD_TEXMAP_FRAMES) memcpy(grp[gn++], name, sizeof name);
+        } else if (strcmp(c[k].tag, "BMID") == 0 && c[k].size >= 2 && gn > 0) {
+            int slot = c[k].data[0], first = have;
             have = 0;
+            newg = 1;
             if (c[k].data[1] == 0) {   /* bank 0: effect animation frames (BSEC/BMEN) and scrub bitmaps, not surfaces */
+                if (!first) continue;   /* (bank 0 as before: the frame named last, right before the BMID) */
                 out->b0_present[slot] = 1;
                 memcpy(out->b0_name[slot], name, sizeof name);
                 continue;
@@ -198,8 +202,18 @@ int bwd_texmap_decode(const uint8_t *rec, size_t len, bwd_texmap *out)
             if (c[k].data[1] != 1) continue;
             if (!out->present[slot]) out->count++;
             out->present[slot] = 1;
-            out->cel_id[slot] = id;
-            memcpy(out->name[slot], name, sizeof name);
+            out->cel_id[slot] = id;   /* (the last cel's id; unused) */
+            for (q = 0; q < gn; q++) memcpy(out->frame[slot][q], grp[q], sizeof grp[q]);
+            out->frames[slot] = gn;
+            memcpy(out->name[slot], grp[0], sizeof name);   /* frame 0 (0x1002d060: +2 = 0) */
+            out->rate[slot] = gn > 1 ? 0x2d : 0;   /* 0x1002d060: DAT_1024e490 (the group had a frame before its last) */
+            out->mode[slot] = 1;
+        } else if (strcmp(c[k].tag, "BSEC") == 0 && c[k].size >= 4 && c[k].data[1] == 1) {   /* 0x1002d1e0 + 0x1002d150(1) */
+            out->rate[c[k].data[0]] = rd16(c[k].data + 2);
+            out->mode[c[k].data[0]] = 1;
+        } else if (strcmp(c[k].tag, "BMEN") == 0 && c[k].size >= 4 && c[k].data[1] == 1) {   /* 0x1002d150 */
+            out->mode[c[k].data[0]] = (int16_t)rd16(c[k].data + 2);
+            if (out->rate[c[k].data[0]] == 0) out->rate[c[k].data[0]] = 0x2d;
         }
     }
     free(c);

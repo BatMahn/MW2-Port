@@ -22,7 +22,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 183 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 192 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build
@@ -265,3 +265,12 @@ Then open it normally. A copy you built yourself is not flagged and opens direct
 the game in `~/MW2-game`; to use another folder, run it once from Terminal with the folder and it is remembered:
 
     "MechWarrior 2.app/Contents/MacOS/mw2" /path/to/MW2-game
+
+### macOS: keyboard shortcuts
+
+During a mission the game turns off the system's keyboard shortcuts (Mission Control's Ctrl+Left/Right, Cmd+Tab,
+Spotlight) while its window is in front. They come back in the MAIN MENU (Esc), while paused and when the game ends. Add
+`system_shortcuts=allow` to `~/Library/Application Support/mw2port/mw2port.cfg` to keep them. If Ctrl+Left/Right still
+switches desktops, go to System Settings > Keyboard > Keyboard Shortcuts... > Mission Control and untick "Move left a
+space" / "Move right a space". If F1-F12 change brightness or volume instead of reaching the game, hold Fn, or turn on
+"Use F1, F2, etc. keys as standard function keys" under Keyboard Shortcuts... > Function Keys.
