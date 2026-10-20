@@ -1212,6 +1212,7 @@ static void wrecks(msim *s, int32_t dt_ms)
         else { x = s->player[0]; z = s->player[2]; y = u->y + 500.0f; }
         if (s->wreck_until[i] == 0) {
             float p[3] = {x, y, z};
+            if (i == s->actor_count && s->on_player_down) s->on_player_down(s->shot_user);
             effect(s, 0x0d, p, 0);   /* 0x1001be40 (+0x8c == 0): a damaging type - area damage round the wreck (0x10046490) */
             s->wreck_until[i] = now + 0x712;
             continue;
@@ -1442,12 +1443,12 @@ void msim_step(msim *s, int32_t dt_ms)
             /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 on the ground
              * (object +0x78) - it stops dead; killed in the air it flies on at its velocity (no drive, LAB_1001aae9), falls
              * and freezes on touching down (0x1000c4d0 sets +0x78) */
-            float h = (ac->mech.heading + (m->jet_side ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f, v = s->air_speed ? s->air_speed[i] : m->speed;
-            ac->mech.origin[0] = (int32_t)lrintf((float)ac->mech.origin[0] + sinf(h) * v * dt);
-            ac->mech.origin[2] = (int32_t)lrintf((float)ac->mech.origin[2] + cosf(h) * v * dt);
+            float h = ac->mech.heading * 3.14159265f / 180.0f, v = m->speed, a = s->across ? s->across[i] : 0.0f;   /* the one velocity */
+            ac->mech.origin[0] = (int32_t)lrintf((float)ac->mech.origin[0] + (sinf(h) * v + cosf(h) * a) * dt);
+            ac->mech.origin[2] = (int32_t)lrintf((float)ac->mech.origin[2] + (cosf(h) * v - sinf(h) * a) * dt);
             s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y);
             combat_jets(&s->units[i], 0, dt, &s->rng);
-            if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; }
+            if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0; }
             ac->mech.origin[1] = (int32_t)s->units[i].y;
         }
         if (!s->armed[i] || s->units[i].destroyed) continue;
@@ -1555,6 +1556,7 @@ void msim_step(msim *s, int32_t dt_ms)
             v.moving = ac->speed > 0 && !fixed_unit(ac);   /* controller +0x88: the top speed (0x10041410; 0 for turrets, 0x100219c9) */
         }
         v.can_jump = s->units[i].jets > 0 && !s->units[i].no_jump && s->units[i].jet_fuel > 5.0f;
+        v.jet_fuel = s->units[i].jet_fuel;
         v.height = s->units[i].y - s->units[i].ground;   /* above the terrain (ai.h): y is absolute - on raised ground the
                                                           * jump manoeuvres never saw a landing */
         v.pilot_level = ac->ai_level >= 1 && ac->ai_level <= 4 ? ac->ai_level : 1;   /* 0x1001ee30: outside 1-4 -> 1 */
@@ -1701,7 +1703,7 @@ void msim_step(msim *s, int32_t dt_ms)
         }
         if (getenv("MW2_TEST_HOLD_ACTOR") && atoi(getenv("MW2_TEST_HOLD_ACTOR")) == i) {   /* TEST hook: this unit stands still
                                                                                                * (no walking, turning, jets, dodges or fire) */
-            m->throttle = 0; m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_side = 0; m->wants_fire = 0; m->reverse = 0;
+            m->throttle = 0; m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_back = 0; m->jet_side = 0; m->wants_fire = 0; m->reverse = 0;
         }
         if (s->sd_at && m->self_destruct) {
             /* input +0x43 (manoeuvre 6's charge ended within 20 m, 0x1001fb90). 3D editions (0x1001a180): taken only with
@@ -1737,8 +1739,8 @@ void msim_step(msim *s, int32_t dt_ms)
          * their MEK speed (they have no walk animation; the old !have_anim test kept every tank, hovercraft and gunship
          * at its spawn point) */
         if (s->units[i].shutdown || s->units[i].immobile || fixed_unit(ac)) m->throttle = 0;
-        if (fixed_unit(ac)) { m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_side = 0; }
-        if (s->online_at && s->now < s->online_at[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; m->jet = 0; m->jet_forward = 0; }   /* still starting up: no jets either (0x1001a180) */
+        if (fixed_unit(ac)) { m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_back = 0; m->jet_side = 0; }
+        if (s->online_at && s->now < s->online_at[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; m->jet = 0; m->jet_forward = 0; m->jet_back = 0; }   /* still starting up: no jets either (0x1001a180) */
         if (s->avoid_turn && m->state != AI_ATTACK) {   /* 0x100201c0 runs in states 2, 4-8, not 3 */
             float gb = m->state == AI_ATTACK || m->state == AI_TARGET ? v.enemy_bearing : (v.has_goal ? v.goal_bearing : ac->mech.heading);
             avoid_obstacles(s, i, m, gb, dt);
@@ -1755,7 +1757,11 @@ void msim_step(msim *s, int32_t dt_ms)
         {
             float kmh, rate, h, spd, top = ac->speed * s->units[i].speed_gain;
             /* the throttle -> speed chain (msim_drive_step: servos +0x44 / +0x24 and the velocity approach, 0x1001a180 /
-             * 0x100190d0), the player's rule; reverse (input +0x2f, manoeuvres 8 / 10): the drive x -0.5 at once, the
+             * 0x100190d0), the player's rule; reverse (input +0x2f, manoeuvres 8 / 10) only asks the gait code for the
+             * reverse sequence (+0x88 = 2, 0x1000b3a0) and the drive turns x -0.5 once that sequence PLAYS (+0x84 == 2,
+             * 0x1001a90a), as the player's (glview pl_move): from a run the stride goes run -> walk -> reverse first.
+             * Class 4 units take the asked sequence at once (0x1000b3a0: object +0 == 4 -> +0x84 = +0x88); other
+             * units without a walk animation never play one (+0x84 stays -1, 0x1000b5a0) - no reverse drive. The
              * throttle itself stays positive. AI mechs get no 12.5% turning creep (that is for object +0x10 != 2, the
              * player); 0x1001f910's 10% is set by ai.c */
             /* the moves: in contact with a mech or a wall in 1/30 s steps, the remainder carried, until MSIM_CONTACT_HOLD
@@ -1766,6 +1772,15 @@ void msim_step(msim *s, int32_t dt_ms)
             /* the frame's vertical move goes into the move test with the horizontal one (engine 0x10019310 -> 0x1000b5e0:
              * one 3D segment; walking it is 0): combat_jets makes it below unless a move was refused - then the 3D
              * impact's vertical move and reflected vertical velocity stand (dy_done, vy3) */
+            /* the jets firing (input +0x1d, fuel c[0x30] > 0, state 2: 0x10019310): with the legs turning (input +0xc not 0)
+             * or a directional jet held (+0x1e / +0x1f / +0x20 / +0x21) no lift - the vertical acceleration 0 (rising: -g),
+             * 0x100196cc..0x10019711; else lift (combat_jets). The flag is combat_unit.jet_forward (combat_jets_dy /
+             * combat_jets) */
+            int firing = m->jet && s->units[i].jets > 0 && s->units[i].jet_fuel > 0 && !s->units[i].no_jump && !s->units[i].shutdown;
+            int jdir = m->jet_side < 0 ? 1 : m->jet_side > 0 ? 2 : m->jet_forward ? 3 : m->jet_back ? 4 : 0;   /* the first of
+                                                                                   * left, right, forward, back */
+            if (!firing || m->turn != 0.0f) jdir = 0;
+            s->units[i].jet_forward = firing && (m->turn != 0.0f || jdir);
             float dy_frame = fixed_unit(ac) ? 0.0f : combat_jets_dy(&s->units[i], m->jet, dt), dy_done = 0.0f, vy3 = 0.0f;
             int imp3 = 0, land3 = 0;
             int cm = s->contact_acc && s->contact_hold && s->contact_hold[i] > 0;
@@ -1778,40 +1793,64 @@ void msim_step(msim *s, int32_t dt_ms)
                     s->contact_acc[i] -= 1.0f / 30.0f;
                     sdt = 1.0f / 30.0f;
                 } else sdt = rest;
-                msim_drive_step(&m->thr_servo, &m->spd_servo, &m->speed, m->throttle, m->reverse ? -0.5f : 1.0f, top,
+                /* ONE velocity (engine 0x10019310, +0xf4 / +0xfc), kept here as m->speed along the heading and across[i]
+                 * across it (+ right): on the ground with the jets not firing it approaches heading x c[0xb] (m->speed by
+                 * msim_drive_step, across at 1/45 per tick to 0); airborne or with the jets firing it is HELD - the servos
+                 * run, a turn does not swing it - and only the directional jets' thrust and drag act, on all of it (the
+                 * player's rule, glview: "Jet terminal speed", "Airborne velocity held"). The port had restarted every
+                 * grounded frame from the walking speed, so an AI unit's ground thrust never built up */
+                int air = s->units[i].y > s->units[i].ground + 1.0f, freev = air || firing;
+                float v0 = m->speed, a0 = s->across ? s->across[i] : 0.0f, hd0 = ac->mech.heading;
+                int revp = ac->unit_class == 4 ? m->reverse : (s->anim_pl && ac->have_anim && s->anim_pl[i].cur == 2);
+                msim_drive_step(&m->thr_servo, &m->spd_servo, &m->speed, m->throttle, revp ? -0.5f : 1.0f, top,
                                 !(s->units[i].shutdown || s->units[i].immobile), m->drive_slow, sdt * 182.0f);
+                if (freev) m->speed = v0;
                 kmh = fabsf(m->spd_servo) * 0.036f;
                 rate = m->turn / 1024.0f * 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);   /* by c[0xb] x 6.516 (0x1001a180) */
-                if (m->jet && s->units[i].jet_fuel >= 1.0f) rate = m->turn / 1024.0f * 90.0f * 2.0f;   /* jetting: x2 (0x1001a180) */
+                if (m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)
+                    rate = s->units[i].jet_fuel - sdt * 182.0f > 0 ? m->turn / 1024.0f * 90.0f * 2.0f : 0.0f;   /* the jets held (a
+                                   * tank, state 2): x2 (0x102473d4) while fuel is left after the burn, else no turn (0x1001a180) */
                 ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
-                spd = m->speed;
-                s->units[i].throttle_frac = fabsf(m->thr_servo) > 1.0f ? 1.0f : fabsf(m->thr_servo);   /* walking heat: c[0x13] - 1/64 (0x1001aac8) */
-                if (s->units[i].y > s->units[i].ground + 1.0f) spd = s->air_speed ? s->air_speed[i] : spd;     /* airborne (y is absolute: above the ground): keep momentum */
-                {
-                    float hv = spd / 182.0f, hv0 = hv;                                /* cm/tick */
-                    int thrust = m->jet && (m->jet_forward || m->jet_side);           /* +0x20 forward, +0x1e / +0x1f sideways */
-                    combat_jets_forward(&s->units[i], thrust, sdt, &hv);
-                    if (thrust && s->units[i].jet_fuel > 0) {   /* the drag while thrusting (0x10019310 / DOS 0x26ba2, msim_jet_drag), S
-                                                                 * the DOS (4 max + min) >> 2 of the velocity's x / z at the start of
-                                                                 * the step (v += ticks x (thrust + drag(v)): terminal = L) */
-                        float kq, B, hj = (ac->mech.heading + (m->jet_side && s->units[i].y > s->units[i].ground + 1.0f ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f;
-                        float ax = fabsf(sinf(hj) * hv0), az = fabsf(cosf(hj) * hv0), S = ax > az ? ax + az * 0.25f : az + ax * 0.25f;
-                        msim_jet_drag(s->units[i].jet_ddy, ac->speed, &kq, &B);
-                        if (S > 1e-7f && (kq != 0 || B != 0)) hv -= hv0 * (kq * S + B) * sdt * 182.0f;
-                    }
-                    if (thrust) spd = hv * 182.0f;
-                    if (s->air_speed) s->air_speed[i] = spd;
+                if (freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
+                    float d = (ac->mech.heading - hd0) * 3.14159265f / 180.0f, cd = cosf(d), sd = sinf(d);
+                    m->speed = v0 * cd + a0 * sd; s->across[i] = a0 * cd - v0 * sd;
                 }
-                h = (ac->mech.heading + (m->jet_side && s->units[i].y > s->units[i].ground + 1.0f ? 90.0f * (float)m->jet_side : 0.0f)) * 3.14159265f / 180.0f;
+                s->units[i].throttle_frac = fabsf(m->thr_servo) > 1.0f ? 1.0f : fabsf(m->thr_servo);   /* walking heat: c[0x13] - 1/64 (0x1001aac8) */
+                {   /* the directional jets (0x10019310 / DOS 0x26ba2): v += ticks x (T dir + drag(v)), the drag f = k S + B of
+                     * the whole velocity at the start of the step (msim_jet_drag, S the DOS (4 max + min) >> 2 of its x / z):
+                     * terminal L = 2.5 x the top speed; world components under 0.0625 cm/tick snap to 0 */
+                    float dv = 0;
+                    combat_jets_forward(&s->units[i], jdir != 0, sdt, &dv);
+                    s->units[i].jet_forward = firing && (m->turn != 0.0f || jdir);   /* the no-lift flag (above) */
+                    if (dv > 0) {
+                        float hh = ac->mech.heading * 3.14159265f / 180.0f, sh = sinf(hh), ch = cosf(hh), ticks = sdt * 182.0f;
+                        float ac0 = s->across ? s->across[i] : 0.0f;
+                        float vx = (sh * m->speed + ch * ac0) / 182.0f, vz = (ch * m->speed - sh * ac0) / 182.0f;   /* cm/tick */
+                        float dx = jdir == 3 ? sh : jdir == 4 ? -sh : jdir == 2 ? ch : -ch;
+                        float dz = jdir == 3 ? ch : jdir == 4 ? -ch : jdir == 2 ? -sh : sh;
+                        float ax = fabsf(vx), az = fabsf(vz), S = ax > az ? ax + az * 0.25f : az + ax * 0.25f, kq, B, nvx, nvz;
+                        msim_jet_drag(s->units[i].jet_ddy, ac->speed, &kq, &B);
+                        nvx = vx + dx * dv; nvz = vz + dz * dv;
+                        if (S > 1e-7f && (kq != 0 || B != 0)) { float f = kq * S + B; nvx -= vx * f * ticks; nvz -= vz * f * ticks; }
+                        if (fabsf(nvx) < 0.0625f) nvx = 0;
+                        if (fabsf(nvz) < 0.0625f) nvz = 0;
+                        m->speed = (sh * nvx + ch * nvz) * 182.0f;
+                        if (s->across) s->across[i] = (ch * nvx - sh * nvz) * 182.0f;
+                    }
+                }
+                spd = m->speed;
+                if (s->air_speed) s->air_speed[i] = spd;
+                h = ac->mech.heading * 3.14159265f / 180.0f;
                 {
                     float acr = 0.0f, nx, nz;
-                    if (s->across && s->across[i] != 0.0f) {   /* the velocity across the heading a contact / impact left: x (1 -
-                                                                 * ticks / 45) on the ground, zero under 0.0625 cm/tick or airborne
-                                                                 * (0x10019310, 0x102473b4 / 0x102473d0), the move by the mean */
-                        float kq = sdt * 182.0f / 45.0f, a0 = s->across[i];
-                        s->across[i] *= kq < 1.0f ? 1.0f - kq : 0.0f;
-                        acr = 0.5f * (a0 + s->across[i]);
-                        if (fabsf(s->across[i]) < 0.0625f * 182.0f || s->units[i].y > s->units[i].ground + 1.0f) s->across[i] = 0;
+                    if (s->across && s->across[i] != 0.0f) {   /* the velocity across the heading (a contact / impact, the side
+                                                                 * jets): x (1 - ticks / 45) on the ground with the jets not
+                                                                 * firing, held otherwise; zero under 0.0625 cm/tick (0x10019310,
+                                                                 * 0x102473b4 / 0x102473d0), the move by the mean */
+                        float kq = sdt * 182.0f / 45.0f, a1 = s->across[i];
+                        if (!freev) s->across[i] *= kq < 1.0f ? 1.0f - kq : 0.0f;
+                        acr = 0.5f * (a1 + s->across[i]);
+                        if (fabsf(s->across[i]) < 0.0625f * 182.0f) s->across[i] = 0;
                     }
                     nx = (float)ac->mech.origin[0] + (sinf(h) * spd + cosf(h) * acr) * sdt;
                     nz = (float)ac->mech.origin[2] + (cosf(h) * spd - sinf(h) * acr) * sdt;
@@ -1886,7 +1925,8 @@ void msim_step(msim *s, int32_t dt_ms)
                                     spd = (n[0] * sinf(h) + n[2] * cosf(h)) * bs * 182.0f;   /* along the heading */
                                     if (s->air_speed) s->air_speed[i] = spd;
                                     if (s->across) s->across[i] = (n[0] * cosf(h) - n[2] * sinf(h)) * bs * 182.0f;   /* and across it */
-                                    if (s->units[i].y <= s->units[i].ground + 1.0f) { s->units[i].vy = 0; m->speed = spd; }   /* on the ground */
+                                    m->speed = spd;   /* the one velocity (msim_step's drive) */
+                                    if (s->units[i].y <= s->units[i].ground + 1.0f) s->units[i].vy = 0;   /* on the ground */
                                 }
                             }
                             nx = (float)ac->mech.origin[0]; nz = (float)ac->mech.origin[2];
@@ -1908,7 +1948,8 @@ void msim_step(msim *s, int32_t dt_ms)
                                 * (0x10019d84 -> 0x1000c3c0 / 0x1000c1f0) and the object walked into takes its share */
                         float wn[3], bx = nx, bz = nz, sp3 = sqrtf(spd * spd + acr * acr) / 182.0f;
                         float sacr = s->across ? s->across[i] : 0.0f;
-                        float dyi = dy_sub, vyi = dy_sub != 0.0f ? (imp3 ? vy3 : s->units[i].vy) : 0.0f;
+                        /* the attempted velocity is the frame's end one (0x10019310: v + a t before the move) */
+                        float dyi = dy_sub, vyi = dy_sub == 0.0f ? 0.0f : imp3 ? vy3 : dt > 0.0f ? 2.0f * dy_frame / (dt * 182.0f) - s->units[i].vy : s->units[i].vy;
                         int imp = msim_world_impact3(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], &bx, &bz, s->units[i].y + dy_done, &dyi, s->centre_h[i], s->radius[i],
                                                      ac->mech.heading, &m->speed, &sacr, &vyi);
                         if (dy_sub != 0.0f) { imp3 = 1; vy3 = vyi; land3 = imp & 2; }   /* an airborne move: the 3D impact's (walking stays level) */
@@ -2190,8 +2231,8 @@ static float aim_range_step(msim *s, msim_aim *a, int hit, float dist)
 }
 static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
 static int shot_thing(const msim *s, int part);
-/* the aim ray (0x10044950 -> 0x100103e0): 150000 cm from the eye along dir, the nearest thing it enters - a mech's part
- * hulls (the shots' own test, 25 cm samples within the mech's bounding sphere; the shooter's own skipped), a world
+/* the aim ray (0x10044950 -> 0x100103e0): 150000 cm from the eye along dir, the nearest thing it enters - a mech's
+ * pieces (the shots' own test, their type 6 spheres, in 1 m legs within the mech's bounding sphere; the shooter's own skipped), a world
  * object, the ground. Returns 1 with the distance when that is a unit (mechs, or a thing's object: class 0x200), 0 when
  * nothing, the ground or another object is nearer. */
 static int aim_ray(msim *s, int self, const float from[3], const float dir[3], float *dist)
@@ -2221,9 +2262,10 @@ static int aim_ray(msim *s, int self, const float from[3], const float dir[3], f
         if (t <= 0 || px * px + py * py + pz * pz > rr * rr) continue;
         h = sqrtf(rr * rr - (px * px + py * py + pz * pz));
         t0 = t - h > 0 ? t - h : 0; t1 = t + h;
-        for (; t0 < t1 && t0 < best; t0 += 100.0f) {   /* 25 cm samples (mech3d_hull_hit: four a segment) */
+        for (; t0 < t1 && t0 < best; t0 += 100.0f) {   /* 1 m legs (mech3d_hull_hit: the pieces' sphere entries) */
             float o2[3] = {from[0] + dir[0] * t0, from[1] + dir[1] * t0, from[2] + dir[2] * t0}, d2[3] = {dir[0] * 100.0f, dir[1] * 100.0f, dir[2] * 100.0f}, ft;
-            if (mech3d_hull_hit(mq, o2, d2, &ft)) { best = t0 + ft * 100.0f; hit = 1; hitq = q; break; }
+            int lg;
+            if (mech3d_hull_hit(mq, o2, d2, mech3d_fly_mask(q < 0 ? s->player_unit.loc_gone : s->units[q].loc_gone), &ft, &lg)) { best = t0 + ft * 100.0f; hit = 1; hitq = q; break; }
         }
     }
     {   /* world objects nearer: a thing's object (0x200) is a unit struck, anything else stops the ray */
@@ -2535,6 +2577,42 @@ static void missile_warning(msim *s, int t, int lv)
 
 static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
 static int shot_thing(const msim *s, int part);
+/* the units a shot's step o..o+dv enters (0x10044f60 -> 0x100103e0): the player and actors near the segment, the
+ * shooter's own skipped (+0x14). A unit's pieces stay in the collision list when it is destroyed (only blown-off ones
+ * leave, 0x100156f0 -> 0x10015be0): a standing wreck stops shots (no damage). The nearest piece entered nearer than
+ * *tbest (a fraction of dv) sets *tbest, *unit and *group (its location, 0 none) */
+static void shot_units(msim *s, int owner, const float o[3], const float dv[3], float *tbest, int *unit, int *group)
+{
+    int i, g;
+    float t;
+    for (i = -1; i < s->actor_count; i++) {
+        const mech3d *m;
+        float cx, cz, ex, ez, lx, lz, len2, u, px, pz;
+        if (i == owner) continue;
+        if (i == -1) { if (!s->pl_mech_ok || s->player_unit.destroyed) continue; m = player_hull(s); }
+        else { if (!s->armed[i]) continue; m = &s->actors[i].mech; }
+        cx = (float)m->origin[0]; cz = (float)m->origin[2];
+        /* coarse: horizontal distance from the segment to the unit < 20 m */
+        ex = dv[0]; ez = dv[2]; lx = cx - o[0]; lz = cz - o[2];
+        len2 = ex * ex + ez * ez;
+        u = len2 > 0 ? (lx * ex + lz * ez) / len2 : 0;
+        if (u < 0) u = 0;
+        if (u > 1) u = 1;
+        px = o[0] + ex * u - cx; pz = o[2] + ez * u - cz;
+        if (px * px + pz * pz > 2000.0f * 2000.0f) continue;
+        /* engine 0x100103e0: the pieces' spheres (type 6, no test of their own), the nearest entry; the piece's
+         * location (+0x16) takes the damage */
+        if (mech3d_hull_hit((mech3d *)m, o, dv, mech3d_fly_mask(i < 0 ? s->player_unit.loc_gone : s->units[i].loc_gone), &t, &g) && t < *tbest) {
+            *tbest = t; *unit = i; *group = g;
+        }
+    }
+}
+int msim_test_shot(msim *s, const float o[3], const float dv[3], int *unit, int *group, float *t)   /* TEST ONLY */
+{
+    *t = 2.0f; *unit = -2; *group = 0;
+    shot_units(s, -2, o, dv, t, unit, group);
+    return *unit != -2;
+}
 static void combat_step(msim *s, float dt)
 {
     int i, k, w;
@@ -2816,12 +2894,11 @@ static void combat_step(msim *s, float dt)
     for (k = 0; k < s->shot_count; k++) {
         msim_shot *sh = &s->shots[k];
         float total = ticks < sh->life ? ticks : sh->life, step, o[3], dv[3];
-        float tbest = 2, t;
-        int hit_unit = -2, hit_group = 0, g, gone = 0, sub, nsub = (int)ceilf(total);
+        float tbest = 2;
+        int hit_unit = -2, hit_group = 0, gone = 0, sub, nsub = (int)ceilf(total);
         if (nsub < 1) nsub = 1;
         step = total / (float)nsub;
-        /* the engine moves and tests a projectile every tick (0x10044f60, 4 hull samples per tick);
-         * testing a whole multi-tick step with 4 samples steps over mechs at close range */
+        /* the engine moves and tests a projectile every tick (0x10044f60: the tick's segment against the collision list) */
         for (sub = 0; sub < nsub && hit_unit == -2; sub++) {
             o[0] = sh->x; o[1] = sh->y; o[2] = sh->z;
             if (sh->prox && sh->homing != -2) {
@@ -2851,26 +2928,8 @@ static void combat_step(msim *s, float dt)
             sh->age += step;
             /* 0x10044f60: p += v dt + a dt^2 / 2; v += a dt */
             dv[0] = sh->vx * step + 0.5f * sh->ax * step * step; dv[1] = sh->vy * step + 0.5f * sh->ay * step * step; dv[2] = sh->vz * step + 0.5f * sh->az * step * step;
-            /* candidates: the player and actors near the segment */
-            for (i = -1; i < s->actor_count; i++) {
-                const mech3d *m;
-                float cx, cz, ex, ez, lx, lz, len2, u, px, pz;
-                if (i == sh->owner) continue;
-                if (i == -1) { if (!s->pl_mech_ok || s->player_unit.destroyed) continue; m = player_hull(s); }
-                else { if (!s->armed[i] || s->units[i].destroyed) continue; m = &s->actors[i].mech; }
-                cx = (float)m->origin[0]; cz = (float)m->origin[2];
-                /* coarse: horizontal distance from the segment to the unit < 20 m */
-                ex = dv[0]; ez = dv[2]; lx = cx - o[0]; lz = cz - o[2];
-                len2 = ex * ex + ez * ez;
-                u = len2 > 0 ? (lx * ex + lz * ez) / len2 : 0;
-                if (u < 0) u = 0;
-                if (u > 1) u = 1;
-                px = o[0] + ex * u - cx; pz = o[2] + ez * u - cz;
-                if (px * px + pz * pz > 2000.0f * 2000.0f) continue;
-                g = mech3d_hull_hit((mech3d *)m, o, dv, &t);   /* engine: 4 samples vs part hulls */
-                if (g && t < tbest) { tbest = t; hit_unit = i; hit_group = g; }
-            }
-            if (hit_unit == -2 && s->world && s->terrain) {
+            shot_units(s, sh->owner, o, dv, &tbest, &hit_unit, &hit_group);
+            if (s->world && s->terrain) {
                 /* world objects (engine 0x10044f60 -> 0x100103e0): the NEAREST object of the collision list the step
                  * crosses - the bounding sphere first (0x10029db0), then the type's segment test (0x10010650, table
                  * 0x1024b3a8): 0 / 1 the world box (0x1000d310, a slab test - a pipe or a tank is hit anywhere in its box),
@@ -2880,7 +2939,9 @@ static void combat_step(msim *s, float dt)
                  * a destroyed object's children) are out of the list (0x10025730) */
                 int part = -1;
                 float tb = 2.0f;
-                if (shot_objects(s, o, dv, &tb, &part)) {
+                if (shot_objects(s, o, dv, &tb, &part) && tb < tbest) {   /* one list: a world object entered nearer than a
+                                                                         * unit's piece wins */
+                    hit_unit = -2;
                     float hp3[3] = {o[0] + dv[0] * tb, o[1] + dv[1] * tb, o[2] + dv[2] * tb};
                     int ft = fx_impact_type(combat_weapon_visual(sh->weapon), FX_HIT_GROUND), b2 = shot_thing(s, part);
                     if (ft >= 0) effect(s, ft, hp3, missile_fx(sh->weapon));
@@ -4235,6 +4296,7 @@ static void buildings_init(msim *s, const mech3d *w)
                     g = &s->bld[s->bld_count++];
                     g->intact = ia; g->destroyed = ib; g->hp = (hp <= 0 || (d[20] & 0x04)) ? 0x7fffffff : hp; g->inspected = 0;
                     g->type = d[18] | d[19] << 8;   /* +18: the thing's class bits (0x1003ddf0 widens them) */
+                    g->flags = d[20] | d[21] << 8;   /* +20: the thing record's flags word (0x1003eb97): targeting 0x400 / 0x800 / 0x1000 (0x1001d2d0) */
                     g->side = affl < 0 || affl >= 64 ? 2 : team_all[affl];   /* 0x10019060: no team -> 2, else the team's alliance */
                     {   /* broad phase: the intact model's world box */
                         const mech3d_part *pp = &w->parts[ia];

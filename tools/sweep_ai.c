@@ -60,7 +60,7 @@ int main(int argc, char **argv)
     int n, i, k, steps;
     msim s;
     static mech3d world;
-    float *lx, *lz, *since, *bx, *bz;
+    float *lx, *lz, *since, *bx, *bz, *hmax;
     char (*why)[512];
     if (argc < 4) { fprintf(stderr, "usage: %s MODELS.PRJ SCENE SECONDS [attack]\n", argv[0]); return 2; }
     if (!(a = prj_open(argv[1], err, sizeof err))) { fprintf(stderr, "%s\n", err); return 1; }
@@ -77,11 +77,13 @@ int main(int argc, char **argv)
     if (argc > 4 && strcmp(argv[4], "attack") == 0) s.player_attacks = 1;
     lx = calloc((size_t)n, sizeof *lx); lz = calloc((size_t)n, sizeof *lz); since = calloc((size_t)n, sizeof *since);
     bx = calloc((size_t)n, sizeof *bx); bz = calloc((size_t)n, sizeof *bz); why = calloc((size_t)n, sizeof *why);
+    hmax = calloc((size_t)n, sizeof *hmax);   /* SWEEP_AI_HEIGHT: each unit's greatest height over its ground, cm */
     for (k = 0; k < n; k++) { lx[k] = (float)ac[k].mech.origin[0]; lz[k] = (float)ac[k].mech.origin[2]; since[k] = -1; }
     steps = (int)(atof(argv[3]) * 20);
     for (i = 0; i < steps && !s.over; i++) {
         s.debug_invulnerable = 1;
         msim_step(&s, 50);
+        for (k = 0; k < n; k++) if (s.armed[k] && !s.units[k].destroyed && s.units[k].y - s.units[k].ground > hmax[k]) hmax[k] = s.units[k].y - s.units[k].ground;
         if (i % 20) continue;
         for (k = 0; k < n; k++) {   /* every second */
             float t = (float)i / 20.0f, dx = (float)ac[k].mech.origin[0] - lx[k], dz = (float)ac[k].mech.origin[2] - lz[k];
@@ -103,6 +105,8 @@ int main(int argc, char **argv)
         if (since[k] >= 0 && s.now / 1000.0f - since[k] >= 10.0f)
             printf("aistuck %s actor %d %s state %s%s from %.0f to %.0f (to the end) at %.0f,%.0f y %.0f:%s\n", argv[2], k, ac[k].name, s.minds ? ai_state_name(s.minds[k].state) : "-", s.minds && s.minds[k].speed < 0 ? " REV" : "",
                    since[k], s.now / 1000.0f, bx[k], bz[k], s.units[k].y, why[k]);
+    if (getenv("SWEEP_AI_HEIGHT"))
+        for (k = 0; k < n; k++) if (hmax[k] > 100.0f * atof(getenv("SWEEP_AI_HEIGHT"))) printf("aiheight %s actor %d %s max %.0f m\n", argv[2], k, ac[k].name, hmax[k] / 100.0f);
     printf("aiinfo %s %d actors, %.0f s, outcome %s\n", argv[2], n, s.now / 1000.0f, msim_outcome_text(&s) ? msim_outcome_text(&s) : "none");
     msim_free(&s);
     mech3d_free(&world);

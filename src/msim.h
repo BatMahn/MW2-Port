@@ -123,6 +123,11 @@ typedef struct {
                                   * type within 5 m, or no free slot) - then neither the effect nor its chunks */
     void       (*on_sound)(void *user, int sound, const float pos[3]);   /* a positional sound at pos (footsteps ...); -1 = the collision clang; pos NULL = a cockpit sound at volume 0x32 */
     void       (*on_radio)(void *user, const char *sound);   /* a mission radio message (SNDS name), voice channel */
+    /* the player's death sequence starts (controller case 4's first run, 0x1001a180: 0x1001be40 the death explosion), just
+     * before its explosion: the front end moves the camera then, as the engine's player input 0x1001adf0 (state 4:
+     * 0x1002df20, camera mode 1) runs before the unit updates in each frame (0x1000908e / 0x10009093) - unless the
+     * death came inside the player's own update (combat_unit.down_in_update), whose case 4 runs at once */
+    void       (*on_player_down)(void *user);
     anim_player *anim_pl;         /* per actor: the walk animation's key player (engine 0x1000dec0 / 0x1000b3a0) */
     int         *bump_with;       /* per actor: the mech it is in contact with (+2; 1 = the player), 0 none */
     float      (*contact_frac)[2];   /* per actor: the sub-cm part (x, z) of the last contact projection, added to the next move
@@ -200,7 +205,7 @@ typedef struct {
     /* destructible world objects: GT chunks {i16 intact node, i16 destroyed node, .., +16 i16 hit points, +18 type,
      * +20 flags, +24 name[22], +46 sub-name[22]} (engine OBJ/GT handler 0x1003eb5c -> thing table 0x101e0280:
      * +0 flags, +8 hit points; damage 0x10046c20; destroyed: explosion 0x10045c30, swap 0x10046a90) */
-    struct msim_building { int intact, destroyed, hp, type, inspected, side; char name[23], sub[23]; float mn[3], mx[3]; } *bld;   /* side: alliance (AFFL team, 0x10019060; 2 none) */
+    struct msim_building { int intact, destroyed, hp, type, inspected, side, flags; char name[23], sub[23]; float mn[3], mx[3]; } *bld;   /* side: alliance (AFFL team, 0x10019060; 2 none); flags: GT +20 (thing record +0) */
     int          bld_count;
     int          world_dirty;    /* a building changed: the front end re-uploads the world mesh */
     struct world3d_paths *paths; /* path tasks (PTBL): world parts flagged `moving`, placed every step (NULL: none) */
@@ -304,6 +309,9 @@ void msim_test_power(msim *s, int actor, int up);   /* TEST ONLY: power an actor
 /* TEST ONLY: one AI avoidance probe (0x100204e0 -> 0x100103e0) from p0 to p1 for no unit: 0 nothing, 1 a world entry, 2 a
  * unit's piece; (ox, oz) the centre of what it hit */
 int  msim_test_probe(const msim *s, const float p0[3], const float p1[3], float *ox, float *oz);
+/* TEST ONLY: the units a shot step o..o+dv strikes (the shots' own test): 1 with the unit (-1 the player), the piece's
+ * location (0 none) and the step fraction, 0 for none */
+int  msim_test_shot(msim *s, const float o[3], const float dv[3], int *unit, int *group, float *t);
 /* index of the nearest living armed enemy actor within the player's weapon range, -1 if none */
 int  msim_nearest_enemy(const msim *s, float *distance);
 /* Terrain height under (x, z) for something at height y (engine 0x10010080): over the world's type 5

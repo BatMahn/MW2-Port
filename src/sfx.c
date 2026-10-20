@@ -393,31 +393,38 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     SDL_UnlockAudioDevice(s->dev);
 }
 
-void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw) { sfx_play_at_h(s, index, dx, dz, listener_yaw, 0); }
-void sfx_play_at_h(sfx *s, int index, float dx, float dz, float listener_yaw, int half)
+void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw) { sfx_play_at3(s, index, dx, 0.0f, dz, listener_yaw, 0); }
+void sfx_play_at_h(sfx *s, int index, float dx, float dz, float listener_yaw, int half) { sfx_play_at3(s, index, dx, 0.0f, dz, listener_yaw, half); }
+/* the engine's pan of a positional sound (0x10032c10 / DOS 0x40d10) as the port's pan: the vector's yaw (0x1001d970 ->
+ * 0x10030120: atan2(x, z) in degrees; both under 1e-7 - the zero vector - 45 degrees; DOS 0x3a9e5 the same), taken to
+ * whole degrees (__ftol, 0x10032b37) when the sample is set up; then 64 + 64 sin(listener yaw - that) (__ftol), clamped
+ * to 15..111 of 0..127, through the mixer's table (sfx_pan). DOSBox YELLSCN1 (heading 158), the in-game menu's sounds
+ * (the zero vector): pan 111 - L 0.790 R 0.197 */
+int sfx_pos_pan_engine(float dx, float dz, float listener_yaw)
 {
-    float d = sqrtf(dx * dx + dz * dz) / 100.0f, a, rel, vol;
+    float a = fabsf(dx) < 1e-7f && fabsf(dz) < 1e-7f ? 45.0f : atan2f(dx, dz) * 180.0f / 3.14159265f;
+    int p = 64 + (int)(64.0f * sinf((listener_yaw - (float)(int)a) * 3.14159265f / 180.0f));
+    return p < 15 ? 15 : p > 111 ? 111 : p;
+}
+float sfx_pos_pan(float dx, float dz, float listener_yaw) { return sfx_pan(sfx_pos_pan_engine(dx, dz, listener_yaw)); }
+void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listener_yaw, int half)
+{
+    float d3 = sqrtf(dx * dx + dy * dy + dz * dz), vol;
     if (!s) return;
-    a = atan2f(dx, dz) * 180.0f / 3.14159265f;
-    rel = a - listener_yaw;
-    while (rel > 180.0f) rel -= 360.0f;
-    while (rel < -180.0f) rel += 360.0f;
-    {   /* engine 0x10032f60: volume % = 100 - 100 (d / 500 m)^2 in whole metres, nothing beyond 500 m (half at 354 m);
-         * halved (>> 1) when the caller passes the flag (0x10032ad0 edx: DAT_1024e678, the cockpit view); pan 0x10032c10:
-         * 64 + 64 sin(angle) clamped to 15..111 of 0..127 = +-0.766; the start delayed by the distance x 0x1024a984
-         * (0.00549 = 1 / 182.15 ticks per cm, DOS 0x40bc0: x 0x168 / 65536) - sound at 182 cm a tick, 331 m/s - when
-         * that is more than the frame's ticks (0x100328e0 / DOS 0x409b0: start time +0x3a8 = now + delay; port: one
-         * 30 fps frame) */
-        int m = (int)d, v;
-        float pan = sinf(rel * 3.14159265f / 180.0f), ticks = sqrtf(dx * dx + dz * dz) * 0.00549f;
+    {   /* engine 0x10032ad0 (DOS 0x40bc0): the distance is the 3D one (0x1001d970's local_4 = horizontal / cos(pitch));
+         * 0x10032f60: volume % = 100 - 100 (d / 500 m)^2 in whole metres, nothing beyond 500 m (half at 354 m); halved
+         * (>> 1) when the caller passes the flag (0x10032ad0 edx: DAT_1024e678, the cockpit view); pan sfx_pos_pan; the
+         * start delayed by the distance x 0x1024a984 (0.00549 = 1 / 182.15 ticks per cm, DOS 0x40bc0: x 0x168 / 65536) -
+         * sound at 182 cm a tick, 331 m/s - when that is more than the frame's ticks (0x100328e0 / DOS 0x409b0: start
+         * time +0x3a8 = now + delay; port: one 30 fps frame) */
+        int m = (int)(d3 / 100.0f), v;
+        float ticks = d3 * 0.00549f;
         if (m >= 500) return;
         v = 100 - m * m * 100 / 250000;
         if (half) v >>= 1;
         vol = (float)v / 100.0f;
-        if (pan > 0.766f) pan = 0.766f;
-        if (pan < -0.766f) pan = -0.766f;
         s_delay = ticks > 182.0f / 30.0f ? ticks / 182.0f : 0.0;
-        sfx_play(s, index, vol * 0.8f, pan);
+        sfx_play(s, index, vol * 0.8f, sfx_pos_pan(dx, dz, listener_yaw));
         s_delay = 0;
     }
 }

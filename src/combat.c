@@ -94,7 +94,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     u->tons = (int)d.tonnage;   /* controller +0xe4 (MEK +0x00): the head-hit ratio in 0x1000c1f0 */
     u->jets = (int)d.jump_mp;
     u->jet_ddy = d.walk_mp ? (float)d.jump_mp / (float)d.walk_mp * 0.1184f : 0;
-    u->jet_fuel = u->jets > 0 ? 1810.0f : 0;
+    u->jet_fuel = u->jets > 0 ? combat_jet_fuel_max : 0;
     /* engine 0x10041410: the first 10 items are the weapons; for each, in order, every ammo link naming it becomes a
      * bin (at most 25) of per_volley x ammo_per_ton rounds, and the weapon's count is the sum (-1: no ammunition) */
     for (i = 0; i < d.item_count && u->weapon_count < COMBAT_MAX_WEAPONS; i++) {
@@ -235,12 +235,12 @@ void combat_tick(combat_unit *u, float dt)
     if (u->heat > 100.0f) {
         if (!u->invulnerable) {            /* an invulnerable player skips this branch */
             if (!u->override) {
-                if (u->seq_ticks > 4525.0f) u->destroyed = 1;
+                if (u->seq_ticks > 4525.0f) u->destroyed = u->down_in_update = 1;
             } else if (ticks > 0) {
                 /* a roll per frame: 3D 0x100160c9 rand(4000 / dt) < 3 (3 in 4000 per tick); DOS 0x25115 rand(500 x dt)
                  * == 0, which depends on the frame rate (no fixed per-tick rate to port) - the 3Dfx rate is kept */
                 u->rng = u->rng * 1103515245u + 12345u;
-                if ((float)((u->rng >> 16) & 0x7FFF) / 32768.0f < 3.0f * ticks / 4000.0f) cook_off(u);
+                if ((float)((u->rng >> 16) & 0x7FFF) / 32768.0f < 3.0f * ticks / 4000.0f) { cook_off(u); if (u->destroyed) u->down_in_update = 1; }
             }
         }
     } else if (u->heat > 80.0f) {
@@ -429,6 +429,15 @@ static void apply_damage(combat_unit *t, float dmg, int rear, unsigned *rng)
 }
 
 int combat_damage_live = 1;
+/* the full jet tank, c[0x30] (controller +0xc0) in ticks: 3Dfx 0x712 = 1810 (0x10041beb at load, 0x1001a5ad / 0x1001a63c,
+ * the Jets bar 0x1001c783); DOS MW2.EXE 0x71c = 1820 everywhere (0x4ce84 at load, 0x27b84 / 0x27c57 / 0x27c7d, the bar
+ * 0x314b9). The front end sets it by edition */
+float combat_jet_fuel_max = 1810.0f;
+/* the refill with the jets released, both 0x1001a5ad (3Dfx) and DOS 0x27c63: below the full tank c[0x30] += the frame's
+ * whole ticks >> 2 (no cap that frame), else = full. The 3D looks keep ticks / 4 (unchanged); the DOS look takes the
+ * DOS rule at the agreed 30 fps: 182 / 30 = 6.07 ticks a frame - the clock's whole ticks 6 or 7, >> 2 = 1 a frame,
+ * 30 a second (ticks / 4 is 45.5). The front end sets it by edition */
+int combat_jet_refill_dos = 0;
 int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsigned *rng)
@@ -689,9 +698,18 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
         if (held) {
             u->jet_fuel -= ticks;
             if (u->jet_fuel <= 0) u->jet_fuel = 0;
-        } else if (u->jet_fuel < 1810.0f) {
+        } else if (combat_jet_refill_dos) {   /* DOS 0x27c57..0x27c7d, one step per 30 fps frame */
+            int n;
+            u->jet_refill_acc += dt * 30.0f;
+            n = (int)u->jet_refill_acc;
+            u->jet_refill_acc -= (float)n;
+            while (n-- > 0) {
+                if (u->jet_fuel < combat_jet_fuel_max) u->jet_fuel += (float)((int)(COMBAT_TICKS_PER_S / 30.0f) >> 2);   /* 6 >> 2 = 1 (7 >> 2 too) */
+                else u->jet_fuel = combat_jet_fuel_max;
+            }
+        } else if (u->jet_fuel < combat_jet_fuel_max) {
             u->jet_fuel += ticks * 0.25f;
-            if (u->jet_fuel > 1810.0f) u->jet_fuel = 1810.0f;
+            if (u->jet_fuel > combat_jet_fuel_max) u->jet_fuel = combat_jet_fuel_max;
         }
     }
     jet = held && u->jet_fuel > 0;

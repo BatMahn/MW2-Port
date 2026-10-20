@@ -36,13 +36,17 @@ typedef struct {
 static prj_archive *c3d_ti;
 static int c3d_ti_hits, c3d_ti_miss;
 
-static texture *c3d_texture(prj_archive *texs, int ati, const char *name)
+/* `alpha`: the bitmap is drawn with the engine's alpha flag (polygon flag 2) - the bank-0 billboards. The 3Dfx edition
+ * stores no format: its Texus conversion reads a CEL as ARGB1555 (Glide format 0xb) for a polygon drawn without flag 2
+ * and as ARGB4444 (0xc) with it (0x10067240: DAT_10265710 = (flags & 2) >> 1; 0x10066a30 -> 0x100685f0 / 0x10068710),
+ * and the billboard 0x1002a8e0 always passes flag 2 (0x1002aaea: 0x1002c880 param_8 = 1 -> local_50 = 2) */
+static texture *c3d_texture(prj_archive *texs, int ati, const char *name, int alpha)
 {
     prj_record r;
     texture *t = calloc(1, sizeof *t);
     /* `ati` is the archive's texture kind: 0 3Dfx / S3, 1 ATi, 2 PowerVR, 3 DOS, 4 Matrox Mystique, 5 Titanium */
     int enc = ati == 1 ? TEX_ATI : ati == 2 ? TEX_PVR : ati == 3 ? TEX_DOS : ati == 4 ? TEX_MGA : ati == 5 ? TEX_TITANIUM
-            : ((toupper((unsigned char)name[0]) == 'L' && isdigit((unsigned char)name[1])) ? TEX_3DFX_4444 : TEX_3DFX_555);
+            : (alpha || (toupper((unsigned char)name[0]) == 'L' && isdigit((unsigned char)name[1]))) ? TEX_3DFX_4444 : TEX_3DFX_555;
     if (!t) return NULL;
     if (c3d_ti && ati != 3 && ati != 5) {
         if (prj_read_named(c3d_ti, "CEL", name, &r) == PRJ_OK) {
@@ -113,14 +117,14 @@ static int c3d_load_scene(prj_archive *models, prj_archive *texs, int ati, const
                 maps++;
                 for (i = 0; i < GLR_SLOTS; i++)
                     if (map.present[i]) {
-                        texture *t = c3d_texture(texs, ati, map.name[i]);
+                        texture *t = c3d_texture(texs, ati, map.name[i], 0);
                         if (!t) continue;
                         if (s->slot[i]) { tex_free(s->slot[i]); free(s->slot[i]); } else s->textures_loaded++;
                         s->slot[i] = t;
                     }
                 for (i = 0; i < GLR_SLOTS; i++)   /* bank 0: only the scrub bitmaps matter here (effects load their own) */
                     if (map.b0_present[i]) {
-                        texture *t = c3d_texture(texs, ati, map.b0_name[i]);
+                        texture *t = c3d_texture(texs, ati, map.b0_name[i], 1);
                         if (!t) continue;
                         if (s->bank0[i]) { tex_free(s->bank0[i]); free(s->bank0[i]); }
                         s->bank0[i] = t;

@@ -42,10 +42,10 @@ typedef struct {
     int       wire_dmg;      /* image enhancement: a mech location's damage colour, 0 unset, 1 blue, 2 red, 3 yellow, 4 colour 8 (dark red, a wreck) */
     int       shadow;        /* a flat shadow piece on the ground: drawn as a translucent darkening */
     int       coll;          /* world objects: OBJ collision type (0 box, 1 XZ box, 4 none, 5 terrain...); -1 none */
-    /* collision hull (engine type 2, 0x1000d6b0): face planes in model space, built lazily */
-    float    *hull;          /* plane_count x {nx, ny, nz, d}: inside when n.p <= d for all */
+    /* (unused since the shots' test became sphere-only: kept for the struct's users) */
+    float    *hull;
     int       hull_count;
-    float     hull_center[3], hull_radius;   /* bounding sphere (model space), broad phase */
+    float     hull_center[3], hull_radius;   /* the piece's bounding sphere (model space): its type 6 collision volume */
     int       sphere_ok;     /* hull_center / hull_radius computed */
     int       moving;        /* world objects: carried by a path task (PTBL, world3d_paths) - pos / rot change every step:
                                 left out of the static world mesh and collision lists, drawn and hit-tested as they are */
@@ -131,11 +131,11 @@ void mech3d_hit_weights(const mech3d *m, float w[8]);
  * of the posed head-group parts (OBJL group 1: canopy / windshield) in world
  * coordinates. Returns 0, or -1 if the mech has no head group. */
 int  mech3d_head_point(const mech3d *m, float out[3]);
-/* Engine projectile collision (0x100103e0 / 0x10029db0 / 0x10010650): the segment o..o+d is
- * sampled at 4 points (k/4, k = 1..4); a hit is a sample inside a posed part's convex hull,
- * after a bounding-sphere check. Returns the hit part's OBJL group (3 if none), 0 for no hit,
- * and the sample fraction in *t. */
-int  mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], float *t);
+/* Engine projectile collision against a unit (0x100103e0 over its pieces): every piece is a type 6 object, so the
+ * hit is the nearest bounding-sphere entry (0x10029db0 -> 0x100107b0) along the segment o..o+d - no polygon test.
+ * Pieces hidden or blown off (under a location in gone_mask, mech3d_fly_mask) are out of the list. Returns 1 on a
+ * hit with the segment fraction in *t and the piece's location (OBJL group, 0 = none: no damage) in *loc, else 0. */
+int  mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone_mask, float *t, int *loc);
 /* Average forward body travel per key over keys [first, first+count): how far
  * the planted (lowest bound) foot moves backwards. Used to time the animation
  * to ground speed so feet don't slide. */

@@ -3796,6 +3796,23 @@ static const int ARCH_HS[2][4][6] = {
     {{0, 440, 639, 479, 320, 455}, {405, 364, 479, 397, 449, 346}, {480, 364, 556, 397, 511, 400}, {67, 358, 120, 410, 92, 400}}};
 static const char *const ARCH_LABEL[4] = {"EXIT", "PREV PAGE", "NEXT PAGE", "BACK"};
 enum { ARCH_X = 88, ARCH_Y = 70, ARCH_LH = 12, ARCH_LINES = 19, ARCH_W = 466, ARCH_TAB = 36 };
+/* the page a click at (x, y) follows, else -1: only a word marked \aNN (drawn white) links; every other word is plain
+ * grey text. There is no lock / unlock: FUN_00026b50 opens ARCHWO / ARCHJF (0x7d464 + clan) at entry 1 with nothing
+ * from the pilot, and FUN_00027510 / FUN_0003ca70 read only the file - the first page's grey topics ("The Exodus
+ * Years", "Codex Listing", ...) have no link and no page in the file. DOSBox 2026-10-19: clicking them does nothing,
+ * the same with a pilot 15 missions into the campaign (docs/reference/dos_archive_w15_*.png, dos_archive_jf15_*.png) */
+static int arch_hit(const arch_tok *tok, int nt, int sub, const int *links, int nl, int n, int x, int y)
+{
+    int i;
+    for (i = 0; i < nt; i++) {
+        const arch_tok *k = &tok[i];
+        int ky = ARCH_Y + (k->line - sub * ARCH_LINES) * ARCH_LH;
+        if (k->line / ARCH_LINES != sub) continue;
+        if (k->link >= 0 && k->link < nl && links[k->link] >= 0 && links[k->link] < n && x >= ARCH_X + k->x && x < ARCH_X + k->x + k->w && y >= ky && y < ky + ARCH_LH)
+            return links[k->link];
+    }
+    return -1;
+}
 static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
     char path[700];
@@ -3887,16 +3904,27 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                     else if (h == 1) sub--;                                 /* PREV PAGE */
                     else if (h == 2) sub++;                                 /* NEXT PAGE */
                     else if (h == 3) back = 1;                              /* BACK */
-                    else for (i = 0; i < nt; i++) {
-                        const arch_tok *k = &tok[i];
-                        int ky = ARCH_Y + (k->line - sub * ARCH_LINES) * ARCH_LH;
-                        if (k->line / ARCH_LINES != sub) continue;
-                        if (k->link >= 0 && k->link < nl && links[k->link] >= 0 && links[k->link] < n && x >= ARCH_X + k->x && x < ARCH_X + k->x + k->w && y >= ky && y < ky + ARCH_LH) {
-                            if (nh < 64) { hsub[nh] = sub; hist[nh++] = page; }
-                            page = links[k->link]; sub = 0;
-                            break;
-                        }
+                    else if ((h = arch_hit(tok, nt, sub, links, nl, n, x, y)) >= 0) {   /* a link word */
+                        if (nh < 64) { hsub[nh] = sub; hist[nh++] = page; }
+                        page = h; sub = 0;
                     }
+                }
+            }
+        }
+        {   /* TEST ONLY: MW2_ARCH_CLICK=x,y[;x,y...] - left clicks on the text, one a frame, as the mouse does */
+            static const char *tc;
+            static int tc_init;
+            int x, y, h, used = 0;
+            if (!tc_init) { tc_init = 1; tc = getenv("MW2_ARCH_CLICK"); }
+            if (tc && *tc && sscanf(tc, "%d,%d%n", &x, &y, &used) == 2) {
+                tc += used;
+                if (*tc == ';') tc++;
+                h = arch_hit(tok, nt, sub, links, nl, n, x, y);
+                printf("archive click: %d,%d -> %d\n", x, y, h);
+                if (h >= 0) {
+                    if (nh < 64) { hsub[nh] = sub; hist[nh++] = page; }
+                    page = h; sub = 0;
+                    continue;
                 }
             }
         }

@@ -85,6 +85,9 @@ typedef struct {
     int           weapon_count;
     float         heat, sink_per_tick;
     int           shutdown, destroyed, damage_taken;
+    int           down_in_update;   /* destroyed inside its own controller update (0x1001a180: heat 0x10015f50 - the
+                                     * shutdown timeout, a cook-off; the DOS self-destruct): its case 4 runs the same
+                                     * update, before the next frame's input handler moves the camera (msim on_player_down) */
     float         shut_ticks, over_ticks, damage_carry;
     int           heat_warning;   /* one tick: "Heat level critical" (65-80 with a net gain; latched, 0x10015f50) */
     int           warn_latch;     /* engine DAT_1024bfd0: the warning was given; cleared below 65 after 724 ticks */
@@ -139,7 +142,8 @@ typedef struct {
     uint16_t      rating;           /* loadout rating, object +0x150 (0x10041c80; group member choice 0x10014920) */
     int           jets;             /* jump MP (c[0x31]) */
     float         jet_ddy;          /* thrust, cm/tick^2: jump MP / walk MP x 0.1184 (c[0x3b]) */
-    float         jet_fuel;         /* ticks, max 1810 (c[0x30]); burns 1/tick, recharges 1/4 per tick */
+    float         jet_fuel;         /* ticks, max combat_jet_fuel_max (c[0x30]); burns 1/tick, recharges 1/4 per tick */
+    float         jet_refill_acc;   /* DOS refill (combat_jet_refill_dos): the 30 fps frames not yet taken, in frames */
     float         y, vy;            /* height (cm, absolute) and vertical speed (cm/tick) */
     float         ground;           /* terrain height under the unit (cm), set by the sim each step */
     float         landed_vy;        /* the vertical speed (cm/tick, < 0) it touched down with this step from a fall or jump, else 0 */
@@ -165,6 +169,8 @@ void combat_set_planet(const combat_planet *p);
  * The sim sets it; 1 by default (tools) */
 extern int combat_damage_live;
 extern int combat_ct_split;
+extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 2 a 30 fps frame (0x27c63); 0: ticks / 4 */
+extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
 /* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */
 /* TOGGLE_AUTOEJECT (engine DAT_1024bfbc, default off; one switch for every unit): an ammunition explosion (0x100167b0)

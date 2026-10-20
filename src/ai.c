@@ -213,12 +213,15 @@ static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
     m->turn_jet = 0;   /* manoeuvre change resets the jets (0x1001f500 -> 0x100201b0) */
     m->reverse = 0;
     m->jet_side = 0;
+    m->jet_back = 0;
     m->man_limit = 9050.0f;                                                     /* 0x235a ticks (0x1001f290) */
     switch (man) {
     case 0: m->man_limit = (float)(ai_rand(m, 5) * 181u + 1448u); break;      /* rand(5) x 181 + 1448 */
     case 1: m->man_limit = 3620.0f; m->flank_face = 0; break;
     case 3: m->weave = ai_rand(m, 2) ? 1.0f : -1.0f; m->weave_ticks = 0; break;
     case 4: m->man_limit = 905.0f; m->throttle = 0; m->turn = 0; break;      /* 0x389 */
+    case 5: m->last_dist = v->enemy_dist; break;                                /* 0x1001f290 case 5 -> 0x100208f0: +0x19a = distance */
+    case 9: m->turn = 0; break;                                                 /* input +0xc = 0 */
     case 7: {   /* 0x1001f290 case 7 -> 0x1001f630: a point 100 m from the target in a 16-way slot round its facing:
                  * 3 or 15 (rand(2) == 0) when 40 m or more away, 4 or 12 (rand(2) == 0) when closer */
         int slot = v->enemy_dist >= 4000.0f ? (ai_rand(m, 2) == 0 ? 15 : 3) : (ai_rand(m, 2) == 0 ? 12 : 4);
@@ -249,10 +252,11 @@ static float closing(ai_mind *m, float d, float ticks)
  * (R < 0 = full throttle) and switches manoeuvres when one finishes */
 static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R, float *dist)
 {
-    int done = 0, jumping;
+    int done = 0, jumping, was_jet = m->jet;
     float d = v->enemy_dist;
     m->jet = 0;
     m->jet_forward = 0;
+    m->jet_back = 0;
     if (m->man < 0) {
         int c = choose_manoeuvre(m, v);
         if (c == -2) {   /* forced -2 (0x1001f030): flee the target, +0x152 = 1 (no further targeting) */
@@ -341,23 +345,29 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
         }
         break;
     }
-    case 5: {   /* 0x1001fe30 */
-        *R = -1.0f;
-        if (m->man_phase >= 2) { if (v->height <= 0) done = 1; break; }
-        if (d < 1000.0f) {
-            if (m->man_phase == 1) m->man_phase = 2;       /* cut the jets inside 10 m */
-        } else {
-            float off = fabsf(wrap180(v->enemy_bearing - v->heading)), lim = v->twist_limit > 0 ? v->twist_limit : 90.0f;
-            int within = off < lim && off < lim * 3.000000f;
-            float cl = (m->last_dist > 0 && ticks > 0) ? (m->last_dist - d) / ticks : 0;
-            float thresh = d <= 6000.0f ? 9.0f : 36.0f;
-            if (!v->can_jump && v->height <= 0) { done = 1; break; }
-            m->jet = 1;
-            m->jet_forward = cl > thresh ? within : !within;   /* 0x1001fe30 */
-            m->man_phase = 1;
-        }
-        if (m->man_phase == 1 && v->height <= 0 && m->man_ticks > 181.0f) done = 1;
-        m->last_dist = d;
+    case 5: {   /* 0x1001fe30, after 4 or 9 (in the air): the legs not steered, the throttle held (no 0x10013600 /
+                 * 0x100134c0). Done (0x1001ea40 case 5) on the ground (object +0x78) or in contact (+0xa4), with the tank
+                 * under 1 tick (+0xc0 < 1), or when 0x10020a30(40) fails. Beyond 10 m the jets fire (0x100201b0(1)) with
+                 * the FORWARD (+0x20) or the BACKWARD (+0x21) jet, never neither (0x100208e0: +0x21 = !+0x20) - a
+                 * directional jet gives no lift (0x10019310), so the unit glides. b = 1 when the target's bearing off
+                 * the legs is beyond the twist limit (+0xe0) but under 3 x it (0x10247548); forward = b while closing
+                 * faster than 36 cm/tick (9 within 60 m: 0x45bb8000), else !b - i.e. ahead and closing fast: brake;
+                 * ahead and not closing: thrust at it. Inside 10 m: jets off, +0x20 / +0x21 = 0, +0x180 + 1 if they
+                 * were firing. The port had read the flag as "ahead", leaving neither jet while not closing: the jets
+                 * then lifted it straight up for the whole manoeuvre (250 m in PLUM / FUCH) */
+        int done0 = v->height <= 1.0f || v->contact;
+        *R = 1e9f;
+        if (m->man_phase == 2) { done = done0; break; }
+        if (d > 1000.0f) {   /* +0xc0 > 0x447a0000 */
+            float off = fabsf(wrap180(v->enemy_bearing - v->heading)), lim = v->twist_limit;
+            int b = off > lim && off < lim * 3.0f;
+            float cl = closing(m, d, ticks);
+            int fwd = cl > (d > 6000.0f ? 36.0f : 9.0f) ? b : !b;
+            m->jet = 1; m->jet_forward = fwd; m->jet_back = !fwd;
+            if (!jets_ok(v, 40.0f)) done0 = 1;
+        } else if (was_jet) m->man_phase++;
+        if (v->jet_fuel < 1.0f) done0 = 1;
+        done = done0;
         break;
     }
     case 6:   /* 0x1001fb90: charge at full throttle; within 20 m (+0xc4 <= 2000.0) input +0x43 = 1 - the self-destruct */
@@ -395,6 +405,7 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
         m->man = -1;
         m->reverse = 0;   /* 0x1001f500: 8 / 10 clear +0x2f */
         m->jet_side = 0;
+        m->jet = 0; m->jet_forward = 0; m->jet_back = 0;   /* 0x1001f500: the jets off (0x100201b0(0)), 5 / 11 +0x20 / +0x21 = 0 */
         m->man_phase = 0;
     }
 }
@@ -483,7 +494,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
 
     /* movement per state (engine 0x100130f0) */
     {
-        float want = v->heading, dist = 0, R = 10000.0f, thr = 0, err;
+        float want = v->heading, dist = 0, R = 10000.0f, thr = 0, err, turn0;
         int moving = 1, full_attack = 0, engaged;
         switch (m->state) {
         case AI_TARGET:
@@ -547,12 +558,18 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
         }
         if (!moving) { m->throttle = 0; m->turn = 0; m->reverse = 0; return; }
         /* steering 0x10013600 */
+        turn0 = m->turn;   /* as the manoeuvre left it (a start may have zeroed it) */
         err = wrap180(want - v->heading);
         if (err > 45.0f) m->turn = 819.2f;
         else if (err < -45.0f) m->turn = -819.2f;
         else m->turn = err * 18.2044f;
         if (m->state == AI_ATTACK && m->man == 3) m->turn += 450.0f * m->weave;
         if (m->state == AI_ATTACK && m->man == 11) m->turn = 0;            /* 0x1001f290 case 11: +0xc = 0 */
+        /* in attack only the manoeuvre handlers steer (0x100130f0 has no state-3 case): 4 (0x1001fdd0), 5 (0x1001fe30), 11
+         * (0x1001fe10) and 9 outside phase 1 (0x1001fcc0) do not, nor a tick without a manoeuvre (one just ended,
+         * 0x1001f500): the leg input +0xc stays as it was (4 / 9 / 11 zero it at the start, 0x1001f290; 5 keeps the last
+         * manoeuvre's) */
+        if (m->state == AI_ATTACK && (m->man < 0 || m->man == 4 || m->man == 5 || (m->man == 9 && m->man_phase != 1))) m->turn = turn0;
         /* throttle 0x100134c0 (3Dfx floats, full = 1/64) in the DOS edition's integers (DOS 0x228d0, input +8 with full =
          * 0x400): 0x400 beyond 2 R, 0x333 (819 / 1024) from R, else 0; turning harder than 45 (|turn| >> 16 > 0x2d):
          * (0x4000000 - chop(|turn| x 2/3)) >> 16, at least 0x66 (102 / 1024); halved (>> 1) above 65 heat (heat >> 16 >
@@ -563,7 +580,6 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
             else if (dist >= R) ti = 0x333;
             else ti = 0;
             if (full_attack) ti = 0x400;
-            if (m->state == AI_ATTACK && (m->man == 11 || m->man == 4)) ti = (int)lrintf(m->throttle * 1024.0f);   /* hold the throttle */
             if (ti != 0 && (int)(fabsf(m->turn) * 65536.0f) >> 16 > 0x2d) {
                 ti = (0x4000000 - (int)((double)(int)(fabsf(m->turn) * 65536.0f) * (2.0 / 3.0))) >> 16;
                 if (ti < 0x66) ti = 0x66;
@@ -571,6 +587,9 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
             if ((int)v->heat > 0x41) ti >>= 1;
             if (ti < 0x66) ti = 0;
             thr = (float)ti / 1024.0f;
+            /* 4, 5, 9 and 11 do not call 0x100134c0: input +8 holds as it was (4 zeroes it at the start, 0x1001f290) - not
+             * re-scaled by the turn or heat rules each tick (the port had halved a held throttle every tick above 65 heat) */
+            if (m->state == AI_ATTACK && (m->man == 11 || m->man == 4 || m->man == 5 || m->man == 9)) thr = m->throttle;
         }
         /* 0x1001f910 (manoeuvres 0 / 1): no throttle but more than 5 deg off -> 1/640 = 10% of full to step round (DOS
          * 0x2d1c0 / 0x2d200: 0x66 = 102 / 1024) */

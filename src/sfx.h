@@ -46,6 +46,15 @@ void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw);
 /* the same; half = 1: the level halved (the engine's cockpit-view flag, 0x10032ad0 edx). Both start the sample
  * distance / 331 m/s late (0x10032ad0 -> 0x100328e0) */
 void sfx_play_at_h(sfx *s, int index, float dx, float dz, float listener_yaw, int half);
+/* the engine's positional sound (0x10032bf0 -> 0x10032ad0): (dx, dy, dz) is the vector the CALLER passes, relative to
+ * the camera (PTR_DAT_1024e1cc +0 / +4 / +8, yaw +0xc) - most callers pass position - camera, but footsteps / gait
+ * (0x1000b370), weapons (0x10043b59), effects (0x10045fca) and object loops (0x10032cc0) pass camera - position, so
+ * their pan is mirrored (DOSBox: an LRM explosion straight ahead with the view glanced right is heard on the right).
+ * Volume and delay by the 3D distance */
+void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listener_yaw, int half);
+/* the engine's positional pan (0x10032c10) for that vector: 15..111, and as the port's pan */
+int   sfx_pos_pan_engine(float dx, float dz, float listener_yaw);
+float sfx_pos_pan(float dx, float dz, float listener_yaw);
 /* Play caller-owned unsigned 8-bit mono PCM at `rate` Hz (data must stay valid while playing).
  * loop = 1 repeats until sfx_stop_loops. Returns 0 on success. */
 int  sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volume, int loop);

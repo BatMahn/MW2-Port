@@ -25,10 +25,11 @@
  * Obstacle avoidance (0x100201c0) is applied by msim.c, which has the world geometry.
  * Jump manoeuvres: 4 (0x1001fdd0) jet until 20 m above the start; 9 (0x1001fcc0) jet while the
  * target is > 8 m above and height < 40 m, then (1 in 4: queue 5) steer to it 181 ticks and finish
- * on landing; 5 (0x1001fe30) jet at the target with forward thrust, cut inside 10 m, finish on
- * landing. Jump-to-turn (0x10020950): pilot level < 4, target outside the twist limit -> jets on.
- * INFERRED: 0x10020a30's compared value read as height in metres; manoeuvre 5's forward-thrust
- * flag taken as "target ahead".
+ * on landing; 5 (0x1001fe30) the forward or backward jets (never lift) by the closing speed and
+ * the bearing, cut inside 10 m, finish on the ground or in contact. 4 / 5 / 11 and 9 (but its
+ * phase 1) neither steer the legs nor set the throttle. Jump-to-turn (0x10020950): pilot level < 4,
+ * target outside the twist limit -> jets on.
+ * INFERRED: 0x10020a30's compared value read as height in metres.
  * The chooser skips 4/5/9 for mechs without jets or fuel, as the engine's checks do.
  * attack-state movement (taken as target movement); target score / visibility simplified;
  * posted events (condition 5) not generated; the AI runs every frame.
@@ -87,6 +88,7 @@ typedef struct {
     int  *flank_slots;       /* attackers per 45-degree slot around the enemy (engine target +0x1a2) */
     int   can_jump;          /* has jump jets and fuel (engine 0x10020a30) */
     float height;            /* current height above ground, cm */
+    float jet_fuel;          /* jet fuel, ticks (controller +0xc0; manoeuvre 5 ends under 1, 0x1001ea40) */
     float enemy_height;      /* target's height, cm (for "target above me", 0x10020090) */
     int   pilot_level;       /* GPS 1-4 (engine +0x159); < 4 enables jump-to-turn (0x10020950) */
     /* condition references (engine 0x10011d20 -> 0x10013400 / 0x10013a50: the rule's cond_ref is an iterator) */
@@ -127,6 +129,7 @@ typedef struct {
     int   flank_face;        /* manoeuvre 1: +0x184 = 1 - at the slot, turning to face the target (0x1001f9d0) */
     int   jet;               /* jet input this tick */
     int   jet_forward;       /* horizontal jet thrust input (+0x20) */
+    int   jet_back;          /* backward jet input (+0x21; manoeuvre 5, 0x100208e0) */
     int   man_phase;         /* manoeuvre 5/9 phase (engine +0x180) */
     int   turn_jet;          /* jump-to-turn jets latched (0x10020950); cleared when a manoeuvre ends */
     float jump_from;         /* manoeuvre 4: height when it started */

@@ -1078,65 +1078,6 @@ int mech3d_head_point(const mech3d *m, float out[3])
     return 0;
 }
 
-static void build_hull(mech3d_part *p)
-{
-    /* The part's convex hull (the engine tests "inside every hull plane", 0x10029db0 / 0x10010650,
-     * which only works for convex volumes; the render polygons of legs and torsos are concave).
-     * Brute force: a vertex triple is a hull face when every vertex lies on one side of its plane. */
-    const wtb_object *o;
-    int a, b, c2, k, j, n = 0, cap, nv;
-    float c[3] = {0, 0, 0}, r = 0;
-    if (p->hull || p->model.object_count < 1) return;
-    o = &p->model.objects[0];
-    nv = o->vert_count;
-    if (nv < 4) return;
-    for (k = 0; k < nv; k++) { c[0] += (float)o->verts[k].x; c[1] += (float)o->verts[k].y; c[2] += (float)o->verts[k].z; }
-    for (j = 0; j < 3; j++) c[j] /= (float)nv;
-    for (k = 0; k < nv; k++) {
-        float dx = (float)o->verts[k].x - c[0], dy = (float)o->verts[k].y - c[1], dz = (float)o->verts[k].z - c[2];
-        float dd = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (dd > r) r = dd;
-    }
-    cap = 256;
-    p->hull = malloc(sizeof(float) * 4 * (size_t)cap);
-    if (!p->hull) return;
-    for (a = 0; a < nv; a++)
-        for (b = a + 1; b < nv; b++)
-            for (c2 = b + 1; c2 < nv; c2++) {
-                const wtb_vertex *A = &o->verts[a], *B = &o->verts[b], *C = &o->verts[c2];
-                float u[3] = {(float)(B->x - A->x), (float)(B->y - A->y), (float)(B->z - A->z)};
-                float v[3] = {(float)(C->x - A->x), (float)(C->y - A->y), (float)(C->z - A->z)};
-                float nrm[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
-                float len = sqrtf(nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]), d;
-                int pos = 0, neg = 0, dup = 0;
-                if (len < 1e-3f) continue;
-                for (j = 0; j < 3; j++) nrm[j] /= len;
-                d = nrm[0] * (float)A->x + nrm[1] * (float)A->y + nrm[2] * (float)A->z;
-                for (k = 0; k < nv && !(pos && neg); k++) {
-                    float sd = nrm[0] * (float)o->verts[k].x + nrm[1] * (float)o->verts[k].y + nrm[2] * (float)o->verts[k].z - d;
-                    if (sd > 0.5f) pos = 1;
-                    else if (sd < -0.5f) neg = 1;
-                }
-                if (pos && neg) continue;
-                if (!pos && !neg) continue;                 /* all coplanar: a flat part */
-                if (pos) { for (j = 0; j < 3; j++) nrm[j] = -nrm[j]; d = -d; }   /* outward: every vertex behind */
-                for (k = 0; k < n && !dup; k++)
-                    if (fabsf(p->hull[k * 4] - nrm[0]) < 1e-3f && fabsf(p->hull[k * 4 + 1] - nrm[1]) < 1e-3f &&
-                        fabsf(p->hull[k * 4 + 2] - nrm[2]) < 1e-3f && fabsf(p->hull[k * 4 + 3] - 1.0f - d) < 1.0f) dup = 1;
-                if (dup) continue;
-                if (n == cap) {
-                    float *g = realloc(p->hull, sizeof(float) * 4 * (size_t)(cap * 2));
-                    if (!g) break;
-                    p->hull = g; cap *= 2;
-                }
-                p->hull[n * 4 + 0] = nrm[0]; p->hull[n * 4 + 1] = nrm[1]; p->hull[n * 4 + 2] = nrm[2]; p->hull[n * 4 + 3] = d + 1.0f;
-                n++;
-            }
-    p->hull_count = n;
-    memcpy(p->hull_center, c, sizeof c);
-    p->hull_radius = r;
-}
-
 /* world point -> the part's model space */
 static void to_local(const mech3d_part *p, const float w[3], float l[3])
 {
@@ -1154,89 +1095,72 @@ static void to_local(const mech3d_part *p, const float w[3], float l[3])
     }
 }
 
+/* the piece's bounding sphere in model space (0x10029060, at load): the centre is the middle of its vertex box (object
+ * +0x28, placed by 0x10029c10), the radius (+0x40) the farthest vertex from it - as msim's piece_sphere for the probes */
 static void build_sphere(mech3d_part *p)
 {
     const wtb_object *o;
-    float c[3] = {0, 0, 0}, r = 0;
+    float mn[3] = {3.4e38f, 3.4e38f, 3.4e38f}, mx[3] = {-3.4e38f, -3.4e38f, -3.4e38f}, c[3], r2 = 0;
     int k, j;
     p->sphere_ok = 1;
+    p->hull_radius = 0;
     if (p->model.object_count < 1) return;
     o = &p->model.objects[0];
     if (o->vert_count < 1) return;
-    for (k = 0; k < o->vert_count; k++) { c[0] += (float)o->verts[k].x; c[1] += (float)o->verts[k].y; c[2] += (float)o->verts[k].z; }
-    for (j = 0; j < 3; j++) c[j] /= (float)o->vert_count;
+    for (k = 0; k < o->vert_count; k++) {
+        const float v[3] = {(float)o->verts[k].x, (float)o->verts[k].y, (float)o->verts[k].z};
+        for (j = 0; j < 3; j++) { if (v[j] < mn[j]) mn[j] = v[j]; if (v[j] > mx[j]) mx[j] = v[j]; }
+    }
+    for (j = 0; j < 3; j++) c[j] = (mn[j] + mx[j]) * 0.5f;
     for (k = 0; k < o->vert_count; k++) {
         float dx = (float)o->verts[k].x - c[0], dy = (float)o->verts[k].y - c[1], dz = (float)o->verts[k].z - c[2];
-        float dd = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (dd > r) r = dd;
+        if (dx * dx + dy * dy + dz * dz > r2) r2 = dx * dx + dy * dy + dz * dz;
     }
     memcpy(p->hull_center, c, sizeof c);
-    p->hull_radius = r;
+    p->hull_radius = sqrtf(r2);
 }
 
-/* point-in-polygon on the XZ plane (engine 0x10010a90) */
-static int in_poly_xz(const wtb_object *o, const wtb_poly *q, float x, float z)
+/* Engine 0x100103e0 over a unit's pieces: each piece is a type 6 object (0x10026430 -> 0x1000ffd0(6)), which has no
+ * test of its own in 0x1024b3a8, so 0x10010650 -> 0x100107b0 takes the bounding sphere's entry (0x10029db0) as the
+ * hit: the projection on the segment less the radius; a start inside the sphere hits at 10 cm, an entry before the
+ * start (0) leaves the whole segment; past the segment's end, a miss. The nearest piece wins (strictly nearer: the
+ * first in the list keeps a tie). The piece's location is its object +0x16 (0x10026430 -> 0x10029840, from the OBJL
+ * chunk 0x1003ecb1; 0 for a piece without one), which 0x10044f60 passes to the damage (0x100171d0). */
+int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone_mask, float *t, int *loc)
 {
-    int i, j, in = 0;
-    for (i = 0, j = q->n - 1; i < q->n; j = i++) {
-        float xi = (float)o->verts[q->idx[i]].x, zi = (float)o->verts[q->idx[i]].z;
-        float xj = (float)o->verts[q->idx[j]].x, zj = (float)o->verts[q->idx[j]].z;
-        if (((zi > z) != (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) in = !in;
-    }
-    return in;
-}
-
-/* Engine type 2 (0x1000d6b0), in the part's model space: the first polygon facing down (engine normal
- * = -stored normal, y < 0) whose XZ outline holds the point decides: inside when the point is above
- * that polygon's plane. Models without stored normals (DOS-only) fall back to a convex hull. */
-static int part_inside(mech3d_part *p, const float l[3])
-{
-    const wtb_object *o = &p->model.objects[0];
-    int k, any_normal = 0;
-    for (k = 0; k < o->poly_count; k++) {
-        const wtb_poly *q = &o->polys[k];
-        float nx, ny, nz, vx, vy, vz, yp;
-        if (!q->has_normal || q->n < 3) continue;
-        any_normal = 1;
-        nx = -q->normal[0]; ny = -q->normal[1]; nz = -q->normal[2];
-        if (!(ny < 0)) continue;
-        if (!in_poly_xz(o, q, l[0], l[2])) continue;
-        vx = (float)o->verts[q->idx[0]].x; vy = (float)o->verts[q->idx[0]].y; vz = (float)o->verts[q->idx[0]].z;
-        yp = vy - ((l[2] - vz) * nz + (l[0] - vx) * nx) / ny;
-        return yp < l[1];
-    }
-    if (!any_normal) {   /* DOS-only model: convex hull of the vertices */
-        int inside = 1;
-        build_hull(p);
-        if (!p->hull || p->hull_count < 4) return 0;
-        for (k = 0; k < p->hull_count && inside; k++)
-            if (p->hull[k * 4] * l[0] + p->hull[k * 4 + 1] * l[1] + p->hull[k * 4 + 2] * l[2] > p->hull[k * 4 + 3]) inside = 0;
-        return inside;
-    }
-    return 0;
-}
-
-int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], float *t)
-{
-    int s, i;
-    for (s = 1; s <= 4; s++) {
-        float w[3] = {o[0] + d[0] * (float)s / 4.0f, o[1] + d[1] * (float)s / 4.0f, o[2] + d[2] * (float)s / 4.0f};
-        for (i = 0; i < m->part_count; i++) {
-            mech3d_part *p = &m->parts[i];
-            float l[3], dx, dy, dz;
-            if (p->model.object_count < 1) continue;
-            if (!p->sphere_ok) build_sphere(p);
-            if (p->hull_radius <= 0) continue;
-            to_local(p, w, l);
-            dx = l[0] - p->hull_center[0]; dy = l[1] - p->hull_center[1]; dz = l[2] - p->hull_center[2];
-            if (dx * dx + dy * dy + dz * dz > p->hull_radius * p->hull_radius) continue;   /* sphere (0x10029db0) */
-            if (part_inside(p, l)) {
-                *t = (float)s / 4.0f;
-                return p->group > 0 ? p->group : 3;
-            }
+    float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), best = 3.4e38f;
+    int i, hit = 0;
+    if (!(len > 0.0f)) return 0;
+    for (i = 0; i < m->part_count; i++) {
+        mech3d_part *p = &m->parts[i];
+        float l0[3], v[3], c2, b, tp, e, hl, r;
+        if (p->hidden || p->model.object_count < 1 || mech3d_fly_loc(m, i, gone_mask)) continue;   /* blown off: out of
+                                                                                                    * the list (0x10015be0) */
+        if (!p->sphere_ok) build_sphere(p);
+        r = p->hull_radius;
+        if (!(r >= 1e-7f)) continue;                     /* 0x10029db0: no radius, no entry */
+        to_local(p, o, l0);
+        v[0] = p->hull_center[0] - l0[0]; v[1] = p->hull_center[1] - l0[1]; v[2] = p->hull_center[2] - l0[2];
+        c2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - r * r;
+        if (c2 < 0) e = 10.0f;                           /* the start inside: 10 cm (0x10247700) */
+        else {
+            float ld[3], w[3] = {o[0] + d[0], o[1] + d[1], o[2] + d[2]};
+            to_local(p, w, ld);
+            b = v[0] * (ld[0] - l0[0]) + v[1] * (ld[1] - l0[1]) + v[2] * (ld[2] - l0[2]);
+            if (b < 0) continue;                         /* behind the start */
+            tp = b / len;
+            if (tp * tp - c2 < 0) continue;              /* passes outside */
+            e = tp - r;
+            if (e < 0) e = 0;
+            else if (len <= e) continue;                 /* entered past the end */
         }
+        hl = e > 0 ? e : len;                            /* 0x100107b0: the segment ends at the entry */
+        if (!(e < best) || !(hl < best)) continue;
+        best = hl; hit = 1;
+        *loc = p->group;
     }
-    return 0;
+    if (hit) *t = best < len ? best / len : 1.0f;
+    return hit;
 }
 
 /* ---- path tasks (TSK type 5 over PTBL paths): see mech3d.h -------------------------------------------------- */

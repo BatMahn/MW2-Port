@@ -34,8 +34,10 @@ typedef struct {
     int     first, n;
     uint8_t kind;      /* 1 lit (textured kinds 5-7: Gouraud, 0x1002ecaa + 0x1002f238), 2 colour kind 1 (a palette shade,
                         * 0x1002f5e3), 3 colour kind 2 (the shade with intensity 0xa0 / 0xd0; textures off only) */
-    uint8_t c;         /* kinds 1 / 2: the shade's intensity >> 1 */
-    uint8_t ramp;      /* kinds 1 / 2: the palette ramp x 16 */
+    uint8_t c;         /* kinds 1 / 2: the shade's intensity >> 1; 1 (textured): the switched-off shade's (0xa0 / 0xd0) */
+    uint8_t ramp;      /* kinds 1 / 2: the palette ramp x 16; 1 (textured): the switched-off shade's */
+    uint8_t cls;       /* 1 (textured): its texture switch class (1 OBJECT, 2 TERRAIN, 0 none) - switched off, the kind 1
+                        * shade (0x1001b47a..0x1001b4f3), drawn as kind 3 */
     float   nrm[3], v0[3];   /* kinds 1 / 2: the polygon's normal and corner 0 in the model's frame (game coordinates) */
 } glr_tipoly;
 
@@ -168,7 +170,7 @@ static const char *VS =
     "    if (dot(sc, sc) > (u_far + a_sphere.w) * (u_far + a_sphere.w) || -sc.z - a_sphere.w > u_far) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
     "  }\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
-    "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(a_texsel + 0.5); v_sph = a_sphere;\n"
+    "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(floor(a_texsel + 0.5)); v_sph = a_sphere;\n"
     "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5);\n"
     "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
     "  v_bary = vec3(corner == 0 ? 1.0 : 0.0, corner == 1 ? 1.0 : 0.0, corner == 2 ? 1.0 : 0.0); v_emask = (e / 3) | (hi << 3);\n"
@@ -309,7 +311,7 @@ static const char *FS =
     "  float ds = v_dnib > 0 ? (u_dsign != 0 ? 1.0 + float(v_dnib) / 15.0 : 1.0 - float(v_dnib) / 15.0) : 1.0;\n"
     /* Titanium: a polygon lit per vertex (v_ticm 1: the colour the lights gave its corners, interpolated - Gouraud, as
      * mercsw 0x1002ecaa / 0x1002f238 and dx5draw's SHADEMODE) */
-    "  vec3 lit = u_unlit != 0 || v_bb != 0 || tinted || (v_tif & 2) != 0 ? base : u_tilit == 1 ? base * (v_ticm == 1 ? v_tic : ti_light((v_tif & 1) != 0 ? v_normal : n > 0.0 ? v_normal / n : vec3(0.0)))\n"
+    "  vec3 lit = u_unlit != 0 || v_bb != 0 || tinted || (v_tif & 2) != 0 || v_ticm == 3 ? base : u_tilit == 1 ? base * (v_ticm == 1 ? v_tic : ti_light((v_tif & 1) != 0 ? v_normal : n > 0.0 ? v_normal / n : vec3(0.0)))\n"
     "           : u_tilit == 2 ? base * u_tignd : base * min(1.0, (u_ambient + diff) * ds);\n"   /* SGL: ambient + parallel light, saturating */
     /* PowerVR PCX2 table fog (Imagination's Series 1 driver source, MIT: dlcamera.c sgl_set_fog, rncamera.c, simulat3
      * hwsabren.c Fog / texas.c): per pixel, from the depth 1/w: index i = depth >> shift = K / z (K below, z the view depth
@@ -640,7 +642,11 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * with low nibble 0 or 3 (0x1004eef0) */
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
-                if (((q->color >> 12) & 7) == 3 && !part->shadow) {
+                /* the 3D editions' colour words 0x8000-0xb000 (engine 0x10026e80) are textured polygons of slot 0x100 + the
+                 * low byte (0x1002c880; bank 1, the surface slots) - 0xb000 unlit (light 0x80000000) - not the type 3
+                 * billboard: the scrub records' ground patches (TNW1SCR1 0xbc38 V1_PLAIN, RUSTSCR1 / SABLSCR1 0xbc39) */
+                const int hi_card = model->extended && !ti && (q->color & 0x8000) != 0;
+                if (((q->color >> 12) & 7) == 3 && !hi_card && !part->shadow) {
                     /* colour type 3 (0x3240 ...): a billboard of bank-0 bitmap (w >> 4) & 0xff (engine 0x10026fc7 ->
                      * 0x1002a8e0): of the triangle's corners (by texel u / v) the foot (u 0, v > 0) and the top (u 0, v 0)
                      * make the vertical edge; the engine draws a screen square of that edge's projected length centred on
@@ -794,9 +800,13 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     /* kind 2 with its texture switch off (0x1001b47a..0x1001b4f3, the switch mask 0x1009e9a8 - INFERRED to be the
                      * 3D editions' OBJECT 0x300 / TERRAIN 0x800 bits): kind 1, ramp (w >> 8) & 0xf, intensity 0xa0 for a
                      * mech (type 0x100) or class 0x50 object, else 0xd0 */
-                    if (tk2) {
-                        k2cls = (part->objtype & 0x300) || (part->objtype & 0xf0) == 0x50 ? 1 : (part->objtype & 0x800) ? 2 : 0;
-                        k2c = ((part->objtype & 0x100) || (part->objtype & 0xf0) == 0x50 ? 0xa0 : 0xd0) >> 1;
+                    /* The textured kinds 5-7 take the same branch (0x1001b466 handles types 0x2000 and 0x5000-0x7000 alike):
+                     * switched off, kind 1 with that shade; else their bitmap w & 0xff (0x1001b4fc / 0x1001b50a). A mech
+                     * part (the port's type 0 on the actor layer) is the engine's type 0x100 (INFERRED, as notex_cls) */
+                    if (ti && (tk2 || tk >= 5)) {
+                        const int ot = li == 1 && part->objtype == 0 ? 0x100 : part->objtype;
+                        k2cls = (ot & 0x300) || (ot & 0xf0) == 0x50 ? 1 : (ot & 0x800) ? 2 : 0;
+                        k2c = ((ot & 0x100) || (ot & 0xf0) == 0x50 ? 0xa0 : 0xd0) >> 1;
                     }
                     pidx = ti ? (tk == 1 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, (int)(q->color & 0xff) >> 1)
                                 : tk2 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, k2c)
@@ -852,8 +862,9 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     if (tip_n == tip_cap) { glr_tipoly *g = realloc(tip, (size_t)(tip_cap = tip_cap ? 2 * tip_cap : 256) * sizeof *tip); if (!g) { tik = 0; goto no_tip; } tip = g; }
                     tp = &tip[tip_n++];
                     tp->first = (int)pos[batch]; tp->n = q->n; tp->kind = (uint8_t)tik;
-                    tp->c = (uint8_t)(tik == 3 ? k2c : (int)(q->color & 0xff) >> 1);
+                    tp->c = (uint8_t)(tik == 3 || tik == 1 ? k2c : (int)(q->color & 0xff) >> 1);
                     tp->ramp = (uint8_t)(((q->color >> 8) & 0xf) << 4);
+                    tp->cls = (uint8_t)(tik == 1 && batch >= GLR_TI && batch < GLR_TB ? k2cls : 0);
                     memcpy(tp->nrm, q->normal, sizeof tp->nrm);
                     tp->v0[0] = (float)v0->x; tp->v0[1] = (float)v0->y; tp->v0[2] = (float)v0->z;
                 }
@@ -929,6 +940,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                          * textured one: minus its texture switch class (notex_class) */
                         f[11] = batch >= GLR_SLOTS && !part->tint && !(r->dos && !model->extended) ? (float)((ti_flat && tk4 ? v->a & 0xff : pidx) + 1) : batch < GLR_SLOTS ? (float)-notex_cls : 0.0f;
                         if (tk2) f[11] = (float)-k2cls;   /* (v_ticm 3: drawn only with its class's textures off) */
+                        if (tik == 1 && batch >= GLR_TI && batch < GLR_TB) f[11] = (float)-k2cls;   /* (textured kinds 5-7: their switch class) */
                         if (tik) {
                             float *t = tic + pos[batch] * 4;
                             memcpy(tipn + pos[batch] * 6, f, 6 * sizeof *f);
@@ -939,7 +951,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         /* the wireframe's edges: this corner (0-2) + 3 x the polygon's own edges in this fan triangle
                          * (bit 0: corner 1 - 2, always; bit 1: corner 2 - 0 when it closes the polygon; bit 2: corner 0 - 1
                          * when it starts it), so the triangulation's diagonals are not drawn (DOS draws polygon outlines) */
-                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat ? 512 : 0) + 2048 * dnib);
+                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && (q->color >> 12) == 0xb) ? 512 : 0) + 2048 * dnib);   /* (+ 512: unlit) */
                         for (c = 0; c < 3; c++) {
                             if (f[c] < mn[c]) mn[c] = f[c];
                             if (f[c] > mx[c]) mx[c] = f[c];
@@ -1033,6 +1045,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
     const glr_ti_shade *sh = &r->ti_shade;
     float key[24], lv[2][3], dp[GLR_TI_DYN][4], dc[GLR_TI_DYN][3];
     int lt[2], nd = v->ti_dyn_n < GLR_TI_DYN ? v->ti_dyn_n : GLR_TI_DYN, k, i, j, c, lo = -1, hi = -1;
+    const int notex = (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0);   /* (as u_notex) */
     const float eye_g[3] = {eye_gl[0], eye_gl[1], -eye_gl[2]};
     if (L->tip_n <= 0 || !L->tic || !L->tipn) return;
     for (k = 0; k < 2; k++) {
@@ -1050,6 +1063,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
     memcpy(key + 3, lv, 6 * sizeof *key);
     memcpy(key + 9, v->ti_lcol, 6 * sizeof *key);
     key[15] = (float)lt[0]; key[16] = (float)lt[1];
+    key[17] = (float)notex;   /* (a texture switch changed: every polygon rewritten) */
     if (!L->tistat) L->tistat = calloc((size_t)L->vertex_count * 3 + 1, sizeof *L->tistat);
     if (!L->tistat) return;
     if (!L->tic_static_ok || memcmp(key, L->tic_key, sizeof key) != 0) {   /* the static lights: once per mission */
@@ -1089,7 +1103,9 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
             }
             nh += hit[k];
         }
-        if (tp->kind == 1) {
+        /* a textured polygon (kinds 5-7) whose class is switched off: the kind 1 shade (0x1001b47a..0x1001b4f3) */
+        const int off = tp->kind == 1 && (tp->cls & notex) != 0;
+        if (tp->kind == 1 && !off) {
             float col[WTB_MAX_POLY_VERTS][3], S[3];
             if (!nh && L->tic_static_ok && !L->tic_dyn) continue;   /* (unchanged) */
             for (j = 0; j < tp->n; j++) memcpy(col[j], L->tistat + (size_t)ti_corner_vertex(tp, j) * 3, sizeof col[j]);
@@ -1110,11 +1126,18 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
             for (j = tp->first; j < e; j++) {
                 int t = (j - tp->first) / 3, a = (j - tp->first) % 3, cn = a == 0 ? 0 : t + a;
                 memcpy(L->tic + (size_t)j * 4, col[cn], 3 * sizeof(float));
+                L->tic[(size_t)j * 4 + 3] = 1.0f;
             }
-        } else if (sh->on) {   /* colour kinds 1 / 2: the shade, flat */
+        } else if (sh->on || off) {   /* colour kinds 1 / 2 (and switched-off textured kinds): the shade, flat */
             int lev, Lv, done = 0;
             float depth = -1e30f;
             Lv = tp->n >= 3 ? ti_shade_base(sh, tp->nrm, tp->v0, eye_g) : (int)sh->amb;
+            /* the depth: the polygon's deepest corner. mercsw 0x1005751c..0x10057638 picks it by the render object's
+             * flag word (0x10106c50 = node +0): 2 the corners' average, 4 the nearest, else the deepest, 1 + 2^28 (the
+             * 3D DLL the same, 0x1002b9b0 at 0x1002bea3 / 0x10247730) - but every node is made with +0 = DAT_100a6298 | 0x8000
+             * (0x10003848), DAT_100a6298 is 0 in the file and its only setter (0x1000354a) is never called (no
+             * reference, no export); the 3D DLL's 0x10029590 likewise DAT_1024e400 (0, never written) | 0x8000. So
+             * the deepest corner always */
             if (sh->range > 1e-7f) {   /* 0x1002f6cb: (depth / range) >> 4 off, at least 0 */
                 for (j = 0; j < tp->n; j++) {
                     const float *P = L->tipn + (size_t)ti_corner_vertex(tp, j) * 6;
@@ -1131,17 +1154,29 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
                 I = ti_shade_i(tp->nrm, tp->v0, lg, 0);
                 if (I > 0) { Lv += I; if (Lv >= 0x80) done = 1; }
             }
-            lev = ti_shade_finish(Lv, tp->c);
+            lev = sh->on ? ti_shade_finish(Lv, tp->c) : 8;
             {
                 const uint8_t *pe = r->ti_pal[li][(tp->ramp | lev) & 0xff];
                 float cc[3] = {pe[0] / 255.0f, pe[1] / 255.0f, pe[2] / 255.0f};
                 float *t0 = L->tic + (size_t)tp->first * 4;
                 if (t0[0] == cc[0] && t0[1] == cc[1] && t0[2] == cc[2] && L->tic_static_ok) continue;
-                for (j = tp->first; j < e; j++) memcpy(L->tic + (size_t)j * 4, cc, sizeof cc);
+                for (j = tp->first; j < e; j++) {
+                    memcpy(L->tic + (size_t)j * 4, cc, sizeof cc);
+                    if (off) L->tic[(size_t)j * 4 + 3] = 3.0f;   /* (the colour, unlit, as kind 2's) */
+                }
             }
         } else continue;
         if (lo < 0 || tp->first < lo) lo = tp->first;
         if (e > hi) hi = e;
+    }
+    if (getenv("MW2_DEBUG_TISHADE")) {   /* (tests) */
+        static int last[2] = {-1, -1};
+        int n_off = 0;
+        for (i = 0; i < L->tip_n; i++) n_off += L->tip[i].kind == 1 && (L->tip[i].cls & notex) != 0;
+        if (li >= 0 && li < 2 && n_off != last[li]) {
+            last[li] = n_off;
+            printf("titanium: %d textured polygons as the kind 1 shade\n", (last[0] > 0 ? last[0] : 0) + (last[1] > 0 ? last[1] : 0));
+        }
     }
     L->tic_dyn = nd > 0;
     L->tic_static_ok = 1;
@@ -1819,17 +1854,24 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
         glUniform2f(r->u_texsize, (float)r->tex_w[2 * GLR_SLOTS + s], (float)r->tex_h[2 * GLR_SLOTS + s]);
-        glUniform1i(r->u_textured, !(li == 0 ? v->notex_world : v->notex_actors));
+        glUniform1i(r->u_textured, 1);   /* per object class (u_notex, v_texsel = -class): mercsw keeps the bitmap of an
+                                          * object whose type is not in the switch mask (0x1001b4fc) */
         glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_TI + s], L->batch_count[GLR_TI + s]);
     }
-    for (s = 0; s < GLR_SLOTS; s++) {   /* bank-0 billboards (colour type 3: scrub rocks, cacti), alpha-keyed */
+    for (s = 0; s < GLR_SLOTS; s++) {   /* bank-0 billboards (colour type 3: scrub rocks, cacti), alpha-blended: the 3Dfx
+                                         * engine draws them with flag 2 - SRC_ALPHA / ONE_MINUS_SRC_ALPHA, alpha test
+                                         * ALWAYS, depth writes left on (0x10067240 with DAT_10265714 = 1); the ARGB1555
+                                         * archives' one-bit alpha gives the same picture as a key */
+        int blend = !v->wire;
         if (L->batch_count[GLR_B0 + s] <= 0) continue;
         glBindTexture(GL_TEXTURE_2D, r->tex[GLR_SLOTS + s]);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
         glUniform2f(r->u_texsize, (float)r->tex_w[GLR_SLOTS + s], (float)r->tex_h[GLR_SLOTS + s]);
         glUniform1i(r->u_textured, 1);
+        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glUniform1i(r->u_blend, 1); }
         glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_B0 + s], L->batch_count[GLR_B0 + s]);
+        if (blend) { glDisable(GL_BLEND); glUniform1i(r->u_blend, 0); }
     }
     for (s = 0; s < GLR_SLOTS; s++) {   /* Titanium billboards (0x1004ef4c): the bitmap x the vertex colour 0xc8 (200 / 255),
                                          * Render type 8 (alpha-blended) for a texture of type > 0, else type 2 (0x1000131e);
