@@ -5022,6 +5022,18 @@ def dos_shading_dither(c):
     c(a6 is not None and checker_runs(a6) >= 500, '640 x 480: 1-pixel checkerboards in the bar', str(checker_runs(a6) if a6 is not None else None))
 
 
+
+@sequence
+def tab_in_mission_no_reload(c):
+    """user report 2026-10-21: Cmd+Tab restarted the mission - the viewer's Tab (next mech, reload) was live in missions.
+    Tab in a mission now does nothing: the player keeps walking, the mission clock runs on (no reload back to 0)"""
+    r = c.run(secs=UP + 9, keys=[(UP, '0'), (UP + 3, 'tab'), (UP + 4, 'tab')], dump='/0.5')
+    a, b = r.at(UP + 2.5), r.at(UP + 8)
+    c(a and b and b['t'] > a['t'] + 4.5, 'the mission runs on after Tab (no reload)', '%s -> %s' % (a and a.get('t'), b and b.get('t')))
+    c(a and b and abs(b.get('x', 0) - a.get('x', 0)) + abs(b.get('z', 0) - a.get('z', 0)) > 500, 'the player keeps walking (not reset to the start)',
+      '%s,%s -> %s,%s' % (a and a.get('x'), a and a.get('z'), b and b.get('x'), b and b.get('z')))
+
+
 def main():
     global GLVIEW, VERBOSE
     ap = argparse.ArgumentParser()

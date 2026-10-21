@@ -22,7 +22,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 201 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 202 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build
@@ -292,8 +292,8 @@ Translocation") and cannot see a folder next to it. It then says so and asks for
 
 ### macOS: keyboard shortcuts
 
-During a mission the game turns off the system's keyboard shortcuts (Mission Control's Ctrl+Left/Right, Cmd+Tab,
-Spotlight) while its window is in front. They come back in the MAIN MENU (Esc), while paused and when the game ends. Add
+During a mission the game turns off the system's keyboard shortcuts (Mission Control's Ctrl+Left/Right, Spotlight)
+while its window is in front; holding Cmd gives them back, so Cmd+Tab and the Cmd+Shift+3/4/5 screenshots work. They come back in the MAIN MENU (Esc), while paused and when the game ends. Add
 `system_shortcuts=allow` to `~/Library/Application Support/mw2port/mw2port.cfg` to keep them. If Ctrl+Left/Right still
 switches desktops, go to System Settings > Keyboard > Keyboard Shortcuts... > Mission Control and untick "Move left a
 space" / "Move right a space". If F1-F12 change brightness or volume instead of reaching the game, hold Fn, or turn on

@@ -4847,7 +4847,8 @@ int main(int argc, char **argv)
             }
         }
         /* the system's shortcuts off while the mission is played in front (see syskeys_update) */
-        syskeys_update(g_world && !g_mm_depth && !g_paused && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS));
+        syskeys_update(g_world && !g_mm_depth && !g_paused && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)
+                      && !(SDL_GetModState() & KMOD_GUI));   /* Cmd held: the system gets its shortcuts back (Cmd+Tab, Cmd+Shift+4 ...) */
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
             else if ((g_mm_depth || g_paused) && (e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEWHEEL)) continue;   /* controls off (0x1003a3c0) */
@@ -4875,6 +4876,9 @@ int main(int argc, char **argv)
                 v.distance *= e.wheel.y > 0 ? 0.9f : 1.1f;
             } else if (e.type == SDL_KEYDOWN) {
                 SDL_Keycode k = e.key.keysym.sym;
+#ifdef __APPLE__
+                if (e.key.keysym.mod & KMOD_GUI) continue;   /* Cmd+key belongs to macOS (Cmd+Tab, screenshots), never the game */
+#endif
                 if (g_mm_depth) { mm_key(k, e.key.keysym.mod); continue; }   /* the MAIN MENU has the keys while open */
                 if (g_paused) {   /* 0x10009740: paused, the next key (DAT_10159e64, a character) ends the pause; nothing else */
                     if (k != SDLK_LSHIFT && k != SDLK_RSHIFT && k != SDLK_LCTRL && k != SDLK_RCTRL && k != SDLK_LALT && k != SDLK_RALT &&
@@ -5146,7 +5150,7 @@ int main(int argc, char **argv)
                 else if ((k == SDLK_f && !g_world) || (k == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
                     Uint32 fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
                     SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-                } else if (k == SDLK_TAB) { mi = (mi + 1) % COUNT(MECHS); rec = MECHS[mi]; reload = 1; }
+                } else if (k == SDLK_TAB && !g_world) { mi = (mi + 1) % COUNT(MECHS); rec = MECHS[mi]; reload = 1; }   /* viewer only: in a mission Tab reloaded it (user 2026-10-21: Cmd+Tab restarted the mission) */
                 else if (k == SDLK_n && !g_world) { ni = (ni + 1) % COUNT(MISSIONS); mission = MISSIONS[ni]; reload = 1; }
                 else if (k == SDLK_c && !g_world) { camo = (camo + 1) % 8; reload = 1; }
                 else if (k == SDLK_i && !g_world) { clan = (clan + 1) % 6; reload = 1; }

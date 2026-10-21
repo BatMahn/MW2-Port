@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.10 (2026-10-21)
+
+- **Tab no longer restarts the mission**: a leftover model-viewer key (Tab = next mech, reload) was live during missions,
+  so Cmd+Tab restarted the mission.
+- **Cmd shortcuts on macOS**: while Cmd is held the system gets its shortcuts back (Cmd+Tab, Cmd+Shift+3/4/5
+  screenshots), and Cmd+key never reaches the game; Mission Control's Ctrl+arrows stay blocked in a mission.
+
 ## v0.4.9 (2026-10-21)
 
 - **Mac app icon**: the small Finder icon (16 / 32 px) is no longer garbled - those sizes are now stored in the classic
