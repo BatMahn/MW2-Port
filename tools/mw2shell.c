@@ -4564,11 +4564,11 @@ static int ask_game_folder(portcfg *c, const char *exe_dir)
     char pick[PORTCFG_PATH], game[PORTCFG_PATH], m[PORTCFG_PATH + 400];
     if (portcfg_translocated(exe_dir))
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "MechWarrior 2",
-            "macOS is running this app from a temporary read-only copy (App Translocation), so it cannot see a game folder "
-            "placed next to it.\n\n"
-            "You can choose the game folder now. To stop this for good: quit, then in Terminal, from the folder holding the "
-            "app, run\n\n    xattr -dr com.apple.quarantine \"MechWarrior 2.app\"\n\n"
-            "(or move the app to another folder with Finder) and open it again.", NULL);
+            "MechWarrior 2 is still in the folder it was downloaded to, so macOS runs it from a temporary copy and it "
+            "cannot see a game folder placed next to it.\n\n"
+            "Click OK and choose your MW2-game folder - it is remembered, so you only do this once.\n\n"
+            "Tip: move MechWarrior 2.app into your Applications folder (or any other folder) with Finder; after that it "
+            "also finds an MW2-game folder placed next to it.", NULL);
     for (;;) {
         if (pick_folder(pick, sizeof pick) != 1) return -1;
         if (portcfg_game_in(pick, game, sizeof game)) break;

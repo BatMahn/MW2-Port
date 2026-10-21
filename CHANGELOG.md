@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.9 (2026-10-21)
+
+- **Mac app icon**: the small Finder icon (16 / 32 px) is no longer garbled - those sizes are now stored in the classic
+  format macOS reads reliably.
+- **Mac first launch**: the message for an app opened straight from Downloads now says to move it to Applications (or
+  any folder) and asks for the game folder; README / FOLDER_SETUP updated (System Settings > Privacy & Security > Open
+  Anyway, or the `xattr` command).
+
 ## v0.4.8 (2026-10-21)
 
 - **DOS look shading as the original**: every shaded polygon (cockpit, mechs, buildings) now gets the DOS renderer's

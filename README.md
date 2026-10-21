@@ -276,8 +276,9 @@ game drew it. At 4:3 the two are identical.
 ### macOS: the app is not signed
 
 The app (built here or downloaded from a GitHub release) is only ad-hoc signed, not signed with an Apple Developer ID or
-notarised, so macOS blocks a downloaded copy ("is damaged and can't be opened" or "Apple could not verify..."). Clear
-the download flag once, in Terminal, from the folder holding the app:
+notarised, so macOS blocks a downloaded copy the first time ("Apple could not verify..." or "is damaged and can't be
+opened"). First move the app out of Downloads (see below), then either open System Settings > Privacy & Security and
+click "Open Anyway" for MechWarrior 2, or clear the download flag once in Terminal, from the folder holding the app:
 
     xattr -dr com.apple.quarantine "MechWarrior 2.app"
 
@@ -285,9 +286,9 @@ Then open it normally. A copy you built yourself is not flagged and opens direct
 app: on first launch the app looks for your `MW2-game` folder next to `MechWarrior 2.app`, one level up and in
 `~/MW2-game`, and if it is in none of those it asks for your game folder (choose `MW2-game` itself or the folder that
 holds it). The choice is remembered in `~/Library/Application Support/mw2port/mw2port.cfg`; if the folder later moves,
-the app asks again. (A downloaded copy opened without clearing the flag runs from a temporary read-only location -
-macOS "App Translocation" - where it cannot see a folder next to it; the app then says so and you can still choose the
-folder, or quit, run the `xattr` command above or move the app with Finder, and open it again.)
+the app asks again. Move `MechWarrior 2.app` out of Downloads (into Applications, or a folder of your own) with Finder
+before you use it: a downloaded app opened where it was downloaded runs from a temporary copy (macOS "App
+Translocation") and cannot see a folder next to it. It then says so and asks for the game folder, which is remembered.
 
 ### macOS: keyboard shortcuts
 

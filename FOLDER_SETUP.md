@@ -100,9 +100,9 @@ those is a game folder (or the remembered one is gone), it asks for it with the 
 remembered.
 
 - **macOS:** on first launch the app asks for your game folder (unless `MW2-game` sits next to the app or in your home
-  folder). A downloaded app that still has the download flag runs from a temporary read-only copy and cannot see a
-  folder next to it - it tells you; clear the flag with `xattr -dr com.apple.quarantine "MechWarrior 2.app"` (README)
-  or move the app with Finder.
+  folder). Move the app out of Downloads (into Applications or a folder of your own) with
+  Finder first: opened where it was downloaded, macOS runs it from a temporary copy that cannot see a folder next to it
+  (it tells you and asks for the game folder, which is remembered).
 - **Windows:** `mw2.exe` asks with the folder browser, or drag the folder onto `mw2.exe`.
 - **Linux:** the folder picker needs `zenity` or `kdialog`; without either, the game explains where to put the folder
   (or run `./mw2 /path/to/MW2-game` once).
