@@ -16,7 +16,9 @@
  *   visual     +0x04  projectile object: 0-2 LASER1-3, 3 missile, 5 MG bullet, 6 PPC, 8 Narc, 11 slug, 22 nuke
  *   refire     +0x44  ticks from the end of a volley until ready again
  *   interval   +0x48  ticks between projectiles in a volley
- *   life       +0x4c  projectile lifetime, ticks (range = speed x life: ER LL 1014 m, Gauss 1809 m)
+ *   life       +0x4c  projectile lifetime, ticks (speed x life: ER LL 1014 m, Gauss 1809 m) - less the volley timer
+ *                     slot +0x10 at the release (0x10043cc0): an `interval`-60 laser loses ~54 ticks at 30 fps (ER ML
+ *                     reaches ~358 m, not 509 m; DOSBox AQUASCN1: the Stormcrow's ER ML shots from 400-510 m miss)
  */
 #ifndef MW2_WTABLE_H
 #define MW2_WTABLE_H

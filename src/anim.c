@@ -151,6 +151,10 @@ static void carry(const anim_set *s, anim_player *p, int from_end, int to_start)
     if (from_end == to_start || from_end < 0 || to_start < 0 || from_end > s->key_count || to_start > s->key_count) return;
     for (k = 0; k < s->track_count && k < ANIM_MAX_TRACKS; k++) p->off[k] += s->tracks[k].pose[from_end] - s->tracks[k].pose[to_start];
 }
+void anim_player_hold(anim_player *p)
+{
+    p->on = 0;   /* +0x80 bit 0 (DOS 0x26990 / 0x27785 the same, & 0xfe) */
+}
 int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks)
 {
     int f, next, trans = 0, target = -1, jumped = 0, ev = 0;

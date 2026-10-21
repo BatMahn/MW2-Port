@@ -20,12 +20,14 @@ ifeq ($(WINDOWS),1)
   CXXLIB = -static-libgcc -Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic   # no libstdc++ / libwinpthread DLLs to ship
   DLLIB =
   WINSRC = src/wincompat.c src/glload.c
+  WINLIBS = -lole32 -lshell32   # system DLLs: the folder picker (wincompat.c mw2_pick_folder)
   WINRES = build/mw2res.o
   WINDRES ?= $(patsubst %gcc,%windres,$(CC))
 else
   DLLIB = -ldl
   WINSRC =
   WINRES =
+  WINLIBS =
 endif
 ifeq ($(UNAME_S),Linux)
   LDLIBS += -ldl
@@ -39,7 +41,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/mek.c
-BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium
+BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium test_gamefolder
 GLBIN   = glshot glview mw2shell
 ifeq ($(UNAME_S),Darwin)
   GLBIN = glview mw2shell          # glshot renders headless through EGL: Linux only
@@ -92,7 +94,7 @@ mw2: $(WINRES) build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c 
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter-out -Dmain=SDL_main,$(shell $(SDL2_CONFIG) --cflags 2>/dev/null)) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(shell $(SDL2_CONFIG) --cflags 2>/dev/null) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
 
 mw2shell: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(filter %.c,$^) build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) -lm $(CXXLIB)
@@ -123,6 +125,9 @@ test_port: tests/test_port.c src/cdaudio.c src/datapath.c build/miniaudio.o
 test_titanium: tests/test_titanium.c src/tex.c src/skygnd.c src/portcfg.c src/prj.c src/datapath.c
 	$(CC) $(CFLAGS) -Isrc $^ -o $@ -lm
 
+test_gamefolder: tests/test_gamefolder.c src/portcfg.c src/portcfg.h
+	$(CC) $(CFLAGS) -Isrc tests/test_gamefolder.c src/portcfg.c -o $@
+
 test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
@@ -139,6 +144,7 @@ check: all
 	MW2_INSTALL_DIR=$(MW2) ./bwdtool $(MW2)/MW2.PRJ missions | tail -1
 	./test_port $(MUSIC) $(MW2) $(ISO)
 	./test_titanium $(TITANIUM)
+	./test_gamefolder
 	$(MAKE) test_inputmap && ./test_inputmap $(MW2)
 	$(MAKE) test_cockpitcfg && ./test_cockpitcfg $(MW2)
 	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 $(MW2) > /tmp/mw2lab.txt; r=$$?; tail -1 /tmp/mw2lab.txt; exit $$r

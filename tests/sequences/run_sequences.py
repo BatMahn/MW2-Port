@@ -125,7 +125,8 @@ def install_dir(name, mech):
     if mech:
         write_userstar(os.path.join(d, 'USERSTAR.BWD'), *mech.split('/'))
     with open(os.path.join(OUT, name, 'mw2port.cfg'), 'w') as f:
-        f.write('game=%s\nrenderer=enhanced\ntextures=original\n' % d)
+        # hud_layout=original: the picture checks measure the original's 4:3 HUD (hud_layout_wide checks the port's wide one)
+        f.write('game=%s\nrenderer=enhanced\ntextures=original\nhud_layout=original\n' % d)
     return d
 
 
@@ -1910,13 +1911,15 @@ def idle_mech_rests(c):
     c(end and all(x.get('w_key') in REST and x.get('w_on') == 0 for x in end), 'TNJ1: within 4 s of stopping he stands in the rest pose, nothing playing',
       'stop at %.1f s; keys after %s' % (stop['t'], sorted(set(x.get('w_key') for x in end))))
     c(end and len(set((x.get('w_x'), x.get('w_z')) for x in end)) == 1, 'TNJ1: and stays put')
-    r2 = c.run('_player', secs=9, keys=[(0.5, '0'), (4.0, '1')], nostart=True, dump='/0.25')
-    mid = r2.at(4.0)
+    # YELLSCN1 drops the player from 25 m (on the ground at ~2.3 s) and the keys hold while airborne
+    # (walk_keys_hold_airborne): the throttle after touch-down
+    r2 = c.run('_player', secs=11.5, keys=[(3.0, '0'), (6.5, '1')], nostart=True, dump='/0.25')
+    mid = r2.at(6.5)
     c(mid.get('pkey') not in REST, 'player: mid-stride when the stop is pressed', 'key %s' % mid.get('pkey'))
-    tail = r2.span(7.0, 9.0)
+    tail = r2.span(9.5, 11.5)
     c(tail and all(x.get('pkey') == 12.0 for x in tail), "player: the walk ends at its last key (11) -> the standing pose within 3 s",
       'keys %s' % sorted(set(x.get('pkey') for x in tail)))
-    moved = [x['pkey'] for x in r2.span(4.0, 7.0)]
+    moved = [x['pkey'] for x in r2.span(6.5, 9.5)]
     c(len(set(moved)) > 4, 'player: the stride finishes (keys move after the stop)', '%s' % moved[:8])
 
 
@@ -2093,36 +2096,85 @@ def aqua_time_to_death(c):
     (Gargoyle, Stormcrow) open fire from ~650 m and kill it in DOS-like time. The engine's controller (0x1001a180 ->
     0x1000f990 -> 0x1002f070 / 0x1000f8f0) sets the torso node's (the first THNG node) whole local rotation every frame -
     pitch, twist, roll 0 - so the walk's relative rotation keys on it (0x1000dec0 -> 0x1000f9d0; the Gargoyle's +-4 deg
-    yaw) never add up and the AI's eye ray (0x10044950: the eye node's world yaw) points along legs + lagged twist. The
-    port had added the keys to the torso: the Gargoyle's ray swung +-4 deg, missing at range, and the player lived on
-    (DOS edition, 9 AI seeds: median 70 s, three > 100 s). DOSBox: first damage ~13.5 s (a PPC at ~650 m: RT front plus
-    the PPC impact's area damage 0x10046700 on every location), death 33 / 33 / 44 / 44 / 45.5 / 50 / 52.5 s (7 runs);
-    the port now 29-60 s, mean 44 (9 seeds). Fire gate (0x100231a0: |bearing off the legs - lagged twist| < 10 deg,
-    rand(max(skill, 1) + 1) == 0 every r x 22 ticks), twist servo (0.6 s AI / 0.2 s player, 0x100190d0) and manoeuvres
-    unchanged (they match DOS 0x2e860 / 0x266e0 / 0x2c880)"""
-    r = c.run(secs=60, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
-              env={'MW2_AI_AIM_TRACE': '1', 'MW2_AI_SEED': '3'})
-    hits = [float(l.split()[1]) for l in r.out.splitlines() if l.startswith('plhit ')]
-    c(hits and 11.0 <= hits[0] <= 17.0, 'first hit at ~13 s from ~650 m (DOSBox ~13.5 s)', '%s' % hits[:3])
-    dead = [s['t'] for s in r.states if s.get('dead')]
-    # seed 3 (the AI's throttles in the DOS integers, 0x228d0): killed at 33 s by a critical with armour left (40 s with the
-    # 3Dfx floats - the outcome is chaotic in such details). 2026-10-19: G1 (AI reverse waits for the reverse walk) and
-    # G2 (shot unit test sphere-only, 0x100103e0) both move it; window re-measured after the merge
-    c(dead and 29.0 <= dead[0] <= 60.0, 'dead within 29-60 s (DOSBox 33-52.5 s, mean 43)', '%s' % (dead[:1] or 'alive at 60 s'))
-    pre = r.before((dead[0] if dead else 60.0) - 1.0)
-    arm = [float(x) for x in str(pre.get('parmor', '')).split(',') if x]
-    full = [float(x) for x in str(r.at(1.0).get('parmor', '')).split(',') if x]
-    c(len(arm) == 8 and len(full) == 8 and all(a < f for a, f in zip(arm, full)),
-      'every location has lost a little (area damage of the PPC impacts, 0x10046700)', '%s -> %s' % (full, arm))
-    by_hit = 'PLAYER DESTROYED' in r.out   # else a critical (ammunition, engine) ended it with armour left
-    # DOSBox H T A L: one side torso and the CT take every hit, the other side torso none - every shot enters the torso
-    # piece's sphere first (group 3), DOS spreads it to RT / CT (rand(2)); the rest takes only the area damage
-    c(not by_hit or (len(arm) == 8 and arm[1] < full[1] * 0.5 and arm[2] < full[2] * 0.5 and
-                     all(arm[k] > full[k] * 0.75 for k in (3, 4, 5, 6, 7))),
-      'RT and CT shot down, LT / arms / legs only grazed by area damage (DOS: CT hits to RT / CT)', '%s' % arm)
-    c(by_hit or (len(arm) == 8 and arm[2] < full[2]), 'a critical ended it: the CT armour struck', '%s' % arm)
-    aim = [l.split() for l in r.out.splitlines() if l.startswith('aiaim ')]
-    c(aim and all(abs(float(f[19]) - float(f[21])) < 0.3 for f in aim), 'every AI aim ray along legs + lagged twist (no torso sway; the hips\' carried offsets)')
+    yaw) never add up and the AI's eye ray (0x10044950: the eye node's world yaw) points along legs + lagged twist.
+    The AI fires through its trigger (controller +0x25): the weapon step (0x100437a0, run before the AI by 0x1001a180)
+    fires the selected weapon on the press only and on the release moves the selection on (0x10043f80 with 0; DOS
+    0x52080 -> 0x528b0), so an AI fires its weapons in turn - the Stormcrow's UAC/20 one shot in every ~8, not every
+    decision (the port had kept the weapon that fired selected: the Stormcrow emptied its 10 UAC rounds within ~10 s of
+    reaching 400 m and the player died at ~30 s in 9 of 12 seeds). DOSBox (19 runs): death 25-59.4 s (median 45.5), one
+    alive at 90 s; the Stormcrow's UAC sound (MECACAN1) 0-4 times before the player's death (4 video captures).
+    The DOSBox runs fly the install's USERSTAR.BWD mech - a MAD DOG MDG00STD (weapon list LPLAS / MPLAS / LRM20, the
+    H T A L lengths), not the Timber Wolf the port had been compared with - and DOSBox's game clock runs slow when the
+    host is busy (2026-10-20: AQUA, AIs held still, the player at 114 kph readout = 21.2 m/s covered 17.8 m per wall
+    second, k 0.84; 0.93-0.95 on a quieter host), so wall times overstate the game time. 8 runs timed by the
+    Stormcrow's approach (25.7 m/s game, c22 / g like the player's): death 28.6-87.1 game s, median 41; side torso gone
+    ~26 s, CT front armour gone ~33 s (port ~25 / ~30); armour lost by 15 / 21 / 27 s 8 / 70 / 178 (port 16 / 75 / 162).
+    Port (Mad Dog, seeds 1-24): 25-52 s, median 32 - the last CT structure lasts ~1 s against DOS ~6 s (open).
+    2026-10-21 (DOSBox ZMBV captures, emulated = game time; H T A L read per frame): 12 more runs 29.4-77.5 s, median 45;
+    up to ~20 s the H T A L matches the port; with the player's armour x 10 (patched copy, 0x4c7bf) the total armour
+    lost matches too (30 / 40 / 50 s: DOS median 238 / 305 / 367, port 262 / 316 / 365), but the port's CT + RT take
+    more in 20-25 s (72 against 43 points) and, with the Gargoyle's PPC / pulse lasers out of range in both, the
+    Stormcrow's lasers do about twice DOS's damage from 25 s on (by 40 s 147 against 68; UAC/20 shots alike).
+    The cause (2026-10-21, DOSBox with the Gargoyle disarmed - its MEK's ER lasers retyped to ER PPCs and the ER PPC /
+    pulse laser ranges 0 in a copy; the Stormcrow's ER ML given the cannon sound to count its shots): DOS fires the ER
+    ML from ~505 m (21 s, as the port) but those shots miss - the first laser hits come at ~24-29 s (350-400 m); the
+    weapon step (0x100437a0) spawns a projectile (0x10043cc0) with life = table +0x4c less slot +0x10, the volley
+    timer before the frame's ticks (~54 of an interval-60 laser's 60 at 30 fps): the ER ML reaches ~358 m, not 509 m
+    (DOS: ~380 m at its 8-22 fps). Port, the timer kept (seeds 1-24): 24.3-76.5 s, median 43 (was 32); 4 of 24 by 30 s
+    (DOSBox 2 of 20; 12 runs 29.4-77.5 s, median 45)"""
+    ttd, uac, reach = [], [], []
+    for seed in ('1', '2', '3', '4', '5', '6'):
+        r = c.run(suffix='_' + seed, secs=90, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
+                  mech='maddog/mdg00std', env={'MW2_AI_AIM_TRACE': '1', 'MW2_AI_SEED': seed})
+        dead = [s['t'] for s in r.states if s.get('dead')]
+        ttd.append(dead[0] if dead else 999.0)
+        end = dead[0] if dead else 90.0
+        aim = [l.split() for l in r.out.splitlines() if l.startswith('aiaim ')]
+        # the Stormcrow (actor 1): UAC/20 (weapon 19) and ER medium lasers (23) leaving before the player's death
+        e45 = min(end, 45.0)   # DOSBox counted 0-4 UAC sounds before deaths at ~25-60 s
+        uac.append((sum(1 for f in aim if f[3] == '1' and f[5] == '19' and float(f[1]) < e45),
+                    sum(1 for f in aim if f[3] == '1' and f[5] == '23' and float(f[1]) < e45)))
+        # each Stormcrow ER ML hit: the distance (eye to the player) of its last ER ML shot before it
+        ml = [(float(f[1]), math.hypot(float(f[15]) - 127500.0, float(f[17]) - 57000.0) / 100.0) for f in aim
+              if f[3] == '1' and f[5] == '23']
+        for l in r.out.splitlines():
+            if l.startswith('plhit '):
+                f = l.split()
+                if f[3] == '1' and f[5] == '23':
+                    prev = [d for t, d in ml if t <= float(f[1])]
+                    if prev:
+                        reach.append(prev[-1])
+        reach.append(-max([d for t, d in ml if t < 23.0] or [0.0]))   # negative: the farthest shot before 23 s
+        if seed != '3':
+            continue
+        hits = [float(l.split()[1]) for l in r.out.splitlines() if l.startswith('plhit ')]
+        c(hits and 11.0 <= hits[0] <= 17.0, 'first hit at ~13 s from ~650 m (DOSBox ~13.5 s)', '%s' % hits[:3])
+        pre = r.before((dead[0] if dead else 90.0) - 1.0)
+        arm = [float(x) for x in str(pre.get('parmor', '')).split(',') if x]
+        full = [float(x) for x in str(r.at(1.0).get('parmor', '')).split(',') if x]
+        c(len(arm) == 8 and len(full) == 8 and all(a < f for a, f in zip(arm, full)),
+          'every location has lost a little (area damage of the PPC impacts, 0x10046700)', '%s -> %s' % (full, arm))
+        by_hit = 'PLAYER DESTROYED' in r.out   # else a critical (ammunition, engine) ended it with armour left
+        # DOSBox H T A L: one side torso and the CT take every hit, the other side torso none - every shot enters the
+        # torso piece's sphere first (group 3), DOS spreads it to RT / CT (rand(2)); the rest takes only the area damage
+        c(not by_hit or (len(arm) == 8 and arm[1] < full[1] * 0.5 and arm[2] < full[2] * 0.5 and
+                         all(arm[k] > full[k] * 0.75 for k in (3, 6, 7)) and all(arm[k] > full[k] * 0.4 for k in (4, 5))),
+          'RT and CT shot down, LT / legs only grazed by area damage, the arms a few hits close in (DOS: CT hits to RT / CT;'
+          ' DOSBox: arm hits within ~200 m)', '%s' % arm)
+        c(by_hit or (len(arm) == 8 and arm[2] < full[2]), 'a critical ended it: the CT armour struck', '%s' % arm)
+        c(aim and all(abs(float(f[19]) - float(f[21])) < 0.3 for f in aim), 'every AI aim ray along legs + lagged twist (no torso sway; the hips\' carried offsets)')
+    hits_d, far = [d for d in reach if d >= 0], [-d for d in reach if d < 0]
+    c(hits_d and max(hits_d) <= 380.0, 'ER ML hits only from within ~358 m (life 182 less the ~54-tick volley timer, 0x10043cc0)',
+      'farthest %.0f m' % max(hits_d or [0]))
+    c(far and max(far) >= 450.0, 'the Stormcrow fires the ER ML from beyond 450 m (DOSBox: from ~505 m, 21 s) - those miss',
+      '%s' % ['%.0f' % d for d in far])
+    c(all(22.0 <= t <= 90.0 for t in ttd), 'each seed dead within DOSBox\'s range (game time 28.6-87.1 s, 20 timed runs)', '%s' % ttd)
+    st = sorted(ttd)
+    c(36.0 <= (st[2] + st[3]) / 2.0 <= 52.0, 'the median of seeds 1-6 near DOSBox\'s (median 45 of 12 runs, 41 of 8; port seeds 1-24 43)', '%s' % ttd)
+    c(sum(1 for t in ttd if t <= 30.0) <= 2, 'few early deaths (DOSBox 2 of 20 by 30 s)', '%s' % ttd)
+    c(all(u <= 6 and u < m for u, m in uac),
+      'the Stormcrow fires its weapons in turn: few UAC/20 rounds by 45 s (DOSBox 0-4 sounds), lasers outnumber them',
+      '(uac, ermlas) %s' % uac)
 
 
 @sequence
@@ -2138,7 +2190,7 @@ def death_explosion_area_damage(c):
         if near:
             c(set(int(f[5]) for f in area) == set(range(1, 9)), '12 m: area damage on every location', '%d lines' % len(area))
             h = sum(float(f[-1]) for f in area if f[5] == '1')
-            c(1.0 <= h <= 3.5, '12 m: the head ~579 / 512 (half of 579 ticks / 256; more from the wreck\'s later blasts and its ammunition'
+            c(0.5 <= h <= 2.0, '12 m: the head ~579 / 1024 (DOS edition, MW2.EXE 0x517c0: a quarter of 579 ticks / 256 - the 3D editions half; more from the wreck\'s later blasts and its ammunition'
               ' cooking off - the wreck takes the area damage too, x 2 in state 4)', '%.3f' % h)
         else:
             c(not area, '25 m: outside (19.1 + 5.45 m)', '%d lines' % len(area))
@@ -4593,6 +4645,382 @@ def target_nearest_enemy_no_cycle(c):
         cand = [(d, q) for q, d in enumerate(rg) if d >= 0]
         near.append(min(cand)[1] if cand else -1)
     c([g[0] for g in got] == near and 2 in near, 'e from beside the Firemoth: the unarmed trainee, as the nearest', str([(g[0], n) for g, n in zip(got, near)]))
+
+
+@sequence
+def dos_fire_cards_face_camera(c):
+    """the fire / smoke cards (world objects of class 0x10 / 0x60: FIRn_m, SMOn_m - one textured quad, colour 0x7f96..0x7fb8
+    DOS / 0x8f96.. 3D, bank-1 slots 0x96..0xb8). Two engine rules the port lacked: (1) every world object's model is built
+    with its vertices x the OBJ scale (3Dfx 0x10025450 -> 0x100420b0 / 0x10042140, DOS 0x36480 -> 0x4fea0 / 0x4fef0): MARO's
+    cards are 4-6 x their model (FIR1_3 scale 4: 54.88 x 48 m); (2) every frame the camera update turns each card about the
+    vertical to face the eye, yaw = heading(eye - card) (0x1002ea80, DOS 0x39fa0). DOSBox MAROSCN1 at the start: a big
+    orange flame (FIR1_3 0x7f9e, slot 0x9e a9fir201..217) left of the near tan building, over the dark building behind it -
+    the port's DOS look drew nothing there (a 13.7 m card, edge-on and back-facing). Checked in DOSBox with patched data
+    copies: FIR1_3's winding reversed -> no flame; its OBJ yaw +-27 deg -> unchanged; SMO2_2 moved into the street -> the
+    same smoke column in DOSBox and the port"""
+    r = c.run(secs=3.0, mission='MAROSCN1', mech=None, nostart=True, dos_look=True, size='640x480', shots=[(2.8, 'card')],
+              env={'MW2_FACING_LOG': '1'})
+    f = [(n, int(x), int(z), float(ex), float(ez), float(y), int(w), int(h), int(t, 16)) for n, x, z, ex, ez, y, w, h, t in
+         re.findall(r'^FACING (\S+) pos=(-?\d+),(-?\d+) eye=(-?\d+),(-?\d+) yaw=(-?[\d.]+) w=(\d+) h=(\d+) type=(0x[0-9a-f]+)', r.out, re.M)]
+    c(len(f) == 10 and sum(1 for q in f if q[8] == 0x10) == 6 and sum(1 for q in f if q[8] == 0x60) == 4,
+      'MAROWLD1: 6 fire (0x10) and 4 smoke (0x60) cards face the camera', str([(q[0], hex(q[8])) for q in f]))
+    fir = [q for q in f if q[0] == 'FIR1_3']
+    c(fir and fir[0][6] == 5488 and fir[0][7] == 4800, 'FIR1_3 built at its OBJ scale 4: 5488 x 4800 cm (model 1372 x 1200)', str(fir))
+    bad = [(q[0], q[5], round(math.degrees(math.atan2(q[3] - q[1], q[4] - q[2])), 2)) for q in f
+           if abs((q[5] - math.degrees(math.atan2(q[3] - q[1], q[4] - q[2])) + 180) % 360 - 180) > 0.1]
+    c(f and not bad, 'each card: yaw = the heading of (eye - card), from +z towards +x (0x10030120 table)', str(bad or f[:2]))
+    flame = count_px(r.shots['card'], lambda R, G, B: (R > 180) & (G > 60) & (B < 120) & (R - B > 100), (0.60, 0.30, 0.73, 0.62))
+    c(flame > 300, 'DOS look: the flame left of the near building (DOSBox MAROSCN1 x 643-736, y 261-440 of 1024 x 768)', str(flame))
+    r = c.run('_3d', secs=1.0, mission='MAROSCN1', mech=None, nostart=True, env={'MW2_FACING_LOG': '1'})
+    f3 = re.findall(r'^FACING (FIR1_3) .* w=(\d+) h=(\d+)', r.out, re.M)
+    c(len(re.findall(r'^FACING ', r.out, re.M)) == 10 and f3 and f3[0][1:] == ('5488', '4800'), '3D editions: the same cards, scale and facing', str(f3))
+
+
+
+
+@sequence
+def trainees_start_heading_and_probe(c):
+    """ORANSCN1 ("Flame Tongue"): the resting trainees (ORANENS1, formation "pumping") wake when the player comes within
+    650 m of oranGOU1 and go to orangoe1 (table 1 node 2, kind 0x100). Two port differences made them run differently
+    from DOS: (1) a follower's start heading is its slot's yaw as it stands (0x10009990 -> 0x10018dd0 -> 0x10018ec0: only
+    the slot's x / z go through the leader's matrix) - 0 here, the leader -100: the Kitfox and the Firemoth turn RIGHT
+    for their goal at ~108 (DOSBox, unit headings through the kph readout: Kitfox 0 at ~6.5 s, then 54 / 66 / 78 / 87;
+    Firemoth 36..49), the Maddog left (-201 .. -247); (2) the AI avoidance probe's length is the unit's VELOCITY x 0.12987
+    (0x100201c0 -> 0x10030330; DOS 0x2db80), at least 0.3 x 5000 cm - the port had used top speed x throttle, a 40 m probe
+    from a standstill that turned the Maddog away from an object 37 m ahead into a 55 m loop west (DOSBox: it heads off
+    south-east, x 934 -> 955 m, z 117 -> 69 m). Player stood at (110000, 30000) (within the radius from the start)"""
+    env = {'MW2_START': '110000,30000'}
+    runs = {}
+    for a in (0, 1, 2):
+        runs[a] = c.run('_%d' % a, secs=16, mission='ORANSCN1', dump='/0.25', env=dict(env, MW2_WATCH_ACTOR=a))
+    hd = {a: runs[a].at(3.0).get('w_hd') for a in runs}
+    c(hd[0] == -100.0 and hd[1] == 0.0 and hd[2] == 0.0, 'start headings: the leader -100 (nav), the followers 0 (their slot yaw)', str(hd))
+    k9, f9 = runs[1].at(9.0).get('w_hd', 999), runs[2].at(9.0).get('w_hd', 999)
+    c(20 < k9 < 110 and 20 < f9 < 110, 'Kitfox and Firemoth turn right (through north) for their goal', 'Kitfox %s Firemoth %s' % (k9, f9))
+    m = runs[0].span(5.0, 16.0)
+    minx = min(x['w_x'] for x in m) if m else 0
+    c(m and minx > 93500 - 1000, 'the Maddog does not loop west (no early avoidance turn from a standstill)', 'min x %s' % minx)
+    c(m and m[-1]['w_x'] > 100000 and m[-1]['w_z'] < 6000, 'and heads off east-south-east', 'end %s,%s' % (m[-1]['w_x'], m[-1]['w_z']) if m else '')
+    # the trainees seen from Nav Alpha (agent TG's DOSBox: Firemoth 307 m nearest, Maddog 354 m; later Maddog 378, Kitfox
+    # 445, Firemoth 523 - the Firemoth passes nearest, then outruns the others)
+    keys = [(10, 'a'), (11, '0'), (40, '1')]
+    r = c.run('_alpha', secs=60, mission='ORANSCN1', keys=keys, dump='/1')
+    rows = []
+    for t in range(42, 61):
+        rg = [float(x) for x in str(r.at(t + 0.05).get('erng', '-1;-1;-1')).split(';')[:3]]
+        rows.append((t, rg))
+    fnear = [t for t, g in rows if min(g) >= 0 and g[2] < g[0] and g[2] < g[1]]
+    late = rows[-1][1]
+    c(fnear, 'the Firemoth is the nearest trainee for a while', str([(t, [round(x / 100) for x in g]) for t, g in rows[::3]]))
+    c(late[0] < late[1] < late[2], 'then Maddog < Kitfox < Firemoth', str([round(x / 100) for x in late]))
+
+
+@sequence
+def ai_probe_dos_broad_phase(c):
+    """the DOS AI's avoidance probe has the DOS broad-phase carry quirk too (one avoidance function 0x2db80 for the AI and
+    the player: 0x2df30 -> 0x1c3f0 -> 0x3a745): a thing is seen from range only when its centre lies ahead in x AND z of
+    the probe. DOS look only; the 3D editions keep the float broad phase (0x100201c0 -> 0x10029db0). SILVSCN1's Falcon
+    Direwolf walks west (heading -96.9) past an object centred at (-114, 2402): the 3D editions' probe sees it ~39 m off
+    and turns left round it; DOSBox (unit 5's x / z / heading through the kph readout): heading -96 / -97 throughout,
+    x 69 -> -18 -> -88 m with z 21 -> 9 -> 0 m - straight past, as the port's DOS look"""
+    env = {'MW2_WATCH_ACTOR': '4'}
+    d = c.run('_dos', secs=27, mission='SILVSCN1', dump='/0.25', env=env, dos_look=True)
+    e = c.run('_3d', secs=27, mission='SILVSCN1', dump='/0.25', env=env)
+    dh = [x.get('w_hd') for x in d.span(16.0, 27.0)]
+    eh = [x.get('w_hd') for x in e.span(16.0, 27.0)]
+    c(dh and all(-99.0 < h < -94.0 for h in dh), 'DOS look: straight on at ~-97 (no early turn)', '%s..%s' % (min(dh), max(dh)) if dh else '')
+    c(eh and min(eh) < -110.0, '3D look: turns left round the object', 'min %s' % (min(eh) if eh else None))
+    end = d.at(26.5)
+    c(end.get('w_x', 0) < -4000 and 300 < end.get('w_z', 0) < 1500, 'DOS look: past it on its line (DOSBox x -18 m / z 9 m at ~23-25 s)',
+      '%s,%s' % (end.get('w_x'), end.get('w_z')))
+
+
+@sequence
+def hud_layout_wide(c):
+    """port (user request 2026-10-21): hud_layout=wide (the default) on a window wider than 4:3 moves the left-hand
+    instruments (radar, altitude tape, target display, AUTOPILOT) to the window's left edge and the right-hand ones
+    (weapon list, damage display / viewport, throttle bar, kph) to its right edge by the side margin - size and distance
+    from the edge as from the 4:3 area's edge -; the compass, reticle and bottom bars stay centred. original: the 4:3
+    layout centred. A 4:3 window: no change. The GRAPHICS page's HUD layout item switches it at once and keeps it in
+    mw2port.cfg (MW2_HUD_RECTS: the elements' rectangles in window pixels)"""
+    def rects(r, layout=None):
+        blocks, cur = [], None
+        for ln in r.out.splitlines():
+            m = re.match(r'^HUDRECTS t=([\d.]+) window (\d+)x(\d+) layout (\w+)', ln)
+            if m:
+                cur = {'_t': float(m.group(1)), '_layout': m.group(4)}
+                blocks.append(cur)
+                continue
+            m = re.match(r'^HUDRECT (\w+) (-?\d) (-?\d+) (-?\d+) (-?\d+) (-?\d+)', ln)
+            if m and cur is not None:
+                cur[m.group(1)] = (int(m.group(2)),) + tuple(int(m.group(k)) for k in range(3, 7))
+        return [b for b in blocks if layout is None or b['_layout'] == layout]
+    got = {}
+    for size in ('1920x1080', '2560x1080', '1440x1080'):
+        for lay in ('wide', 'original'):
+            r = c.run('_%s_%s' % (size, lay), secs=2, size=size, nostart=True,
+                      env={'MW2_HUD_RECTS': '1', 'MW2_HUD_LAYOUT': lay, 'MW2_TEST_TARGET': '0'})
+            b = rects(r)
+            c(b and b[0]['_layout'] == lay, '%s %s: HUD rectangles dumped' % (size, lay), str(b[:1]))
+            got[(size, lay)] = b[0] if b else {}
+    for size, margin in (('1920x1080', 240), ('2560x1080', 560), ('1440x1080', 0)):
+        w, o = got[(size, 'wide')], got[(size, 'original')]
+        names = [n for n in o if not n.startswith('_')]
+        c(len(names) >= 12 and set(names) == set(k for k in w if not k.startswith('_')), '%s: the same elements in both layouts' % size, str(names))
+        bad = []
+        for n in names:
+            side, ox0, oy0, ox1, oy1 = o[n]
+            _, wx0, wy0, wx1, wy1 = w[n]
+            want = side * margin
+            if abs((wx0 - ox0) - want) > 1 or abs((wx1 - ox1) - want) > 1 or wy0 != oy0 or wy1 != oy1:
+                bad.append((n, o[n], w[n]))
+        c(not bad, '%s: left-hand elements %d px left, right-hand %d px right, size and height kept, centre ones unmoved' % (size, margin, margin), str(bad))
+    o = got[('1920x1080', 'original')]
+    c(o and abs((o['compass'][1] + o['compass'][3]) / 2.0 - 960) <= 2 and abs(o['reticle'][1] - 960) <= 1, '16:9: compass and reticle centred', str(o.get('compass')))
+    w = got[('1920x1080', 'wide')]
+    c(w and abs(w['radar'][1] - got[('1440x1080', 'wide')]['radar'][1]) <= 1 and
+      abs((1920 - w['throttle'][3]) - (1440 - got[('1440x1080', 'wide')]['throttle'][3])) <= 1,
+      '16:9 wide: radar as far from the left edge and throttle bar from the right edge as at 4:3', '%s %s' % (w.get('radar'), w.get('throttle')))
+    # the GRAPHICS page: Esc, 2 (Graphics), 5 (HUD layout: Wide -> Original), 0 (Accept), Esc (close)
+    r = c.run('_menu', secs=6, size='1920x1080', nostart=True, keys=[(1, 'esc'), (1.5, '2'), (2, '5'), (2.5, '0'), (3, 'esc')],
+              env={'MW2_HUD_RECTS': '1', 'MW2_HUD_LAYOUT': 'wide'})
+    b = rects(r)
+    lays = [(x['_t'], x['_layout']) for x in b]
+    c(b and b[0]['_layout'] == 'wide' and b[-1]['_layout'] == 'original', 'HUD layout on the GRAPHICS page: wide, then original once accepted', str(lays))
+    if b and b[-1]['_layout'] == 'original':
+        c(b[-1]['radar'][1:] == got[('1920x1080', 'original')]['radar'][1:], 'switched: the radar back in the 4:3 area', str(b[-1]['radar']))
+    with open(os.path.join(OUT, c.name + '_menu', 'mw2port.cfg')) as f:
+        cfg = f.read()
+    c(re.search(r'^hud_layout=original$', cfg, re.M) is not None, 'kept in mw2port.cfg (hud_layout=original)', cfg.replace('\n', ' | '))
+
+
+
+
+@sequence
+def htal_bar_scale(c):
+    """H T A L (F6; engine 0x1001b230 / 0x1001b890, DOS 0x2f190 / 0x2f790): every bar is armour x half the lower window's
+    height (0x8000 of its 80 rows: 40 at 640x480) / the mech's largest STARTING FRONT armour (0x1024c620 / DOS 0x96664),
+    truncated, drawn as an inclusive line run (+1 row); the bars' x left to right head, 3, 2, 1, 5, 4, 7, 6 (0x1007c340..).
+    DOSBox AQUASCN1, the Mad Dog (largest front 23 x 4, CT / legs), 1024x768: H 26, side torsos / arms 45, CT / legs 65,
+    rears 20 px; an ER PPC (17) on the CT -12 px. The port had drawn 1.125 units per MEK point (H 16 px) with every pair
+    mirrored. Here two ER PPC hits on location 2 (1-based, the CT's DOS spread partner) at 9.3 s: the RIGHT torso pair
+    keeps 45 px, its green part 64 - 34 = 30 x 40 / 92 -> 13 + 1 rows = 21 px"""
+    r = c.run(secs=10.5, throttle=0, twist=0, mission='AQUASCN1', edition='dos', mech='maddog/mdg00std', size='1024x768',
+              keys=[(9.0, 'f6')], shots=[(10.2, 'h')], env={'MW2_TEST_PHIT': '9.3:2:21:2'})
+    w, h, px = ppm(r.shots['h'])
+    def bar(x):   # green rows, then yellow / red rows, from the hanging line (y 600 = 375.6 x 1.6) down
+        g = y = 0
+        for yy in range(598, 680):
+            o = (yy * w + x) * 3
+            R, G, B = px[o], px[o + 1], px[o + 2]
+            if G > 100 and R < 100: g += 1
+            elif R > 150 and G > 100 and B < 80 or R > 150 and G < 80: y += 1
+        return g, y
+    cols = {'H': 856, 'LTf': 871, 'LTr': 877, 'CTf': 887, 'CTr': 893, 'RTf': 903, 'RTr': 909, 'LA': 926, 'RA': 942, 'LL': 962, 'RL': 978}
+    b = {k: bar(x) for k, x in cols.items()}
+    tot = {k: g + y for k, (g, y) in b.items()}
+    c(abs(tot['H'] - 26) <= 1 and abs(tot['CTf'] - 65) <= 1 and abs(tot['LL'] - 65) <= 1 and abs(tot['LTf'] - 45) <= 1
+      and abs(tot['LA'] - 45) <= 1 and abs(tot['CTr'] - 20) <= 1, 'full lengths as DOSBox (H 26, CT / legs 65, sides / arms 45, rears 20)', str(tot))
+    c(b['LTf'][1] == 0 and b['CTf'][1] == 0, 'the left pair and the CT untouched', str(b))
+    c(abs(b['RTf'][0] - 21) <= 2 and abs(tot['RTf'] - 45) <= 1, 'location 2 hit: the RIGHT pair green 64 - 34 = 30 x 40 / 92 -> 21 px, the rest yellow', str(b['RTf']))
+
+
+
+@sequence
+def walk_keys_hold_airborne(c):
+    """user (2026-10-20): "when jump jetting in the air ... the walking animations continue to happen". The engine holds
+    the walk keys while the jets fire with fuel left (0x1001a180 0x1001a688 clears object +0x80 bit 0) and while the feet
+    end the frame more than the centre height c[0x33] over the ground (0x10019310 0x10019df2; DOS 0x26990 / 0x27785 the
+    same); the key player 0x1000dec0 then only sets the bit again: key and pose held, the frame's time dropped, no key
+    starts (no footstep), and it plays on after touch-down. DOSBox HEIDSCN1 (HEIDUSER Nova), walking at 6, J held 1 s,
+    side camera: the legs keep one pose from the first jet frame to touch-down (21 m up), then walk on. Here the Nova in
+    ORANSCN1 walking at 6, J held 1 s; and YELL's disarmed Jenner (actor 2) jumping on its own (ai_jump_glide)"""
+    r = c.run(secs=UP + 12, keys=[(UP, '6')], hold=[(UP + 4, UP + 5, 'j')], dump='/0.05', mission='ORANSCN1',
+              mech='nova/nva00std', env={'MW2_SFX_LOG': '1'})
+    walk = [s['pkey'] for s in r.span(UP + 2, UP + 4)]
+    c(len(set(walk)) > 10, 'walking: the keys play', '%d poses' % len(set(walk)))
+    held = [s for s in r.span(UP + 4.1, UP + 12) if s.get('aheld')]
+    air = [s for s in r.span(UP + 4.1, UP + 12) if s['y'] - s['gnd'] > 600]
+    c(air and all(s.get('aheld') for s in air), 'airborne above the centre height: held every frame', '%d / %d' % (len(held), len(air)))
+    jet = [s for s in r.span(UP + 4.1, UP + 4.9)]
+    c(jet and all(s.get('aheld') for s in jet), 'jets firing (low down too): held', str([round(s['y'] - s['gnd']) for s in jet[:4]]))
+    if held:
+        keys = set(round(s['pkey'], 3) for s in held)
+        c(len(keys) <= 2, 'one pose all through the hold (the frame it begins at most)', str(sorted(keys)))
+        t0, t1 = held[0]['t'], held[-1]['t']
+        steps = [float(m.group(1)) for m in re.finditer(r'SFXLOG (-?[\d.]+) snd 214\b', r.out)]
+        c(steps and not [t for t in steps if t0 + 0.06 < t < t1], 'no footstep in the air', '%s in %.2f..%.2f' % (steps, t0, t1))
+        after = [s['pkey'] for s in r.span(t1 + 0.3, t1 + 2.5)]
+        c(len(set(after)) > 10, 'landed: the keys play on', '%d poses' % len(set(after)))
+        c(steps and [t for t in steps if t > t1], 'landed: footsteps again', str(steps[-3:]))
+        low = [s for s in r.span(t1 - 1, t1 + 0.3) if not s.get('aheld') and 1 < s['y'] - s['gnd'] <= 500]
+        c(all(not s.get('aheld') for s in low), 'falling within the centre height, jets off: playing', '%d frames' % len(low))
+    env = {'MW2_TEST_DISARM': '12:2', 'MW2_START': '330000,262000', 'MW2_START_HEADING': 180, 'MW2_TEST_RNG': '11.9:1',
+           'MW2_TEST_WATCH': '1:2', 'MW2_ANIM_TRACE': '2'}
+    a = c.run('_ai', secs=30, env=env)
+    rows = [(float(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4)), float(m.group(5)), float(m.group(6)))
+            for m in re.finditer(r'^anim ([\d.]+)s actor 2 held (\d) vy \S+ fuel \S+ jet (-?\d) y (-?[\d.]+) ground (-?[\d.]+) throttle \S+ key (-?[\d.]+)', a.out, re.M)]
+    up = [x for x in rows if x[3] - x[4] > 600]
+    c(up and all(x[1] for x in up), 'AI: held above its centre height', '%d rows' % len(up))
+    runs, cur = [], []
+    for x in rows:
+        if x[1]: cur.append(x[5])
+        elif cur: runs.append(cur); cur = []
+    c(runs and all(len(set(rn[1:])) <= 1 for rn in runs), 'AI: one pose through each hold', str([sorted(set(rn))[:3] for rn in runs][:4]))
+
+
+@sequence
+def dos_sky_banded_smooth(c):
+    """port option (user request 2026-10-21) dos_sky=banded | smooth, the DOS renderer only. banded (default) = MW2.EXE:
+    the haze band (0x3c000 -> 0x59e77 with dither 0x8000) in the palette's 0xE0-0xEE, each step a flat band and a
+    1-pixel checkerboard of it and the next - DOSBox RUSTSCN1 / YELLSCN1 at 1024 x 768 (start pose) matches the port row
+    for row (docs: /tmp/SK captures); smooth: the same colours blended - no checkerboard, a monotonic gradient of many
+    colours, each flat band's middle row the banded colour; both follow the palette (light amplification's INFRARED slot).
+    The GRAPHICS page's first row in a DOS mission is DOS sky (Banded / Smooth), kept in mw2port.cfg (dos_sky=).
+    Since session 16 (GD) the option is dos_shading=dithered | smooth (DOS shading: Dithered / Smooth) and covers the
+    Gouraud polygons too (dos_shading_dither); dos_sky= is still read"""
+    import numpy as np
+    def sky(path):   # the sky between the cockpit struts: x 440-600, rows 170-360 of 1024 x 768 (RUST: all band)
+        if not path or not os.path.exists(path):
+            return None
+        w, h, px = ppm(path)
+        return np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[170:360, 440:600].astype(np.int32)
+    def checker_rows(a):   # rows of exactly two colours alternating pixel by pixel
+        n = 0
+        for row in a:
+            k = np.unique(row.reshape(-1, 3), axis=0)
+            if len(k) == 2 and (row[0::2] == row[0]).all() and (row[1::2] == row[1]).all() and (row[0] != row[1]).any():
+                n += 1
+        return n
+    def flat_mids(a):   # the middle row of each run of 4+ uniform rows
+        uni = [(row == row[0]).all() for row in a]
+        mids, k = [], 0
+        while k < len(uni):
+            if uni[k]:
+                j = k
+                while j < len(uni) and uni[j] and (a[j][0] == a[k][0]).all():
+                    j += 1
+                if j - k >= 4:
+                    mids.append((k + j) // 2)
+                k = j
+            else:
+                k += 1
+        return mids
+    base = dict(secs=3, throttle=0, nostart=True, mission='RUSTSCN1', size='1024x768', dos_look=True)
+    res = {}
+    for mode, extra in (('banded', {}), ('smooth', {'MW2_DOS_SKY': 'smooth'}), ('banded_amp', {'MW2_VISION': '1'}),
+                        ('smooth_amp', {'MW2_DOS_SKY': 'smooth', 'MW2_VISION': '1'})):
+        r = c.run('_' + mode, shots=[(2.6, 'sky')], env=extra, **base)
+        res[mode] = sky(r.shots.get('sky'))
+        c(res[mode] is not None, mode + ': picture')
+    if any(v is None for v in res.values()):
+        return
+    for tag in ('', '_amp'):
+        b, s = res['banded' + tag], res['smooth' + tag]
+        nb = len(np.unique(b.reshape(-1, 3), axis=0))
+        ns = len(np.unique(s.reshape(-1, 3), axis=0))
+        cb, cs = checker_rows(b), checker_rows(s)
+        c(3 <= nb <= 15, 'banded%s: the palette steps only (at most 15 colours)' % tag, '%d colours' % nb)
+        c(cb >= 40, 'banded%s: the checkerboard rows between the flat bands (as DOS)' % tag, '%d rows' % cb)
+        c(cs == 0 and all((row == row[0]).all() for row in s), 'smooth%s: no checkerboard, every row one colour' % tag, '%d checker rows' % cs)
+        c(ns >= 3 * nb, 'smooth%s: many more colours than the steps' % tag, '%d vs %d' % (ns, nb))
+        col = s[:, 80, :]
+        lum = col[:, 0] * 3 + col[:, 1] * 6 + col[:, 2]
+        d = np.diff(lum)
+        mono = (d >= 0).all() or (d <= 0).all()
+        if not mono:   # a hue change with level luminance: per channel, each channel one way
+            mono = all((np.diff(col[:, k]) >= 0).all() or (np.diff(col[:, k]) <= 0).all() for k in range(3))
+        c(mono, 'smooth%s: a monotonic gradient down the band' % tag, str(col[::20].tolist()))
+        mids = flat_mids(b)
+        bad = [(m, b[m, 0].tolist(), s[m, 0].tolist()) for m in mids if np.abs(b[m, 0] - s[m, 0]).max() > 3]
+        c(len(mids) >= 4 and not bad, 'banded%s / smooth: the same colour in the middle of each flat band' % tag, '%d bands, off: %s' % (len(mids), bad[:3]))
+    g, r_ = res['smooth_amp'][..., 1].mean(), res['smooth_amp'][..., 0].mean()
+    c(g > r_ and res['smooth'][..., 0].mean() > res['smooth'][..., 1].mean(), 'smooth follows the palette: light amplification turns the sky green',
+      'amp R %.0f G %.0f' % (r_, g))
+    # the GRAPHICS page in a DOS mission: Esc, 2 (Graphics), 1 (DOS shading: Dithered -> Smooth), 0 (Accept), Esc (close)
+    r = c.run('_menu', shots=[(0.8, 'before'), (4.5, 'after')], keys=[(1, 'esc'), (1.5, '2'), (2, '1'), (2.5, '0'), (3, 'esc')],
+              **dict(base, secs=5))
+    a0, a1 = sky(r.shots.get('before')), sky(r.shots.get('after'))
+    c(a0 is not None and checker_rows(a0) >= 40, 'menu: banded before', str(checker_rows(a0) if a0 is not None else None))
+    c(a1 is not None and checker_rows(a1) == 0 and len(np.unique(a1.reshape(-1, 3), axis=0)) > 30, 'menu: smooth once accepted',
+      str(len(np.unique(a1.reshape(-1, 3), axis=0)) if a1 is not None else None))
+    with open(os.path.join(OUT, c.name + '_menu', 'mw2port.cfg')) as f:
+        cfg = f.read()
+    c(re.search(r'^dos_shading=smooth$', cfg, re.M) is not None, 'kept in mw2port.cfg (dos_shading=smooth)', cfg.replace('\n', ' | '))
+
+
+
+@sequence
+def ai_fire_line_units(c):
+    """the AI's fire decision (0x100231a0 -> 0x10015090, pilots below level 5) tests the line from the unit to its target
+    against the whole collision list (0x100103e0, the unit itself skipped): units and world objects together, and only
+    the target struck first lets it fire (object +2 bit 0x100 / controller +0xdc bit 0x200: the piece's owner +0x14 is
+    the target) - the port had tested the world only, so an AI fired through a friend in its way. AQUASCN1 before the
+    attackers move off (~7 s): the Stormcrow (106500, -20000) stands 35 m west of the Gargoyle (110000, -20000); with
+    the player 400 m east on that line the Gargoyle stands in the Stormcrow's line, not off it"""
+    r = c.run('_line', secs=4, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
+              env={'MW2_START': '150000,-20000', 'MW2_TEST_FIRELINE': '3:0,3.1:1'})
+    fl = dict((int(m.group(1)), int(m.group(2))) for m in re.finditer(r'^fireline (\d+) (-?\d+)', r.out, re.M))
+    c(fl.get(0) == 1, 'the Gargoyle (in front): its line to the player clear', str(fl))
+    c(fl.get(1) == 0, 'the Stormcrow behind it: the Gargoyle struck first - no fire', str(fl))
+    r = c.run('_off', secs=4, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
+              env={'MW2_START': '150000,-8000', 'MW2_TEST_FIRELINE': '3:0,3.1:1'})
+    fl = dict((int(m.group(1)), int(m.group(2))) for m in re.finditer(r'^fireline (\d+) (-?\d+)', r.out, re.M))
+    c(fl.get(0) == 1 and fl.get(1) == 1, 'the player 120 m off that line: both clear', str(fl))
+
+@sequence
+def dos_shading_dither(c):
+    """the DOS renderer's Gouraud polygons dithered as MW2.EXE 0x59e77 fills them (session 16, agent GD): vertices
+    rounded to whole pixels (0x3dfb7), each edge from its upper vertex's x / c + 0x8000, the span stepped per pixel pair,
+    the even pixel (from the span's left end) at + 0x7fff, the odd at + 0, swapped every row from the polygon's top
+    (0x3bd6b / 0x5a1d0..0x5a320): a 1-pixel checkerboard of n / n + 1 where the shade's fraction is under 0.5, flat
+    n + 1 above, its phase per polygon. DOSBox RUSTSCN1 1024 x 768 at rest (docs/reference/dos_shading_rust_dosbox.png:
+    the cockpit's top bar and strut tops, x 395-630, rows 100-170): the port before drew them undithered and darker -
+    22 % of the bar's pixels as DOS, now 98 % (the rest: the struts' edges a pixel off). dos_shading=smooth (the port's
+    option, not the original): the same mean, blended - no checkerboard"""
+    from PIL import Image
+    import numpy as np
+    ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_shading_rust_dosbox.png')).convert('RGB')).astype(np.int32)
+    def crop(r, name, box=(100, 170, 395, 630)):
+        path = r.shots.get(name)
+        if not path or not os.path.exists(path):
+            return None
+        w, h, px = ppm(path)
+        return np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[box[0]:box[1], box[2]:box[3]].astype(np.int32)
+    def checker_runs(a):   # pixels in a run of 6+ that alternate between two colours pixel by pixel, n / n+1 rows apart too
+        n = 0
+        for row in a:
+            same2 = (row[2:] == row[:-2]).all(1) & (row[1:-1] != row[:-2]).any(1)
+            run = 0
+            for v in same2:
+                run = run + 1 if v else 0
+                n += run >= 4
+        return n
+    base = dict(secs=3, throttle=0, nostart=True, mission='RUSTSCN1', mech=None, size='1024x768', dos_look=True)
+    rd = c.run('_dithered', shots=[(2.6, 'cp')], **base)
+    rs = c.run('_smooth', shots=[(2.6, 'cp')], env={'MW2_DOS_SHADING': 'smooth'}, **base)
+    a, b = crop(rd, 'cp'), crop(rs, 'cp')
+    c(a is not None and b is not None, 'pictures')
+    if a is None or b is None:
+        return
+    bar = (slice(12, 66), slice(25, 205))   # the top bar: rows 112-166, x 420-600
+    agree_bar = (a[bar] == ref[bar]).all(2).mean()
+    agree_all = (a == ref).all(2).mean()
+    c(agree_bar >= 0.95, 'the top bar pixel for pixel as DOSBox (dither, phase, rounding)', '%.4f (before: 0.22)' % agree_bar)
+    c(agree_all >= 0.90, 'bar and strut tops as DOSBox', '%.4f (before: 0.39)' % agree_all)
+    ma, mr = a[bar].reshape(-1, 3).mean(0), ref[bar].reshape(-1, 3).mean(0)
+    c(np.abs(ma - mr).max() <= 0.5, 'the bar\'s mean colour as DOS (was a palette step darker)', '%s vs %s' % (ma.round(1).tolist(), mr.round(1).tolist()))
+    nck = checker_runs(a)
+    c(nck >= 3000, 'checkerboards in the cockpit (1-pixel, two colours)', '%d (DOSBox 4969; before 1100: the sky band only)' % nck)
+    nsm = checker_runs(b)
+    ms = b[bar].reshape(-1, 3).mean(0)
+    c(nsm == 0, 'smooth: no checkerboard', str(nsm))
+    c(np.abs(ms - ma).max() <= 2.0, 'smooth: the dither\'s mean', '%s vs %s' % (ms.round(1).tolist(), ma.round(1).tolist()))
+    # any size: the checker per output pixel (640 x 480: the bar at half the size, still 1-pixel cells)
+    r6 = c.run('_640', shots=[(2.6, 'cp')], **dict(base, size='640x480'))
+    a6 = crop(r6, 'cp', (72, 102, 265, 372))   # (the bar: 1224 run pixels; before 0)
+    c(a6 is not None and checker_runs(a6) >= 500, '640 x 480: 1-pixel checkerboards in the bar', str(checker_runs(a6) if a6 is not None else None))
+
 
 def main():
     global GLVIEW, VERBOSE

@@ -41,6 +41,9 @@ FILE *mw2_fmemopen(void *buf, size_t size, const char *mode);
 
 /* this executable's full path (argv[0] is unreliable when started from Explorer) */
 void mw2_exe_path(char *out, size_t n);
+/* the shell's folder browser (SHBrowseForFolderW): 1 a folder chosen (out, in the ANSI code page like the port's other
+ * paths), 0 cancelled */
+int mw2_pick_folder(const char *title, char *out, size_t n);
 
 #endif
 #endif

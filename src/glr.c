@@ -43,6 +43,7 @@ typedef struct {
 
 typedef struct {
     GLuint  vao, vbo;
+    GLuint  tbo;       /* the DOS look: vbo as a buffer texture (R32F), so a Gouraud fragment can read its whole polygon */
     GLuint  sph_vbo;   /* per vertex: its object's bounding sphere (GL centre, radius) for the view-distance cull */
     GLuint  tic_vbo;   /* per vertex: the Titanium CPU colour (rgb) and its use (a: 0 none, 1 x the texel (lit), 2 the
                         * colour (a palette shade), 3 kind 2: the colour, drawn only with its textures off) */
@@ -82,7 +83,7 @@ struct glr {
     /* the DOS edition */
     int    dos;
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
-    GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir;
+    GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir, u_dos_vtx, u_dos_smooth, u_vpo;
     GLint  u_far, u_vp;
     /* the palette fade of the 3D editions (0x1002ad50): textured polygons in a flat colour, untextured ones toward a
      * target palette by their palette index (glr_set_world_fade) */
@@ -91,7 +92,7 @@ struct glr {
     int    dsign;                           /* glr_set_damage_shade */
     float  tint[3], pfade;
     int    tint_on;
-    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_tifog, u_blend;
+    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_hz_x, u_hz_smooth, u_tifog, u_blend;
     /* the Titanium edition's sky dome (glr_set_skydome): triangles (pos, texel uv / (size - 1), slot) by slot */
     GLuint dome_vao, dome_vbo, dome_tex[GLR_SLOTS];
     float *dome_v;                          /* x, y, z, u, v per vertex (game coordinates, GL z) */
@@ -125,6 +126,7 @@ static const char *VS =
     "out vec3 v_normal; out vec2 v_uv; out vec3 v_color; flat out int v_texsel; out vec3 v_viewpos; out vec3 v_world;\n"
     "out vec3 v_bary; flat out int v_emask, v_bb, v_tif, v_dnib; flat out vec4 v_sph;\n"
     "out vec3 v_tic; flat out int v_ticm;\n"
+    "noperspective out vec2 v_gs;\n"   /* the DOS Gouraud shade (a_uv), screen-linear as MW2.EXE 0x59e77 steps it */
     "void main() {\n"
     "  int e = int(a_edge + 0.5);\n"
     "  v_dnib = e / 2048; e -= v_dnib * 2048;\n"   /* a mech location's damage nibble (glr_set_damage_shade) */
@@ -172,7 +174,7 @@ static const char *VS =
     "  }\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
     "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(floor(a_texsel + 0.5)); v_sph = a_sphere;\n"
-    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5);\n"
+    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5); v_gs = a_uv;\n"
     "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
     "  v_bary = vec3(corner == 0 ? 1.0 : 0.0, corner == 1 ? 1.0 : 0.0, corner == 2 ? 1.0 : 0.0); v_emask = (e / 3) | (hi << 3);\n"
     "}\n";
@@ -224,19 +226,103 @@ static const char *FS =
     "uniform mat4 u_view;\n"
     "uniform vec3 u_tint; uniform float u_pfade; uniform sampler2D u_ptab; uniform int u_notex, u_tinton, u_dsign;\n"
     "uniform int u_dos, u_dos_dir; uniform sampler2D u_dos_tab; uniform vec3 u_dos_lpos; uniform float u_dos_amb, u_dos_fogdist;\n"
+    /* the DOS Gouraud fill (glr_dos_gouraud below): the layer's vertices (13 floats each) as a buffer texture, the MVP, the
+     * viewport (origin, size); u_dos_smooth: the port's dos_shading=smooth */
+    "uniform samplerBuffer u_dos_vtx; uniform mat4 u_mvp; uniform vec2 u_vp, u_vpo; uniform int u_dos_smooth;\n"
+    "noperspective in vec2 v_gs;\n"
     "uniform float u_alpha; uniform int u_mga_lod;\n"
     /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), w the camera's
      * factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
     "uniform vec4 u_tifog; uniform int u_blend;\n"
     /* the DOS horizon fill (MW2.EXE 0x3c000): a pixel is sky when its view ray's world y >= 0 - ray = R (sx - cx) / fx +
-     * U (cy - sy) / fy + F; above the line a haze band of u_hz_band pixels fades from 0xEE (on the line) to 0xE0 */
-    "uniform int u_horizon; uniform vec3 u_hz_r, u_hz_u, u_hz_f; uniform vec4 u_hz_c; uniform float u_hz_band;\n"
+     * U (cy - sy) / fy + F; above the line a haze band of u_hz_band pixels fades from 0xEE (on the line) to 0xE0;
+     * u_hz_x: the window's left and right x; u_hz_smooth: the port's dos_sky=smooth (the band's colours blended) */
+    "uniform int u_horizon, u_hz_smooth; uniform vec3 u_hz_r, u_hz_u, u_hz_f; uniform vec4 u_hz_c; uniform float u_hz_band; uniform vec2 u_hz_x;\n"
     "out vec4 o_color;\n"
     /* the DOS edition (MW2.EXE 0x38ae3 / 0x3e086 / 0x38ee0): v_color = (kind, base index, intensity C); kind 0 unlit
      * (base is the index), 1 flat lit (base = ramp x 16), 2 textured (the texel's index through LUMA). The shade level =
      * ((C >> 1) x ((f x (128 - amb) >> 7) + amb)) / 0x440, f = 127 x cos(light, normal), less one per fog distance of
      * depth, clamped 0-15 */
     "vec3 dos_colour(float idx) { return texture(u_dos_tab, vec2((idx + 0.5) / 256.0, 16.5 / 17.0)).rgb; }\n"
+    /* DOS Gouraud (type 4: 0x3bb80 -> 0x3bd08 / 0x3bd69, the map mode's 0x12690 -> 0x1272d; both only with Gouraud on,
+     * DAT_00097024, else the flat fill 0x59180). The vertices: projected to whole pixels about the window's centre,
+     * ((p << s) / z + 2) >> 2 (0x3dfb7: quarter pixels, rounded), the shade c (16.16) = ramp x 16 + i (L + 1) / 16
+     * (0x3bd22; a < 48 as it is). MW2.EXE 0x59e77 then fills row by row from the top vertex (the last of the least y,
+     * 0x59f58) down two chains, one backward and one forward through the vertex list (0x59f9f / 0x5a03a, the first
+     * edges of no height skipped; later ones count 1 row, 0x5a61d), each edge starting at its upper vertex's x << 16 +
+     * 0x8000 and c + 0x8000 (0x5a01f / 0x5a0b7, 0x5a662) and stepping dx / dy, dc / dy per row (16.16, truncated; the
+     * last row steps on without switching, 0x5a33f). A row's span runs from the smaller chain's x >> 16 to the
+     * larger's (0x5a1d5), stepped per PIXEL PAIR: s = (cR - cL) / max(w >> 1, 1), w its last pixel - its first
+     * (0x5a1ea..0x5a202). Two accumulators run the pairs: the even pixel (from the span's own left end) at cL + DA,
+     * the odd at cL + DB, + s per pair (0x5a214..0x5a2fd); the colour is the byte of the integer part (the palette
+     * index). DA = 0x7fff (the callers' push, 0x3bd6b / 0x12723), DB = 0, swapped after every row (0x5a310..0x5a320;
+     * at the top clip by the rows skipped, 0x5a10b), the top row starting with DA; a left-clipped span keeps its
+     * phase (0x5a5c4). So pixel k of row r (from the unclipped span's left end / the polygon's top row): idx =
+     * (cL + floor(k / 2) s + (k + r even ? 0x7fff : 0)) >> 16 - a 1-pixel checkerboard of n / n + 1 where the shade's
+     * fraction is under 0.5, flat n + 1 above, its phase per polygon (DOSBox YELLSCN1 1024 x 768: the cockpit's
+     * checkerboards change phase at polygon edges). The port does it in integers per output pixel at any size (DOS
+     * draws it at its own resolution - 1024 x 768 one checker cell per pixel): the fragment reads its polygon
+     * (v_texsel - 1: its fan's first vertex in the layer's buffer; the triangles end at the one whose edge code has
+     * the closing bit), near-clips it (GL's plane, not DOS's 0x3de4e - near-clipped polygons approximate), rounds the
+     * vertices as 0x3dfb7 about the viewport's centre and walks the chains to its row; the pixels GL covers outside
+     * the DOS span take its end. dos_shading=smooth (not the original): the colours blended at c + 0.25 - the
+     * dither's mean - within the polygon's own shades */
+    "vec4 dos_gclip(int i) { int b = i * 13; return u_mvp * vec4(texelFetch(u_dos_vtx, b).r, texelFetch(u_dos_vtx, b + 1).r, texelFetch(u_dos_vtx, b + 2).r, 1.0); }\n"
+    "float dos_gshade(int i, float g) { int b = i * 13; return texelFetch(u_dos_vtx, b + 7).r + texelFetch(u_dos_vtx, b + 6).r * g; }\n"
+    "int dos_idiv(int n, int d) { int q = abs(n) / abs(d); return (n < 0) != (d < 0) ? -q : q; }\n"   /* idiv: truncated */
+    "int dos_q(float p) { return (int(trunc(p * 4.0)) + 2) >> 2; }\n"   /* 0x3dfb7: quarter pixels, + 2 >> 2 */
+    "ivec2 dos_gvtx(vec4 q) { vec2 p = q.xy / q.w * 0.5 * u_vp; ivec2 c = ivec2(u_vp) / 2; return ivec2(c.x + dos_q(p.x), c.y - dos_q(p.y)); }\n"
+    /* one chain (dir -1: backward, the first, 0x5a5eb; + 1 forward, 0x5a689) at DOS row y: (x, c) in 16.16 */
+    "ivec2 dos_gchain(ivec2 V[20], int C[20], int m, int top, int dir, int y, int ybot) {\n"
+    "  int a = top, b = (a + dir + m) % m, r0 = V[top].y;\n"
+    "  for (int g = 0; g < 20 && V[b].y == V[a].y && b != top; g++) { a = b; b = (a + dir + m) % m; }\n"
+    "  int cnt = V[b].y - V[a].y, yq = y == ybot && y > r0 ? y - 1 : y;\n"
+    "  for (int g = 0; g < 20 && yq >= r0 + cnt && b != top; g++) { r0 += cnt; a = b; b = (a + dir + m) % m; cnt = V[b].y - V[a].y; if (cnt == 0) cnt = 1; }\n"
+    "  if (cnt == 0) cnt = 1;\n"
+    "  uint t = uint(y - r0);\n"
+    "  return ivec2(int(uint(V[a].x * 65536 + 0x8000) + t * uint(dos_idiv((V[b].x - V[a].x) * 65536, cnt))),\n"
+    "               int(uint(C[a] + 0x8000) + t * uint(dos_idiv(C[b] - C[a], cnt))));\n"
+    "}\n"
+    "vec3 dos_gouraud(float lev) {\n"
+    "  float g = (lev + 1.0) / 16.0, px = floor(gl_FragCoord.x), py = floor(gl_FragCoord.y);\n"
+    "  float cc = v_gs.y + v_gs.x * g + 0.5, cmin = -1e9, cmax = 1e9;\n"   /* (no polygon: interpolated, screen parity) */
+    "  int k = int(px), r = int(py);\n"
+    "  uint val = 0u; bool exact = false;\n"
+    "  if (v_texsel > 0) {\n"
+    "    vec4 P[18]; float C[18]; ivec2 V[20]; int CF[20]; int n = 0, m = 0, s = v_texsel - 1, L1 = int(lev) + 1;\n"
+    "    for (int t = 0; t < 16; t++) {\n"
+    "      int b = s + 3 * t;\n"
+    "      if (t == 0) { P[0] = dos_gclip(b); C[0] = dos_gshade(b, g); n = 1; }\n"
+    "      P[n] = dos_gclip(b + 1); C[n] = dos_gshade(b + 1, g); n++;\n"
+    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) { P[n] = dos_gclip(b + 2); C[n] = dos_gshade(b + 2, g); n++; break; }\n"
+    "    }\n"
+    "    cmin = 1e9; cmax = -1e9;\n"
+    "    for (int i = 0; i < n; i++) {\n"   /* the near plane (z + w >= 0), the shade carried */
+    "      vec4 a = P[i], b = P[(i + 1) % n]; float da = a.z + a.w, db = b.z + b.w;\n"
+    "      cmin = min(cmin, C[i]); cmax = max(cmax, C[i]);\n"
+    "      if (da >= 0.0) { V[m] = dos_gvtx(a); CF[m] = int(floor(C[i] * 65536.0 + 0.5)); m++; }\n"
+    "      if ((da >= 0.0) != (db >= 0.0)) { float t = da / (da - db); V[m] = dos_gvtx(mix(a, b, t)); CF[m] = int(floor(mix(C[i], C[(i + 1) % n], t) * 65536.0 + 0.5)); m++; }\n"
+    "    }\n"
+    "    if (m >= 3) {\n"
+    "      int top = 0, ybot = V[0].y;\n"
+    "      for (int i = 0; i < m; i++) { if (V[i].y <= V[top].y) top = i; ybot = max(ybot, V[i].y); }\n"   /* 0x59f58: the last of the least y */
+    "      int y = clamp(int(u_vp.y) - 1 - (int(py) - int(u_vpo.y)), V[top].y, ybot);\n"   /* the DOS row (y down) */
+    "      ivec2 e1 = dos_gchain(V, CF, m, top, -1, y, ybot), e2 = dos_gchain(V, CF, m, top, 1, y, ybot);\n"
+    "      if (e2.x <= e1.x) { ivec2 t2 = e1; e1 = e2; e2 = t2; }\n"   /* 0x5a1d5 */
+    "      int x0 = e1.x >> 16, w = (e2.x >> 16) - x0;\n"
+    "      int st = w != 0 ? dos_idiv(e2.y - e1.y, max(w >> 1, 1)) : 0;\n"
+    "      k = clamp(int(px) - int(u_vpo.x) - x0, 0, w); r = y - V[top].y;\n"
+    "      val = uint(e1.y) + uint(k >> 1) * uint(st); exact = true;\n"
+    "      cc = float(int(val)) / 65536.0;\n"
+    "    }\n"
+    "  }\n"
+    "  if (u_dos_smooth != 0) {\n"
+    "    float e = clamp(cc - 0.25, cmin, cmax), e0 = floor(e);\n"
+    "    return mix(dos_colour(e0), dos_colour(e0 + 1.0), e - e0);\n"
+    "  }\n"
+    "  if (exact) return dos_colour(float(((val + (((k + r) & 1) == 0 ? 0x7fffu : 0u)) >> 16) & 0xffu));\n"
+    "  return dos_colour(floor(cc + (((k + r) & 1) == 0 ? 32767.0 / 65536.0 : 0.0)));\n"
+    "}\n"
     "void main() {\n"
     /* the wireframe (image enhancement): only the polygons' own edges, 1 px - corner k's barycentric is the distance
      * to the edge opposite it (bit 0: corner 0's, bit 1: corner 1's, bit 2: corner 2's) */
@@ -257,10 +343,28 @@ static const char *FS =
     "    vec3 ray = u_hz_r * (sx - u_hz_c.x) / u_hz_c.z + u_hz_u * (sy - u_hz_c.y) / u_hz_c.w + u_hz_f;\n"
     "    if (ray.y < 0.0) { o_color = vec4(dos_colour(239.0), 1.0); return; }\n"   /* 0xEF ground */
     "    float idx = 224.0;\n"                                                      /* 0xE0 sky */
+    /* the band (0x3c000 -> 0x59e77, only with Gouraud on, DAT_00097024): a quad from the line (corners 0xEE << 16,
+     * DAT_00096eac - 1) up u_hz_band rows (corners 0xE0 << 16, DAT_00096ea8), its colour c = 238 - 14 d / band (d: the
+     * rows above the line) stepped down the edges from c + 0x8000 (0x5a0xx), each row's pixels in pairs as c + 0x8000 and
+     * c (in_stack 8 = 0x8000 from 0x3cc8b), the pair swapped every row (0x5a310): idx = floor(c + 0.5 + 0.5 chk) - a
+     * half-step checkerboard, counted from the span's left end and the quad's top row (DOSBox YELLSCN1 1024 x 768:
+     * every step one flat band and one 1-pixel checkerboard band of it and the next, row for row as here; the phase -
+     * which pixel of a pair is the brighter - set to that capture, the GL row count being one off the quad's own). dos_sky=smooth: the same
+     * colours blended at e = c + 0.25 (the staircase's mean: each flat band's middle = its own colour) */
     "    if (u_hz_band > 0.0 && abs(u_hz_u.y) > 1e-6) {\n"
     "      float sh = u_hz_c.y - u_hz_c.w * ((sx - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"   /* the line's row here */
     "      float d = sy - sh;\n"
-    "      if (d >= 0.0 && d < u_hz_band) idx = floor(238.0 - 14.0 * d / u_hz_band);\n"
+    "      if (d >= 0.0 && d < u_hz_band) {\n"
+    "        float c = 238.0 - 14.0 * d / u_hz_band;\n"
+    "        if (u_hz_smooth != 0) {\n"
+    "          float e = clamp(c + 0.25, 224.0, 238.0), e0 = min(floor(e), 237.0);\n"
+    "          o_color = vec4(mix(dos_colour(e0), dos_colour(e0 + 1.0), e - e0), 1.0); return;\n"
+    "        }\n"
+    "        float shl = u_hz_c.y - u_hz_c.w * ((u_hz_x.x - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"
+    "        float shr = u_hz_c.y - u_hz_c.w * ((u_hz_x.y - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"
+    "        int row = int(floor(max(shl, shr) + u_hz_band - sy)), col = int(floor(sx - u_hz_x.x));\n"
+    "        idx = min(floor(c + (((row + col) & 1) != 0 ? 1.0 : 0.5)), 238.0);\n"
+    "      }\n"
     "    }\n"
     "    o_color = vec4(dos_colour(idx), 1.0); return;\n"
     "  }\n"
@@ -282,9 +386,10 @@ static const char *FS =
     "    lev = clamp(lev, 0.0, 15.0);\n"
     "    if (kind == 1) { o_color = vec4(dos_colour(base + lev), 1.0); return; }\n"
     /* Gouraud (0x3bb80): each vertex's baked index a = ramp | i, rescaled by the polygon's level - ramp + i (L + 1) / 16 -
-     * when a >= 48 (16.16 a >= 0x300000), else taken as it is; interpolated across the polygon: the fixed part in
-     * v_uv.y (ramp, or a), the scaled part in v_uv.x (i, or 0) */
-    "    if (kind == 3) { o_color = vec4(dos_colour(floor(v_uv.y + v_uv.x * (lev + 1.0) / 16.0)), 1.0); return; }\n"
+     * when a >= 48 (16.16 a >= 0x300000), else taken as it is: the fixed part in the vertex's v (ramp, or a), the scaled
+     * part in its u (i, or 0); filled and dithered as 0x59e77 does (dos_gouraud). Flat-lit (types 1 / 2, 0x59180) and
+     * textured (5-7: 0x5b549 affine, 0x3fb20 perspective) polygons have no dither in DOS */
+    "    if (kind == 3) { o_color = vec4(dos_gouraud(lev), 1.0); return; }\n"
     "    vec4 tx = texture(u_tex, v_uv / u_texsize); if (tx.a < 0.5) discard;\n"
     "    float ti = floor(tx.r * 255.0 + 0.5);\n"
     "    float si = lev >= 15.0 ? ti : floor(texture(u_dos_tab, vec2((ti + 0.5) / 256.0, (lev + 0.5) / 17.0)).r * 255.0 + 0.5);\n"
@@ -381,6 +486,7 @@ glr *glr_create(void)
         for (l = 0; l < GLR_LAYERS; l++) {
             glGenVertexArrays(1, &r->layer[l].vao);
             glGenBuffers(1, &r->layer[l].vbo);
+            glGenTextures(1, &r->layer[l].tbo);
             glGenBuffers(1, &r->layer[l].sph_vbo);
             glGenBuffers(1, &r->layer[l].tic_vbo);
         }
@@ -411,6 +517,13 @@ glr *glr_create(void)
     r->u_dos_amb = glGetUniformLocation(r->prog, "u_dos_amb");
     r->u_dos_fogdist = glGetUniformLocation(r->prog, "u_dos_fogdist");
     r->u_dos_dir = glGetUniformLocation(r->prog, "u_dos_dir");
+    r->u_dos_vtx = glGetUniformLocation(r->prog, "u_dos_vtx");
+    r->u_dos_smooth = glGetUniformLocation(r->prog, "u_dos_smooth");
+    r->u_vpo = glGetUniformLocation(r->prog, "u_vpo");
+    glUseProgram(r->prog);   /* the buffer sampler on its own unit always: a samplerBuffer left on unit 0 with u_tex's
+                              * sampler2D makes every draw invalid */
+    glUniform1i(r->u_dos_vtx, 3);
+    glUseProgram(0);
     r->u_alpha = glGetUniformLocation(r->prog, "u_alpha");
     r->u_mga_lod = glGetUniformLocation(r->prog, "u_mga_lod");
     r->u_horizon = glGetUniformLocation(r->prog, "u_horizon");
@@ -419,6 +532,8 @@ glr *glr_create(void)
     r->u_hz_f = glGetUniformLocation(r->prog, "u_hz_f");
     r->u_hz_c = glGetUniformLocation(r->prog, "u_hz_c");
     r->u_hz_band = glGetUniformLocation(r->prog, "u_hz_band");
+    r->u_hz_x = glGetUniformLocation(r->prog, "u_hz_x");
+    r->u_hz_smooth = glGetUniformLocation(r->prog, "u_hz_smooth");
     r->u_tifog = glGetUniformLocation(r->prog, "u_tifog");
 #define U(name) r->name = glGetUniformLocation(r->prog, #name)
     U(u_tilit); U(u_tiamb); U(u_tilt); U(u_tilv); U(u_tilc); U(u_tignd); U(u_tidn); U(u_tidp); U(u_tidc);
@@ -454,6 +569,7 @@ void glr_destroy(glr *r)
         int l;
         for (l = 0; l < GLR_LAYERS; l++) {
             glDeleteBuffers(1, &r->layer[l].vbo);
+            glDeleteTextures(1, &r->layer[l].tbo);
             glDeleteBuffers(1, &r->layer[l].sph_vbo);
             glDeleteBuffers(1, &r->layer[l].tic_vbo);
             free(r->layer[l].tic); free(r->layer[l].tipn); free(r->layer[l].tistat); free(r->layer[l].tip);
@@ -629,7 +745,8 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             else if (part->objtype & 0x400) wire_code = 2;
             else if (part->objtype & 0x100) { int cn = (part->objtype & 0xf0) >> 4; wire_code = cn < 1 ? 1 : cn < 12 ? 3 : 2; }
             else if (part->wire_hi) wire_code = 1;
-            if (part->hidden || part->moving || !o) continue;   /* moving: a path-carried world part, drawn on the actor layer */
+            if (part->hidden || part->moving || part->facing || !o) continue;   /* moving: a path-carried world part, facing: a fire /
+                                                                                 * smoke card - both drawn on the actor layer */
             const int dnib = !r->dos && !ti && part->dmg_nib > 0 && part->dmg_nib < 16 ? part->dmg_nib : 0;
             /* the texture switches by the object's type word (0x1002a768: DAT_1024e228 & type, and with the OBJECT bit 0x100
              * also class 5): OBJECT TEXTURES (0x100652f0: bits 0x100 mechs, 0x200) -> class 1, TERRAIN TEXTURES (0x10065340:
@@ -640,6 +757,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             for (k = 0; k < o->poly_count; k++) {
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3], ti_vmin;
+                size_t pfirst;
                 int c0, pidx, ti_flat, tk4, tk2, tik = 0, k2c = 0, k2cls = 0;
                 const wtb_vertex *v0, *v1, *v2;
                 int slot = q->color & 0xFF, batch = GLR_SLOTS;
@@ -885,6 +1003,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     ti_vmin = 1e9f;
                     for (k4 = 0; k4 < q->n; k4++) if ((float)o->verts[q->idx[k4]].b < ti_vmin) ti_vmin = (float)o->verts[q->idx[k4]].b;
                 }
+                pfirst = pos[batch];
                 for (j = 1; j + 1 < q->n; j++) {
                     int tri[3] = {0, j, j + 1};
                     float cy = cosf(part->yaw * 3.14159265f / 180.0f), sy = sinf(part->yaw * 3.14159265f / 180.0f);
@@ -949,6 +1068,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                          * textured one: minus its texture switch class (notex_class) */
                         f[11] = batch >= GLR_SLOTS && !part->tint && !(r->dos && !model->extended) ? (float)((ti_flat && tk4 ? v->a & 0xff : pidx) + 1) : batch < GLR_SLOTS ? (float)-notex_cls : 0.0f;
                         if (tk2) f[11] = (float)-k2cls;   /* (v_ticm 3: drawn only with its class's textures off) */
+                        if (r->dos && !model->extended && tk4 && batch == GLR_SLOTS) f[11] = (float)(pfirst + 1);   /* DOS Gouraud: its fan's first vertex + 1 (dos_gouraud) */
                         if (tik == 1 && batch >= GLR_TI && batch < GLR_TB) f[11] = (float)-k2cls;   /* (textured kinds 5-7: their switch class) */
                         if (tik) {
                             float *t = tic + pos[batch] * 4;
@@ -986,6 +1106,9 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     glBindVertexArray(L->vao);
     glBindBuffer(GL_ARRAY_BUFFER, L->vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * FLOATS_PER_VERTEX * sizeof *buf), buf, GL_STATIC_DRAW);
+    glBindTexture(GL_TEXTURE_BUFFER, L->tbo);   /* (the DOS Gouraud fill reads its polygon from it) */
+    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, L->vbo);
+    glBindTexture(GL_TEXTURE_BUFFER, 0);
     {
         static const int sizes[6] = {3, 3, 2, 3, 1, 1};
         size_t off = 0;
@@ -1673,6 +1796,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniform3fv(r->u_hz_r, 1, Rv); glUniform3fv(r->u_hz_u, 1, Uv); glUniform3fv(r->u_hz_f, 1, Fv);
             glUniform4f(r->u_hz_c, (float)x0 + (float)w * 0.5f, (float)y0 + (float)h * 0.5f, fy, fy);
             glUniform1f(r->u_hz_band, v->dos_band * (float)w / 320.0f);   /* 0x14950: the height in 320-wide pixels */
+            glUniform2f(r->u_hz_x, (float)x0, (float)(x0 + w));
+            glUniform1i(r->u_hz_smooth, v->dos_sky_smooth);
             glUniform1i(r->u_horizon, 1);
             glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
             glDrawArrays(GL_TRIANGLES, 42, 6);
@@ -1808,6 +1933,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform3fv(r->u_fog_color, 1, v->fog_color);
     glUniform1f(r->u_far, v->ortho_w > 0 ? 0.0f : v->far_cull);   /* the world and actor layers carry their spheres */
     glUniform2f(r->u_vp, (float)w, (float)h);                     /* the billboards' screen squares */
+    glUniform2f(r->u_vpo, (float)x0, (float)y0);                  /* (and the DOS Gouraud fill's polygon) */
     glUniform1f(r->u_pfade, r->dos ? 0.0f : r->pfade);
     glUniform1i(r->u_notex, (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0));
     if (r->pfade > 0 && !r->dos) {
@@ -1829,6 +1955,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glUniform1f(r->u_dos_amb, v->point_light ? v->dos_amb - 10.0f : v->dos_amb);
         glUniform1f(r->u_dos_fogdist, v->dos_fogdist);
         glUniform1i(r->u_dos_dir, v->point_light ? 0 : v->dos_dir);
+        glUniform1i(r->u_dos_smooth, v->dos_sky_smooth);   /* the port's dos_shading=smooth */
         glUniform1f(r->u_fog_density, 0);
     }
     glActiveTexture(GL_TEXTURE0);
@@ -1844,6 +1971,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);   /* the wireframe's edges come from the fragment shader */
     }
     glBindVertexArray(L->vao);
+    if (r->dos) { glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_BUFFER, L->tbo); glActiveTexture(GL_TEXTURE0); }
     for (s = 0; s <= GLR_SLOTS; s++) {
         if (L->batch_count[s] <= 0) continue;
         if (s < GLR_SLOTS) {

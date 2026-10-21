@@ -54,4 +54,4 @@ PLIST
 # install_name_tool voids the linker's signature; arm64 macOS refuses to run unsigned code, so re-sign ad hoc
 if [ -d "$APP/Contents/Frameworks" ]; then codesign --force -s - "$APP/Contents/Frameworks/"*.dylib; fi
 codesign --force -s - "$APP"
-echo "built $APP (first run: open it once from a terminal with the game folder: \"$APP/Contents/MacOS/mw2\" /path/to/MW2-game)"
+echo "built $APP (on first launch it finds MW2-game next to the app or in ~, or asks for the game folder)"

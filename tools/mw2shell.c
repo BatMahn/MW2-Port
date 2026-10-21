@@ -3016,7 +3016,9 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * sliders MUSIC / EFFECTS / VOICE at (335, 128 / 152 / 176) 285 wide (MW2SND +0xc / +4 / +8). RESOLUTION keeps its
  * meaning - the sim drawn at 320x200 / 640x480 / 1024x768 (MW2PORT.CFG render=, the original byte written as VGA /
  * vesa480 / vesa768) - plus the port's NATIVE choices (the display's resolution, anti-aliasing off / 2X / 4X / 8X); the
- * port's DISPLAY row at y 397 picks desktop / windowed / the display's modes */
+ * port's DISPLAY row at y 397 picks desktop / windowed / the display's modes, and its right half (x 515 on) the port's
+ * HUD layout - HUD WIDE / HUD ORIGINAL (mw2port.cfg hud_layout=; no room for a row of its own); the TEXTURES row's
+ * right part (x 495 on) the port's DOS shading - DOS DITHERED / DOS SMOOTH (mw2port.cfg dos_shading=, the DOS renderer only) */
 /* the k-th word of a row in the pristine background (the option words: the columns differing from the column's key
  * colour at (380,130), split at gaps of 6+ pixels); returns its x range */
 static int32_t rd32(const uint8_t *b) { return (int32_t)(b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24); }
@@ -3105,6 +3107,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                                 if (hh >= 700) memcpy(snd + 0x2c, "vesa768.dll", 11); else if (hh >= 400) memcpy(snd + 0x2c, "vesa480.dll", 11);
                             }
                         }
+                        else if (i == 8 && x >= 515) pc.hud_original ^= 1;   /* the port's HUD layout: wide / original */
                         else if (i == 8) {   /* the port's DISPLAY: desktop -> windowed -> the display's modes -> desktop */
                             if (pc.mode == 0) pc.mode = 1;
                             else if (pc.mode == 1) { if (nmodes) { pc.mode = 2; mi = 0; pc.w = modes[0].w; pc.h = modes[0].h; } else pc.mode = 0; }
@@ -3123,6 +3126,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                             }
                             pc.renderer = g_cfg.renderer = e2;
                         }
+                        else if (i == 13 && x >= 495) pc.dos_sky_smooth ^= 1;   /* the port's DOS shading: dithered / smooth */
                         else if (i == 13 && !tx_lock)   /* the port's TEXTURES: ORIGINAL / TITANIUM */
                             pc.texset = g_cfg.texset = pc.texset == PORTCFG_TX_TITANIUM ? PORTCFG_TX_ORIGINAL : PORTCFG_TX_TITANIUM;
                     }
@@ -3161,8 +3165,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             char vals[14][32];
             tt_item it;
             int k;
-            const char *lines[17];
-            int ly[17], lx[17];
+            const char *lines[19];
+            int ly[19], lx[19];
             for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
@@ -3176,14 +3180,16 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             lines[14] = "DISPLAY"; ly[14] = 398; lx[14] = 360;
             lines[15] = "RENDERER"; ly[15] = ROW_Y[12] + 1; lx[15] = 360;
             lines[16] = "TEXTURES"; ly[16] = ROW_Y[13] + 1; lx[16] = 360;
-            for (k = 0; k < 17; k++) {
+            lines[17] = pc.hud_original ? "HUD ORIGINAL" : "HUD WIDE"; ly[17] = ROW_Y[8] + 1; lx[17] = 520;   /* the DISPLAY row's right half */
+            lines[18] = pc.dos_sky_smooth ? "DOS SMOOTH" : "DOS DITHERED"; ly[18] = ROW_Y[13] + 1; lx[18] = 500;   /* the TEXTURES row's (from 500: the column ends at 633) */
+            for (k = 0; k < 19; k++) {
                 const char *t = lines[k];
                 int grey = tx_lock && (k == 13 || k == 16);   /* TEXTURES locked: its label and value greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
-                    int tx2 = k >= 14 ? lx[k] - text_width(&g_flabel, t) : lx[k];
+                    int tx2 = (k >= 14 && k < 17) ? lx[k] - text_width(&g_flabel, t) : lx[k];
                     draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, grey ? 6 : -1);
-                } else if (g_text_hires) { int n0 = g_ntt; tt_text(lx[k], ly[k], t, k >= 14); if (grey && g_ntt > n0) g_tt[n0].rgb[0] = g_tt[n0].rgb[1] = g_tt[n0].rgb[2] = 110; }
-                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = k >= 14; it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = grey ? 110 : 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
+                } else if (g_text_hires) { int n0 = g_ntt; tt_text(lx[k], ly[k], t, (k >= 14 && k < 17)); if (grey && g_ntt > n0) g_tt[n0].rgb[0] = g_tt[n0].rgb[1] = g_tt[n0].rgb[2] = 110; }
+                else { memset(&it, 0, sizeof it); it.x = lx[k]; it.y = ly[k]; it.align = (k >= 14 && k < 17); it.cap = 12.0f; it.rgb[0] = it.rgb[1] = it.rgb[2] = grey ? 110 : 221; snprintf(it.t, sizeof it.t, "%s", t); tt_raster(&it); }
             }
         }
         if (logo) { smk_next(logo); blit_smk(logo, 120, 4); }
@@ -4507,6 +4513,86 @@ static const screen_def *find_screen(int id, int clan)
     return NULL;
 }
 
+/* ---- the game folder when none is found: the system's folder picker (port-only, no library) ---- */
+#define PICK_PROMPT "Select your MechWarrior 2 game folder (MW2-game)"
+#ifndef _WIN32
+/* one picker command through the shell: 1 a folder (out), 0 cancelled, -1 the picker is not available */
+static int run_picker(const char *cmd, char *out, size_t n)
+{
+    char line[PORTCFG_PATH];
+    size_t k;
+    int st;
+    FILE *f = popen(cmd, "r");
+    if (!f) return -1;
+    if (!fgets(line, sizeof line, f)) line[0] = 0;
+    st = pclose(f);
+    if (st == -1 || !WIFEXITED(st) || WEXITSTATUS(st) == 127 || WEXITSTATUS(st) == 255) return -1;   /* missing / no display */
+    if (WEXITSTATUS(st) != 0) return 0;   /* Cancel */
+    line[strcspn(line, "\r\n")] = 0;
+    for (k = strlen(line); k > 1 && line[k - 1] == '/'; k--) line[k - 1] = 0;   /* osascript: "/path/MW2-game/" */
+    if (!line[0]) return 0;
+    snprintf(out, n, "%s", line);
+    return 1;
+}
+#endif
+static int pick_folder(char *out, size_t n)
+{
+#ifdef _WIN32
+    return mw2_pick_folder(PICK_PROMPT, out, n);
+#else
+    static const char *const cmds[] = {
+#ifdef __APPLE__
+        "/usr/bin/osascript -e 'POSIX path of (choose folder with prompt \"" PICK_PROMPT "\")' 2>/dev/null",
+#else
+        "command -v zenity >/dev/null 2>&1 || exit 127; zenity --file-selection --directory --title='" PICK_PROMPT "' 2>/dev/null",
+        "command -v kdialog >/dev/null 2>&1 || exit 127; kdialog --getexistingdirectory \"$HOME\" --title '" PICK_PROMPT "' 2>/dev/null",
+#endif
+    };
+    size_t i;
+    if (getenv("MW2_PICKER")) return run_picker(getenv("MW2_PICKER"), out, n);   /* tests: a command standing in for the picker */
+    for (i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
+        int r = run_picker(cmds[i], out, n);
+        if (r >= 0) return r;
+    }
+    return -1;
+#endif
+}
+/* No game folder found: ask for it (a wrong pick is explained and asked again). 0 with c resolved to the chosen folder;
+ * -1 cancelled or no picker. */
+static int ask_game_folder(portcfg *c, const char *exe_dir)
+{
+    char pick[PORTCFG_PATH], game[PORTCFG_PATH], m[PORTCFG_PATH + 400];
+    if (portcfg_translocated(exe_dir))
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "MechWarrior 2",
+            "macOS is running this app from a temporary read-only copy (App Translocation), so it cannot see a game folder "
+            "placed next to it.\n\n"
+            "You can choose the game folder now. To stop this for good: quit, then in Terminal, from the folder holding the "
+            "app, run\n\n    xattr -dr com.apple.quarantine \"MechWarrior 2.app\"\n\n"
+            "(or move the app to another folder with Finder) and open it again.", NULL);
+    for (;;) {
+        if (pick_folder(pick, sizeof pick) != 1) return -1;
+        if (portcfg_game_in(pick, game, sizeof game)) break;
+        fprintf(stderr, "MechWarrior 2: %s is not a game folder\n", pick);
+        snprintf(m, sizeof m,
+            "%s is not a MechWarrior 2 game folder.\n\n"
+            "Choose the MW2-game folder itself (the one with install, cd, 3d ... inside - see FOLDER_SETUP.md), "
+            "or the folder that holds it.", pick);
+        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "MechWarrior 2", m, NULL) != 0) return -1;   /* no way to tell: stop */
+    }
+    c->game[0] = 0; c->install[0] = 0; c->cd[0] = 0; c->models[0] = 0; c->textures[0] = 0;
+    snprintf(c->game, sizeof c->game, "%s", game);
+    return portcfg_resolve(c, exe_dir, NULL);
+}
+/* remember a game folder in the per-user file (the file's other settings kept) */
+static void remember_game(const char *game)
+{
+    portcfg raw;
+    portcfg_load(NULL, &raw);
+    snprintf(raw.game, sizeof raw.game, "%s", game);
+    raw.install[0] = 0;
+    portcfg_save(NULL, &raw);
+}
+
 #ifdef MW2_ONE_BINARY
 int glview_main(int argc, char **argv);
 #endif
@@ -4529,30 +4615,57 @@ int main(int argc, char **argv)
     char p[700];
     {   /* the configuration: the per-user file; the game folder from the command line or found and remembered */
         char *bp = SDL_GetBasePath();
-        int had_game;
+        int had_game, picked = 0;
         snprintf(g_exe_dir, sizeof g_exe_dir, "%s", bp ? bp : "./");
         SDL_free(bp);
         portcfg_load(NULL, &g_cfg);
         had_game = g_cfg.game[0] || g_cfg.install[0];
+        if (argc < 2 && g_cfg.game[0] && !portcfg_is_game_dir(g_cfg.game)) {   /* the remembered folder is gone: look again */
+            fprintf(stderr, "MechWarrior 2: the remembered game folder %s is gone\n", g_cfg.game);
+            g_cfg.game[0] = 0;
+            had_game = g_cfg.install[0] != 0;
+        }
         if (argc >= 2) { g_cfg.game[0] = 0; g_cfg.install[0] = 0; g_cfg.cd[0] = 0; g_cfg.models[0] = 0; g_cfg.textures[0] = 0; }   /* this run: as given */
         if (portcfg_resolve(&g_cfg, g_exe_dir, argc >= 2 ? argv[1] : NULL) != 0) {
+            /* none found: ask with the system's folder picker (a double-clicked app has no terminal; its current folder
+             * is "/"), and remember the choice */
+            if (!headless && ask_game_folder(&g_cfg, g_exe_dir) == 0) { picked = 1; remember_game(g_cfg.game); }
+        }
+        if (!picked && !g_cfg.install[0]) {
             fprintf(stderr,
                 "MechWarrior 2: no game folder found.\n"
                 "Run:  mw2 <folder>\n"
                 "where <folder> is either the game folder (with install/, cd/, music/, ultrasnd/, 3d/ inside)\n"
                 "or a complete MechWarrior 2 DOS install. It is remembered in %s.\n", portcfg_file());
-#ifdef _WIN32   /* started from Explorer there is no console to read that in */
-            { char m[1400]; snprintf(m, sizeof m,
-                "No game folder found.\n\n"
-                "Put your MW2-game folder (with install, cd, 3d ... inside - see FOLDER_SETUP.md) next to mw2.exe, "
-                "or in your user folder (%s\\MW2-game), or drag the folder onto mw2.exe.\n\n"
-                "It is remembered after the first run (%s).", getenv("USERPROFILE") ? getenv("USERPROFILE") : "", portcfg_file());
-              SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, NULL); }
+            if (!headless) {   /* started from Explorer / Finder / a desktop there is no console to read that in */
+                char m[1400];
+#ifdef _WIN32
+                snprintf(m, sizeof m,
+                    "No game folder found.\n\n"
+                    "Put your MW2-game folder (with install, cd, 3d ... inside - see FOLDER_SETUP.md) next to mw2.exe, "
+                    "or in your user folder (%s\\MW2-game), or drag the folder onto mw2.exe.\n\n"
+                    "It is remembered after the first run (%s).", getenv("USERPROFILE") ? getenv("USERPROFILE") : "", portcfg_file());
+#elif defined(__APPLE__)
+                snprintf(m, sizeof m,
+                    "No game folder found.\n\n"
+                    "Put your MW2-game folder (with install, cd, 3d ... inside - see FOLDER_SETUP.md) next to "
+                    "MechWarrior 2.app, or in your home folder (%s/MW2-game), and open the app again - or choose the "
+                    "folder when the app asks for it.\n\n"
+                    "It is remembered after the first run (%s).", getenv("HOME") ? getenv("HOME") : "~", portcfg_file());
+#else
+                snprintf(m, sizeof m,
+                    "No game folder found.\n\n"
+                    "Put your MW2-game folder (with install, cd, 3d ... inside - see FOLDER_SETUP.md) next to mw2, "
+                    "or in your home folder (%s/MW2-game), or run  mw2 /path/to/MW2-game  once "
+                    "(installing zenity or kdialog lets the game ask for the folder instead).\n\n"
+                    "It is remembered after the first run (%s).", getenv("HOME") ? getenv("HOME") : "~", portcfg_file());
 #endif
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, NULL);
+            }
             return 2;
         }
-        if (!had_game && argc < 2) portcfg_save(NULL, &g_cfg);   /* found on its own: remember it */
-        if (argc >= 2 && !getenv("MW2_CONFIG") && portcfg_is_game_dir(argv[1])) {   /* given: remember it too */
+        if (!picked && !had_game && argc < 2) portcfg_save(NULL, &g_cfg);   /* found on its own: remember it */
+        if (!picked && argc >= 2 && !getenv("MW2_CONFIG") && portcfg_is_game_dir(argv[1])) {   /* given: remember it too */
             portcfg keep = g_cfg;
             portcfg_load(NULL, &g_cfg);
             snprintf(g_cfg.game, sizeof g_cfg.game, "%s", keep.game[0] ? keep.game : keep.install);

@@ -59,6 +59,8 @@ typedef struct {
     float dos_lpos[3], dos_amb, dos_fogdist;
     int   dos_dir;
     float dos_band;          /* DOS haze band above the horizon (HRZM +4: pixels at 320 wide), 0 = none */
+    int   dos_sky_smooth;    /* the port's dos_shading=smooth: the Gouraud polygons' and the haze band's colours blended, not
+                              * stepped and dithered (0 = original) */
     int   pvr_veil;          /* PowerVR fog: the 40 % white, fogged plane at y 55555.55 over the sky (0x1005ED90) */
     int   solo;              /* the target viewer: black behind, no sky / ground / world layer / effects, no fog */
     float mono[4];           /* a > 0: the actor layer untextured in this colour, lit (the target viewer's solid mode); a = 2: in each

@@ -54,6 +54,7 @@
     X(glLinkProgram, PFNGLLINKPROGRAMPROC) \
     X(glRenderbufferStorage, PFNGLRENDERBUFFERSTORAGEPROC) \
     X(glShaderSource, PFNGLSHADERSOURCEPROC) \
+    X(glTexBuffer, PFNGLTEXBUFFERPROC) \
     X(glUniform1f, PFNGLUNIFORM1FPROC) \
     X(glUniform1i, PFNGLUNIFORM1IPROC) \
     X(glUniform2f, PFNGLUNIFORM2FPROC) \
@@ -107,6 +108,7 @@ MW2GL_FUNCS
 #define glLinkProgram mw2gl_glLinkProgram
 #define glRenderbufferStorage mw2gl_glRenderbufferStorage
 #define glShaderSource mw2gl_glShaderSource
+#define glTexBuffer mw2gl_glTexBuffer
 #define glUniform1f mw2gl_glUniform1f
 #define glUniform1i mw2gl_glUniform1i
 #define glUniform2f mw2gl_glUniform2f

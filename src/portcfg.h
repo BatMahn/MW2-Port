@@ -19,13 +19,26 @@
  *   aa=0 | 2 | 4 | 8
  *   render=native | 320x200 | 640x480 | 1024x768   (the sim's picture: the display's resolution, or one of the
  *                          original's RESOLUTION choices, drawn at that size and scaled up in blocks to 4:3)
+ *   hud_layout=wide | original   (wide, the default: on a window wider than 4:3 the HUD's left-hand instruments - radar,
+ *                          altitude tape, target display - sit at the window's left edge and the right-hand ones - weapon
+ *                          list, damage display / viewport, throttle bar, speed - at its right edge, each as far from
+ *                          the edge as from the 4:3 area's edge; the compass, reticle, markers, bars and messages stay
+ *                          centred. original: the whole HUD in the 4:3 middle, as the original drew it)
+ *   dos_shading=dithered | smooth   (the DOS renderer's Gouraud shading - the shaded polygons (cockpit, mechs, buildings)
+ *                          and the sky's haze band: dithered, the default, as the original drew them - each palette step a
+ *                          flat band and a 1-pixel checkerboard of it and the next (MW2.EXE 0x59e77; the haze band in the
+ *                          sky palette's 15 colours 0xE0-0xEE, 0x3c000); smooth: the same colours blended into an even
+ *                          gradient. dos_sky=banded | smooth, its older name, is still read. The other renderers are not
+ *                          affected)
  *   system_shortcuts=block | allow   (macOS: block, the default, turns the system's keyboard shortcuts - Mission
  *                          Control's Ctrl+arrows, Cmd+Tab, Spotlight - off while a mission is played with the window in
  *                          front (not in the MAIN MENU or paused); allow leaves them on. Other systems: no effect)
- * The game folder is found on first run (the command line, the current folder, next to the executable, ~/MW2-game)
- * and remembered. */
+ * The game folder is found on first run (the command line, the current folder, next to the executable - in a macOS
+ * bundle: next to the .app -, one level up, ~/MW2-game; else the shell asks with the system's folder picker) and
+ * remembered. */
 #ifndef PORTCFG_H
 #define PORTCFG_H
+#include <stddef.h>
 #define PORTCFG_PATH 1024
 typedef struct {
     int mode;        /* 0 desktop fullscreen, 1 windowed, 2 exclusive fullscreen at w x h */
@@ -41,6 +54,9 @@ typedef struct {
     int  renderer;            /* PORTCFG_ED_*: how the simulation is drawn (Combat Variables RENDERER) */
     int  texset;              /* PORTCFG_TX_*: the texture set (Combat Variables TEXTURES) */
     int  system_shortcuts;    /* 0 block (default): the system's shortcuts off while playing (macOS); 1 allow */
+    int  hud_original;        /* hud_layout=: 0 wide (default), 1 original (the 4:3 layout centred) */
+    int  dos_sky_smooth;      /* dos_shading= (dos_sky=): 0 dithered (default, the original), 1 smooth (the DOS renderer's
+                               * Gouraud polygons and haze band blended) */
 } portcfg;
 enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA, PORTCFG_ED_COUNT };
 extern const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT];   /* "enhanced", "dos", ... (the file's words) */
@@ -69,4 +85,11 @@ int  portcfg_save(const char *unused, const portcfg *c);
 int  portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint);
 /* Is this a game folder (or a plain DOS install)? */
 int  portcfg_is_game_dir(const char *dir);
+/* A chosen folder: the game folder itself, or a folder holding MW2-game/. Returns 1 with the game folder's absolute
+ * path in out, 0 if neither. */
+int  portcfg_game_in(const char *dir, char *out, size_t n);
+/* exe_dir inside a macOS bundle (".../X.app/Contents/..."): 1 with the folder holding X.app in out, else 0 */
+int  portcfg_app_folder(const char *exe_dir, char *out, size_t n);
+/* exe_dir is a macOS App Translocation copy (a quarantined download run in place: a random read-only path) */
+int  portcfg_translocated(const char *exe_dir);
 #endif

@@ -24,6 +24,7 @@ struct hud_s {
     uint8_t pal[256][3];
     int    have_pal, vw, vh;
     float  ox, k, ky;      /* 4:3 area: left edge (px) and px per virtual unit across (k) and down (ky) */
+    float  ox0;            /* ox as hud_begin set it (hud_side moves ox to a window edge and back) */
     float  n;              /* screen pixels per sprite pixel: 1, or lines / 768 above 768 lines (the K set at the
                             * size it has at 1024 x 768, its Scale3x texture filtered linearly) */
     GLuint font_tex, font_tex3;   /* the atlas 1:1 (whole-number scales) and Scale3x'd (in-between scales) */
@@ -269,7 +270,7 @@ void hud_begin_stretched(hud *h, int w, int hp)
     hud_begin(h, w, hp);
     h->k = (float)w / 640.0f;
     h->ky = (float)hp / 480.0f;
-    h->ox = 0;
+    h->ox = h->ox0 = 0;
     h->n = 1;
 }
 float hud_px_x(const hud *h, float px) { return px * h->n / h->k; }
@@ -290,7 +291,7 @@ void hud_begin(hud *h, int w, int hp)
     h->vw = w; h->vh = hp;
     h->k = (float)hp * 4.0f / 3.0f / 640.0f;
     if ((float)w < (float)hp * 4.0f / 3.0f) h->k = (float)w / 640.0f;
-    h->ox = ((float)w - 640.0f * h->k) * 0.5f;
+    h->ox = h->ox0 = ((float)w - 640.0f * h->k) * 0.5f;
     h->ky = h->k;
     h->n = hp > 768 ? (float)hp / 768.0f : 1.0f;
 }
@@ -405,6 +406,15 @@ void hud_draw_stretch_row(hud *h, const hud_sprite *s, float height_px, int bott
 }
 
 float hud_left_x(const hud *h) { return h->k > 0 ? -h->ox / h->k : 0; }
+
+/* the port's wide HUD layout: the 4:3 area moved by the side margin to the window's left (-1) or right (+1) edge, or
+ * back to the centre (0); nothing moves when the window is not wider than 4:3 (no margin) */
+void hud_side(hud *h, int side)
+{
+    h->ox = h->ox0 > 0 ? h->ox0 * (float)(1 + (side < 0 ? -1 : side > 0 ? 1 : 0)) : h->ox0;
+}
+float hud_screen_x(const hud *h, float x) { return sx_(h, x); }
+float hud_screen_y(const hud *h, float y) { return sy_(h, y); }
 
 void hud_draw_window(hud *h, const hud_sprite *s, float u0, float width, float x, float y, const float tint[4])
 {

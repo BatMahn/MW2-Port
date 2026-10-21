@@ -22,7 +22,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 192 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 201 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build
@@ -123,8 +123,9 @@ Then run the game once with the folder; it remembers it:
 
     ./mw2 /path/to/MW2-game     # afterwards just ./mw2
 
-If no folder is given, `mw2` looks in the current folder, next to itself, one level up (`MW2-game`) and in
-`~/MW2-game`. Settings live in `~/Library/Application Support/mw2port/mw2port.cfg` (macOS) or
+If no folder is given, `mw2` looks in the current folder, next to itself (the macOS app: next to
+`MechWarrior 2.app`), one level up (`MW2-game`) and in `~/MW2-game`; if it finds none it asks for the folder with the
+system's folder picker (Linux: zenity or kdialog, when installed). Settings live in `~/Library/Application Support/mw2port/mw2port.cfg` (macOS) or
 `~/.config/mw2port/mw2port.cfg` (Linux).
 
 Optional: `make check MUSIC=/path/to/MW2-game/music MW2=/path/to/MW2-game/install` runs the test suite against your
@@ -208,8 +209,10 @@ holds your copy of the game:
     3d/         the 3D editions' data - copy gamedata/3d/ from this repository (without 3d/: the DOS models, untextured)
     titanium/   optional: MW2.PRJ + SKYGND.PAR from the Titanium disc's Install/16bit/ (the TITANIUM textures)
 
-If no folder is given, `mw2` looks in the current folder, next to itself, one level up (`MW2-game`) and in
-`~/MW2-game`, and remembers what it found in the per-user settings file:
+If no folder is given, `mw2` looks in the current folder, next to itself (the macOS app: next to
+`MechWarrior 2.app`), one level up (`MW2-game`) and in `~/MW2-game`; if it finds none (or the remembered folder is
+gone) it asks for it with the system's folder picker - choose `MW2-game` itself or the folder that holds it. It
+remembers the folder in the per-user settings file:
 
     Linux   ~/.config/mw2port/mw2port.cfg        macOS   ~/Library/Application Support/mw2port/mw2port.cfg
 
@@ -246,12 +249,29 @@ SDL2 bundled inside (no Homebrew needed to run it).
 
 Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2.exe`, `SDL2.dll` and `assets\`
 must stay together. Then either put your `MW2-game` folder next to `mw2.exe`, put it in your user folder
-(`C:\Users\<you>\MW2-game`), or drag the folder onto `mw2.exe` once - it is remembered in
+(`C:\Users\<you>\MW2-game`), drag the folder onto `mw2.exe` once, or just start `mw2.exe` and choose the folder when
+it asks - it is remembered in
 `%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with OpenGL 3.3 (any GPU from about 2010 on, with the
 vendor's driver installed rather than Windows' basic display driver).
 
 The exe isn't code-signed, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then
 **Run anyway**.
+
+### DOS look shading
+
+`dos_shading=dithered|smooth` in mw2port.cfg (the older `dos_sky=` key is still read; in a DOS mission: GRAPHICS page,
+first row "DOS shading"; in the shell: Combat Variables, DOS DITHERED / SMOOTH right of TEXTURES). *dithered* (the
+default) is the original: the sky haze in 15 steps and every shaded polygon (cockpit, mechs, buildings) with the DOS
+renderer's fine checkerboard between palette steps. *smooth* blends the same colours into even gradients; it follows the
+time of day, light amplification and the red damage flash. Other renderers are not affected.
+
+### HUD layout
+
+`hud_layout=wide|original` in mw2port.cfg (in a mission: GRAPHICS page > HUD layout; in the shell: Combat Variables >
+DISPLAY row, right half). *wide* (the default) moves the cockpit instruments to the screen's corners on screens wider
+than 4:3: radar, altitude tape and target display on the left; weapons, damage display, throttle bar and speed on the
+right. The compass, reticle and heat bars stay centred. *original* keeps the whole HUD in the 4:3 middle, as the original
+game drew it. At 4:3 the two are identical.
 
 ### macOS: the app is not signed
 
@@ -261,10 +281,13 @@ the download flag once, in Terminal, from the folder holding the app:
 
     xattr -dr com.apple.quarantine "MechWarrior 2.app"
 
-Then open it normally. A copy you built yourself is not flagged and opens directly. On first launch the app looks for
-the game in `~/MW2-game`; to use another folder, run it once from Terminal with the folder and it is remembered:
-
-    "MechWarrior 2.app/Contents/MacOS/mw2" /path/to/MW2-game
+Then open it normally. A copy you built yourself is not flagged and opens directly. Your game data is not inside the
+app: on first launch the app looks for your `MW2-game` folder next to `MechWarrior 2.app`, one level up and in
+`~/MW2-game`, and if it is in none of those it asks for your game folder (choose `MW2-game` itself or the folder that
+holds it). The choice is remembered in `~/Library/Application Support/mw2port/mw2port.cfg`; if the folder later moves,
+the app asks again. (A downloaded copy opened without clearing the flag runs from a temporary read-only location -
+macOS "App Translocation" - where it cannot see a folder next to it; the app then says so and you can still choose the
+folder, or quit, run the `xattr` command above or move the app with Finder, and open it again.)
 
 ### macOS: keyboard shortcuts
 

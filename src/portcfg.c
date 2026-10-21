@@ -83,6 +83,8 @@ int portcfg_load(const char *unused, portcfg *c)
             int a = atoi(v);
             c->aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0;
         } else if (strcmp(line, "system_shortcuts") == 0) c->system_shortcuts = strcmp(v, "allow") == 0;
+        else if (strcmp(line, "hud_layout") == 0) c->hud_original = strcmp(v, "original") == 0;
+        else if (strcmp(line, "dos_shading") == 0 || strcmp(line, "dos_sky") == 0) c->dos_sky_smooth = strcmp(v, "smooth") == 0;   /* (dos_sky=: its older name) */
         else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
         else if (strcmp(line, "renderer") == 0 || strcmp(line, "edition") == 0) {   /* (edition=: the old single look) */
             int e;
@@ -119,6 +121,8 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "renderer=%s\n", PORTCFG_ED_NAME[c->renderer >= 0 && c->renderer < PORTCFG_ED_COUNT ? c->renderer : 0]);
     fprintf(f, "textures=%s\n", PORTCFG_TX_NAME[c->texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
     fprintf(f, "system_shortcuts=%s\n", c->system_shortcuts ? "allow" : "block");
+    fprintf(f, "hud_layout=%s\n", c->hud_original ? "original" : "wide");
+    fprintf(f, "dos_shading=%s\n", c->dos_sky_smooth ? "smooth" : "dithered");
     fclose(f);
     return 0;
 }
@@ -129,7 +133,36 @@ int portcfg_is_game_dir(const char *dir)
     if (!is_dir(dir)) return 0;
     snprintf(p, sizeof p, "%s/install", dir);
     if (is_dir(p)) return 1;                                            /* a game folder */
+    snprintf(p, sizeof p, "%s/cd", dir);
+    if (is_dir(p)) return 1;            /* a game folder whose install files sit at the top (cd/ beside them) */
     return find_ci(dir, "DATABASE.MW2", tmp, sizeof tmp) && find_ci(dir, "MW2.PRJ", tmp, sizeof tmp);   /* a plain install */
+}
+
+int portcfg_app_folder(const char *exe_dir, char *out, size_t n)
+{
+    /* SDL_GetBasePath() inside a macOS bundle: ".../X.app/Contents/Resources/" (or MacOS/); the folder holding X.app */
+    const char *a = exe_dir ? strstr(exe_dir, ".app/Contents/") : NULL, *s;
+    if (!a) return 0;
+    for (s = a; s > exe_dir && s[-1] != '/'; s--) {}
+    if (s - exe_dir <= 1) snprintf(out, n, "%s", s > exe_dir ? "/" : ".");   /* "/X.app/..." or a relative "X.app/..." */
+    else snprintf(out, n, "%.*s", (int)(s - exe_dir - 1), exe_dir);
+    return 1;
+}
+
+int portcfg_translocated(const char *exe_dir) { return exe_dir && strstr(exe_dir, "/AppTranslocation/") != NULL; }
+
+int portcfg_game_in(const char *dir, char *out, size_t n)
+{
+    char p[PORTCFG_PATH + 16];
+    const char *g = NULL;
+    char *r;
+    if (portcfg_is_game_dir(dir)) g = dir;
+    else { snprintf(p, sizeof p, "%s/MW2-game", dir); if (portcfg_is_game_dir(p)) g = p; }
+    if (!g) return 0;
+    r = realpath(g, NULL);
+    snprintf(out, n, "%s", r ? r : g);
+    free(r);
+    return 1;
 }
 
 int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
@@ -141,14 +174,19 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
 #endif
     if (hint && portcfg_is_game_dir(hint)) snprintf(c->game, sizeof c->game, "%s", hint);
     if (!c->game[0] && !c->install[0]) {   /* look for it */
-        char cand[5][PORTCFG_PATH];
-        int i;
-        snprintf(cand[0], PORTCFG_PATH, ".");
-        snprintf(cand[1], PORTCFG_PATH, "%sMW2-game", exe_dir ? exe_dir : "");
-        snprintf(cand[2], PORTCFG_PATH, "%s../MW2-game", exe_dir ? exe_dir : "");
-        snprintf(cand[3], PORTCFG_PATH, "%s/MW2-game", home ? home : ".");
-        snprintf(cand[4], PORTCFG_PATH, "%s", exe_dir ? exe_dir : ".");
-        for (i = 0; i < 5 && !c->game[0]; i++)
+        char cand[8][PORTCFG_PATH], app[PORTCFG_PATH];
+        int i, k = 0;
+        snprintf(cand[k++], PORTCFG_PATH, ".");
+        snprintf(cand[k++], PORTCFG_PATH, "%sMW2-game", exe_dir ? exe_dir : "");
+        snprintf(cand[k++], PORTCFG_PATH, "%s../MW2-game", exe_dir ? exe_dir : "");
+        if (portcfg_app_folder(exe_dir, app, sizeof app)) {   /* in a macOS bundle: next to the .app, not inside it */
+            snprintf(cand[k++], PORTCFG_PATH, "%s/MW2-game", app);
+            snprintf(cand[k++], PORTCFG_PATH, "%s/../MW2-game", app);
+        }
+        snprintf(cand[k++], PORTCFG_PATH, "%s/MW2-game", home ? home : ".");
+        snprintf(cand[k++], PORTCFG_PATH, "%s", exe_dir ? exe_dir : ".");
+        if (portcfg_app_folder(exe_dir, app, sizeof app)) snprintf(cand[k++], PORTCFG_PATH, "%s", app);
+        for (i = 0; i < k && !c->game[0]; i++)
             if (portcfg_is_game_dir(cand[i])) {
                 char *r = realpath(cand[i], NULL);
                 snprintf(c->game, sizeof c->game, "%s", r ? r : cand[i]);

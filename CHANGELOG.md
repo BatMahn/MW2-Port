@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.4.8 (2026-10-21)
+
+- **DOS look shading as the original**: every shaded polygon (cockpit, mechs, buildings) now gets the DOS renderer's
+  fine checkerboard between palette steps, at the original brightness (it was half a shade darker). The option is now
+  `dos_shading=dithered|smooth` (covers the sky too; `dos_sky=` still works).
+
+## v0.4.7 (2026-10-21)
+
+- **DOS look sky**: the default now matches the original exactly (15 haze steps with the original's fine checkerboard
+  between them); new option `dos_sky=smooth` blends them into an even gradient (GRAPHICS page / Combat Variables).
+- **Laser range as in the original**: a laser shot loses its weapon's recycle time from its flight time, so medium lasers
+  reach about 360 m, not their full table range (player and AI). AQUA's attackers no longer land laser hits from 500 m.
+- **Damage display (H T A L)** scaled and ordered as the original: the best-armoured location fills half the window;
+  the left / right bars were mirrored.
+- **AI holds fire when another mech is in the way**; DOS-look area damage gives the head a quarter, as DOS does.
+- **AQUA**: deaths now match the original (median about 43 s vs 45 s in DOSBox).
+
+## v0.4.6 (2026-10-21)
+
+- **macOS app finds your game folder**: it looks next to `MechWarrior 2.app` and, if the folder isn't there, asks for it
+  with the system folder picker and remembers it (Windows and Linux ask too). No Terminal launch needed.
+- **Wide-screen HUD**: on screens wider than 4:3 the instruments sit in the left and right corners (`hud_layout=original`
+  for the centred 4:3 layout).
+- **Legs hold still in the air**: the walk animation pauses while airborne (jumping or high drops) and resumes on landing,
+  as the original does (player and AI).
+- **AI fires its weapons in turn** (one weapon per trigger press, as the original): AQUA's Stormcrow no longer empties
+  its AC/20 in seconds; deaths there now spread like DOSBox's.
+- **ORANSCN1 trainees** start facing and steering as in the original; AI obstacle probes use the original's length (and
+  the DOS look's own probe quirk).
+- **World objects use their placement scale**: fires / smoke at the right size and turned to face you (MARO's street
+  fire), training mountains and other scaled objects at the original size.
+
 ## v0.4.5 (2026-10-20)
 
 - **Autopilot at obstacles**: drives straight, and after bumping into a building or mech turns away, follows the wall

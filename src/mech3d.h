@@ -49,6 +49,9 @@ typedef struct {
     int       sphere_ok;     /* hull_center / hull_radius computed */
     int       moving;        /* world objects: carried by a path task (PTBL, world3d_paths) - pos / rot change every step:
                                 left out of the static world mesh and collision lists, drawn and hit-tested as they are */
+    int       facing;        /* world objects of class 0x10 / 0x60 (the fire and smoke cards, OBJ type word): turned about
+                                the vertical every frame to face the camera (engine 0x1002ea80, DOS 0x39fa0) - left out
+                                of the static world mesh, drawn on the actor layer with that yaw */
     /* TEXTURES TITANIUM (drawing only; the simulation keeps `model`): */
     int       ti;            /* `model` is a Titanium one (mech3d_ti_load): drawn with the Titanium texture table */
     const wtb_model *ti_model;   /* world objects: the Titanium archive's model at the same record / OBJ index
@@ -274,5 +277,8 @@ void world3d_ti_free(wtb_model *store, int count);
  * polygon's unit normal (0x10004127; also kept in its normal[], has_normal 0) added to its vertices', normalised by the
  * engine's length at every step */
 void mech3d_ti_normals(wtb_model *m);
+
+/* the engine's heading of (dx, dz) in degrees, from +z towards +x (0x10030120 / DOS 0x3a9e5, table-based atan2) */
+float mech3d_heading(float dx, float dz);
 
 #endif

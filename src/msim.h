@@ -103,6 +103,7 @@ typedef struct {
     int          obstacle_count;
     int          flank_slots[8]; /* attackers per slot around the player */
     float       *avoid_turn, *avoid_thr, *avoid_next;   /* per actor: held avoidance output */
+    float       *avoid_len;      /* per actor: the avoidance probe's length factor (engine +0x192), kept while a side is set */
     float       *air_speed;      /* per actor: horizontal speed carried while airborne (cm/s) */
     int         *avoid_side;
     ai_mind     *minds;          /* per actor */
@@ -325,6 +326,7 @@ int  msim_test_probe(const msim *s, const float p0[3], const float p1[3], float 
 /* TEST ONLY: the units a shot step o..o+dv strikes (the shots' own test): 1 with the unit (-1 the player), the piece's
  * location (0 none) and the step fraction, 0 for none */
 int  msim_test_shot(msim *s, const float o[3], const float dv[3], int *unit, int *group, float *t);
+int  msim_test_fire_line(msim *s, int k);   /* TEST ONLY: actor k's line of fire to the player - 1 clear, 0 a unit first, -1 the world */
 /* index of the nearest living armed enemy actor within the player's weapon range, -1 if none */
 int  msim_nearest_enemy(const msim *s, float *distance);
 /* Terrain height under (x, z) for something at height y (engine 0x10010080): over the world's type 5

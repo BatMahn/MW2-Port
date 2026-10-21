@@ -89,3 +89,20 @@ From inside your game folder:
     ls install/MW2REG.CFG  # must exist
 
 Then run `./mw2 /path/to/MW2-game` once (Windows: drag the folder onto `mw2.exe`); the port remembers the folder after that.
+
+## Where the game looks for it
+
+The game data is never inside the program or the macOS app: the port uses your own `MW2-game` folder. Without a folder
+on the command line it uses, in order: the folder remembered in `mw2port.cfg` (`game=`), the current folder, the folder
+next to the program (the macOS app: next to `MechWarrior 2.app`), `MW2-game` one level up, and `~/MW2-game`. If none of
+those is a game folder (or the remembered one is gone), it asks for it with the system's folder picker - choose
+`MW2-game` itself or the folder that holds it; a folder without the game is explained and asked again. The choice is
+remembered.
+
+- **macOS:** on first launch the app asks for your game folder (unless `MW2-game` sits next to the app or in your home
+  folder). A downloaded app that still has the download flag runs from a temporary read-only copy and cannot see a
+  folder next to it - it tells you; clear the flag with `xattr -dr com.apple.quarantine "MechWarrior 2.app"` (README)
+  or move the app with Finder.
+- **Windows:** `mw2.exe` asks with the folder browser, or drag the folder onto `mw2.exe`.
+- **Linux:** the folder picker needs `zenity` or `kdialog`; without either, the game explains where to put the folder
+  (or run `./mw2 /path/to/MW2-game` once).

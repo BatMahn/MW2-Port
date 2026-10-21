@@ -72,6 +72,21 @@ static int        g_win_cols = 640;      /* and its width */
 static float      g_hp[256][4];          /* the HUD palette's colours (hud_mission_palette) */
 #define HP(i) ((const float *)g_hp[(i) & 0xff])
 #define HUD_BEGIN(hd, w, h) (g_render_w == 320 && g_lr_fbo[0] ? hud_begin_stretched(hd, w, h) : hud_begin(hd, w, h))
+/* the port's HUD layout (mw2port.cfg hud_layout=, the GRAPHICS page's HUD layout; not the original's - it drew the 4:3
+ * layout only): wide (1, the default) puts the left-hand instruments at the window's left edge and the right-hand ones
+ * at its right edge when the window is wider than 4:3 (hud_side); original (0) keeps the whole HUD in the 4:3 middle */
+static int        g_hud_wide = 1;
+/* the port's DOS shading (mw2port.cfg dos_shading=, the GRAPHICS page's DOS shading in a DOS mission; not the original's):
+ * 0 dithered (the default: the Gouraud polygons and the sky's haze band stepped and dithered as MW2.EXE 0x59e77 drew
+ * them), 1 smooth (their colours blended) */
+static int        g_dos_sky_smooth;
+#define HUD_SIDE(s) hud_side(g_hud, g_hud_wide ? (s) : 0)
+/* the same move in window pixels for the 3D pictures drawn into HUD windows (w x h the 3D frame): the side margin */
+static int hud_side_px(int w, int h, int side)
+{
+    int m = (w - h * 4 / 3) / 2;
+    return g_hud_wide && m > 0 ? side * m : 0;
+}
 static const char *HN(const char *base) { static char b[8][16]; static int k; k = (k + 1) & 7; snprintf(b[k], 16, "%s%s", base, g_hud_sfx); return b[k]; }
 static int        g_cockpit_frame;   /* the cockpit frame (the eye's hull piece): off until its rule is solved (ASSUMPTIONS
                                       * "Cockpit frames"); MW2_COCKPIT_FRAME=1 shows the current attempt */
@@ -196,6 +211,8 @@ static int       g_pl_contact_hold;    /* 1/30 s moves left in contact mode with
 static float     g_jet_vx, g_jet_vz;   /* cm/s: the velocity beyond the walking one (g_pl_speed along the heading) - the
                                         * engine keeps one velocity vector (+0xf4 / +0xfc); the port splits it in two */
 static int       g_pl_free;            /* airborne or jetting with fuel: no walking servo on the velocity (0x10019310) */
+static int       g_pl_jet_fire;        /* the jets fire this frame with fuel left after the burn (0x1001a180): the walk keys hold */
+static int       g_pl_anim_held;       /* the walk keys held this frame (anim_player_hold; state dump "aheld") */
 static float     g_pl_free_h = 1e9f;   /* the heading at the last free frame (1e9: none) */
 static int       g_pl_legs_turn;       /* this frame's leg-turn input (+0xc) is not 0 - keys, axis or the autopilot's
                                         * (0x1001a180: +0xc = the pilot's +0x10 or the autopilot's turn) */
@@ -3008,7 +3025,10 @@ static void cc_draw(void)
  *   FLEE TO WINDOWS 0x10264828: "Confirm your cowardice", 1 Accept -> 0x100642e0: leave the game
  *   GRAPHICS 0x10265570: Textured Sky, Textured Ground (Off / On; off = flat in the texture's average colour,
  *            0x10027c80 / 0x1002d330), Resolution 800x600 (No / Yes; its commit is empty) - the port: Renderer and
- *            Textures in its place (the shell's RENDERER / TEXTURES; Accept stays on the sixth row)
+ *            Textures in its place (the shell's RENDERER / TEXTURES) and HUD layout (Wide / Original: mw2port.cfg
+ *            hud_layout=, the port's own; Accept stays on the sixth row). In a DOS mission the first row is the port's
+ *            DOS shading (Dithered / Smooth: mw2port.cfg dos_shading=) - Textured Sky has nothing to switch there (the DOS look
+ *            fills the sky flat at the horizon, 0x3c000, and draws no sky texture)
  *   SET AUDIO VOLUME 0x10265290: Music, Sound Effects, Voice - sliders 0..1 in 0x199a steps (0x10064780), applied as
  *            they move (0x10031960), restored by Esc (0x10031b50)
  *   COMBAT VARIABLES 0x10265068: Object textmaps, Terrain textmaps (Off / On), Display detail, Object density
@@ -3021,25 +3041,29 @@ static void cc_draw(void)
  * title at y 113.75, rows from 167.5 every 36.25 (Accept on the sixth); values at x 385.6; sliders from 386.9 -
  * MENDL, MBAR, MENDR with the MSLIDE knob, centred on the row. */
 enum { MI_SUB, MI_VAL, MI_ACCEPT, MI_LABEL, MI_CONFIRM, MI_SLIDER };
-enum { MP_MAIN, MP_ABORT, MP_GRAPHICS, MP_AUDIO, MP_COMBAT, MP_FLEE, MP_COUNT };
-enum { MV_SKY, MV_GROUND, MV_VIDEO, MV_TEXSET, MV_MUSIC, MV_EFFECTS, MV_VOICE, MV_OBJTEX, MV_TERTEX, MV_DETAIL, MV_DENSITY, MV_CHUNKS, MV_COUNT };
+enum { MP_MAIN, MP_ABORT, MP_GRAPHICS, MP_AUDIO, MP_COMBAT, MP_FLEE, MP_GRAPHICS_DOS, MP_COUNT };
+enum { MV_SKY, MV_GROUND, MV_VIDEO, MV_TEXSET, MV_MUSIC, MV_EFFECTS, MV_VOICE, MV_OBJTEX, MV_TERTEX, MV_DETAIL, MV_DENSITY, MV_CHUNKS, MV_HUDLAYOUT, MV_DOSSKY, MV_COUNT };
 typedef struct { int type; const char *text; int arg; } mm_item;
 typedef struct { const char *title; int n; mm_item it[6]; } mm_page;
 static const mm_page MM_PAGE[MP_COUNT] = {
     {"MAIN MENU", 6, {{MI_SUB, "Abort Mission", MP_ABORT}, {MI_SUB, "Graphics", MP_GRAPHICS}, {MI_SUB, "Audio Ctrl", MP_AUDIO},
                       {MI_SUB, "Combat Variables", MP_COMBAT}, {MI_SUB, "Flee to Windows", MP_FLEE}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"ABORT MISSION", 2, {{MI_LABEL, "Confirmation requested", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 0}}},
-    {"GRAPHICS", 5, {{MI_VAL, "Textured Sky", MV_SKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},
-                     {MI_VAL, "Textures", MV_TEXSET}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
+    {"GRAPHICS", 6, {{MI_VAL, "Textured Sky", MV_SKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},
+                     {MI_VAL, "Textures", MV_TEXSET}, {MI_VAL, "HUD layout", MV_HUDLAYOUT}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"SET AUDIO VOLUME", 4, {{MI_SLIDER, "Music", MV_MUSIC}, {MI_SLIDER, "Sound Effects", MV_EFFECTS}, {MI_SLIDER, "Voice", MV_VOICE},
                              {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"COMBAT VARIABLES", 6, {{MI_VAL, "Object textmaps", MV_OBJTEX}, {MI_VAL, "Terrain textmaps", MV_TERTEX}, {MI_VAL, "Display detail", MV_DETAIL},
                              {MI_VAL, "Object density", MV_DENSITY}, {MI_VAL, "Explosion chunks", MV_CHUNKS}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"FLEE TO WINDOWS", 2, {{MI_LABEL, "Confirm your cowardice", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 1}}},
+    {"GRAPHICS", 6, {{MI_VAL, "DOS shading", MV_DOSSKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},   /* a DOS mission's */
+                     {MI_VAL, "Textures", MV_TEXSET}, {MI_VAL, "HUD layout", MV_HUDLAYOUT}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
 };
 static const char *const MM_OFFON[2] = {"Off", "On"}, *const MM_LOWHIGH[2] = {"Low", "High"};
 static const char *const MM_ED_TEXT[PORTCFG_ED_COUNT] = {"Enhanced", "DOS", "3Dfx", "ATi", "S3", "PowerVR", "Matrox"};
 static const char *const MM_TX_TEXT[PORTCFG_TX_COUNT] = {"Original", "Titanium"};
+static const char *const MM_HUD_TEXT[2] = {"Wide", "Original"};
+static const char *const MM_DOSSKY_TEXT[2] = {"Dithered", "Smooth"};
 static int  g_mm_stack[8], g_mm_depth;          /* open pages; empty = closed */
 static int  g_mm_sel;                           /* the chosen item of the top page */
 static int  g_mm_v[MV_COUNT], g_mm_old[MV_COUNT];   /* the pages' values (sliders 0..0x10000), as opened */
@@ -3098,13 +3122,16 @@ static const char *mm_value_text(int mv)
 {
     if (mv == MV_VIDEO) return MM_ED_TEXT[g_mm_ned > 0 ? g_mm_eds[g_mm_v[mv]] : g_edition];
     if (mv == MV_TEXSET) return MM_TX_TEXT[g_mm_v[mv] ? 1 : 0];
+    if (mv == MV_HUDLAYOUT) return MM_HUD_TEXT[g_mm_v[mv] ? 1 : 0];
+    if (mv == MV_DOSSKY) return MM_DOSSKY_TEXT[g_mm_v[mv] ? 1 : 0];
     return (mv == MV_DETAIL || mv == MV_DENSITY ? MM_LOWHIGH : MM_OFFON)[g_mm_v[mv] ? 1 : 0];
 }
 /* a page's values as they stand (0x10064d90 state 1: each item's getter) */
 static void mm_load_page(int pg)
 {
     int k;
-    if (pg == MP_GRAPHICS) {
+    if (pg == MP_GRAPHICS || pg == MP_GRAPHICS_DOS) {
+        g_mm_v[MV_DOSSKY] = g_dos_sky_smooth;
         g_mm_v[MV_SKY] = !(g_view && g_view->flat_sky);
         g_mm_v[MV_GROUND] = !(g_view && g_view->flat_ground);
         if (g_mm_ned < 0) {   /* the 3D editions whose files are present (none to switch to in a DOS mission) */
@@ -3125,6 +3152,7 @@ static void mm_load_page(int pg)
             g_mm_tx_lock = g_tex_kind == 3 || !portcfg_texset_ok(&pc, g_edition, PORTCFG_TX_TITANIUM);
         }
         g_mm_v[MV_TEXSET] = g_texset == PORTCFG_TX_TITANIUM && !g_mm_tx_lock;
+        g_mm_v[MV_HUDLAYOUT] = !g_hud_wide;
     } else if (pg == MP_AUDIO) {
         if (g_mm_vol[0] < 0) mm_read_volumes();
         g_mm_v[MV_MUSIC] = g_mm_vol[0]; g_mm_v[MV_EFFECTS] = g_mm_vol[1]; g_mm_v[MV_VOICE] = g_mm_vol[2];
@@ -3138,10 +3166,24 @@ static void mm_load_page(int pg)
 /* Accept: the page's values taken (the items' commit functions) */
 static void mm_commit_page(int pg)
 {
-    if (pg == MP_GRAPHICS) {
+    if (pg == MP_GRAPHICS || pg == MP_GRAPHICS_DOS) {
         if (g_view) { g_view->flat_sky = !g_mm_v[MV_SKY]; g_view->flat_ground = !g_mm_v[MV_GROUND]; }
         if (g_mm_ned > 0 && g_mm_eds[g_mm_v[MV_VIDEO]] != g_edition) g_mm_ed_req = g_mm_eds[g_mm_v[MV_VIDEO]];
         if (!g_mm_tx_lock && g_mm_v[MV_TEXSET] != (g_texset == PORTCFG_TX_TITANIUM)) g_mm_tx_req = g_mm_v[MV_TEXSET] ? PORTCFG_TX_TITANIUM : PORTCFG_TX_ORIGINAL;
+        if (g_mm_v[MV_HUDLAYOUT] != !g_hud_wide) {   /* at once, and kept in mw2port.cfg (the file's own values) */
+            portcfg raw;
+            g_hud_wide = !g_mm_v[MV_HUDLAYOUT];
+            portcfg_load(NULL, &raw);
+            raw.hud_original = !g_hud_wide;
+            portcfg_save(NULL, &raw);
+        }
+        if (g_mm_v[MV_DOSSKY] != g_dos_sky_smooth) {   /* the same: at once and in mw2port.cfg (dos_shading=) */
+            portcfg raw;
+            g_dos_sky_smooth = g_mm_v[MV_DOSSKY];
+            portcfg_load(NULL, &raw);
+            raw.dos_sky_smooth = g_dos_sky_smooth;
+            portcfg_save(NULL, &raw);
+        }
     } else if (pg == MP_AUDIO) {
         static const int OFS[3] = {12, 4, 8};
         g_mm_vol[0] = g_mm_v[MV_MUSIC]; g_mm_vol[1] = g_mm_v[MV_EFFECTS]; g_mm_vol[2] = g_mm_v[MV_VOICE];
@@ -3208,9 +3250,10 @@ static void mm_activate(int k)
     int pg = g_mm_stack[g_mm_depth - 1];
     const mm_item *it = &MM_PAGE[pg].it[k];
     if (it->type == MI_SUB && g_mm_depth < 8) {
-        g_mm_stack[g_mm_depth++] = it->arg; g_mm_sel = 0;
-        while (g_mm_sel < MM_PAGE[it->arg].n && MM_PAGE[it->arg].it[g_mm_sel].type == MI_LABEL) g_mm_sel++;
-        mm_load_page(it->arg);
+        int sub = it->arg == MP_GRAPHICS && g_tex_kind == 3 ? MP_GRAPHICS_DOS : it->arg;   /* a DOS mission: DOS shading first */
+        g_mm_stack[g_mm_depth++] = sub; g_mm_sel = 0;
+        while (g_mm_sel < MM_PAGE[sub].n && MM_PAGE[sub].it[g_mm_sel].type == MI_LABEL) g_mm_sel++;
+        mm_load_page(sub);
         if (g_sfx) { float L[3], yaw; snd_listener(L, &yaw); sfx_play_at3(g_sfx, 0xe1, 0, 0, 0, yaw, 0); }   /* see mm_key */
     } else if (it->type == MI_ACCEPT) { mm_commit_page(pg); mm_pop(); }
     else if (it->type == MI_CONFIRM) {
@@ -3386,7 +3429,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
-            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
+            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_jet_fire = 0; g_pl_anim_held = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
             if (getenv("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
@@ -4106,6 +4149,8 @@ static void target_at_reticle(void)
  * MW2_TEST_PARMOR="t:factor"  the player's armour x factor at t (0.25: the MEK's points, as before the loader's x 4)
  * MW2_TEST_WATCH="t:actor"  the actor's state dumped as a_* (a_armor: armour + structure per location 1-8)
  * MW2_TEST_SHOTSEG="t:k:dy:dx,..."  a shot step through actor k (50 m south to north, dy over its feet, dx east): testshot lines
+ * MW2_TEST_FIRELINE="t:k,..."  actor k's fire-decision line to the player (msim_test_fire_line): "fireline <k> <1 clear / 0 a unit
+ *                                        first / -1 the world>"
  * MW2_TEST_PHIT="t:loc:weapon:count,..."  the player takes `count` hits of weapon `weapon` on location loc (1-8) at t
  * MW2_TEST_HEAT="t:value,..."  set the player's heat at t
  * MW2_TEST_RNG="t:value"  set the simulation's random state at t (deterministic criticals)
@@ -4242,6 +4287,8 @@ static void test_shotseg(const char *r)
         printf("testshot %d unit %d loc %d z %.0f (dy %.0f dx %.0f)\n", h, u, g, h ? t * 10000.0f - 5000.0f : 0.0f, dy, dx);
     }
 }
+/* MW2_TEST_FIRELINE="t:k"  actor k's line of fire to the player as its fire decision tests it (0x10015090) */
+static void test_fireline(const char *r) { int k = atoi(r); printf("fireline %d %d\n", k, msim_test_fire_line(&g_sim, k)); }
 /* MW2_TEST_DROP="t:actor:dz:height:vy:hspeed"  actor put dz cm ahead (+z) of the player, its feet `height` cm above the
  * player's, falling at vy cm/tick (negative down), carrying hspeed cm/s toward the player */
 /* MW2_TEST_PROBE="t:dz:dy:len"  one AI avoidance probe at t from dz ahead (+z) of the player, dy above its centre, len cm
@@ -4320,7 +4367,7 @@ static void test_dump(const char *tag)
         printf(" fade=%.3f gnd=%.0f lvy=%.2f jolt=%.2f", (double)g_fade_level, (double)g_sim.player_unit.ground, (double)g_sim.player_unit.landed_vy, (double)g_jolt_view[3]);   /* the opening palette fade (1 = done); the ground under the player, its touch-down speed, the jolt pitch */
     }
     /* the walk-cycle keys: the player's and MW2_KILL_ACTOR's actor's (a destroyed mech keeps its pose: standing_wreck_frozen) */
-    printf(" pkey=%.3f bracket=%d zoom=%.2f", (double)g_pl_t, g_bracket, (double)g_zoom);
+    printf(" pkey=%.3f aheld=%d bracket=%d zoom=%.2f", (double)g_pl_t, g_pl_anim_held, g_bracket, (double)g_zoom);
     {   /* per unit: the range e would see (unit_targetable side 1, cm; -1 refused) and its weapon count */
         printf(" erng=");
         for (i = 0; i < g_actor_count; i++) { float dd = -1.0f; if (!unit_targetable(i, 1, &dd)) dd = -1.0f; printf("%s%.0f", i ? ";" : "", (double)dd); }
@@ -4335,8 +4382,9 @@ static void test_dump(const char *tag)
     if (getenv("MW2_WATCH_ACTOR") && g_sim_ok && g_sim.anim_pl) {   /* TEST ONLY: an actor's walk animation (idle_mech_rests) */
         int wa = atoi(getenv("MW2_WATCH_ACTOR"));
         if (wa >= 0 && wa < g_actor_count)
-            printf(" w_key=%.3f w_seq=%d w_on=%d w_thr=%.3f w_x=%d w_z=%d", (double)g_actors[wa].t, g_sim.anim_pl[wa].cur, g_sim.anim_pl[wa].on,
-                   (double)(g_sim.minds ? g_sim.minds[wa].thr_servo : 0.0f), g_actors[wa].mech.origin[0], g_actors[wa].mech.origin[2]);
+            printf(" w_key=%.3f w_seq=%d w_on=%d w_thr=%.3f w_x=%d w_z=%d w_hd=%.1f w_st=%d", (double)g_actors[wa].t, g_sim.anim_pl[wa].cur, g_sim.anim_pl[wa].on,
+                   (double)(g_sim.minds ? g_sim.minds[wa].thr_servo : 0.0f), g_actors[wa].mech.origin[0], g_actors[wa].mech.origin[2],
+                   (double)g_actors[wa].mech.heading, g_sim.minds ? g_sim.minds[wa].state : -1);
     }
     if (getenv("MW2_KILL_ACTOR")) {
         int ka = atoi(getenv("MW2_KILL_ACTOR"));
@@ -4397,6 +4445,7 @@ static void test_frame(int w, int h)
     test_timed("MW2_TEST_NODE_OK", &d_node, test_node_ok);
     { static int d_ahit; test_timed("MW2_TEST_AHIT", &d_ahit, test_ahit); }
     { static int d_shotseg; test_timed("MW2_TEST_SHOTSEG", &d_shotseg, test_shotseg); }
+    { static int d_fireline; test_timed("MW2_TEST_FIRELINE", &d_fireline, test_fireline); }
     { static int d_watch; test_timed("MW2_TEST_WATCH", &d_watch, test_watch); }
     { static int d_parmor; test_timed("MW2_TEST_PARMOR", &d_parmor, test_parmor); }
     test_timed("MW2_TEST_HEAT", &d_heat, test_heat);
@@ -4564,6 +4613,11 @@ int main(int argc, char **argv)
         }
         if (!aa) msaa = 0;
         g_syskeys_allow = pc.system_shortcuts;
+        g_hud_wide = !pc.hud_original;
+        if (getenv("MW2_HUD_LAYOUT")) g_hud_wide = strcmp(getenv("MW2_HUD_LAYOUT"), "original") != 0;   /* tests */
+        g_dos_sky_smooth = pc.dos_sky_smooth;
+        if (getenv("MW2_DOS_SKY")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SKY"), "smooth") == 0;   /* tests */
+        if (getenv("MW2_DOS_SHADING")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SHADING"), "smooth") == 0;   /* tests */
     }
     if (!win || !(ctx = SDL_GL_CreateContext(win))) {
         fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError());
@@ -5546,6 +5600,7 @@ int main(int argc, char **argv)
                     /* engine 0x10019310 (DOS 0x26990): the velocity approaches heading x c[0xb] only on the ground with the
                      * jets not firing (input +0x1d and fuel c[0x30] > 0); airborne or jetting it is left alone - momentum,
                      * whatever the throttle - except for the directional jets' thrust and drag (the jets block below) */
+                    g_pl_jet_fire = g_sim_ok && combat_jets_firing(&g_sim.player_unit, jet, dt);
                     g_pl_free = g_sim_ok && (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f ||
                                              (jet && g_sim.player_unit.jets > 0 && g_sim.player_unit.jet_fuel > 0));
                     g_pl_dy_done = 0; g_pl_vy3 = 0; g_pl_imp3 = 0; g_pl_land3 = 0; g_pl_dt = dt;
@@ -5569,6 +5624,16 @@ int main(int argc, char **argv)
                         if (g_reverse) seq = 2;   /* the reverse flag (input +0x2f) asks for the reverse walk (0x1000b3a0) */
                     }
                     const int seq_req = seq;   /* +0x88 as asked this frame (-1 stop) */
+                    /* the walk keys hold in the air (user report 2026-10-20): the physics 0x10019310 clears object +0x80 bit 0
+                     * whenever the feet end the frame more than the centre height c[0x33] (MGEO int[0]) over the ground
+                     * (0x10019df2; DOS 0x26990 the same), and the controller 0x1001a180 whenever the jets fire with fuel
+                     * left (0x1001a688) - both every frame, after the gait code and before the key player (an object task,
+                     * 0x100249b0 at the frame's end); the key player then only sets the bit again (0x1000dec0): the key,
+                     * the pose and the carried offset hold, the frame's time is dropped, no key starts (no footstep), and it
+                     * plays on from there once landed. The gait request and its sounds (0x1000b4e0) run on meanwhile.
+                     * DOSBox HEIDSCN1 Nova at walk, J held 1 s: the legs held from the first jet frame to touch-down */
+                    g_pl_anim_held = g_sim_ok && (g_pl_jet_fire || g_sim.player_unit.y + g_pl_dy_frame - g_sim.player_unit.ground > g_sim.player_centre_h);
+                    if (g_pl_anim_held) anim_player_hold(&g_pl_ap);
                     ev = anim_player_step(&g_pl_anim, &g_pl_ap, seq, gait, r0, dt * 182.0f);
                     g_pl_t = g_pl_ap.t;
                     if (seq < 0) seq = 0;
@@ -6151,6 +6216,46 @@ int main(int argc, char **argv)
                             if (g_sim.world->parts[q].moving && !g_sim.world->parts[q].hidden) { all.parts[all.part_count] = g_sim.world->parts[q]; all.parts[all.part_count++].moving = 0; }
                     }
                 }
+                if (all.parts && g_sim.world) {
+                    /* the fire / smoke cards (world objects of class 0x10 / 0x60): every frame, after the camera, the engine
+                     * turns each about the vertical to face the eye - yaw = the heading of (eye - object) in x / z, pitch 0
+                     * (0x1002ea80 from the camera update 0x1002dc90; DOS 0x39fa0, the same: 0x3a9e5 of the eye's x / z
+                     * less the node's), replacing its OBJ rotation (while DAT_10244d3c / DOS 0xa4c48 is 4 - a display mode
+                     * not identified, not in the port - yaw 180, pitch -45). The eye: this frame's (the ordnance / ejection
+                     * cameras move it later in the frame - last frame's for them) */
+                    int q, nf = 0;
+                    mech3d_part *grown;
+                    const float *eye = (g_camode == 3 || g_camode == 4) ? g_cam_eye : v.eye;
+                    for (q = 0; q < g_sim.world->part_count; q++) nf += g_sim.world->parts[q].facing && !g_sim.world->parts[q].hidden;
+                    if (nf && (grown = realloc(all.parts, (size_t)(total + nf) * sizeof *all.parts))) {
+                        all.parts = grown; total += nf;
+                        for (q = 0; q < g_sim.world->part_count; q++) {
+                            mech3d_part *fp = &g_sim.world->parts[q];
+                            if (!fp->facing || fp->hidden) continue;
+                            all.parts[all.part_count] = *fp;
+                            all.parts[all.part_count].facing = 0;
+                            all.parts[all.part_count].has_rot = 0;
+                            all.parts[all.part_count].yaw = mech3d_heading(eye[0] - (float)fp->pos[0], eye[2] - (float)fp->pos[2]);
+                            if (getenv("MW2_FACING_LOG") && fp->model.object_count > 0) {   /* TEST hook: once per card */
+                                static unsigned char said[4096];
+                                if (q < 4096 && !said[q]) {
+                                    const wtb_object *fo = &fp->model.objects[0];
+                                    int k3, x0 = 1 << 30, x1 = -(1 << 30), y0 = 1 << 30, y1 = -(1 << 30);
+                                    for (k3 = 0; k3 < fo->vert_count; k3++) {
+                                        if (fo->verts[k3].x < x0) x0 = fo->verts[k3].x;
+                                        if (fo->verts[k3].x > x1) x1 = fo->verts[k3].x;
+                                        if (fo->verts[k3].y < y0) y0 = fo->verts[k3].y;
+                                        if (fo->verts[k3].y > y1) y1 = fo->verts[k3].y;
+                                    }
+                                    said[q] = 1;
+                                    printf("FACING %s pos=%d,%d eye=%.0f,%.0f yaw=%.3f w=%d h=%d type=%#x\n", fp->model_name, (int)fp->pos[0], (int)fp->pos[2],
+                                           (double)eye[0], (double)eye[2], (double)all.parts[all.part_count].yaw, x1 - x0, y1 - y0, fp->objtype);
+                                }
+                            }
+                            all.part_count++;
+                        }
+                    }
+                }
                 g_pit_first = all.part_count;   /* the cockpit piece goes last (left out of viewport views) */
                 if (!show_pl && VIEW_IN_COCKPIT && !g_satmap && g_pl_ok && all.parts && !g_sim.player_unit.destroyed && g_zoom <= 1.0f) {
                     /* the cockpit frame: the player's representation 4 (engine 0x100267d0 / 0x10026330), posed as the
@@ -6644,6 +6749,7 @@ int main(int argc, char **argv)
         v.wire = g_world && HUD_VIEW && g_vision == 2;
         v.notex_world = g_notex_world; v.notex_actors = g_notex_actors;
         v.far_cull = g_world ? g_view_far : 0.0f;   /* the planet's VIEW far (load_view_far) */
+        v.dos_sky_smooth = g_dos_sky_smooth;        /* the port's dos_shading= (the DOS look's Gouraud fill and haze band) */
         if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
         world_fade(r);
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
@@ -6692,7 +6798,7 @@ int main(int argc, char **argv)
             /* DOS viewport box x 827-991, y 559-686 at 1024x768 = 516.9..619.4 x 349.4..428.8 in 640x480 units */
             glr_view vv = v;
             float sx = (float)h * 4.0f / 3.0f, x0 = ((float)w - sx) * 0.5f;
-            int px = (int)(x0 + 516.9f * sx / 640.0f), pw = (int)(102.5f * sx / 640.0f);
+            int px = (int)(x0 + 516.9f * sx / 640.0f) + hud_side_px(w, h, 1), pw = (int)(102.5f * sx / 640.0f);   /* right-hand */
             int ph = (int)(79.4f * (float)h / 480.0f), py = h - (int)(349.4f * (float)h / 480.0f) - ph;
             if (vp_wf < 1.0f || vp_hf < 1.0f) {
                 /* powering up / down (0x10011aa0 / 0x10011b70): the view is drawn into the window as it stands - the camera's
@@ -6733,7 +6839,7 @@ int main(int argc, char **argv)
             float R = g_sim.radius ? g_sim.radius[g_tgt_sel] : 545.0f, ch = g_sim.centre_h ? g_sim.centre_h[g_tgt_sel] : 550.0f;
             float lx = (float)ta->mech.origin[0] - (float)g_pl.origin[0], lz = (float)ta->mech.origin[2] - (float)g_pl.origin[2], ll = sqrtf(lx * lx + lz * lz);
             float sx = (float)h * 4.0f / 3.0f, x0 = ((float)w - sx) * 0.5f;
-            int px = (int)(x0 + ((float)rr[0] * 2.0f) * sx / 640.0f), pw = (int)(((float)rr[2] * 2.0f) * sx / 640.0f);
+            int px = (int)(x0 + ((float)rr[0] * 2.0f) * sx / 640.0f) + hud_side_px(w, h, -1), pw = (int)(((float)rr[2] * 2.0f) * sx / 640.0f);   /* left-hand */
             int ph = (int)(((float)rr[3] * 2.4f) * (float)h / 480.0f), py = h - (int)(((float)rr[1] * 2.4f) * (float)h / 480.0f) - ph;
             {   /* powering up / down: the window about its centre (0x10021730 / 0x100217f0 draw it there) */
                 int npw = (int)((float)pw * td_wf), nph = (int)((float)ph * td_hf);
@@ -7051,6 +7157,7 @@ int main(int argc, char **argv)
                 /* the window from the mode descriptor 0x1024a760 (screen fractions; CPIT rect 0 is overwritten by it,
                  * 0x10003250): mode 1 (0.02, 0.02)-(0.26, 0.34), mode 2 (0.13, 0)-(0.87, 1.0); circle radius w / 2 - 1 */
                 float cx = 89.6f, cy = 86.4f, rad = 75.8f;
+                if (!g_radar_big && !g_satmap) HUD_SIDE(-1);   /* the corner radar (and its range label): left-hand */
                 if (g_radar_big) { cx = 320.0f; cy = 240.0f; rad = 235.8f; }
                 if (g_satmap) { cx = 320.0f; cy = 240.0f; rad = 420.0f; }       /* mode 4: full screen, north up */
                 else if (hud_dead) rad *= rad_wf;   /* powering up / down: the window (and its circle) about the centre */
@@ -7137,6 +7244,7 @@ int main(int argc, char **argv)
                         if (g_sim.now / 1000.0 >= last + 1.0) { last = g_sim.now / 1000.0; printf("RADAR t=%.1f units %d things %d\n", g_sim.now / 1000.0, nblip_u, nblip_t); }
                     }
                 }
+                HUD_SIDE(0);
             }
             /* altitude tape (engine 0x100222e0; window 23 = (1,74)-(35,111) in 320x200 -> 640 units x 2-70, y 178-267;
              * reference point (0.7, 0.5) = local (48, 45) -> (50, 223)). It shows the ABSOLUTE elevation of the feet
@@ -7147,6 +7255,7 @@ int main(int argc, char **argv)
             {
             if (!hud_dead && g_hs_alt.tex) {
                 float ux = hud_px_x(g_hud, 1.0f), uy = hud_px_y(g_hud, 1.0f), alt = pu->y / 100.0f, gnd = pu->ground / 100.0f;
+                HUD_SIDE(-1);   /* left-hand */
                 float hy = 178.0f + 45.0f * uy + uy * (float)(int)((alt - 201.0f) * 4.0f);   /* the tape's hotspot */
                 float v0 = (178.0f - hy) / uy - (float)g_hs_alt.top;
                 hud_draw_window_v(g_hud, &g_hs_alt, v0, 89.0f / uy, 2.0f + 6.0f * ux + ux * (float)g_hs_alt.left, 178.0f);
@@ -7167,11 +7276,13 @@ int main(int argc, char **argv)
                         else if (ar[0].tex) hud_draw(g_hud, &ar[0], 2.0f + 54.0f * ux, 178.0f + ty * uy, NULL);
                     }
                 }
+                HUD_SIDE(0);
             }
             /* weapon list, top right (CPIT rects 3-12): green ready, white ready but target out of range,
              * red recycling, grey empty / destroyed; box around the selected weapon */
             {
                 int wi;
+                HUD_SIDE(1);   /* right-hand */
                 for (wi = 0; wi < pu->weapon_count && wi < 10 && g_layout_n > 12 && (!hud_dead || g_pow == 1); wi++) {
                     const combat_weapon *cw = &pu->weapons[wi];
                     const int win = weapon_window(pu, wi), *rr = g_layout[win];
@@ -7207,9 +7318,11 @@ int main(int argc, char **argv)
                         hud_line(g_hud, bx1, by1, bx0, by1, 1.5f, col); hud_line(g_hud, bx0, by1, bx0, by0, 1.5f, col);
                     }
                 }
+                HUD_SIDE(0);
             }
             }
             /* damage outline, bottom right (CPIT rect 2), per location (engine 0x1001b620); F5 hides it */
+            HUD_SIDE(1);   /* right-hand: the viewport box, H T A L bars or damage outline */
             if (g_vport) {   /* the viewport box: blue frame, label sprite at the top centre (DOS) */
                 const float *vblue = HP(6);   /* DOSBox YELLSCN1: 0,0,199 = YELL_DA 6 */
                 float x0 = 516.9f, y0 = 349.4f, x1 = 619.4f, y1 = 428.8f, vwf = 1, vhf = 1;
@@ -7232,38 +7345,56 @@ int main(int argc, char **argv)
                     }
                 }
             } else if (g_htal && !g_dmg_off && !hud_dead) {
-                /* H T A L (DOS, F6; engine 0x1001b890): armour bars hanging from a line at y 375.6, 1.125 units per
-                 * armour point (1.8 px at 1024x768), torsos as half-width front / rear pairs, blue letters (index 6).
-                 * The armour left is green (0xf bands); the armour lost, below it on the same bar up to the maximum,
-                 * yellow (3) while more than a quarter is left, else red (0xb); a destroyed location all grey (0xf3) */
+                /* H T A L (DOS, F6; engine 0x1001b890, DOS 0x2f790): armour bars hanging from a line a third down the
+                 * lower window (0x5555 of its height, y 375.6), torsos as half-width front / rear pairs, blue letters
+                 * (index 6). The scale is the mech's own: at the HUD's set-up (0x1001b230 / DOS 0x2f190) every
+                 * location's starting front / rear armour is copied (0x1007c388 / DOS 0xfe0a8) and the largest FRONT
+                 * value kept (0x1024c620 / DOS 0x96664); a bar is armour x half the window's height (0x8000 of it,
+                 * converted to pixels at the set-up: 40 rows at 640x480) / that maximum, truncated (DOS 64-bit
+                 * integer divide), so the most armoured location's bar is half the window whatever the mech (the
+                 * port had drawn a fixed 1.125 units per MEK point: a Mad Dog's bars ~1.6x too short, every hit
+                 * stripping too little). Each part is drawn as a vertical line run, both ends inclusive (0x1001c810 /
+                 * DOS 0x31520): the armour left in green (0xf bands) from the line down to it, then the armour lost
+                 * from there to the starting length - yellow (3) while more than a quarter of the start is left (DOS
+                 * (start >> 2) < armour), else red (0xb), over the green's last row; a destroyed location all grey
+                 * (0xf3). DOSBox AQUASCN1, Mad Dog (largest front 23 x 4 = CT / legs): 1024x768 full lengths
+                 * H 26 / side torsos and arms 45 / CT and legs 65 / rears 20 px; an ER PPC hit on the CT -12 px */
+                /* the bars' x (0x1007c340.. / DOS 0xfdf60..: 0x2323, 0x7373, 0x5a5a, 0x4141, 0xaaab, 0x9192, 0xe1e2,
+                 * 0xc8c9 of the window's width for locations 0-7): left to right head, 3, 2, 1, 5, 4, 7, 6 - each pair
+                 * the higher location first (the port had drawn 1..7 left to right, every pair mirrored; DOSBox
+                 * AQUASCN1: the CT's partner in the DOS spread, location 1, is the RIGHT torso pair) */
                 static const struct { int loc, rear; float x, w; } B[11] = {
-                    {0, 0, 531.3f, 8.1f}, {1, 0, 543.1f, 3.75f}, {1, 1, 546.9f, 3.75f}, {2, 0, 553.1f, 3.75f}, {2, 1, 556.9f, 3.75f},
-                    {3, 0, 563.1f, 3.75f}, {3, 1, 566.9f, 3.75f}, {4, 0, 575.0f, 8.1f}, {5, 0, 585.0f, 8.1f}, {6, 0, 597.5f, 8.1f}, {7, 0, 607.5f, 8.1f}};
+                    {0, 0, 531.3f, 8.1f}, {3, 0, 543.1f, 3.75f}, {3, 1, 546.9f, 3.75f}, {2, 0, 553.1f, 3.75f}, {2, 1, 556.9f, 3.75f},
+                    {1, 0, 563.1f, 3.75f}, {1, 1, 566.9f, 3.75f}, {5, 0, 575.0f, 8.1f}, {4, 0, 585.0f, 8.1f}, {7, 0, 597.5f, 8.1f}, {6, 0, 607.5f, 8.1f}};
                 const float *hb = HP(14), *hl = HP(15), *hd = HP(13);   /* the band colours in the mission palette (0x10260324) */
                 const float *yb = HP(2), *yl = HP(3), *ydk = HP(1);
                 const float *rb = HP(10), *rl = HP(11), *rd = HP(9);
                 const float *gb2 = HP(0xf2), *gl2 = HP(0xf3), *gd2 = HP(0xf1);
                 const float *hblue = HP(6);
+                const int64_t half = 40;   /* 0x8000 x the window's 80 rows (y 349.4-428.8, 0x10005ec0 rounds) */
+                int64_t fmax = 0;
                 int b2;
+                for (b2 = 0; b2 < 8; b2++) if (pu->armor_max[b2] > fmax) fmax = pu->armor_max[b2];   /* front only, as both loops compare */
                 hud_text(g_hud, 528.8f, 357.5f, "H", hblue); hud_text(g_hud, 549.4f, 357.5f, "T", hblue);
                 hud_text(g_hud, 577.5f, 357.5f, "A", hblue); hud_text(g_hud, 601.3f, 357.5f, "L", hblue);
-                for (b2 = 0; b2 < 11; b2++) {
-                    /* in MEK points: the loader's armour factor (x 4 for the player, 0x10041410) divided out */
-                    float am = pu->armor_mult > 0 ? pu->armor_mult : 1.0f;
-                    int loc = B[b2].loc, cur = (int)((B[b2].rear ? pu->rear[loc] : pu->armor[loc]) / am),
-                        mx = (int)((float)(B[b2].rear ? pu->rear_max[loc] : pu->armor_max[loc]) / am);
-                    float len = (float)(cur > 0 ? cur : 0) * 1.125f, full = (float)(mx > 0 ? mx : 0) * 1.125f, w3 = B[b2].w / 3.0f;
-                    const float *mb = cur * 4 > mx ? yb : rb, *ml = cur * 4 > mx ? yl : rl, *md = cur * 4 > mx ? ydk : rd;
+                for (b2 = 0; b2 < 11 && fmax > 0; b2++) {
+                    int loc = B[b2].loc;
+                    float cur = B[b2].rear ? pu->rear[loc] : pu->armor[loc];
+                    int64_t mx = B[b2].rear ? pu->rear_max[loc] : pu->armor_max[loc];
+                    int64_t len = (int64_t)(cur > 0 ? cur : 0) * half / fmax, full = mx * half / fmax;
+                    float w3 = B[b2].w / 3.0f, y0 = 375.6f;
+                    const float *mb = (float)mx * 0.25f < cur ? yb : rb, *ml = (float)mx * 0.25f < cur ? yl : rl,
+                                *md = (float)mx * 0.25f < cur ? ydk : rd;
                     if (pu->loc_gone[loc]) { len = 0; mb = gb2; ml = gl2; md = gd2; }
-                    if (len > 0) {
-                        hud_rect(g_hud, B[b2].x, 375.6f, w3, len, hb);
-                        hud_rect(g_hud, B[b2].x + w3, 375.6f, w3, len, hl);
-                        hud_rect(g_hud, B[b2].x + 2 * w3, 375.6f, w3, len, hd);
+                    if (len != 0) {   /* rows y0 .. y0 + len */
+                        hud_rect(g_hud, B[b2].x, y0, w3, (float)len + 1.0f, hb);
+                        hud_rect(g_hud, B[b2].x + w3, y0, w3, (float)len + 1.0f, hl);
+                        hud_rect(g_hud, B[b2].x + 2 * w3, y0, w3, (float)len + 1.0f, hd);
                     }
-                    if (full > len) {
-                        hud_rect(g_hud, B[b2].x, 375.6f + len, w3, full - len, mb);
-                        hud_rect(g_hud, B[b2].x + w3, 375.6f + len, w3, full - len, ml);
-                        hud_rect(g_hud, B[b2].x + 2 * w3, 375.6f + len, w3, full - len, md);
+                    if (len < full) {   /* rows y0 + len .. y0 + full */
+                        hud_rect(g_hud, B[b2].x, y0 + (float)len, w3, (float)(full - len) + 1.0f, mb);
+                        hud_rect(g_hud, B[b2].x + w3, y0 + (float)len, w3, (float)(full - len) + 1.0f, ml);
+                        hud_rect(g_hud, B[b2].x + 2 * w3, y0 + (float)len, w3, (float)(full - len) + 1.0f, md);
                     }
                 }
             } else if (g_layout_n > 2 && !g_dmg_off && !hud_dead) {
@@ -7280,10 +7411,11 @@ int main(int argc, char **argv)
                     hud_draw_region(g_hud, &g_hs_dmg_lvl[pick], dx, dy, (float)rg[0] * 2.0f * g_hud_s, (float)rg[1] * 2.0f * g_hud_s, (float)rg[2] * 2.0f * g_hud_s, (float)rg[3] * 2.0f * g_hud_s);
                 }
             }
+            HUD_SIDE(0);
             if (!hud_dead && g_autopilot)   /* engine 0x100183d0: "AUTOPILOT" (0x1024c2d0 / 0x1024c2dc) in the HUD font's
                                              * colour (0xe) while the player's autopilot (controller +0xbc) is 1 or 2; DOSBox
                                              * YELLSCN1 a: caps 177-240 x 732-742 at 1024x768, gone once a turn cancels it */
-                hud_text(g_hud, 110.0f, 456.0f, "AUTOPILOT", green);
+                { HUD_SIDE(-1); hud_text(g_hud, 110.0f, 456.0f, "AUTOPILOT", green); HUD_SIDE(0); }   /* bottom left: left-hand */
             if (!hud_dead) {   /* the instruments (dark while shut down) */
             /* tall bar, right edge of CPIT rect 1 (engine 0x1001c5b0, geometry 0x1001c250): the THROTTLE SETTING, its
              * shown value easing halfway to the setting on every draw (cur += (target - cur) >> 1; the DOS ramp 57 / 67 /
@@ -7292,6 +7424,7 @@ int main(int argc, char **argv)
              * span; the fill is h + 1 rows, so zero throttle leaves a single line; frame red (0xa) */
             if (g_layout_n > 1) {
                 /* DOS: frame columns 1001-1017, rows 542-752 at 1024x768 */
+                HUD_SIDE(1);   /* right-hand: the bar and the kph line */
                 static float shown;
                 static int32_t shown_t;
                 float bar_dt = shown_t ? (float)(SDL_GetTicks() - (Uint32)shown_t) / 1000.0f : 0;
@@ -7337,6 +7470,7 @@ int main(int argc, char **argv)
                     if (getenv("MW2_KPH_TRACE")) fprintf(stderr, "kph %.2fs %s (%.1f cm/s, heading %.2f)\n", g_sim.now / 1000.0, kph, g_pl_speed, g_pl.heading);   /* tests */
                     hud_text(g_hud, 551.0f, 453.0f, kph, green);   /* DOS / footage: left edge x 551 */
                 }
+                HUD_SIDE(0);
             }
             }
             /* target viewer, bottom left (CPIT rect 13); F4 hides it. Powering up / down: the window about its centre
@@ -7344,6 +7478,7 @@ int main(int argc, char **argv)
             float tv_wf = 1, tv_hf = 1;
             if (g_layout_n > 13 && !g_tgtdisp_off && pow_window(1, &tv_wf, &tv_hf)) {
                 const int *rr = g_layout[13];
+                HUD_SIDE(-1);   /* left-hand: the box, its picture and text lines */
                 float bx = LX(rr[0]), by = LY(rr[1]), bw = LX(rr[2]), bh = LY(rr[3]);
                 int shaded = (g_tgtdisp == 2 || (g_tgtdisp == 1 && g_tex_kind != 3)) && tgt >= 0 && g_cockpit && g_pow == 2;   /* drawn in 3D before the HUD */
                 int full = tv_wf >= 1.0f && tv_hf >= 1.0f;
@@ -7450,6 +7585,7 @@ int main(int argc, char **argv)
                         }
                     }
                 }
+                HUD_SIDE(0);
             }
             if (!hud_dead) {   /* the instruments (dark while not up) */
             /* bottom centre (DOS footage): "Heat" - yellow fills from both ends toward the middle;
@@ -7531,6 +7667,33 @@ int main(int argc, char **argv)
                     hud_text(g_hud, 422.0f, 441.0f, "Jets", green);
                 }
             }
+            }
+            if (getenv("MW2_HUD_RECTS")) {   /* TEST hook: the HUD elements' rectangles in window pixels (x0 y0 x1 y1), once a
+                                              * second: side -1 left-hand, 1 right-hand, 0 centred (hud_side) */
+                static double last = -1;
+                if (g_sim.now / 1000.0 >= last + 1.0 || g_sim.now / 1000.0 < last) {
+                    static const struct { const char *nm; int side, rect; float x0, y0, x1, y1; } E[] = {
+                        {"radar", -1, -1, 89.6f - 75.8f, 86.4f - 75.8f, 89.6f + 75.8f, 86.4f + 75.8f}, {"alt", -1, -1, 2, 178, 70, 267},
+                        {"viewer", -1, 13, 0, 0, 0, 0}, {"autopilot", -1, -1, 110, 456, 110, 456},
+                        {"compass", 0, -1, 230, 2, 411, 84}, {"reticle", 0, -1, 320, 240, 320, 240}, {"heat", 0, -1, 219.5f, 428.1f, 329.5f, 428.1f},
+                        {"dhdt", 0, -1, 340.5f, 428.1f, 408.5f, 428.1f}, {"jets", 0, -1, 422, 428.1f, 491, 428.1f},
+                        {"weapons", 1, 3, 0, 0, 0, 0}, {"damage", 1, 2, 0, 0, 0, 0}, {"vport", 1, -1, 516.9f, 349.4f, 619.4f, 428.8f},
+                        {"throttle", 1, -1, 625.6f, 338.75f, 635.6f, 470.0f}, {"kph", 1, -1, 551, 453, 551, 453}};
+                    int e2;
+                    last = g_sim.now / 1000.0;
+                    printf("HUDRECTS t=%.1f window %dx%d layout %s\n", last, w, h, g_hud_wide ? "wide" : "original");
+                    for (e2 = 0; e2 < (int)(sizeof E / sizeof E[0]); e2++) {
+                        float x0 = E[e2].x0, y0 = E[e2].y0, x1 = E[e2].x1, y1 = E[e2].y1;
+                        if (E[e2].rect >= 0) {
+                            const int *rr = g_layout[E[e2].rect];
+                            if (E[e2].rect >= g_layout_n) continue;
+                            x0 = LX(rr[0]); y0 = LY(rr[1]); x1 = LX(rr[0] + rr[2]); y1 = LY(rr[1] + rr[3]);
+                        }
+                        HUD_SIDE(E[e2].side);
+                        printf("HUDRECT %s %d %.0f %.0f %.0f %.0f\n", E[e2].nm, E[e2].side, hud_screen_x(g_hud, x0), hud_screen_y(g_hud, y0), hud_screen_x(g_hud, x1), hud_screen_y(g_hud, y1));
+                        HUD_SIDE(0);
+                    }
+                }
             }
             /* the MISSION OBJECTIVES display: on demand (F12), not part of the end sequence */
             if (g_show_objectives) {   /* DOS footage: blue / green text over the view, no panel */

@@ -68,6 +68,10 @@ typedef struct {
 #define ANIM_EV_SLOW 2   /* entered a key flagged 0x10 (+0x80 bit 1) */
 int   anim_key_time(int gait, int rate);
 void  anim_player_init(anim_player *p, int rate);
+/* airborne (engine 0x10019310 0x10019df2: the feet more than the centre height c[0x33] over the ground) or the jets firing
+ * with fuel (0x1001a180 0x1001a688) clears object +0x80 bit 0 every frame: call before anim_player_step, which then only
+ * sets it again and re-reads the key time (0x1000dec0, 0x1000e600) - the key and the pose hold, the frame's time is dropped */
+void  anim_player_hold(anim_player *p);
 int   anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks);
 
 #endif

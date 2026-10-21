@@ -237,6 +237,7 @@ typedef struct {
     uint16_t model;
     int coll;
     int objtype;
+    int32_t scale[3];
 } wnode;
 
 /* world transform of node i: position and accumulated yaw */
@@ -282,6 +283,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         nodes[o.index].model = o.model;
         nodes[o.index].coll = o.coll;
         nodes[o.index].objtype = o.objtype;
+        memcpy(nodes[o.index].scale, o.scale, sizeof o.scale);
     }
     {   /* SCRG {i16 object}: the record's scrub patch (engine 0x1003e693 -> 0x100113f0, DOS 0x4ed5b -> 0x1f120) */
         int sc = -1;
@@ -318,10 +320,24 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         if (strncasecmp(record, "MW2_SHT", 7) == 0) p->hidden = 1;
         /* OBJECT DENSITY: the type 0xc0 objects come and go (engine 0x1000de50 unlinks / relinks them; Combat Variables
          * and the in-game menu) - loaded always, hidden while it is LOW */
+        p->facing = (nodes[i].objtype & 0xf0) == 0x10 || (nodes[i].objtype & 0xf0) == 0x60;   /* (see mech3d.h) */
         p->sparse = (nodes[i].objtype & 0xf0) == 0xc0;
         if (p->sparse && world3d_density_low) p->hidden = 1;
         if (wtb_parse(mr.data, mr.size, &p->model) != 0) { prj_record_free(&mr); continue; }
         prj_record_free(&mr);
+        {   /* the OBJ scale (payload +6, three i32, whole units; 0 counts as 1): the engine builds each world object's model
+             * with its vertices multiplied by it (3Dfx 0x10025450 -> 0x100420b0, then 0x10042140 loads each vertex as x scale + offset;
+             * DOS 0x36480 -> 0x4fea0, 0x4fef0 integer x scale). MARO's fire / smoke cards are 4-6 x their model (FIR1_3 scale 4:
+             * 55 x 48 m), the training mountains 3 x taller (TRNJARE2 1 3 1), PROVMTN2's 0xc0 copies mirrored (1 -2 1) */
+            int sx = nodes[i].scale[0] ? nodes[i].scale[0] : 1, sy = nodes[i].scale[1] ? nodes[i].scale[1] : 1;
+            int sz = nodes[i].scale[2] ? nodes[i].scale[2] : 1, ob, q;
+            if (sx != 1 || sy != 1 || sz != 1)
+                for (ob = 0; ob < p->model.object_count; ob++)
+                    for (q = 0; q < p->model.objects[ob].vert_count; q++) {
+                        wtb_vertex *v = &p->model.objects[ob].verts[q];
+                        v->x *= sx; v->y *= sy; v->z *= sz;
+                    }
+        }
         p->scrg = scrg_obj >= 0;   /* the patch object and its children (the 3 x 3 tiles) */
         if (i == scrg_obj && p->model.object_count) {   /* the grid step from the patch model's x / z extent (0x100113f0) */
             const wtb_object *o = &p->model.objects[0];
@@ -638,7 +654,11 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                 if (slot > 0) {
                     float hx = cosf(nav.heading * 3.14159265f / 180.0f), hz = sinf(nav.heading * 3.14159265f / 180.0f), ox, oz;
                     if (f.found && slot - 1 < f.count) {
-                        ox = (float)f.x[slot - 1]; oz = (float)f.z[slot - 1]; yaw = nav.heading + f.yaw[slot - 1];
+                        /* the follower's heading is the slot's yaw as it stands - NOT turned by the group heading
+                         * (0x10009990 -> 0x10018dd0 -> 0x10018ec0: the slot's x / z go through the leader's matrix,
+                         * 0x1002eb50, its yaw 0x101de940 straight into +0x60). DOSBox ORANSCN1: the Training Kitfox
+                         * stands at heading 0 (the leader -100) and turns right for its goal at 108 */
+                        ox = (float)f.x[slot - 1]; oz = (float)f.z[slot - 1]; yaw = f.yaw[slot - 1];
                     } else {
                         ox = (float)(((slot + 1) / 2) * 2000 * ((slot & 1) ? 1 : -1)); oz = 0; /* no table: side by side */
                     }
@@ -1333,6 +1353,7 @@ static float wp_heading(float dx, float dz)
     if (dx < 0) r = -r;
     return r;
 }
+float mech3d_heading(float dx, float dz) { return wp_heading(dx, dz); }
 
 /* one run of the task (0x1000ee10 mode 1); 0 = the task ends */
 static int wp_run(world3d_paths *P, wp_task *t, float now)
@@ -1871,6 +1892,16 @@ int world3d_ti_attach(prj_archive *ti, mech3d *world, wtb_model **store)
                 for (q2 = 0; q2 < (l1 > l2 ? l1 : l2); q2++)
                     if (q2 >= l1 || q2 >= l2 || toupper((unsigned char)p->model_name[q2]) != toupper((unsigned char)mr.name[q2])) diff++;
                 if (diff <= 2 && strcasecmp(mr.name, "DUMMY") != 0 && wtb_parse(mr.data, mr.size, &(*store)[i]) == 0 && (*store)[i].object_count > 0) {
+                    {   /* the Titanium record's own OBJ scale, as the other editions build their world models (world3d_append;
+                         * mercsw's loader not traced - INFERRED) */
+                        int sx = o.scale[0] ? o.scale[0] : 1, sy = o.scale[1] ? o.scale[1] : 1, sz = o.scale[2] ? o.scale[2] : 1, ob, q3;
+                        if (sx != 1 || sy != 1 || sz != 1)
+                            for (ob = 0; ob < (*store)[i].object_count; ob++)
+                                for (q3 = 0; q3 < (*store)[i].objects[ob].vert_count; q3++) {
+                                    wtb_vertex *v = &(*store)[i].objects[ob].verts[q3];
+                                    v->x *= sx; v->y *= sy; v->z *= sz;
+                                }
+                    }
                     if (!(*store)[i].extended) mech3d_ti_normals(&(*store)[i]);
                     p->ti_model = &(*store)[i];
                     found++;

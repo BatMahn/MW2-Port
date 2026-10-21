@@ -523,6 +523,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->avoid_thr = calloc((size_t)(count ? count : 1), sizeof *s->avoid_thr);
     s->avoid_next = calloc((size_t)(count ? count : 1), sizeof *s->avoid_next);
     s->avoid_side = calloc((size_t)(count ? count : 1), sizeof *s->avoid_side);
+    s->avoid_len = calloc((size_t)(count ? count : 1), sizeof *s->avoid_len);
     s->height = calloc((size_t)(count ? count : 1), sizeof *s->height);
     s->wreck_until = calloc((size_t)count + 1, sizeof *s->wreck_until);
     s->msg_seen = calloc((size_t)(count ? count : 1), sizeof *s->msg_seen);
@@ -1076,8 +1077,9 @@ static void effect(msim *s, int type, const float p[3], int chunks)
  * 0x10046700(pos, radius, 1/256): every unit whose position (object +0x50..+0x58: its centre, the feet + the MGEO centre
  * height controller +0xcc - 0x10019fad / 0x10019db8, as the missile guidance's aim point) is nearer the effect than its contact
  * radius (controller +0xe8) + the effect's radius takes ticks / 256 on each location 2-8 and half that on the head
- * (location 1) through 0x100171d0 (so a CT share spreads as a hit's); a unit in state 4 (destroyed: its own death
- * explosion, the wreck's blasts) twice that (x DAT_102485f8 = 2) - 0x100171d0 has no state test, so a wreck loses
+ * (location 1; DOS MW2.EXE 0x517c0, the same loop over 0x26270: a quarter, and the distance as the octagonal estimate
+ * (4 x max + mid + min) / 4 of the axis offsets) through 0x100171d0 (so a CT share spreads as a hit's); a unit in
+ * state 4 (destroyed: its own death explosion, the wreck's blasts) twice that (x DAT_102485f8 = 2) - 0x100171d0 has no state test, so a wreck loses
  * locations (blown off) and its bins cook off. Skipped: controller +0x10c bit 0x100 (a wreck blown apart on landing,
  * 0x1000c4d0 - not modelled) and state 5 counts once (an ejected unit stands intact). Then the effect's life runs down
  * by the ticks (it ends at <= 0) */
@@ -1094,8 +1096,14 @@ static void area_damage(msim *s, float ticks)
             float y = cu->y + (u < 0 ? s->player_centre_h : s->centre_h ? s->centre_h[u] : 550.0f), rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), dx = x - a->pos[0], dy = y - a->pos[1], dz = z - a->pos[2];
             float d = ticks / 256.0f * (cu->destroyed && !cu->intact_out ? 2.0f : 1.0f);
             if (u >= 0 && !s->armed[u]) continue;
-            if (dx * dx + dy * dy + dz * dz >= (rr + a->r) * (rr + a->r)) continue;
-            combat_damage_at(cu, d / 2.0f, 1, &s->rng);
+            if (msim_dos_int) {   /* DOS 0x517c0: the octagonal estimate (4 x max + mid + min) >> 2 of |dx|, |dy|, |dz| */
+                float p0 = fabsf(dx), p1 = fabsf(dy), p2 = fabsf(dz), q;
+                if (p0 < p1) { q = p0; p0 = p1; p1 = q; }
+                if (p0 < p2) { q = p0; p0 = p2; p2 = q; }
+                if ((p0 * 4.0f + p1 + p2) * 0.25f >= rr + a->r) continue;
+            } else if (dx * dx + dy * dy + dz * dz >= (rr + a->r) * (rr + a->r)) continue;
+            /* the head: half (3Dfx 0x10046700: / DAT_102485f8 = 2.0); a quarter in DOS (MW2.EXE 0x517c0: 0x26270(iVar4 >> 2, 1)) */
+            combat_damage_at(cu, msim_dos_int ? d / 4.0f : d / 2.0f, 1, &s->rng);
             for (l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
         }
         k++;
@@ -2026,7 +2034,14 @@ void msim_step(msim *s, int32_t dt_ms)
         /* destroyed (state 4): the mech stands as it was struck (the engine's state 4 runs no gait; DOSBox shows the
          * self-destructed Mad Dog mid-stride - ASSUMPTIONS "Standing wrecks"); only the dead are held */
         if (s->armed[i] && s->units[i].destroyed) continue;
-        if (s->anim_pl && s->units[i].y <= s->units[i].ground + 1.0f) {   /* airborne: the keys hold (ASSUMED, as before) */
+        int held = 0;
+        if (s->anim_pl) {
+            /* airborne - the feet more than the centre height c[0x33] over the ground (0x10019310 0x10019df2) - or the
+             * jets firing with fuel left (0x1001a180 0x1001a688): object +0x80 bit 0 cleared every frame, so the key
+             * player holds its key and pose, drops the frame's time and starts no key (no footstep) until it lands; the
+             * gait request runs on (as the player's, tools/glview.c). Was: held whenever 1 cm off the ground (ASSUMED) */
+            held = s->units[i].jet_on || s->units[i].y - s->units[i].ground > (s->centre_h ? s->centre_h[i] : 550.0f);
+            if (held) anim_player_hold(&s->anim_pl[i]);
             /* 0x1000b3a0: c[0x13] over the stop level (1/64) by more than 1/2048 (1/32 of full: 0x3c840001) walks -
              * gait 1 under 1/4 of full, 2 under 3/4, else 3; sequence 0 (walk) below gait 3, 1 (run) at it, 2 (reverse)
              * while reversing (input +0x2f; the AI's throttle stays positive), the gait then at most 2; at or under it
@@ -2051,7 +2066,7 @@ void msim_step(msim *s, int32_t dt_ms)
             ac->t = s->anim_pl[i].t;
         }
         if (getenv("MW2_ANIM_TRACE") && i == atoi(getenv("MW2_ANIM_TRACE")))   /* tests: one actor every step */
-            fprintf(stderr, "anim %.2fs actor %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
+            fprintf(stderr, "anim %.2fs actor %d held %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, held, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
         ac->mech.pose_off = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? s->anim_pl[i].off : NULL;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
         mech3d_pose(&ac->mech, &ac->anim, ac->t);
     }
@@ -2084,8 +2099,8 @@ void msim_free(msim *s)
     world3d_paths_free(s->paths); s->paths = NULL;
     terrain_release(s->terrain); s->terrain = NULL;
     free(s->clist_seq); s->clist_seq = NULL; s->clist_seq_n = 0;
-    free(s->obstacles); free(s->avoid_turn); free(s->avoid_thr); free(s->avoid_next); free(s->avoid_side);
-    s->obstacles = NULL; s->avoid_turn = s->avoid_thr = s->avoid_next = NULL; s->avoid_side = NULL;
+    free(s->obstacles); free(s->avoid_turn); free(s->avoid_thr); free(s->avoid_next); free(s->avoid_side); free(s->avoid_len);
+    s->obstacles = NULL; s->avoid_turn = s->avoid_thr = s->avoid_next = s->avoid_len = NULL; s->avoid_side = NULL;
     s->twist_limit = NULL;
     if (s->pl_mech_ok) mech3d_free(&s->pl_mech);
     if (s->pl_pit_ok) mech3d_free(&s->pl_pit);
@@ -2607,6 +2622,27 @@ static void shot_units(msim *s, int owner, const float o[3], const float dv[3], 
         }
     }
 }
+/* engine 0x10015090 (the fire decision 0x100231a0, AI pilots below level 5): the line from the unit to its target runs
+ * against the whole collision list (0x100103e0, the unit itself skipped) - units and world objects together; the
+ * nearest object struck must be the target (object +2 bit 0x100 with controller +0xdc bit 0x200: a unit's piece whose
+ * owner +0x14 is the target; bit 0x200 with +0xdc bit 0x400: the target thing), anything else holds the fire (return
+ * 0); nothing struck, fire. los_blocked covers the world objects; this, a unit nearer than the target */
+static int los_unit_first(msim *s, int self, int who, float x0, float y0, float z0, float x1, float y1, float z1)
+{
+    float o[3] = {x0, y0, z0}, dv[3] = {x1 - x0, y1 - y0, z1 - z0}, t = 1.0f;
+    int unit = -2, group = 0;
+    shot_units(s, self, o, dv, &t, &unit, &group);
+    return unit != -2 && unit != who;
+}
+int msim_test_fire_line(msim *s, int k)   /* TEST ONLY: the fire decision's line test (combat_step) at the player */
+{
+    float x0, y0, z0, y1;
+    if (k < 0 || k >= s->actor_count || !s->armed[k]) return -2;
+    x0 = (float)s->actors[k].mech.origin[0]; y0 = s->units[k].y + s->height[k] * 0.7f; z0 = (float)s->actors[k].mech.origin[2];
+    y1 = s->player_unit.y + 950.0f * 0.55f;
+    if (los_blocked(s, x0, y0, z0, s->player[0], y1, s->player[2])) return -1;
+    return !los_unit_first(s, k, -1, x0, y0, z0, s->player[0], y1, s->player[2]);
+}
 int msim_test_shot(msim *s, const float o[3], const float dv[3], int *unit, int *group, float *t)   /* TEST ONLY */
 {
     *t = 2.0f; *unit = -2; *group = 0;
@@ -2641,7 +2677,12 @@ static void combat_step(msim *s, float dt)
     for (i = 0; i < s->actor_count; i++)
         s->units[i].offline = (s->online_at && (float)s->now < s->online_at[i]) || (s->powered_down && s->powered_down[i]);
     combat_tick(&s->player_unit, dt);
-    for (i = 0; i < s->actor_count; i++) if (s->armed[i]) combat_tick(&s->units[i], dt);
+    for (i = 0; i < s->actor_count; i++) if (s->armed[i]) {
+        /* 0x1001a180: the weapon step (0x100437a0) runs before the AI (0x10011c50) - it sees the trigger the AI left
+         * last frame */
+        if (s->minds && s->ai_ok) combat_ai_trigger(&s->units[i]);
+        combat_tick(&s->units[i], dt);
+    }
     area_damage(s, ticks);
     ammo_booms(s);
     /* the heat restart sets state 0 (0x10016201), which runs the start-up again (0x1001ab71: online 0x43e + rand(0x16a)
@@ -2662,6 +2703,9 @@ static void combat_step(msim *s, float dt)
         float dx, dz, from[3], to[3], ex = 0, ez = 0, ey = 0, ef = 0, eh = 0, aim_h;
         int who = -1;
         ai_mind *m = s->minds && s->ai_ok ? &s->minds[i] : NULL;
+        /* the AI's trigger (+0x25): cleared by the state's movement (0x100130f0 case 2, 0x10013290), which does not
+         * run when a rule fired (0x10011c50) - then it holds */
+        if (m && !m->rule_fired) s->units[i].ai_trigger = 0;
         if (!s->armed[i] || s->units[i].destroyed || !pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who)) continue;
         (void)ef;
         aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
@@ -2700,9 +2744,29 @@ static void combat_step(msim *s, float dt)
                 }
             } else m->lock = 0;
         }
-        if ((m ? m->wants_fire : (who == -1 && order_attacks_player(s, i))) &&
+        if (m) {
+            /* set by the fire decision (0x100231a0) when 0x100232b0 chooses a weapon (it stays selected; ENEMYFIR
+             * 0x10023428) and the line to the target is clear (0x10015090). The weapon step fires on the press, one
+             * weapon, and moves on at the release (combat_ai_trigger) */
+            combat_unit *cu = &s->units[i];
+            if (!m->rule_fired) {
+                if (m->wants_fire) {
+                    int fw;
+                    s->units[i].lock_target = !(m->lock & 0x80) ? -2 : who >= -1 ? who
+                                            : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
+                    fw = combat_ai_select(cu, sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);
+                    if (fw >= 0 && who == -1 && msim_weapon_guided(cu->weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
+                    cu->ai_trigger = fw >= 0 && !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f,
+                                                             (float)s->actors[i].mech.origin[2], ex, aim_h, ez) &&
+                                     !los_unit_first(s, i, who, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f,
+                                                     (float)s->actors[i].mech.origin[2], ex, aim_h, ez);
+                }
+            }
+        } else if (who == -1 && order_attacks_player(s, i) &&
             !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f, (float)s->actors[i].mech.origin[2],
-                         ex, aim_h, ez)) {
+                         ex, aim_h, ez) &&
+            !los_unit_first(s, i, who, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f, (float)s->actors[i].mech.origin[2],
+                            ex, aim_h, ez)) {
             int fw;
             /* homing only if locked when triggered (0x100437a0 / 0x100443a0): the volley latches the target in its slot */
             s->units[i].lock_target = !m || !(m->lock & 0x80) ? -2 : who >= -1 ? who
@@ -2765,7 +2829,10 @@ static void combat_step(msim *s, float dt)
                 {
                     int before = s->shot_count;
                     spawn_shot_h(s, w, i, src, to, 0.0f, hom);   /* the target latched at the trigger (slot +0x18 / +0x1c) */
-                    if (s->shot_count > before) s->shots[s->shot_count - 1].first = first;
+                    if (s->shot_count > before) {
+                        s->shots[s->shot_count - 1].first = first;
+                        s->shots[s->shot_count - 1].life -= combat_last_age;   /* 0x10043cc0: +0x4c - slot +0x10 */
+                    }
                 }
                 if (who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* the target dodges (0x10020ac0 from 0x1004397b) */
                     int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
@@ -2865,7 +2932,10 @@ static void combat_step(msim *s, float dt)
                     {
                         int before = s->shot_count;
                         spawn_shot_h(s, w, -1, src, to, 0.0f, hom);
-                        if (s->shot_count > before) s->shots[s->shot_count - 1].first = first;
+                        if (s->shot_count > before) {
+                            s->shots[s->shot_count - 1].first = first;
+                            s->shots[s->shot_count - 1].life -= combat_last_age;   /* 0x10043cc0: +0x4c - slot +0x10 */
+                        }
                     }
                     if (s->shot_count > 0 && s->shots[s->shot_count - 1].owner == -1) {   /* TEST ONLY: the aim line */
                         msim_shot *ns = &s->shots[s->shot_count - 1];
@@ -4553,8 +4623,7 @@ static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, floa
 {
     static const float ANG[4] = {0.0f, 26.565f, 45.0f, 63.435f}, LEN[4] = {1.0f, 1.118f, 1.414f, 1.118f};
     world_actor *ac = &s->actors[i];
-    float x = (float)ac->mech.origin[0], z = (float)ac->mech.origin[2];
-    float vel = ac->speed * m->throttle / 182.0f, len = vel * 0.12987f, accum = 0;
+    float x = (float)ac->mech.origin[0], z = (float)ac->mech.origin[2], len, accum = 0;
     int step, side = s->avoid_side[i];
     if (m->throttle <= 0) { s->avoid_turn[i] = 0; return; }
     s->avoid_next[i] -= dt * 182.0f;
@@ -4562,15 +4631,28 @@ static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, floa
         if (s->avoid_turn[i] != 0) { m->turn = s->avoid_turn[i]; m->throttle = s->avoid_thr[i]; }
         return;
     }
-    if (ac->unit_class != 1) len *= 0.5f;   /* 0x100201c0: the unit record's class (+0) other than 1 - vehicles - probes half as far */
-    if (len < 0.3f) len = 0.3f;
-    len *= 5000.0f;
+    if (side == 0) {
+        /* the length factor +0x192, recomputed only while no side is set: the unit's VELOCITY (physics +0xf4 / +0xfc, cm/tick)
+         * as (4 max + mid + min) / 4 (0x10030330) x 0.12987 (0x10247534; DOS 0x2db80: << 16 / 500000), at least 0.3
+         * (0x3e99999a) - not its top speed x throttle: a unit starting from rest probes 0.3 x 5000 cm = 15 m (the port's
+         * 40 m probe from a standstill turned ORANSCN1's Trainer Maddog away from an object 37 m ahead into a wide loop
+         * west; DOSBox: it turns tightly and heads off south-east) */
+        float h = ac->mech.heading * 3.14159265f / 180.0f, a = s->across ? s->across[i] : 0.0f;
+        float vx = fabsf((sinf(h) * m->speed + cosf(h) * a) / 182.0f), vz = fabsf((cosf(h) * m->speed - sinf(h) * a) / 182.0f);
+        float f = ((vx > vz ? vx : vz) * 4.0f + (vx > vz ? vz : vx)) * 0.25f * (msim_dos_int ? 65536.0f / 500000.0f : 0.12987013f);
+        if (ac->unit_class != 1) f *= 0.5f;   /* 0x100201c0: the unit record's class (+0) other than 1 - vehicles - probes half as far */
+        s->avoid_len[i] = f < 0.3f ? 0.3f : f;
+    }
+    len = s->avoid_len[i] * 5000.0f;
     {
         float yc = s->units[i].y + (s->centre_h ? s->centre_h[i] : 550.0f), R = s->radius ? s->radius[i] : 450.0f;
         for (step = 0; step < 4; step++) {
             float a = (ac->mech.heading + (float)side * ANG[step]) * 3.14159265f / 180.0f, L = len * LEN[step];
             float p0[3] = {x, yc, z}, p1[3] = {x + sinf(a) * L, yc, z + cosf(a) * L}, ox = 0, oz = 0;
-            int climb, hit = probe_engine(s, i, p0, p1, &climb, &ox, &oz);
+            /* the DOS edition's probe (DOS 0x2db80 serves the AI and the player alike: 0x2df30 -> 0x1c3f0 -> 0x3a745) has the
+             * DOS broad phase (dos_broad_reject) in the DOS look; the 3D editions' AI the float one (0x100201c0 ->
+             * 0x100103e0 -> 0x10029db0) */
+            int climb, hit = probe_engine_ex(s, i, p0, p1, msim_dos_int, &climb, &ox, &oz);
             if (!hit) {
                 if (step == 0 && fabsf(wrap180(goal_bearing - ac->mech.heading)) <= 1.0f) side = 0;
                 if (step == 0 && side != 0) {
@@ -4583,7 +4665,7 @@ static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, floa
                     float q0[3] = {x + cosf(hr) * off, yc, z - sinf(hr) * off}, q1[3];
                     int bclimb;
                     q1[0] = q0[0] + sinf(bh) * Lb; q1[1] = yc; q1[2] = q0[2] + cosf(bh) * Lb;
-                    if (probe_engine(s, i, q0, q1, &bclimb, &ox, &oz) && !bclimb) accum += (float)side * 409.6f;
+                    if (probe_engine_ex(s, i, q0, q1, msim_dos_int, &bclimb, &ox, &oz) && !bclimb) accum += (float)side * 409.6f;
                 }
                 break;
             }

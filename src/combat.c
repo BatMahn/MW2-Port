@@ -157,9 +157,14 @@ static void release_due(combat_unit *u, combat_weapon *cw)
     const sim_weapon *sw = &sim_weapons[cw->weapon];
     while (cw->state == CW_FIRING && cw->shots > 0 && cw->t >= (float)sw->interval) {
         int ok = take_round(u, cw);
+        /* 0x100437a0 calls the spawn (0x10043cc0) before it takes the interval off: the projectile's life is the
+         * table's +0x4c less slot +0x10 as it stands - the volley timer before this frame's ticks for the first
+         * release of the frame, the remainder after the last release for the next (DOS 0x52757: the same) */
+        if (cw->pulses_due < 24) cw->pulse_age[cw->pulses_due] = cw->t10;
         cw->pulses_due++;
         if (!ok) { if (cw->shots == sw->per_volley) cw->volley_start = 0; cw->shots = 0; break; }   /* last round: no heat, no sound */
         cw->t -= (float)sw->interval;
+        cw->t10 = cw->t;
         cw->shots--;
         u->heat += sw->heat;
         if (cw->shots == 0 && sw->repeat && (u->fire_held & (1u << (cw - u->weapons)))) {
@@ -179,6 +184,7 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
     cw->state = CW_FIRING;
     cw->shots = sim_weapons[cw->weapon].per_volley;
     cw->t = u->last_ticks;
+    cw->t10 = 0;   /* the trigger sets +0x10 = 0; the release loop adds this frame's ticks to it */
     cw->volley_start = 1;
     cw->homing = u->lock_target;   /* 0x100437a0: slot +0x18 / +0x1c = the target if locked, at the trigger */
     release_due(u, cw);
@@ -202,6 +208,7 @@ void combat_tick(combat_unit *u, float dt)
         /* 0x100437a0 runs only while the mech is up (state 2): a volley's timer stands still while shut down; the
          * recycle and repeat waits are measured from a start time, so they run on */
         if ((u->shutdown || u->offline) && cw->state == CW_FIRING) continue;
+        cw->t10 = cw->t;
         cw->t += ticks;
         if (u->shutdown || u->offline) continue;
         if (cw->state == CW_RECYCLE && cw->t >= (float)sw->refire) { cw->state = CW_READY; cw->t = 0; }
@@ -569,38 +576,90 @@ void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
     }
 }
 
-int combat_ai_fire(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx)
+/* 0x10043f80: the selection moves to the next weapon that is still there */
+static void ai_next_weapon(combat_unit *u)
+{
+    int k, n = u->weapon_count, i = u->ai_sel;
+    for (k = 1; k <= n; k++) {
+        int j = (i + k) % n;
+        if (u->weapons[j].state >= 0 && !u->loc_gone[u->weapons[j].location] && u->internal[u->weapons[j].location] > 0) { u->ai_sel = j; break; }
+    }
+}
+
+/* engine 0x100232b0: the weapon that passes stays selected (+0xac), returned; -1 none */
+static int ai_choose(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx)
 {
     int tries, n = u->weapon_count;
     if (u->destroyed || u->shutdown || u->offline || n <= 0) return -1;
     if (u->ai_sel < 0 || u->ai_sel >= n) u->ai_sel = 0;
     for (tries = 0; tries < n; tries++) {
-        int i = u->ai_sel, k;
+        int i = u->ai_sel;
         combat_weapon *cw = &u->weapons[i];
         const sim_weapon *sw = &sim_weapons[cw->weapon];
         int usable = cw->state >= 0 && u->internal[cw->location] > 0 && !u->loc_gone[cw->location];
         /* 0x100151a0: 3 inside the minimum range (+0x3c), 2 inside the range, 1 at it, 0 beyond: fires on 1-2 */
         if (usable && distance >= (float)sw->field3c && distance <= range_cm(cw->weapon) &&
             sw->heat + u->heat < 65.0f && cw->state == CW_READY && cw->ammo != 0 &&
-            rng(ctx, (unsigned)(sw->refire / 90 + 1)) == 0) {
-            start_volley(u, cw);
+            rng(ctx, (unsigned)(sw->refire / 90 + 1)) == 0)
             return i;
-        }
-        for (k = 1; k <= n; k++) {   /* 0x10043f80: the next weapon that is still there */
-            int j = (i + k) % n;
-            if (u->weapons[j].state >= 0 && !u->loc_gone[u->weapons[j].location] && u->internal[u->weapons[j].location] > 0) { u->ai_sel = j; break; }
-        }
+        ai_next_weapon(u);
     }
     return -1;
 }
 
+int combat_ai_fire(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx)
+{
+    int i = ai_choose(u, distance, rng, ctx);
+    if (i >= 0) start_volley(u, &u->weapons[i]);
+    return i;
+}
+
+int combat_ai_select(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx)
+{
+    return ai_choose(u, distance, rng, ctx);
+}
+
+void combat_ai_trigger(combat_unit *u)
+{
+    /* engine 0x100437a0 (unit state 2), a unit other than the player: no group triggers (+0x27..+0x2a), so +0x25 alone:
+     * pressed with the latch (+0x10c bit 1) clear - latch, and the selected weapon (+0xac) starts its volley if ready
+     * (state 1: +0x24 = per volley, state 2, +0x10 = 0; the release loop then counts this frame's ticks, combat_tick);
+     * released with the latch set - unlatch and 0x10043f80(0): the next weapon is selected */
+    int n = u->weapon_count;
+    if (u->destroyed || u->shutdown || u->offline || n <= 0) return;
+    if (u->ai_sel < 0 || u->ai_sel >= n) u->ai_sel = 0;
+    if (u->ai_trigger) {
+        if (!u->ai_latch) {
+            combat_weapon *cw = &u->weapons[u->ai_sel];
+            u->ai_latch = 1;
+            if (cw->state == CW_READY) {
+                cw->state = CW_FIRING;
+                cw->shots = sim_weapons[cw->weapon].per_volley;
+                cw->t = 0;
+                cw->volley_start = 1;
+                cw->homing = u->lock_target;
+            }
+        }
+    } else if (u->ai_latch) {
+        u->ai_latch = 0;
+        ai_next_weapon(u);
+    }
+    /* the volley's end (release_due) and the repeat's end (combat_tick) test the trigger: down -> state 3 / the
+     * selected weapon fires again (0x100437a0 states 2 / 3) */
+    u->fire_held = u->ai_trigger ? 1u << u->ai_sel : 0;
+}
+
 int combat_next_projectile_ex(combat_unit *u, int *first) { return combat_next_projectile_at(u, first, NULL); }
 int combat_next_projectile_at(combat_unit *u, int *first, int *loc) { return combat_next_projectile_h(u, first, loc, NULL); }
+float combat_last_age;
 int combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing)
 {
-    int i;
+    int i, k;
     for (i = 0; i < u->weapon_count; i++)
         if (u->weapons[i].pulses_due > 0) {
+            combat_weapon *cw = &u->weapons[i];
+            combat_last_age = cw->pulse_age[0];   /* first due, first out */
+            for (k = 1; k < cw->pulses_due && k < 24; k++) cw->pulse_age[k - 1] = cw->pulse_age[k];
             u->weapons[i].pulses_due--;
             if (first) *first = u->weapons[i].volley_start;
             u->weapons[i].volley_start = 0;
@@ -713,6 +772,7 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
         }
     }
     jet = held && u->jet_fuel > 0;
+    u->jet_on = jet;   /* 0x1001a180 (0x1001a679 / 0x1001a688): firing with fuel left clears object +0x80 bits 2 / 0 - the walk keys hold */
     if (jet) {
         u->heat += ticks * (float)u->jets * 0.005859375f;           /* 3/512 per jet per tick */
         if (u->no_heat) u->heat = 0;
@@ -759,6 +819,12 @@ void combat_land(combat_unit *u, float vy, unsigned *rng)
     u->landed_vy = vy;
     u->y = u->ground;
     u->vy = 0;
+}
+
+int combat_jets_firing(const combat_unit *u, int jetting, float dt)
+{
+    int held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0;
+    return held && u->jet_fuel - dt * COMBAT_TICKS_PER_S > 0;
 }
 
 float combat_jets_dy(const combat_unit *u, int jetting, float dt)

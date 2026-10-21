@@ -33,7 +33,7 @@
  *   - a destroyed location (0x10016640 -> 0x10016600) gives every entry a silent critical
  *   - ammunition: per-weapon bins drawn down a round at a time (0x10043cc0); the last round spends
  *     the weapon (state -1)
- *   - projectiles: fly at `speed` for `life` ticks and collide with the target's posed part
+ *   - projectiles: fly at `speed` for `life` ticks (less the volley timer at release, 0x10043cc0) and collide with the target's posed part
  *     geometry; the part's OBJL group is the location (msim.c; engine 0x10044f60 / 0x100103e0)
  *
  * STILL ASSUMED:
@@ -67,6 +67,8 @@ typedef struct {
     int   volley_start; /* the next projectile released is the volley's first (plays the sound) */
     uint32_t item;      /* MEK item id of this weapon instance */
     float t;            /* ticks into the current state */
+    float t10;          /* slot +0x10 as the release loop finds it: the volley timer before this frame's ticks (0x100437a0) */
+    float pulse_age[24];/* each due projectile's t10 at its release (0x10043cc0: its life = table life - this) */
     int   bin_first, bin_n, bin_cur;   /* its ammo bins (+0x34.., +0x30 count, +0x60 current) */
     int   homing;       /* slot +0x18 / +0x1c: the target latched when the volley was triggered (0x100437a0 / 0x10044440 /
                            0x100443a0: the unit's target if the controller was locked, 0x80) - every projectile of the volley
@@ -126,6 +128,9 @@ typedef struct {
                                         frac/64 x dissipation x 6.4 once per frame (0x1001aac8; 30 fps assumed) */
     float         hold_fire_above;  /* 0 = fire freely (a human pilot); AI: 65 (assumed) */
     int           ai_sel;           /* AI: the selected weapon slot (engine unit +0xac) */
+    int           ai_trigger;       /* AI: the fire input as the AI left it (controller +0x25), seen by the next frame's
+                                       weapon step (0x1001a180 runs 0x100437a0 before the AI, 0x10011c50) */
+    int           ai_latch;         /* AI: the trigger was down at the last weapon step (unit +0x10c bit 1) */
     int           lock_target;      /* set by the sim before a trigger: the unit's target when locked (controller +0x10c
                                        bit 0x80), else -2; a volley started now latches it (combat_weapon.homing) */
     float         hit_w[8];         /* location weights (mech3d_hit_weights); all 0 = unknown */
@@ -149,6 +154,8 @@ typedef struct {
     float         landed_vy;        /* the vertical speed (cm/tick, < 0) it touched down with this step from a fall or jump, else 0 */
     int           blocked;          /* pressing against terrain (cleared by a free move): the contact count / impact-sound latch */
     int           jet_forward;      /* horizontal jet thrust on (input +0x20) */
+    int           jet_on;           /* combat_jets this step: the jets fired with fuel left after the burn (0x1001a180: input
+                                       +0x1d, state 2, c[0x30] > 0) - the walk keys hold (object +0x80 bit 0 cleared) */
     int           offline;          /* set by the sim: not in controller state 2 (starting up, powered down) - the fire
                                        routine 0x100437a0 runs only in state 2, so no trigger and no queued volley releases */
     /* ejection (controller state 5: EJECT 0x100174f0, automatic ejection 0x100167b0; resolved by 0x10016280) */
@@ -204,6 +211,15 @@ void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask);
  * rand(refire / 90 + 1) == 0; the first that passes fires (and stays selected), else the selection moves on.
  * rng(ctx, n) returns 0..n-1. Returns the weapon slot fired, -1 none */
 int  combat_ai_fire(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx);
+/* As combat_ai_fire, but only the choice (0x100232b0 with an AI program): the weapon that passes stays selected and is
+ * returned (-1 none); nothing fires - the AI then sets its trigger (ai_trigger) and the next combat_ai_trigger starts
+ * the volley */
+int  combat_ai_select(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx);
+/* The weapon step's trigger (engine 0x100437a0, a unit that is up), before combat_tick: the trigger pressed (ai_trigger
+ * set, ai_latch clear) starts the selected weapon's volley if it is ready; released (ai_trigger clear, ai_latch set)
+ * moves the selection to the next weapon still there (0x10043f80 with 0) - so an AI fires its weapons in turn, one per
+ * press. A repeating weapon whose volley ends with the trigger still down fires again after `refire` while selected */
+void combat_ai_trigger(combat_unit *u);
 /* Next projectile released and not yet launched: returns the weapon (sim_weapons index) or -1. */
 int  combat_next_projectile(combat_unit *u);
 /* As above; *first = 1 for a volley's first projectile (the engine plays the weapon sound then). */
@@ -232,6 +248,7 @@ int  combat_crit_ammo(combat_unit *u);
 /* MASC fitted: a critical slot holding an item 5000..5049 (engine loader 0x1004xxxx sets controller +0x43 bit 0x10) */
 int  combat_has_masc(const combat_unit *u);
 int   combat_weapon_life(int w);    /* ticks */
+extern float combat_last_age;   /* the age (slot +0x10 at release) of the projectile combat_next_projectile_* returned last */
 int   combat_weapon_drop(int w);    /* table +0x28: 1 = falls under gravity (MG, Streak, Narc, AMS) */
 /* Old instant-hit helper (trigger + resolve with range odds); kept for tests. */
 int  combat_fire(combat_unit *u, combat_unit *target, float distance, float rel_angle, unsigned *rng);
@@ -247,6 +264,8 @@ int  combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng);
 /* the vertical displacement (cm) combat_jets would make this frame - for the 3D move test (engine 0x10019310 ->
  * 0x1000b5e0); nothing is changed */
 float combat_jets_dy(const combat_unit *u, int jetting, float dt);
+/* would combat_jets fire the jets this step (input held, jets fitted and working, fuel left after the step's burn)? */
+int   combat_jets_firing(const combat_unit *u, int jetting, float dt);
 /* a touch-down at vertical speed vy (cm/tick) as combat_jets lands: fall damage beyond 16.154 cm/tick (Collision Damage on),
  * landed_vy set, y = ground, vy 0 - a harmless 3D impact lands the unit (engine 0x10019c4e -> 0x10019e41) */
 void combat_land(combat_unit *u, float vy, unsigned *rng);

@@ -2,6 +2,8 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +54,26 @@ void mw2_exe_path(char *out, size_t n)
 {
     DWORD k = GetModuleFileNameA(NULL, out, (DWORD)n);
     if (k == 0 || k >= n) { if (n) out[0] = 0; }
+}
+
+int mw2_pick_folder(const char *title, char *out, size_t n)
+{
+    BROWSEINFOW bi;
+    LPITEMIDLIST pidl;
+    WCHAR wt[256], wp[MAX_PATH];
+    BOOL lost = FALSE;
+    int r = 0;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);   /* BIF_NEWDIALOGSTYLE needs COM */
+    if (!MultiByteToWideChar(CP_ACP, 0, title, -1, wt, 256)) wt[0] = 0;
+    memset(&bi, 0, sizeof bi);
+    bi.lpszTitle = wt;
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    if ((pidl = SHBrowseForFolderW(&bi))) {
+        if (SHGetPathFromIDListW(pidl, wp) && WideCharToMultiByte(CP_ACP, 0, wp, -1, out, (int)n, NULL, &lost) > 0 && !lost) r = 1;
+        CoTaskMemFree(pidl);
+    }
+    if (SUCCEEDED(hr)) CoUninitialize();
+    return r;
 }
 #else
 typedef int mw2_wincompat_unused;   /* ISO C: a translation unit must not be empty */
