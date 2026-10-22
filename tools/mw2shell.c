@@ -39,16 +39,21 @@
 #define H 480
 
 typedef struct { int x0, y0, x1, y1, lx, ly; const char *label; int next, clan; const char *video; } hotspot;
+/* hotspot labels as the original's tables spell them: '~' first = centred on the label x, else drawn from it
+ * (FUN_0003c2c0); '<' (always shown) is not kept here. DOSBox: the clan hall's CADET TRAINING / ARCHIVE HOLOPROJECTOR /
+ * READY ROOM / REGISTER, the Ready Room's CLAN HALL and the Star Configuration's CHANGE MECH start at their x */
+static int label_width(const char *t);
+static int label_x(const char **t, int lx) { if (**t == '~') { (*t)++; return lx - label_width(*t) / 2; } return lx; }
 typedef struct { const char *name; int x, y; } overlay_def;
 typedef struct { int id; const char *name; int bg; const char *smk; int sx, sy; int ambient; const hotspot *hs; int nhs;
                  int clan; const overlay_def *ov; int nov; } screen_def;
 
 /* title (screen 8): FUN_0002a410, hotspots 0x7e7fc; actions: 0 -> 7 (clan 2), 1 -> 15 (Wolf), 2 -> 15 (Falcon), 3 -> exit */
 static const hotspot TITLE_HS[] = {
-    {219, 294, 426, 419, 320, 395, "TRIALS OF GRIEVANCE", 7, 2, NULL},
-    {427, 245, 634, 373, 525, 374, "WOLF CLAN HALL", 15, 0, NULL},
-    {10, 197, 200, 370, 124, 374, "JADE FALCON CLAN HALL", 15, 1, NULL},
-    {0, 450, 639, 479, 320, 455, "EXIT", -3, -1, NULL},
+    {219, 294, 426, 419, 320, 395, "~TRIALS OF GRIEVANCE", 7, 2, NULL},
+    {427, 245, 634, 373, 525, 374, "~WOLF CLAN HALL", 15, 0, NULL},
+    {10, 197, 200, 370, 124, 374, "~JADE FALCON CLAN HALL", 15, 1, NULL},
+    {0, 450, 639, 479, 320, 455, "~EXIT", -3, -1, NULL},
 };
 /* clan halls (screen 1): FUN_0001dbe0; per-clan records 0x7f08c (16 bytes: hotspots, 5, background slot,
  * music): Wolf 0x7d52c / slot 11, Jade Falcon 0x7de94 / slot 18. Actions: 0 CADET TRAINING -> 14,
@@ -59,14 +64,14 @@ static const hotspot WOLF_HALL_HS[] = {
     {320, 300, 470, 400, 246, 371, "ARCHIVE HOLOPROJECTOR", 5, 0, "AWOHOLOP"},
     {20, 245, 90, 411, 25, 307, "READY ROOM", 11, 0, NULL},
     {95, 385, 180, 479, 80, 455, "REGISTER", 12, 0, "AWORGSTR"},
-    {0, 0, 639, 40, 320, 15, "EXIT", 8, 2, NULL},
+    {0, 0, 639, 40, 320, 15, "~EXIT", 8, 2, NULL},
 };
 static const hotspot FALCON_HALL_HS[] = {
     {66, 167, 152, 303, 69, 187, "CADET TRAINING", 14, 1, NULL},
     {160, 290, 375, 322, 110, 340, "ARCHIVE HOLOPROJECTOR", 5, 1, "AJFHOLOP"},
     {523, 154, 636, 332, 450, 200, "READY ROOM", 11, 1, NULL},
     {397, 385, 492, 466, 397, 443, "REGISTER", 12, 1, "AJFRGSTR"},
-    {0, 0, 639, 40, 320, 15, "EXIT", 8, 2, NULL},
+    {0, 0, 639, 40, 320, 15, "~EXIT", 8, 2, NULL},
 };
 /* the halls' looping clips (FUN_000399b0 slot, name, x, y) */
 static const overlay_def WOLF_HALL_OV[] = {{"AWOBALL", 91, 380}, {"AWOARCHT", 328, 332}, {"AWOLITE1", 0, 280}, {"AWOLITE2", 158, 300}, {"AWOLITE3", 580, 275}};
@@ -147,6 +152,7 @@ static int text_width(const font *fo, const char *t)
     }
     return w;
 }
+static int label_width(const char *t) { return text_width(&g_flabel, t); }
 static int font_height(const font *fo) { return fo->d && fo->len > 12 ? (fo->d[8] | fo->d[9] << 8) : 16; }   /* header: "1." , glyph count, height, transparent index */
 /* ---- text. The original shell fonts, but not rasterised into the 640x480 frame: with a renderer, each call is queued
  * and drawn after the frame as glyph textures at the display's resolution - the glyph upscaled 3x with Scale3x (edge-
@@ -854,6 +860,9 @@ static void ia_planet(overlay *o)
  * MW2_PILOT: the player's name. Formations go to the simulation as MW2_OF / MW2_OE (-of= / -oe=). */
 static const char *const FORM_ARG[6] = {"echelonl", "echelonr", "lineabreast", "lineastern", "vform", "wedge"};
 static SDL_Window *g_win;
+static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg, int def);
+static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, int py);
+static int menu_opens(const SDL_Event *e);
 static char g_result[64];   /* the last mission's result, from MW2MSN.CFG */
 static void read_results(const char *dir)
 {
@@ -884,7 +893,7 @@ static void edition_files(void)
     char kind[PORTCFG_PATH], m[PORTCFG_PATH], t[PORTCFG_PATH], s[PORTCFG_PATH], f[PORTCFG_PATH];
     g_edf.ed = g_cfg.renderer;
     if (portcfg_edition(&g_cfg, g_edf.ed, m, t, kind, s, f) != 0) g_edf.ed = PORTCFG_ED_ENHANCED;
-    g_edf.tx = portcfg_texset_ok(&g_cfg, g_edf.ed, g_cfg.texset) ? g_cfg.texset : PORTCFG_TX_ORIGINAL;
+    g_edf.tx = portcfg_texset_for(&g_cfg, g_edf.ed, g_cfg.texset);   /* (RENDITION: TITANIUM always) */
     if (portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
         g_edf.tx = PORTCFG_TX_ORIGINAL;
         portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog);
@@ -1043,10 +1052,10 @@ static void loading_screen(int clan)
         SDL_Delay(30);
     }
 }
+static void prm_names(int rec, char names[3][16], int write);
 static int launch_ia(void)
 {
     const char *simprj = NULL, *save = getenv("MW2_SAVE_DIR");
-    const char *pilot = getenv("MW2_PILOT") ? getenv("MW2_PILOT") : "PLAYER";
     char path[1024], err[256], line[4200], scen[16];
     prj_archive *a;
     lance_slot fr[3], en[3];
@@ -1066,7 +1075,12 @@ static int launch_ia(void)
         for (k = 1; k < 3; k++) if (fr[k].mech >= 0) { fr[0].mech = fr[k].mech; fr[k].mech = -1; break; }
         if (fr[0].mech < 0) fr[0].mech = 9;
     }
-    snprintf(fr[0].pilot, sizeof fr[0].pilot, "%s", pilot);
+    {   /* the pilots' names: the star records' (FUN_0001d540 -> 0x1d310: record slot +0x14, 15 characters) */
+        char fn[3][16], en2[3][16];
+        prm_names(0, fn, 0); prm_names(1, en2, 0);
+        for (k = 0; k < 3; k++) { snprintf(fr[k].pilot, sizeof fr[k].pilot, "%s", fn[k]); snprintf(en[k].pilot, sizeof en[k].pilot, "%s", en2[k]); }
+        if (getenv("MW2_PILOT")) snprintf(fr[0].pilot, sizeof fr[0].pilot, "%s", getenv("MW2_PILOT"));   /* TEST ONLY */
+    }
     rc = lance_write_all(a, save, fr, en, 1) | lance_write_instmap(a, save, g_ia.clan[0], g_ia.clan[1]);
     prj_close(a);
     if (rc) { fprintf(stderr, "launch: cannot write the lance files into %s\n", save); return -1; }
@@ -1116,7 +1130,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) next = -3;
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = 8;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00029680 -> 0x258e0 */
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
                     for (i = 0; i < 25; i++)
                         if (e.button.x >= IA_HS[i].x0 && e.button.x <= IA_HS[i].x1 && e.button.y >= IA_HS[i].y0 && e.button.y <= IA_HS[i].y1) click = i;
@@ -1241,12 +1255,53 @@ static void reg_save(void)
     for (i = 0; i < 20; i++) g_reg[i].rt = 0;   /* the runtime field (the name's text object) is not kept */
     if ((f = fopen(p, "wb"))) { fwrite(g_reg, 1, sizeof g_reg, f); fclose(f); }
 }
-static const char *ia_pilot(void)   /* the registered pilot (Wolf, else Jade Falcon), as the original's callsign */
+#define PRM_STAR0 0x10   /* MW2PRM.CFG: record 0x840dc (0x8415c follows at 0x90) */
+static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static void wr32le(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+/* the star records' pilot names in MW2PRM.CFG (record 0x840dc at +0x10, 0x8415c at +0x90; +0x14 + 0x24 k + 0x14, 16 bytes):
+ * the shell's data starts them as "MechWarrior", "Friend 1", "Friend 2" / "Enemy 1".."Enemy 3" (MW2SHELL data 0x840dc /
+ * 0x8415c); the file keeps what the shell last wrote (the install's: "MIKE" over "MechWarrior" - "MIKE\0arrior") */
+static void prm_names(int rec, char names[3][16], int write)
 {
-    int c, i;
-    reg_load();
-    for (c = 0; c < 2; c++) for (i = 0; i < 10; i++) if (g_reg[c * 10 + i].used && g_reg[c * 10 + i].selected) return g_reg[c * 10 + i].name;
-    return getenv("MW2_PILOT") ? getenv("MW2_PILOT") : "MechWarrior";
+    static const char *DFLT[2][3] = {{"MechWarrior", "Friend 1", "Friend 2"}, {"Enemy 1", "Enemy 2", "Enemy 3"}};
+    char p[700];
+    uint8_t prm[0x218];
+    FILE *f;
+    int k, have = 0, off = rec ? 0x90 : PRM_STAR0;
+    memset(prm, 0, sizeof prm);
+    snprintf(p, sizeof p, "%s/MW2PRM.CFG", g_dir);
+    if ((f = fopen(p, "rb"))) { have = fread(prm, 1, sizeof prm, f) == sizeof prm; fclose(f); }
+    if (!write) {
+        for (k = 0; k < 3; k++) {
+            const char *q = (const char *)prm + off + 0x14 + 0x24 * k + 0x14;
+            snprintf(names[k], 16, "%.15s", have && q[0] ? q : DFLT[rec][k]);
+        }
+        return;
+    }
+    if (!have) { memset(prm, 0, sizeof prm); wr32le(prm + 0x114, 0xffffffffu); }
+    for (k = 0; k < 3; k++) {   /* strcpy over the field: its tail stays (0x2a910 / 0x3a8a0) */
+        uint8_t *q = prm + off + 0x14 + 0x24 * k + 0x14;
+        size_t n = strlen(names[k]);
+        if (n > 15) n = 15;
+        memcpy(q, names[k], n); q[n] = 0;
+    }
+    if ((f = fopen(p, "wb"))) { fwrite(prm, 1, sizeof prm, f); fclose(f); }
+}
+/* the Instant Action player's name: record 0x840dc's slot 0 (the record is the clans' and Instant Action's friendly star,
+ * PTR 0x841dc; the roster puts the pilot's name there - 0x370ba / 0x38644: FUN_0003a8a0(0, 0, pilot + 0x28) - and the
+ * Star Configuration's name typing changes it) */
+static const char *ia_pilot(void)
+{
+    static char nm[3][16];
+    prm_names(0, nm, 0);
+    return nm[0];
+}
+static void prm_player_name(const char *name)   /* FUN_0003a8a0(0, 0, name): record 0x840dc slot 0's name */
+{
+    char nm[3][16];
+    prm_names(0, nm, 0);
+    snprintf(nm[0], 16, "%.15s", name);
+    prm_names(0, nm, 1);
 }
 static int reg_selected(int clan)
 {
@@ -1287,7 +1342,7 @@ static const char *roster_title(int clan, int k)
 }
 static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
-    int next = -1, f = 0, editing = -1, i, confirm_del = 0, old_list = 0, text_on = 0;
+    int next = -1, f = 0, editing = -1, i, old_list = 0, text_on = 0;
     char edit[16] = "";
     reg_load();
     load_bg(clan == 1 ? 23 : 16);
@@ -1313,6 +1368,11 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (editing >= 0 && e.type == SDL_TEXTINPUT && strlen(edit) + strlen(e.text.text) < 15) strcat(edit, e.text.text);
+                if (menu_opens(&e) && !(editing >= 0 && e.type == SDL_KEYDOWN)) {   /* FUN_00038310 -> 0x258e0 (Esc while a name is typed cancels it) */
+                    int r = global_menu(rd, tx, headless, *mx, *my);
+                    if (r != -1) next = r;
+                    continue;
+                }
                 if (e.type == SDL_KEYDOWN) {
                     SDL_Keycode k = e.key.keysym.sym;
                     if (editing >= 0) {
@@ -1334,7 +1394,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                             editing = -1;
                             old_list = 0;
                         }
-                    } else if (k == SDLK_ESCAPE) next = 1;
+                    }
                 }
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && editing < 0 && nclick < 16) {
                     click[nclick][0] = e.button.x; click[nclick][1] = e.button.y; nclick++;
@@ -1347,11 +1407,6 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
             for (i = 0; i < 15; i++) enabled[i] = 1;   /* FUN_00028bc0 hides / 0x28b60 shows: none without a pilot; */
             if (sel < 0) enabled[11] = enabled[12] = enabled[13] = enabled[14] = 0;   /* LAUNCH OLD MISSION with missions */
             else { enabled[13] = !old_list && g_reg[sel].rank > 0; enabled[14] = old_list; }   /* done, PILOT INFO in the list */
-            if (confirm_del) {   /* "Terminate MechWarrior?#Yes|No" */
-                if (by >= 250 && by < 290 && bx >= 230 && bx < 310 && sel >= 0) { memset(&g_reg[sel], 0, sizeof g_reg[sel]); reg_save(); old_list = 0; }
-                if (by >= 250 && by < 290 && bx >= 230 && bx < 410) confirm_del = 0;
-                continue;
-            }
             if (old_list && sel >= 0) {   /* 0x385a0: an old mission's item, before the buttons (it can lie over PILOT INFO) */
                 int k, done = g_reg[sel].rank;
                 for (k = 0; k < 16 && k < done; k++)
@@ -1362,6 +1417,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                      * state 12): no briefing, and the simulation returns to the roster - no debriefing, so neither
                      * the campaign position nor the honor changes */
                     star_reset_mission(clan, k);
+                    prm_player_name(g_reg[sel].name);   /* 0x38644: FUN_0003a8a0(0, 0, pilot + 0x28) */
                     printf("roster: launch old mission %d (%s)\n", k + 1, CAMPAIGN_TITLE[clan][k]);
                     launch_campaign_m(clan, sel, k);
                     music_after_mission(12, clan);   /* the roster is the return state (12) */
@@ -1381,7 +1437,14 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                     old_list = 0;                                  /* either way the record panel (0x38690 / 0x38800) */
                 } else if (i == 0) next = 8;                       /* NEW ALLEGIANCE: back to the title */
                 else if (i == 11) next = 1;                        /* ACCEPT: the clan hall with this pilot */
-                else if (i == 12 && sel >= 0) confirm_del = 1;     /* asks first */
+                else if (i == 12 && sel >= 0) {                    /* DELETE MECHWARRIOR (0x3869d): the shell dialog, No by
+                                                                     * default; Yes clears +0 and the name (0x77c84 "") - the
+                                                                     * rest of the record stays (the Hall of Honor still sorts it) */
+                    if (shell_dialog(rd, tx, headless, "Terminate MechWarrior?#Yes|No", 1) == 0) {
+                        g_reg[sel].used = 0; g_reg[sel].selected = 0; memset(g_reg[sel].name, 0, sizeof g_reg[sel].name);
+                        reg_save(); old_list = 0;
+                    }
+                }
                 else if (i == 13) old_list = 1;                    /* LAUNCH OLD MISSION (0x38708): the list, PILOT INFO */
                 else if (i == 14) old_list = 0;                    /* PILOT INFO (0x38727): the record again */
                 break;
@@ -1429,14 +1492,6 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                     for (q = 0; v[q]; q++) if (v[q] >= 'a' && v[q] <= 'z') v[q] = (char)(v[q] - 32);
                     draw_text(&g_fbig, 468 - text_width(&g_fbig, v) / 2, LY[k2] + 19, v, pal, -1);
                 }
-        }
-        if (confirm_del) {
-            int x, y;
-            for (y = 200; y < 300; y++) for (x = 200; x < 440; x++) { uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3; q[0] /= 4; q[1] /= 4; q[2] /= 4; }
-            text_layer_cull(200, 200, 440, 300);
-            draw_text(&g_flabel, 320 - text_width(&g_flabel, "Terminate MechWarrior?") / 2, 220, "Terminate MechWarrior?", (const uint8_t (*)[3])g_bg.pal, -1);
-            draw_text(&g_flabel, 270 - text_width(&g_flabel, "YES") / 2, 265, "YES", (const uint8_t (*)[3])g_bg.pal, -1);
-            draw_text(&g_flabel, 370 - text_width(&g_flabel, "NO") / 2, 265, "NO", (const uint8_t (*)[3])g_bg.pal, -1);
         }
         for (i = 0; i < 15; i++)
             if (enabled[i] && *mx >= ROSTER_HS[i][0] && *mx <= ROSTER_HS[i][2] && *my >= ROSTER_HS[i][1] && *my <= ROSTER_HS[i][3]) hover = i;
@@ -1562,9 +1617,6 @@ static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const c
  * record 0x840dc (one record, as the original) and writes it whenever the star changes (the port's shell does not
  * exit for a mission); the rest of the file is kept */
 typedef struct { int formation, size; lance_slot slot[3]; } star_cfg;
-#define PRM_STAR0 0x10   /* MW2PRM.CFG: record 0x840dc (0x8415c follows at 0x90) */
-static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
-static void wr32le(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 static star_cfg g_star[4];   /* 0 / 1 the clans' stars, 2 / 3 Instant Action friendly / enemy (= g_ia) */
 static const char *ia_pilot(void);
 static void ia_load_scenario(void);
@@ -1576,15 +1628,16 @@ static void star_load(int clan)
     int k;
     if (clan >= 2) {   /* the Instant Action star records 0x840dc / 0x8415c */
         int sd = clan - 2;
+        char nm[3][16];
         if (!g_ia.loaded) ia_load_scenario();
         memset(st, 0, sizeof *st);
         st->formation = g_ia.form[sd];
         st->size = 0;
+        prm_names(sd, nm, 0);   /* the names: the records' (0x840dc / 0x8415c) */
         for (k = 0; k < 3; k++) {
             st->slot[k].mech = g_ia.mech[sd][k];
             snprintf(st->slot[k].loadout, sizeof st->slot[k].loadout, "%s", g_ia.loadout[sd][k]);
-            if (sd == 0 && k == 0) snprintf(st->slot[k].pilot, sizeof st->slot[k].pilot, "%s", ia_pilot());
-            else snprintf(st->slot[k].pilot, sizeof st->slot[k].pilot, sd ? "Enemy %d" : "Friend %d", sd ? k + 1 : k);
+            snprintf(st->slot[k].pilot, sizeof st->slot[k].pilot, "%s", nm[k]);
             if (g_ia.mech[sd][k] >= 0) st->size = k + 1;
         }
         if (st->size < 1) st->size = 1;
@@ -1622,6 +1675,9 @@ static void star_save(int clan)
     FILE *f;
     if (clan >= 2) {
         int sd = clan - 2, k;
+        char nm[3][16];
+        for (k = 0; k < 3; k++) snprintf(nm[k], 16, "%.15s", g_star[clan].slot[k].pilot);
+        prm_names(sd, nm, 1);
         g_ia.form[sd] = g_star[clan].formation;
         for (k = 0; k < 3; k++) {
             g_ia.mech[sd][k] = k < g_star[clan].size ? g_star[clan].slot[k].mech : -1;
@@ -1686,42 +1742,46 @@ static const char *const ENGINE_MAKER[79] = {
     "Omni", "GM", "Vlar", "GM", "Magna", "GM", "Pitban", "VOX", "VOX", "Leenex", "VOX", "Vlar", "Magna", "LTV",
     "Hermes", "Hermes", "Magna", "GM", "GM", "LTV", "Magna", "Hermes", "LTV"};
 static const char *engine_maker(int rating) { int i = (rating - 10) / 5; return ENGINE_MAKER[i < 0 ? 0 : i > 78 ? 78 : i]; }
-/* ---- the Mech Lab (screen 9, FUN_000339e0), chassis / variant choice only for now (weapon editing NOT YET):
+/* ---- the Mech Lab (screen 9, FUN_000339e0): chassis / variant choice (CUSTOMIZE: run_customize below);
  * the 18 shell mechs; variants = the archive's MEK records <code>NN... */
+/* the variant list (FUN_00032870, table 0xa5944: 200 x 13 bytes): entry 0 "<code>00std" (format 0x76e4d), then
+ * "<code>NNstd" for NN 1..99 when the archive has it (0x1cf00), then the player's MEK\<code>NNusr.mek at 100 + NN - so
+ * only the standard and user variants, in number order (the archive's TRN / AFU / DMG / TPE / SPC records are not
+ * offered) */
 static int mek_variants(const char *code, char out[][9], int max)
 {
-    char path[1100], err[256];
+    char path[1100], err[256], nm[16];
     prj_archive *a;
-    int t, i, n = 0;
+    int t, i, n = 0, nn;
     if ((a = prj_open(gpath("MW2.PRJ"), err, sizeof err))) {
         t = prj_find_type(a, "MEK");
-        for (i = 0; t >= 0 && i < prj_symbol_count(a, t) && n < max; i++) {
-            const char *nm = prj_symbol_name(a, t, i);
-            if (strncasecmp(nm, code, 3) == 0 && strlen(nm) <= 8) {
-                int k;
-                snprintf(out[n], 9, "%s", nm);
-                for (k = 0; out[n][k]; k++) if (out[n][k] >= 'A' && out[n][k] <= 'Z') out[n][k] = (char)(out[n][k] + 32);
-                n++;
-            }
+        for (nn = 0; t >= 0 && nn < 100 && n < max; nn++) {
+            snprintf(nm, sizeof nm, "%.3s%02dstd", code, nn);
+            if (nn > 0 && prj_find_id(a, t, nm) < 0) continue;
+            for (i = 0; nm[i]; i++) if (nm[i] >= 'A' && nm[i] <= 'Z') nm[i] = (char)(nm[i] + 32);
+            memcpy(out[n++], nm, 9);   /* 8 characters and the terminator */
         }
         prj_close(a);
     }
-    {   /* the player's designs: <install>/MEK/<code>NNusr.mek (any case) */
+    {   /* the player's designs: <install>/MEK/<code>NNusr.mek (any case), by NN */
+        char usr[100][9];
         DIR *dd;
         struct dirent *de;
+        memset(usr, 0, sizeof usr);
         snprintf(path, sizeof path, "%s/MEK", g_dir);
         if ((dd = opendir(path))) {
-            while ((de = readdir(dd)) && n < max) {
+            while ((de = readdir(dd))) {
                 const char *f = de->d_name;
-                if (strlen(f) == 12 && strncasecmp(f, code, 3) == 0 && strncasecmp(f + 5, "usr.mek", 7) == 0) {
-                    int k;
-                    snprintf(out[n], 9, "%.8s", f);
-                    for (k = 0; out[n][k]; k++) if (out[n][k] >= 'A' && out[n][k] <= 'Z') out[n][k] = (char)(out[n][k] + 32);
-                    n++;
+                if (strlen(f) == 12 && strncasecmp(f, code, 3) == 0 && isdigit((unsigned char)f[3]) && isdigit((unsigned char)f[4]) &&
+                    strncasecmp(f + 5, "usr.mek", 7) == 0) {
+                    int k, v = (f[3] - '0') * 10 + (f[4] - '0');
+                    memcpy(usr[v], f, 8); usr[v][8] = 0;
+                    for (k = 0; usr[v][k]; k++) if (usr[v][k] >= 'A' && usr[v][k] <= 'Z') usr[v][k] = (char)(usr[v][k] + 32);
                 }
             }
             closedir(dd);
         }
+        for (nn = 0; nn < 100 && n < max; nn++) if (usr[nn][0]) memcpy(out[n++], usr[nn], 9);
     }
     return n;
 }
@@ -1783,10 +1843,13 @@ static void mek_masses(const mek_def *d, mek_mass *m)
     for (k = 0; k < d->item_count; k++) {
         int w = (int)(d->items[k].id / 100);
         if (d->items[k].id >= 5000 || w >= mek_weapon_count) continue;
-        if (w == 29) m->equip += mek_weapons[w].weight_x100 / 100.0;   /* the anti-missile system: equipment (ASSUMED) */
-        else m->weapons += mek_weapons[w].weight_x100 / 100.0;
+        m->weapons += mek_weapons[w].weight_x100 / 100.0;   /* every MEK item, the anti-missile system too: the weapons
+                                                              * mass (FUN_00030db0: list 0xa48c8 from the MEK items, 0x7faa4
+                                                              * per item into 0xa4840); equipment is MASC only (0xa4850) */
     }
     m->ammo = d->link_count;
+    for (k = 0; k < MEK_LOC_COUNT && m->equip == 0; k++)   /* MASC (a 5001 slot anywhere): (tons x 4 + 50) / 100 (0x31720: 0xa4850) */
+        for (sl = 0; sl < d->loc[k].slot_count && sl < MEK_SLOTS; sl++) if (d->loc[k].slots[sl] == 5001) { m->equip = masc_tons((int)d->tonnage); break; }
     m->used = m->engine + m->gyro + m->cockpit + m->sinks + m->jets + m->internal + m->armor + m->weapons + m->ammo + m->equip;
     if (!m->dbl && m->used > d->tonnage + 1e-9 && m->sinks >= 10 && m->dissip % 2 == 0) {
         m->dbl = 1; m->nsinks = m->dissip / 2; m->sinks = m->nsinks > 10 ? m->nsinks - 10 : 0;
@@ -1823,7 +1886,7 @@ static int mech_lab_kdmt(int clan)   /* the mission's tonnage limit (BRF2 SDSC);
  * sinks free; double heat sinks 2 slots; jump jets 1 slot each (at most walk MP); XL engine 2 slots in each side torso;
  * Endo-steel 7 slots (half the internal mass); Ferro-fibrous 7 slots (19.2 points a ton, else 16); armour bought in half
  * tons, at most 9 in the head and twice the internal structure elsewhere; weapons their table's slots; ammo 1 slot a ton;
- * MASC tonnage / 25 tons and slots (ASSUMED Clan figures). Slot ids as in the MEK data (equipment base + instance / side). */
+ * MASC (tons x 4 + 50) / 100 tons and slots (0x31661, masc_tons). Slot ids as in the MEK data (equipment base + instance / side). */
 typedef struct {
     mek_def  d;
     int      halftons;            /* armour bought, half tons */
@@ -1914,6 +1977,7 @@ static void ed_trim_armor(medit *e)   /* FUN_0002bbd0: take points off until the
     }
 }
 static int ed_loc_max(const medit *e, int l) { return l == MEK_HEAD ? 9 : 2 * (int)e->d.loc[l].internal; }
+static void ed_split_links(medit *e);
 static void ed_init(medit *e, const mek_def *d)
 {
     int k;
@@ -1924,6 +1988,7 @@ static void ed_init(medit *e, const mek_def *d)
     e->crit_loc = MEK_HEAD;
     for (k = 0; k < MEK_LOC_COUNT; k++) {}
     if (ed_count(e, 5001)) e->masc = masc_tons((int)e->d.tonnage);
+    ed_split_links(e);
     { mek_mass mm; mek_masses(&e->d, &mm); e->dbl = mm.dbl; }
 }
 static medit g_lab_test;
@@ -1932,7 +1997,7 @@ static void ed_masses(const medit *e, mek_mass *m)
     mek_masses(&e->d, m);
     m->dbl = e->dbl; m->nsinks = e->dbl ? m->dissip / 2 : m->dissip; m->sinks = m->nsinks > 10 ? m->nsinks - 10 : 0;
     m->armor = e->halftons * 0.5;
-    m->equip += e->masc;
+    m->equip = e->masc;   /* MASC placed or still in the pool */
     m->used = m->engine + m->gyro + m->cockpit + m->sinks + m->jets + m->internal + m->armor + m->weapons + m->ammo + m->equip;
 }
 /* the items: weapons first, then ammo links */
@@ -1944,17 +2009,79 @@ static int ed_ammo_bins(const medit *e, uint32_t wid)
     for (k = e->d.item_count; k < e->d.item_count + e->d.link_count; k++) if (e->d.items[k].linked_id == (int32_t)wid) n++;
     return n;
 }
-static void ed_add_weapon(medit *e, int w)   /* ADD WEAPON: the weapon, plus a ton of its ammo when it uses any */
+/* Ammo bins as MW2SHELL keeps them: a table of 25 (0xa4864, -1 empty, kept packed) of internal ids 10000 + weapon id x
+ * 100 + bin, the bin numbered per weapon from 1 - at load (0x310e2) in the file's link order, by ADD AMMO / ADD WEAPON
+ * (0x2f590 / 0x2eee0) as that weapon's bins + 1, and DELETE AMMO (0x2f820) takes the weapon's highest bin (#n) wherever
+ * it sits; deleting (0x2b0d0) packs the table and numbers the weapon's later bins down. So a bin's number is its rank
+ * among its weapon's links in the link order. The port keeps the MEK's own form in the editor - a link record {id,
+ * weapon} per bin, its id (a 16-bit token >= 10000, unique) in the slots - and numbers a bin by that rank (ed_bin_no).
+ * The save (0x30732) writes each link id as 10000 + weapon type x 100 + 1 + the earlier links of that type, in table
+ * order, and the slots by that id (ed_renumber_links) - as the retail files are (TBR: 11001 / 11002 / 10001 / 10002) */
+static int ed_link_of(const medit *e, uint32_t tok)
+{
+    int k;
+    for (k = e->d.item_count; k < e->d.item_count + e->d.link_count; k++) if (e->d.items[k].id == tok) return k;
+    return -1;
+}
+static int ed_bin_no(const medit *e, int k)   /* 1-based: the link's rank among its weapon's links */
+{
+    int j, n = 0;
+    for (j = e->d.item_count; j <= k; j++) if (e->d.items[j].linked_id == e->d.items[k].linked_id) n++;
+    return n;
+}
+static uint16_t ed_new_token(const medit *e, uint32_t wid)   /* an unused link id in the save's form, type x 100 + 10001.. */
+{
+    uint32_t t = 10001 + (wid / 100) * 100;
+    while (t < 65535 && (ed_link_of(e, t) >= 0 || ed_count(e, (uint16_t)t))) t++;
+    return (uint16_t)t;
+}
+/* the file's ids (0x30732..0x30803): links in table order, id = type x 100 + 10001, + 1 for each earlier link given that id;
+ * every slot holding a link's old id gets its new one */
+static void ed_renumber_links(mek_def *d)
+{
+    uint32_t old[MEK_MAX_ITEMS];
+    int k, j, l, s;
+    for (k = d->item_count; k < d->item_count + d->link_count; k++) {
+        uint32_t id = 10001 + ((uint32_t)d->items[k].linked_id / 100) * 100;
+        for (j = d->item_count; j < k; j++) if (d->items[j].id == id) id++;
+        old[k] = d->items[k].id;
+        d->items[k].id = id;
+    }
+    for (l = 0; l < MEK_LOC_COUNT; l++)
+        for (s = 0; s < d->loc[l].slot_count; s++) {
+            uint16_t v = d->loc[l].slots[s];
+            if (v < 10000) continue;
+            for (k = d->item_count; k < d->item_count + d->link_count; k++) if (old[k] == v) { d->loc[l].slots[s] = (uint16_t)d->items[k].id; break; }
+        }
+}
+/* a design whose links share an id (the port's saves before 2026-10-21 gave every bin of a weapon 10000 + its id): each
+ * bin a token of its own, the n-th slot holding the shared id going to the n-th link with it (port repair; MW2SHELL's
+ * load maps a slot to the first link with its id) */
+static void ed_split_links(medit *e)
+{
+    mek_def *d = &e->d;
+    int k, j, l, s;
+    for (k = d->item_count + 1; k < d->item_count + d->link_count; k++) {
+        int dup = 0, nth = 0, seen = 0;
+        for (j = d->item_count; j < k; j++) if (d->items[j].id == d->items[k].id) { dup = 1; nth++; }
+        if (!dup) continue;
+        {
+            uint32_t was = d->items[k].id;
+            uint16_t t = ed_new_token(e, (uint32_t)d->items[k].linked_id);
+            d->items[k].id = t;
+            for (l = 0; l < MEK_LOC_COUNT && seen <= nth; l++)
+                for (s = 0; s < d->loc[l].slot_count; s++)
+                    if (d->loc[l].slots[s] == was && seen++ == nth) { d->loc[l].slots[s] = t; break; }
+        }
+    }
+}
+static void ed_add_weapon(medit *e, int w)   /* ADD WEAPON (0x2eee0): the weapon, plus a ton of its ammo when it uses any */
 {
     mek_def *d = &e->d;
     uint32_t id;
-    int inst, k;
+    int inst = 1, k;
     if (d->item_count >= 10 || d->item_count + d->link_count >= MEK_MAX_ITEMS || e->npool + mek_weapons[w].crits > 78) return;
-    for (inst = 1; inst < 99; inst++) {
-        id = (uint32_t)(w * 100 + inst);
-        for (k = 0; k < d->item_count; k++) if (d->items[k].id == id) break;
-        if (k == d->item_count && !ed_count(e, (uint16_t)id)) break;
-    }
+    for (k = 0; k < d->item_count; k++) if (d->items[k].id / 100 == (uint32_t)w && d->items[k].id < 5000) inst++;   /* the type's weapons + 1 */
     id = (uint32_t)(w * 100 + inst);
     memmove(d->items + d->item_count + 1, d->items + d->item_count, (size_t)d->link_count * sizeof d->items[0]);
     d->items[d->item_count].id = id; d->items[d->item_count].linked_id = -1;
@@ -1962,38 +2089,54 @@ static void ed_add_weapon(medit *e, int w)   /* ADD WEAPON: the weapon, plus a t
     ed_pool_add(e, (uint16_t)id, mek_weapons[w].crits);
     if (mek_weapons[w].ammo_per_ton > 0) ed_add_ammo(e, d->item_count - 1);
 }
-static void ed_del_ammo(medit *e, uint32_t wid)
+static void ed_drop_link(medit *e, int k)   /* the link and every slot holding it (0x2b0d0) */
+{
+    mek_def *d = &e->d;
+    uint16_t tok = (uint16_t)d->items[k].id;
+    memmove(d->items + k, d->items + k + 1, (size_t)(d->item_count + d->link_count - k - 1) * sizeof d->items[0]);
+    d->link_count--;
+    ed_remove(e, tok, 99);
+}
+static void ed_del_ammo(medit *e, uint32_t wid)   /* DELETE AMMO (0x2f820): the weapon's bin #n, placed or not */
 {
     mek_def *d = &e->d;
     int k;
     for (k = d->item_count + d->link_count - 1; k >= d->item_count; k--)
-        if (d->items[k].linked_id == (int32_t)wid) {
-            memmove(d->items + k, d->items + k + 1, (size_t)(d->item_count + d->link_count - k - 1) * sizeof d->items[0]);
-            d->link_count--;
-            ed_remove(e, (uint16_t)(10000 + wid), 1);
-            return;
-        }
+        if (d->items[k].linked_id == (int32_t)wid) { ed_drop_link(e, k); return; }
 }
-static void ed_del_weapon(medit *e, int item)
+static void ed_del_weapon(medit *e, int item)   /* DELETE WEAPON (0x2f230): the weapon and its bins; the type's later
+                                                  * weapons number down (0x2b0d0: their slots, and their bins' weapon) */
 {
     mek_def *d = &e->d;
     uint32_t id = d->items[item].id;
-    int k;
-    for (k = 0; k < 40; k++) ed_del_ammo(e, id);
+    int k, l, s;
+    for (k = d->item_count + d->link_count - 1; k >= d->item_count; k--) if (d->items[k].linked_id == (int32_t)id) ed_drop_link(e, k);
     ed_remove(e, (uint16_t)id, 99);
     memmove(d->items + item, d->items + item + 1, (size_t)(d->item_count + d->link_count - item - 1) * sizeof d->items[0]);
     d->item_count--;
+    if (id >= 5000) return;
+    for (k = 0; k < d->item_count; k++) if (d->items[k].id / 100 == id / 100 && d->items[k].id % 100 > id % 100) d->items[k].id--;
+    for (k = d->item_count; k < d->item_count + d->link_count; k++)
+        if (d->items[k].linked_id >= 0 && (uint32_t)d->items[k].linked_id / 100 == id / 100 && (uint32_t)d->items[k].linked_id % 100 > id % 100) d->items[k].linked_id--;
+    for (l = 0; l < MEK_LOC_COUNT; l++)
+        for (s = 0; s < d->loc[l].slot_count; s++) {
+            uint16_t v = d->loc[l].slots[s];
+            if (v < 5000 && v / 100 == id / 100 && v % 100 > id % 100) d->loc[l].slots[s]--;
+        }
+    for (k = 0; k < e->npool; k++) if (e->pool[k] < 5000 && e->pool[k] / 100 == id / 100 && e->pool[k] % 100 > id % 100) e->pool[k]--;
 }
-static void ed_add_ammo(medit *e, int item)
+static void ed_add_ammo(medit *e, int item)   /* ADD AMMO (0x2f590): a bin numbered the weapon's bins + 1, to the unassigned list */
 {
     mek_def *d = &e->d;
     uint32_t id = d->items[item].id;
+    uint16_t tok;
     if (d->item_count + d->link_count >= MEK_MAX_ITEMS || mek_weapons[id / 100].ammo_per_ton <= 0) return;
     if (d->link_count >= 25 || ed_ammo_bins(e, id) >= 10 || e->npool >= 78) return;
-    d->items[d->item_count + d->link_count].id = 10000 + id;
+    tok = ed_new_token(e, id);
+    d->items[d->item_count + d->link_count].id = tok;
     d->items[d->item_count + d->link_count].linked_id = (int32_t)id;
     d->link_count++;
-    ed_pool_add(e, (uint16_t)(10000 + id), 1);
+    ed_pool_add(e, tok, 1);
 }
 static int ed_removable(uint16_t id)   /* items the player may move: not the structure */
 {
@@ -2022,6 +2165,47 @@ static int ed_has_actuator(const medit *e, int arm, int hand)
     int k;
     for (k = 0; k < e->d.loc[arm].slot_count; k++) if (e->d.loc[arm].slots[k] == id) return 1;
     return 0;
+}
+/* CUSTOMIZE's critical-slot texts as the shell prints them. Location slots (0x2cb30): empty "-", weapons "%s #%d" (the
+ * table 0x7fab0 name, instance id % 100), equipment "%s" from the table 0x7f4c4 by id / 50, ammo "Ammo (%s #%d) #%d"
+ * (weapon, instance, bin). The unassigned list (0x2ccf0), one line per item: "%s #%d (%d)", "%s (%d)", "Ammo (%s #%d)
+ * #%d (%d)" with the item's slot count; an ammo bin by its weapon and number (see ed_bin_no) */
+static const char *crit_equip_name(int id)
+{
+    static const struct { int base; const char *name; } EQ[] = {   /* 0x7f4c4 */
+        {5000, "MASC"}, {5050, "Targeting Computer"}, {5100, "ECM"}, {5150, "Artemis IV"}, {5200, "Beagle Active Probe"},
+        {5250, "TAG"}, {5300, "Shoulder"}, {5350, "Upper Arm Actuator"}, {5400, "Lower Arm Actuator"}, {5450, "Hand Actuator"},
+        {5500, "Hip"}, {5550, "Upper Leg Actuator"}, {5600, "Lower Leg Actuator"}, {5650, "Foot Actuator"}, {5700, "Sensors"},
+        {5750, "Cockpit"}, {5800, "Gyro"}, {5850, "Engine"}, {5900, "Life Support"}, {6000, "Heat Sink"}, {7000, "Jump Jet"},
+        {8000, "Endo Steel"}, {9000, "Ferro-Fibrous"}};
+    int k;
+    for (k = (int)(sizeof EQ / sizeof EQ[0]) - 1; k >= 0; k--) if (EQ[k].base / 50 == id / 50) return EQ[k].name;
+    return NULL;
+}
+static void crit_text(const medit *e, int loc, int s, int pool_j, char *t, size_t tn)
+{
+    uint16_t id = loc >= 0 ? e->d.loc[loc].slots[s] : e->pool[pool_j];
+    int cnt = 1, k;
+    const char *nm;
+    if (loc < 0 && id < 10000) for (cnt = 0, k = 0; k < e->npool; k++) if (e->pool[k] == id) cnt++;   /* the item's slots */
+    if (id == 0) snprintf(t, tn, "-");
+    else if (id < 5000 && id / 100 < mek_weapon_count) {
+        if (loc >= 0) snprintf(t, tn, "%s #%d", mek_weapons[id / 100].name, id % 100);
+        else snprintf(t, tn, "%s #%d (%d)", mek_weapons[id / 100].name, id % 100, cnt);
+    } else if (id >= 10000 && ed_link_of(e, id) >= 0 && (uint32_t)e->d.items[ed_link_of(e, id)].linked_id / 100 < (uint32_t)mek_weapon_count) {
+        int k2 = ed_link_of(e, id), w = e->d.items[k2].linked_id, bin = ed_bin_no(e, k2);   /* the bin's weapon and number */
+        if (loc >= 0) snprintf(t, tn, "Ammo (%s #%d) #%d", mek_weapons[w / 100].name, w % 100, bin);
+        else snprintf(t, tn, "Ammo (%s #%d) #%d (%d)", mek_weapons[w / 100].name, w % 100, bin, 1);
+    } else if ((nm = crit_equip_name(id))) {
+        if (loc >= 0) snprintf(t, tn, "%s", nm); else snprintf(t, tn, "%s (%d)", nm, cnt);
+    } else snprintf(t, tn, "BAD CRITICAL %d", id);
+}
+static int crit_pool_line(const medit *e, int j)   /* j starts an unassigned line: every ammo bin, else an item's first slot */
+{
+    int q;
+    if (e->pool[j] >= 10000) return 1;
+    for (q = 0; q < j; q++) if (e->pool[q] == e->pool[j]) return 0;
+    return 1;
 }
 static int ed_single(uint16_t id);
 /* assign the selected pool item into location loc (FUN_0002ae40): the whole item into the location's first free slots,
@@ -2058,14 +2242,14 @@ static void ed_unassign(medit *e, int loc, int s)
 
 /* ---- the CUSTOMIZE screen. Panels (clips held on their last frame): left wwomp1 (12,52); right short wwomp1es or tall
  * wwomp7cr (436,52) (the weapons table); middle tall wwomp4ar (armour, criticals) or wwomp5wa (weapons) at (216,52). The
- * armour diagram: SHP WWOMP4MP pieces head (291,221), right torso (262,258), centre torso (302,258), left torso (342,258),
- * right arm (226,256), left arm (378,256), right leg (255,362), left leg (325,362) - placed by template matching; the
- * selected location cross-hatched (a 10-pixel grid). Text: font 31, grey (ink -> palette 6) for information, white for
- * what can be clicked; right-panel values at x 544. */
-static const int DIAG_LOC[8] = {0, 1, 2, 3, 4, 5, 6, 7};   /* piece p is location p (the shell's diagram) */
-static const int DIAG_ORDER[8] = {4,5,6,7,1,3,2,0};
-static int DIAG_FILL = 0;   /* the palette entry of (247,89,0): unselected locations (DOS capture, full armour; other levels ASSUMED the same) */
-static const int DIAG_XY[8][2] = {{291, 223}, {262, 258}, {302, 258}, {342, 258}, {226, 256}, {378, 256}, {255, 362}, {325, 362}};
+ * armour diagram is the wwomp4ar panel's own art (the whole 'Mech in (247,89,0), whatever the armour); over it the shell
+ * shows only the selected location's cross-hatched piece, SHP WWOMP4MP frame = location (clip slot 12, FUN_0002bd20:
+ * 0x39fb0 frame, 0x39710 at 216 + 0x7ff64[loc], 52 + 0x7ff84[loc], 0x39610 shown): head (291,223), right torso (262,258),
+ * centre torso (302,258), left torso (342,258), right arm (226,256), left arm (378,256), right leg (255,362), left leg
+ * (325,362). Text: font 31, grey (ink -> palette 6) for information, white for what can be clicked; right-panel values
+ * at x 544. */
+static const int DIAG_LOC[8] = {0, 1, 2, 3, 4, 5, 6, 7};   /* frame p is location p (0x2bd20) */
+static const int DIAG_XY[8][2] = {{291, 223}, {262, 258}, {302, 258}, {342, 258}, {226, 256}, {378, 256}, {255, 362}, {325, 362}};   /* 0x7ff64 / 0x7ff84 + (216, 52) */
 static smk *open_smk_held(const char *name)   /* a panel: its opening plays, then it stays on the last frame */
 {
     smk *c = open_smk(name);
@@ -2086,39 +2270,24 @@ static int diag_hit(const uint8_t *shp, size_t len, int x, int y)
     }
     return -1;
 }
-static void diag_draw(const uint8_t *shp, size_t len, int selected)
+static void diag_draw(const uint8_t *shp, size_t len, int selected)   /* FUN_0002bd20: the selected piece only */
 {
-    {
-        int i2, best = 1 << 30;
-        for (i2 = 0; i2 < 256; i2++) { int d2 = abs((int)g_bg.pal[i2][0] - 247) + abs((int)g_bg.pal[i2][1] - 89) + (int)g_bg.pal[i2][2]; if (d2 < best) { best = d2; DIAG_FILL = i2; } }
-    }
-    /* the pieces' art carries the cross-hatching: the selected location is drawn as it is, the others with the grid
-     * lines filled in the piece's main colour (as the DOS captures show) */
-    int p, x, y, o2;
-    for (o2 = 0; o2 < 8; o2++) {
-        shp_frame fr;
-        int cnt[256], fill = 0, i;
-        p = DIAG_ORDER[o2];
-        if (shp_decode(shp, len, p, &fr) != 0) continue;
-        memset(cnt, 0, sizeof cnt);
-        for (i = 0; i < fr.w * fr.h; i++) if (fr.mask[i]) cnt[fr.pix[i]]++;
-        for (i = 0; i < 256; i++) if (g_bg.pal[i][0] > g_bg.pal[i][1] + 40 && cnt[i] > cnt[fill]) fill = i;   /* the reddish majority */
-        for (y = 0; y < fr.h; y++)
-            for (x = 0; x < fr.w; x++) {
-                int px = DIAG_XY[p][0] + x, py = DIAG_XY[p][1] + y;
-                uint8_t ix;
-                if (!fr.mask[y * fr.w + x] || px >= W || py >= H) continue;
-                ix = fr.pix[y * fr.w + x];
-                if (DIAG_LOC[p] != selected && (g_bg.pal[ix][1] >= g_bg.pal[ix][0] || ix == fill)) ix = (uint8_t)DIAG_FILL;   /* fill and grid -> (247,89,0) */
-                memcpy(g_fb + ((size_t)py * W + (size_t)px) * 3, g_bg.pal[ix], 3);
-            }
-        shp_frame_free(&fr);
-    }
+    shp_frame fr;
+    int x, y;
+    if (selected < 0 || selected > 7 || shp_decode(shp, len, selected, &fr) != 0) return;
+    for (y = 0; y < fr.h; y++)
+        for (x = 0; x < fr.w; x++) {
+            int px = DIAG_XY[selected][0] + x, py = DIAG_XY[selected][1] + y;
+            if (!fr.mask[y * fr.w + x] || px >= W || py >= H) continue;
+            memcpy(g_fb + ((size_t)py * W + (size_t)px) * 3, g_bg.pal[fr.pix[y * fr.w + x]], 3);
+        }
+    shp_frame_free(&fr);
 }
 static void dlg_g(int x, int y, const char *t) { draw_text(&g_fthin, x, y, t, (const uint8_t (*)[3])g_bg.pal, 6); }   /* information */
 static void dlg_w(int x, int y, const char *t) { draw_text(&g_fthin, x, y, t, (const uint8_t (*)[3])g_bg.pal, -1); }  /* clickable */
 static int shell_confirm(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg);
 /* returns 1 if saved (out = the new loadout name), 0 on ABORT, -3 to quit */
+static int g_menu_next;   /* the screen the global menu picked from CUSTOMIZE (run_customize returns -4) */
 static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int m, const char *loadout, char *out)
 {
     static medit E;
@@ -2162,6 +2331,46 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
     }
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);
     if (getenv("MW2_LAB_PAGE")) e->page = atoi(getenv("MW2_LAB_PAGE"));   /* tests */
+    if (getenv("MW2_LAB_LOC")) e->crit_loc = e->armor_loc = atoi(getenv("MW2_LAB_LOC")) & 7;   /* TEST ONLY: the location picked */
+    if (getenv("MW2_LAB_OPS")) {   /* TEST ONLY: "a<item>" ADD AMMO, "d<item>" DELETE AMMO, "x<item>" DELETE WEAPON, "w<type>" ADD
+                                    * WEAPON, ';'-separated; then every location's slots, the pool and the links as saved */
+        const char *q = getenv("MW2_LAB_OPS");
+        char tb[64];
+        int l2, s2, j2;
+        static mek_def wd;
+        while (*q) {
+            int v = atoi(q + 1);
+            if (q[0] == 'a' && v >= 0 && v < e->d.item_count) ed_add_ammo(e, v);
+            else if (q[0] == 'd' && v >= 0 && v < e->d.item_count) ed_del_ammo(e, e->d.items[v].id);
+            else if (q[0] == 'x' && v >= 0 && v < e->d.item_count) ed_del_weapon(e, v);
+            else if (q[0] == 'w' && v >= 0 && v < mek_weapon_count) ed_add_weapon(e, v);
+            while (*q && *q != ';') q++;
+            if (*q) q++;
+        }
+        for (l2 = 0; l2 < MEK_LOC_COUNT; l2++)
+            for (s2 = 0; s2 < e->d.loc[l2].slot_count; s2++) { crit_text(e, l2, s2, -1, tb, sizeof tb); if (e->d.loc[l2].slots[s2] >= 10000 || e->d.loc[l2].slots[s2] < 5000) printf("crit loc %d slot %d: %s\n", l2, s2, tb); }
+        for (j2 = 0; j2 < e->npool; j2++) if (crit_pool_line(e, j2)) { crit_text(e, -1, 0, j2, tb, sizeof tb); printf("crit pool: %s\n", tb); }
+        wd = e->d; ed_renumber_links(&wd);
+        printf("saved links:");
+        for (j2 = wd.item_count; j2 < wd.item_count + wd.link_count; j2++) printf(" %u>%d", wd.items[j2].id, wd.items[j2].linked_id);
+        printf("\nsaved slots:");
+        for (l2 = 0; l2 < MEK_LOC_COUNT; l2++) for (s2 = 0; s2 < wd.loc[l2].slot_count; s2++) if (wd.loc[l2].slots[s2] >= 10000) printf(" %d.%d=%u", l2, s2, wd.loc[l2].slots[s2]);
+        printf("\n");
+        fflush(stdout);
+    }
+    if (getenv("MW2_LAB_UNASSIGN")) {   /* TEST ONLY: "loc,slot;loc,slot..." unassigned as a click on them would, then the texts */
+        const char *q = getenv("MW2_LAB_UNASSIGN");
+        int l2, s2, j2;
+        char tb[64];
+        while (sscanf(q, "%d,%d", &l2, &s2) == 2) {
+            if (l2 >= 0 && l2 < MEK_LOC_COUNT && s2 >= 0 && s2 < e->d.loc[l2].slot_count) ed_unassign(e, l2, s2);
+            if (!(q = strchr(q, ';'))) break;
+            q++;
+        }
+        for (s2 = 0; s2 < e->d.loc[e->crit_loc].slot_count; s2++) { crit_text(e, e->crit_loc, s2, -1, tb, sizeof tb); printf("crit slot: %s\n", tb); }
+        for (j2 = 0; j2 < e->npool; j2++) if (crit_pool_line(e, j2)) { crit_text(e, -1, 0, j2, tb, sizeof tb); printf("crit pool: %s\n", tb); }
+        fflush(stdout);
+    }
     {   /* tests: MW2_LAB_CLICKS="x,y;x,y;..." - left clicks fed through the screen's own input handling */
         const char *cs = getenv("MW2_LAB_CLICKS");
         while (cs && *cs) {
@@ -2187,7 +2396,12 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                 pg = e->page;   /* every event: an earlier one may have changed the page */
                 ed_masses(e, &mm);
                 if (ev.type == SDL_QUIT) { result = -3; break; }
-                if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE) { result = 0; break; }
+                if (menu_opens(&ev)) {   /* CUSTOMIZE is a mode of FUN_000339e0's loop: Esc / right button open the global menu */
+                    int r = global_menu(rd, tx, headless, g_cmx, g_cmy);
+                    if (r == -3) { result = -3; break; }
+                    if (r >= 0) { g_menu_next = r; result = -4; break; }
+                    continue;
+                }
                 if (ev.type == SDL_MOUSEMOTION) { g_cmx = ev.motion.x; g_cmy = ev.motion.y; }
                 if (ev.type != SDL_MOUSEBUTTONDOWN || ev.button.button != SDL_BUTTON_LEFT) continue;
                 x = ev.button.x; y = ev.button.y;
@@ -2202,7 +2416,12 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                         size_t n;
                         memset(e->d.config_raw, 0, sizeof e->d.config_raw);
                         snprintf(e->d.config_name, sizeof e->d.config_name, "User Variant #%d", nn + 1);
-                        n = mek_write(&e->d, buf, sizeof buf);
+                        {   /* the file's link ids (0x30732) */
+                            static mek_def wd;
+                            wd = e->d;
+                            ed_renumber_links(&wd);
+                            n = mek_write(&wd, buf, sizeof buf);
+                        }
                         snprintf(path, sizeof path, "%s/MEK", g_dir);
                         mkdir(path, 0755);
                         snprintf(path, sizeof path, "%s/MEK/%s%02dusr.mek", g_dir, code, nn);
@@ -2276,7 +2495,9 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                     } else if (pg == 9) {
                         if (y >= 97 && y < 108) {                                                                /* MASC */
                             int t = masc_tons((int)e->d.tonnage);
-                            if (e->masc) { ed_remove(e, 5001, 99); e->masc = 0; } else { ed_pool_add(e, 5001, t); e->masc = t; }
+                            if (e->masc) { for (k = 0; k < e->masc; k++) ed_remove(e, (uint16_t)(5001 + k), 99); e->masc = 0; }   /* 0x30427 */
+                            else { for (k = 0; k < t; k++) ed_pool_add(e, (uint16_t)(5001 + k), 1); e->masc = t; }   /* 0x2ff5c: one 1-slot
+                                                                     * item each, 5001 .. 5000 + tons (0xa4d84) */
                         }
                         if (y >= 108 && y < 119) ed_toggle_actuator(e, 4, 0);
                         if (y >= 119 && y < 130) ed_toggle_actuator(e, 4, 1);
@@ -2284,10 +2505,8 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                         if (y >= 141 && y < 152) ed_toggle_actuator(e, 5, 1);
                     } else if (pg == 10) {
                         int g = (y - 86) / 11, seen = 0, j;
-                        for (j = 0; j < e->npool; j++) {   /* the pool's groups, in order */
-                            int first = 1, q;
-                            for (q = 0; q < j; q++) if (e->pool[q] == e->pool[j]) first = 0;
-                            if (!first) continue;
+                        for (j = 0; j < e->npool; j++) {   /* the unassigned lines, in order */
+                            if (!crit_pool_line(e, j)) continue;
                             if (seen == g) { e->sel_pool = j; break; }
                             seen++;
                         }
@@ -2340,10 +2559,10 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         {   /* the header */
             char nm[48];
             int k;
-            draw_text(&g_fhead, 320 - text_width(&g_fhead, "CUSTOMIZING") / 2, 4, "CUSTOMIZING", (const uint8_t (*)[3])g_bg.pal, -1);
+            draw_text(&g_f26, 320 - text_width(&g_f26, "CUSTOMIZING") / 2, 4, "CUSTOMIZING", (const uint8_t (*)[3])g_bg.pal, 6);   /* as the lab's header (0x2c1e0, remap 0xa5530) */
             snprintf(nm, sizeof nm, "%s", lance_mech_name(m));
             for (k = 0; nm[k]; k++) if (nm[k] >= 'a' && nm[k] <= 'z') nm[k] = (char)(nm[k] - 32);
-            draw_text(&g_fhead, 320 - text_width(&g_fhead, nm) / 2, 28, nm, (const uint8_t (*)[3])g_bg.pal, -1);
+            draw_text(&g_f26, 320 - text_width(&g_f26, nm) / 2, 28, nm, (const uint8_t (*)[3])g_bg.pal, 6);
         }
         {   /* the left panel: the component table, the editable rows white */
             static const char *ROW[10] = {"Engine", "Gyro", "Cockpit", "Heat Sinks", "Jump Jets", "Internal", "Armor", "Weapons", "Ammo", "Equipment"};
@@ -2361,7 +2580,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                 if (i == 0) snprintf(note, sizeof note, "%d%s", mm.rating, ed_is_xl(e) ? "XL" : "");
                 if (i == 3) snprintf(note, sizeof note, "%d (%d)", mm.nsinks, mm.dissip);
                 if (i == 4) snprintf(note, sizeof note, "%d", mm.njets);
-                if (i == 5) snprintf(note, sizeof note, "%s", ed_endo(e) ? "Endo" : "Std");
+                if (i == 5) snprintf(note, sizeof note, "%s", ed_endo(e) ? "Endo-S" : "Std");
                 if (i == 6) snprintf(note, sizeof note, "%s", ed_ferro(e) ? "Ferro-F" : "Std");
                 if (note[0]) dlg_g(147, y, note);
             }
@@ -2395,7 +2614,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                 dlg_w(444, 119, "ADD"); dlg_w(444, 130, "DELETE");
             } else if (pg == 5) {
                 dlg_g(444, 64, "INTERNAL STRUCTURE");
-                dlg_g(444, 86, "Type"); dlg_w(544, 86, ed_endo(e) ? "Endo" : "Std");
+                dlg_g(444, 86, "Type"); dlg_w(544, 86, ed_endo(e) ? "Endo-S" : "Std");
                 dlg_g(444, 97, "Mass"); snprintf(t, sizeof t, "%.2f T", mm.internal); dlg_g(544, 97, t);
                 for (k = 0; k < 8; k++) { dlg_g(444, 119 + 11 * k, ARMOR_NAME[k]); snprintf(t, sizeof t, "%u", e->d.loc[INTERNAL_ORDER[k]].internal); dlg_g(544, 119 + 11 * k, t); }
             } else if (pg == 6) {
@@ -2462,14 +2681,11 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
                 char nb[64];
                 int g = 0, j;
                 dlg_w(224, 64, LOC_NAME[e->crit_loc]);
-                for (k = 0; k < L->slot_count; k++) dlg_g(224, 79 + 11 * k, L->slots[k] ? mek_item_name(L->slots[k], nb, sizeof nb) : "-");
+                for (k = 0; k < L->slot_count; k++) { crit_text(e, e->crit_loc, k, -1, nb, sizeof nb); dlg_g(224, 79 + 11 * k, nb); }   /* 0x2cb30 */
                 dlg_g(444, 64, "UNASSIGNED CRITICALS");
-                for (j = 0; j < e->npool; j++) {
-                    int first = 1, q, cnt = 0;
-                    for (q = 0; q < j; q++) if (e->pool[q] == e->pool[j]) first = 0;
-                    if (!first) continue;
-                    for (q = 0; q < e->npool; q++) if (e->pool[q] == e->pool[j]) cnt++;
-                    snprintf(t, sizeof t, "%s (%d)", mek_item_name(e->pool[j], nb, sizeof nb), cnt);
+                for (j = 0; j < e->npool; j++) {   /* 0x2ccf0 */
+                    if (!crit_pool_line(e, j)) continue;
+                    crit_text(e, -1, 0, j, t, sizeof t);
                     if (g_cmx >= 440 && g_cmx <= 626 && g_cmy >= 86 + 11 * g && g_cmy < 97 + 11 * g) dlg_w(444, 86 + 11 * g, t); else dlg_g(444, 86 + 11 * g, t);   /* the item under the pointer: a click assigns it */
                     g++;
                 }
@@ -2507,10 +2723,11 @@ static int shell_confirm(SDL_Renderer *rd, SDL_Texture *tx, int headless, const 
  * right panel wwomp1es (436,52): WEAPONS AND AMMO (445,64), ten lines from y 87 ("-" when empty), ammo inline
  * "(ammo <t>T/<shots>)"; the turntable SHP AWOMP<code> (30 frames, 13 / s, advancing) at origin (175,127) plus each
  * frame's offset; hotspots 0x7f26c (EXIT LAB, STAR CONFIG, NEXT / PREV CHASSIS, NEXT / PREV VARIANT, CUSTOMIZE, ACCEPT
- * MECH, SAVE / ABORT / DELETE in customise mode). The weapon editor (CUSTOMIZE) NOT YET. */
+ * MECH, SAVE / ABORT / DELETE in customise mode); the weapon editor CUSTOMIZE is run_customize. */
 static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int slot, int *mx, int *my)
 {
     lance_slot *sl = &g_star[clan].slot[slot];
+    int lheld = getenv("MW2_SC_HELD") != NULL;   /* TEST ONLY: the left button held */
     int next = -1, f = 0, m = sl->mech >= 0 ? sl->mech : (clan == 1 ? 5 : 9), nv = 0, vi = 0, i, kdmt = clan >= 2 ? g_ia.tons[clan - 2] : mech_lab_kdmt(clan), reg;
     char var[24][9], pilot[24] = "MechWarrior";
     uint8_t *shp = NULL;
@@ -2528,12 +2745,17 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
     static const int HS[11][6] = {{50, 445, 149, 469, 100, 450}, {404, 414, 474, 474, 440, 460}, {303, 425, 330, 469, 300, 465}, {200, 425, 236, 469, 240, 465},
                                   {263, 425, 302, 469, 280, 465}, {237, 425, 262, 469, 260, 465}, {50, 420, 149, 444, 100, 425}, {50, 395, 149, 419, 100, 400},
                                   {50, 420, 149, 444, 100, 425}, {50, 445, 149, 469, 100, 450}, {490, 445, 589, 469, 540, 450}};
-    static const char *HL[11] = {"EXIT LAB", "STAR CONFIG", "NEXT CHASSIS", "PREV CHASSIS", "NEXT VARIANT", "PREV VARIANT", "CUSTOMIZE", "ACCEPT MECH", "SAVE", "ABORT", "DELETE"};
+    static const char *HL[11] = {"EXIT LAB", "~STAR CONFIG", "NEXT CHASSIS", "PREV CHASSIS", "NEXT VARIANT", "PREV VARIANT", "CUSTOMIZE", "ACCEPT MECH", "SAVE", "ABORT", "DELETE"};
     char want[16] = "";
     reg_load();
     reg = clan < 2 ? reg_selected(clan) : -1;
-    if (reg >= 0) snprintf(pilot, sizeof pilot, "%s", g_reg[reg].name);
-    if (clan >= 2) snprintf(pilot, sizeof pilot, "%s", ia_pilot());
+    /* the header's callsign is the star record's name for the slot being changed (0x34184: record + 0x28 + slot x 0x24):
+     * the player's slot holds the pilot's name (put there by the roster, 0x38644, and on entering the hall from it:
+     * FUN_0003a8a0(0, 0, pilot + 0x28)), the others "Friend 1" / "Friend 2" and the Instant Action enemies "Enemy 1".. (data 0x840dc /
+     * 0x8415c) */
+    if (sl->pilot[0]) snprintf(pilot, sizeof pilot, "%s", sl->pilot);
+    if (slot == 0 && reg >= 0) snprintf(pilot, sizeof pilot, "%s", g_reg[reg].name);
+    if (slot == 0 && clan == 2) snprintf(pilot, sizeof pilot, "%s", ia_pilot());
     snprintf(want, sizeof want, "%s", sl->loadout);
     if (sl->mech < 0 && reg >= 0 && g_reg[reg].rank >= 0 && g_reg[reg].rank < 16) {   /* nothing chosen: the mission's own 'Mech */
         mission_star ms = mission_sdsc(CAMPAIGN_SCEN[clan][g_reg[reg].rank]);
@@ -2542,7 +2764,11 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
     nv = mek_variants(lance_mech_code(m), var, 24);
     for (i = 0; i < nv; i++) if (strcasecmp(var[i], want) == 0) vi = i;
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);
-    for (i = 0; i < 9; i++) cl[i] = (cx == 2 && i >= 4) ? NULL : clip_open(CL[cx][i]);   /* context 2: WIASTAR .. WIAVP flags 0x24, hidden */
+    /* the button clips as in the Star Configuration (0x34557..): the original's slot 5 (STAR, here 4) paused (clans) / hidden
+     * (context 2) unless the pointer is on STAR CONFIG (hotspot 1); slots 6-9 (here 5-8: CN, CP, VN, VP) hidden unless the
+     * left button is held on hotspot 4, 5, 2, 3 (NEXT / PREV VARIANT, NEXT / PREV CHASSIS: cases 0x34ca0, 0x34dd2,
+     * 0x34668, 0x34982) */
+    for (i = 0; i < 9; i++) cl[i] = clip_open(CL[cx][i]);
     if (!headless) shell_sound(LAB_VOICE[m], 0x28);   /* the chassis' name on entering (0x34441) */
     if (getenv("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the chassis by lance index, as NEXT CHASSIS would reach it */
         m = atoi(getenv("MW2_SHELL_LAB_CHASSIS")) % lance_mech_count();
@@ -2556,6 +2782,12 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         mek_mass mm;
         int have = nv > 0 && load_mek(var[vi], &d) == 0, hover = -1;
         if (have) mek_masses(&d, &mm);
+        if (headless && f == 0 && getenv("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the variant list and the main page's masses */
+            printf("lab variants:");
+            for (i = 0; i < nv; i++) printf(" %s", var[i]);
+            if (have) printf("\nlab mass: weapons %.2f equipment %.2f used %.2f\n", mm.weapons, mm.equip, mm.used);
+            else printf("\n");
+        }
         if (shp_m != m) {   /* the turntable for this chassis */
             char dn[64];
             FILE *fp;
@@ -2575,7 +2807,8 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = clan >= 2 ? 7 : 11;   /* as EXIT LAB */
+                if ((e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_MOUSEBUTTONDOWN;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_000339e0 -> 0x258e0 */
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y, h = -1;
                     for (i = 0; i < 8; i++) if (x >= HS[i][0] && x <= HS[i][2] && y >= HS[i][1] && y <= HS[i][3]) h = i;
@@ -2605,6 +2838,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                         char saved[16] = "";
                         int r = run_customize(rd, tx, headless, frames, clan, m, var[vi], saved);
                         if (r == -3) { next = -3; break; }
+                        if (r == -4) { next = g_menu_next; break; }
                         nv = mek_variants(lance_mech_code(m), var, 24);
                         if (r == 1) for (i = 0; i < nv; i++) if (strcasecmp(var[i], saved) == 0) vi = i;
                         load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);
@@ -2618,7 +2852,19 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         }
         draw_bg();
         g_clip_pal = !cl[0] || !cl[0]->s ? NULL : smk_palette(cl[0]->s);
-        for (i = 0; i < 9; i++) if (cl[i]) { clip_next(cl[i]); clip_blit(cl[i], CXY[cx][i][0], CXY[cx][i][1]); }
+        {
+            static const int PRESS[9] = {-1, -1, -1, -1, -1, 4, 5, 2, 3};   /* the hotspot that shows each button clip */
+            int on = -1;
+            for (i = 0; i < 6; i++) if (*mx >= HS[i][0] && *mx <= HS[i][2] && *my >= HS[i][1] && *my <= HS[i][3]) on = i;
+            for (i = 0; i < 9; i++) {
+                int shown = 1, runs = 1;
+                if (!cl[i]) continue;
+                if (i == 4) { if (cx == 2) shown = on == 1; else runs = on == 1; }
+                if (i >= 5) shown = lheld && on == PRESS[i];
+                if (runs || f == 0) clip_next(cl[i]);
+                if (shown) clip_blit(cl[i], CXY[cx][i][0], CXY[cx][i][1]);
+            }
+        }
         g_clip_pal = NULL;
         if (shp && shpn > 0) {   /* the turntable: 13 frames a second, advancing */
             shp_frame fr;
@@ -2639,15 +2885,13 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             int k;
             snprintf(t, sizeof t, "CALLSIGN: %s (%d.00 T MAX)", pilot, kdmt);
             for (k = 0; t[k]; k++) if (t[k] >= 'a' && t[k] <= 'z') t[k] = (char)(t[k] - 32);
-            /* context 2: the header is grey 170 (palette entry 6) where the clans' screens show entry 7 (153): DOS
-             * capture; the mechanism (a palette change by the context's clips) is not traced, ASSUMED */
-            static uint8_t ipal[256][3];
-            const uint8_t (*tpal)[3] = pal;
-            if (cx == 2) { memcpy(ipal, pal, sizeof ipal); memcpy(ipal[7], pal[6], 3); tpal = (const uint8_t (*)[3])ipal; }
-            draw_text(&g_fhead, 320 - text_width(&g_fhead, t) / 2, 4, t, tpal, -1);
+            /* widgets 0x82e38 / 0x82e64 (draw 0x2c1e0): shell font 0x1b (DAT_00091174, entry 26) with the remap table
+             * 0xa5530 (colour 1 -> 6, built at 0x33aa7): grey 170 in every context (DOS: dos_mechlab_main.png,
+             * dos_ia_mech_lab.png) */
+            draw_text(&g_f26, 320 - text_width(&g_f26, t) / 2, 4, t, pal, 6);
             snprintf(nm, sizeof nm, "%s", lance_mech_name(m));
             for (k = 0; nm[k]; k++) if (nm[k] >= 'a' && nm[k] <= 'z') nm[k] = (char)(nm[k] - 32);
-            draw_text(&g_fhead, 320 - text_width(&g_fhead, nm) / 2, 28, nm, tpal, -1);
+            draw_text(&g_f26, 320 - text_width(&g_f26, nm) / 2, 28, nm, pal, 6);
         }
         if (have) {   /* the left panel: the component table */
             static const char *ROW[10] = {"Engine", "Gyro", "Cockpit", "Heat Sinks", "Jump Jets", "Internal", "Armor", "Weapons", "Ammo", "Equipment"};
@@ -2666,7 +2910,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                 if (i == 0) snprintf(note, sizeof note, "%d%s", mm.rating, mm.xl ? "XL" : "");
                 if (i == 3) snprintf(note, sizeof note, "%d (%d)", mm.nsinks, mm.dissip);
                 if (i == 4) snprintf(note, sizeof note, "%d", mm.njets);
-                if (i == 5) snprintf(note, sizeof note, "%s", mm.endo ? "Endo" : "Std");
+                if (i == 5) snprintf(note, sizeof note, "%s", mm.endo ? "Endo-S" : "Std");   /* 0x2c210: "Endo-S" (0x76ad3) / "Std" */
                 if (i == 6) snprintf(note, sizeof note, "%s", mm.ferro ? "Ferro-F" : "Std");
                 if (note[0]) draw_text(&g_fthin, 147, y, note, pal, 6);
             }
@@ -2696,7 +2940,11 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         if (nv && strstr(var[vi], "usr")) draw_text(&g_flabel, HS[10][4] - text_width(&g_flabel, HL[10]) / 2, HS[10][5], HL[10], pal, hover == 10 ? -1 : 6);   /* DELETE: user designs */
         draw_text(&g_flabel, HS[0][4] - text_width(&g_flabel, HL[0]) / 2, HS[0][5], HL[0], pal, hover == 0 ? -1 : 6);
         if (hover > 5) hover = -1;
-        if (hover > 0) draw_text(&g_flabel, HS[hover][4] - text_width(&g_flabel, HL[hover]) / 2, HS[hover][5], HL[hover], pal, 6);
+        if (hover > 0) {   /* 0x7dd98: "~STAR CONFIG" centred; NEXT / PREV CHASSIS / VARIANT drawn from the label x */
+            const char *t = HL[hover];
+            int lx2 = label_x(&t, HS[hover][4]);
+            draw_text(&g_flabel, lx2, HS[hover][5], t, pal, 6);
+        }
         f++;
         if (headless) { if (f >= frames) next = -2; }
         else {
@@ -2723,9 +2971,32 @@ static const int SC_HS[3][9][6] = {
     {{50, 445, 149, 469, 100, 450}, {404, 414, 474, 474, 440, 460}, {263, 425, 302, 469, 280, 465}, {237, 425, 262, 469, 260, 465},
      {303, 425, 330, 469, 300, 465}, {200, 425, 236, 469, 240, 465}, {159, 195, 187, 229, 73, 234}, {391, 162, 419, 196, 305, 201}, {586, 218, 614, 252, 500, 257}}   /* context 2 = the Wolf table 0x7dc64 */
 };
-static const char *SC_LABEL[9] = {"EXIT CONFIG", "MECH LAB", "NEXT FORMATION", "PREV FORMATION", "ADD STARMATE", "DELETE STARMATE", "CHANGE MECH", "CHANGE MECH", "CHANGE MECH"};
+static const char *SC_LABEL[9] = {"~EXIT CONFIG", "~MECH LAB", "NEXT FORMATION", "PREV FORMATION", "ADD STARMATE", "DELETE STARMATE", "CHANGE MECH", "CHANGE MECH", "CHANGE MECH"};
 #define SC_HEAD_FONT g_fbig
 enum { SC_LINE = 12 };
+static int gm_script_event(const char **sp, SDL_Event *e);
+/* The Star Configuration's name typing (FUN_0003b420 -> FUN_0002a910, the shell's line editor): a left press inside a
+ * formation member's name box - x box .. box + 99, y box .. box + 9 (0x84210 / 0x8421c, Falcon 0x84228 / 0x84234) - for a
+ * member index <= the star's size (sic: a member not yet in the star too) and not the player's (member 0) except in
+ * Instant Action (context 2) edits that member's name in the star record (+0x28 + 0x24 k, 16 bytes) in place, drawn in
+ * the box's font (0x9116c = 0x91170, shell font 0x20) with a '_' cursor after it (0x76a45). Keys (the C library's getch):
+ * a character 0x20..0x7f other than '~' that the font has is added while the name is under 15 characters (0xf) and its
+ * width with the cursor stays under 100 px; Backspace takes the last off; Enter or Esc (the edited text kept either way:
+ * 0x2a910 copies it back before returning 1 / 0) or a left press ends. The loop is modal: the clips run, nothing else
+ * reacts. The name then shows whole until the boxes are redrawn (FUN_0003aeb0, on entering and on the formation / size
+ * buttons), which cuts it to 92 px and stores the cut name. Stored with the record (MW2PRM.CFG at launch, FUN_0003a810):
+ * the lance files' pilot names (FUN_0001d540 -> 0x1d310), the Mech Lab's callsign; record 0x840dc slot 0 is the Instant
+ * Action player's name. */
+static int sc_name_char(const char *buf, int c)   /* FUN_0002a910 0x2ab73: may c be added? */
+{
+    char t[24];
+    size_t n = strlen(buf);
+    if (c < 0x20 || c >= 0x80 || c == '~' || n == 15) return 0;
+    t[0] = (char)c; t[1] = 0;
+    if (c != ' ' && text_width(&g_fthin, t) <= 0) return 0;   /* the font has no such glyph (0x26870 -> 0) */
+    snprintf(t, sizeof t, "%s%c_", buf, c);
+    return text_width(&g_fthin, t) < 100;
+}
 static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
     static const char *CLIPS[3][10] = {{"AWOGRID", "AWOSTR1", "AWOSTR2", "AWOSTR3", "WWOBKG", "WWODSGN", "WWOCN", "WWOCP", "WWOVN", "WWOVP"},
@@ -2735,22 +3006,53 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                                       {{108, 306}, {39, 164}, {272, 119}, {487, 209}, {216, 434}, {369, 416}, {286, 438}, {242, 438}, {296, 434}, {220, 437}},
                                       {{108, 306}, {73, 158}, {305, 125}, {500, 181}, {219, 414}, {415, 417}, {265, 430}, {238, 437}, {302, 431}, {223, 437}}};   /* FUN_0003b420 context 2 */
     clip *cl[10];
-    int next = -1, f = 0, i, k, cx = CTX(clan), back = clan >= 2 ? 7 : 11;
+    int next = -1, f = 0, i, k, cx = CTX(clan), back = clan >= 2 ? 7 : 11, lheld = getenv("MW2_SC_HELD") != NULL;   /* TEST ONLY */
+    int ed_m = -1, ed_box = 0, text_on = 0, whole[3] = {0, 0, 0};   /* the name being typed (member, box); names shown uncut */
+    char ed_buf[20] = "";
+    const char *script = headless ? getenv("MW2_SC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
     star_cfg *st = &g_star[clan];
     star_load(clan);
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);   /* background slots 15 / 22 / 10 (0x7f11c) */
-    /* the clans' button clips 6-9 play on press (not yet); in context 2 slots 5-9 are stills loaded hidden (flags 0x24,
-     * as WIALANCH): only the grid, the bays and WIABKG2 (flags 4) show */
-    for (k = 0; k < 10; k++) cl[k] = (cx == 2 ? k <= 4 : k <= 5) ? clip_open(CLIPS[cx][k]) : NULL;
+    /* the button clips (0x3b8f6..): every pass hides 6-9 (0x395d0(k, 0x20)) and pauses 5 (clans: bit 0) or hides it (context
+     * 2: 0x20); the pointer on MECH LAB (hotspot 1) runs 5 (clans) / shows it (context 2, 0x39610); the left button held
+     * (+0x33) on hotspot 2-5 (NEXT / PREV FORMATION, ADD / DELETE STARMATE) shows clip 6-9 - the pressed button.
+     * Hidden clips still step (0x39270). DOSBox: Instant Action, MECH LAB lit under the pointer, NEXT FORMATION while held */
+    for (k = 0; k < 10; k++) cl[k] = clip_open(CLIPS[cx][k]);
     while (next == -1) {
         SDL_Event e;
         int hover = -1;
         const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
-        if (!headless) {
-            while (SDL_PollEvent(&e)) {
+        if (!headless && (ed_m >= 0) != text_on) {   /* port: text input only while a name is typed */
+            text_on = ed_m >= 0;
+            if (text_on) SDL_StartTextInput(); else SDL_StopTextInput();
+        }
+        if (!headless || script) {
+            while (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
+                if (ed_m >= 0) {   /* typing a name (FUN_0002a910): nothing else reacts */
+                    int done = 0;
+                    if (e.type == SDL_TEXTINPUT) {
+                        const char *q;
+                        for (q = e.text.text; *q; q++)
+                            if (sc_name_char(ed_buf, (unsigned char)*q)) { size_t n = strlen(ed_buf); ed_buf[n] = *q; ed_buf[n + 1] = 0; }
+                    } else if (e.type == SDL_KEYDOWN) {
+                        SDL_Keycode kc = e.key.keysym.sym;
+                        if (kc == SDLK_BACKSPACE && ed_buf[0]) ed_buf[strlen(ed_buf) - 1] = 0;
+                        else if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER || kc == SDLK_ESCAPE) done = 1;
+                    } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) done = 1;
+                    if (done) {
+                        snprintf(st->slot[ed_m].pilot, sizeof st->slot[ed_m].pilot, "%s", ed_buf);
+                        whole[ed_m] = 1;
+                        star_save(clan);
+                        if (script) printf("sc: name %d '%s'\n", ed_m, ed_buf);
+                        ed_m = -1;
+                    }
+                    if (script) break;
+                    continue;
+                }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = back;
+                if ((e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_MOUSEBUTTONDOWN;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; if (script) break; continue; }   /* FUN_0003b420 -> 0x258e0 */
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 9; i++) {
@@ -2764,9 +3066,30 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                         else if (i == 4 && st->size < 3) { if (st->slot[st->size].mech < 0) st->slot[st->size].mech = st->slot[0].mech; st->size++; }
                         else if (i == 5 && st->size > 1) st->size--;
                         else if (i >= 6 && i - 6 < st->size) { g_lab_slot = i - 6; next = 9; }
+                        if (i >= 2 && i <= 5) {   /* FUN_0003aeb0 for each member: a shown name cut to 92 px, stored */
+                            for (k = 0; k < 3; k++) {
+                                size_t q;
+                                whole[k] = 0;
+                                if (k >= st->size) continue;
+                                for (q = strlen(st->slot[k].pilot); q > 0 && text_width(&g_fthin, st->slot[k].pilot) > 92; q--) st->slot[k].pilot[q - 1] = 0;
+                            }
+                        }
                         star_save(clan);
                     }
+                    for (k = 0; k < 3 && next == -1; k++) {   /* a name box (0x3bc2c..): its member's name typed */
+                        static const int BOXES[2][3][2] = {{{81, 166}, {313, 133}, {508, 189}}, {{47, 172}, {280, 127}, {495, 217}}};   /* 0x84210 / 0x84228 */
+                        static const int FM[6][3] = {{2, 1, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 0}, {0, 2, 1}, {2, 1, 0}};   /* 0x83e84: member */
+                        static const int FB[6][3] = {{2, 1, 0}, {0, 1, 2}, {0, 1, 2}, {2, 1, 0}, {1, 0, 2}, {0, 2, 1}};   /* and box */
+                        int mem = FM[st->formation][k], bx2 = BOXES[clan == 1][FB[st->formation][k]][0], by2 = BOXES[clan == 1][FB[st->formation][k]][1];
+                        if (mem > st->size || (mem == 0 && cx != 2)) continue;
+                        if (x < bx2 || x >= bx2 + 100 || y < by2 || y >= by2 + 10) continue;
+                        ed_m = mem; ed_box = FB[st->formation][k];
+                        snprintf(ed_buf, sizeof ed_buf, "%s", st->slot[mem].pilot);
+                        if (strlen(ed_buf) > 15) ed_buf[15] = 0;
+                        break;
+                    }
                 }
+                if (script) break;
             }
         }
         draw_bg();
@@ -2775,11 +3098,16 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
              * the 67 ms rounded up to the 70 Hz display) - the loop had stepped them every 66 ms pass */
             static Uint32 clast[10];
             Uint32 now = SDL_GetTicks();
+            int on = -1;
+            for (i = 0; i < 9; i++) { const int *h = SC_HS[cx][i]; if (*mx >= h[0] && *mx <= h[2] && *my >= h[1] && *my <= h[3]) on = i; }
             for (k = 0; k < 10; k++) {
+                int shown = 1, runs = 1;
                 if (!cl[k]) continue;
                 if (k >= 1 && k <= 3 && k > st->size) continue;   /* empty bays */
-                if (headless || f == 0 || !cl[k]->s || now - clast[k] >= (Uint32)smk_frame_ms(cl[k]->s)) { clip_next(cl[k]); clast[k] = now; }
-                clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
+                if (k == 5) { if (cx == 2) shown = on == 1; else runs = on == 1; }
+                if (k >= 6) shown = lheld && on == k - 4;
+                if (headless || f == 0 || !cl[k]->s || (runs && now - clast[k] >= (Uint32)smk_frame_ms(cl[k]->s))) { if (runs || f == 0) clip_next(cl[k]); clast[k] = now; }
+                if (shown) clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
             }
         }
         if (!getenv("MW2_SC_CLIPPAL")) g_clip_pal = NULL;
@@ -2823,16 +3151,21 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                                                 * the DOS capture: 0 offset error for all three 'Mechs) */
                     clip_blit(sc, e[1] - 90, e[2] - 135); clip_close(sc);
                 }
-                {   /* the pilot's name, cut to 92 px */
+                {   /* the pilot's name, cut to 92 px (FUN_0003aeb0) - whole just after it was typed */
                     size_t q;
                     int rg = clan < 2 && e[0] == 0 ? reg_selected(clan) : -1;   /* the player: the registered pilot's name */
                     snprintf(nm, sizeof nm, "%s", rg >= 0 ? g_reg[rg].name : sl->pilot);
-                    for (q = strlen(nm); q > 0 && text_width(&g_fthin, nm) > 92; q--) nm[q - 1] = 0;
+                    for (q = strlen(nm); q > 0 && !whole[e[0]] && text_width(&g_fthin, nm) > 92; q--) nm[q - 1] = 0;
                 }
-                draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1], nm, pal, -1);
+                if (e[0] != ed_m) draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1], nm, pal, -1);
                 draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1] + SC_LINE, MECHS[m2].name, pal, -1);
                 snprintf(line, sizeof line, "%d.00 T", tons);
                 draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1] + 2 * SC_LINE, line, pal, -1);
+            }
+            if (ed_m >= 0) {   /* the name being typed, with its cursor (0x2a910) */
+                char eb[24];
+                snprintf(eb, sizeof eb, "%s_", ed_buf);
+                draw_text(&g_fthin, BOX_XY[bx][ed_box][0], BOX_XY[bx][ed_box][1], eb, pal, -1);
             }
             {
                 char up[24];
@@ -2866,22 +3199,28 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         g_clip_pal = NULL;
         draw_text(&g_flabel, 100 - text_width(&g_flabel, "EXIT CONFIG") / 2, 450, "EXIT CONFIG", pal, 6);   /* grey (DOS) */
         for (i = 0; i < 9; i++) { const int *h = SC_HS[cx][i]; if (*mx >= h[0] && *mx <= h[2] && *my >= h[1] && *my <= h[3]) hover = i; }
-        if (hover > 0) draw_text(&g_flabel, SC_HS[cx][hover][4] - text_width(&g_flabel, SC_LABEL[hover]) / 2, SC_HS[cx][hover][5], SC_LABEL[hover], pal, -1);
+        if (hover > 0) {   /* 0x7dc64: "~MECH LAB" centred, the others drawn from the label x */
+            const char *t = SC_LABEL[hover];
+            int lx2 = label_x(&t, SC_HS[cx][hover][4]);
+            draw_text(&g_flabel, lx2, SC_HS[cx][hover][5], t, pal, -1);
+        }
         f++;
-        if (headless) { if (f >= frames) next = -2; }
+        if (headless) { if (f >= frames && (!script || !*script) && next == -1) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
             SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(15);
         }
     }
+    if (text_on) SDL_StopTextInput();
+    if (getenv("MW2_SC_EVENTS")) { printf("sc: names"); for (k = 0; k < 3; k++) printf(" '%s'", st->slot[k].pilot); printf("\n"); fflush(stdout); }   /* TEST ONLY */
     for (k = 0; k < 10; k++) clip_close(cl[k]);
     return next;
 }
 
 
-/* a campaign mission: the player's lance file (default mech until Star Config: Wolf Timber Wolf, Falcon Mad Dog,
- * ASSUMED), the simulation, the result; success advances the pilot's campaign */
+/* a campaign mission: the player's lance file (until Star Configuration the mission's own BRF2 SDSC 'Mechs; Timber
+ * Wolf / Mad Dog only for a mission without one - none in the campaign), the simulation, the result; success advances the pilot's campaign */
 static int launch_campaign(int clan, int reg) { return launch_campaign_m(clan, reg, g_reg[reg].rank); }
 /* mission m of the clan's campaign (the pilot's current one; the roster's LAUNCH OLD MISSION passes an earlier one) */
 static int launch_campaign_m(int clan, int reg, int m)
@@ -2956,51 +3295,71 @@ static void shell_message(SDL_Renderer *rd, SDL_Texture *tx, int headless, const
  * y 150: Pilot 0, Clan 125, Rank 200, Honor 325, Kills 400, Hit % 460, Last Mission 520; the 20 registry pilots
  * sorted by honor (FUN_000281e0: honor, then missions), the top 8 from y 182 every 16; any click / key closes */
 static const char *CLAN_NAME[3] = {"Wolf", "Jade Falcon", "Ghost Bear"};   /* 0x7d3b8 */
+static int key_is_modifier(SDL_Keycode k)
+{
+    return k == SDLK_LSHIFT || k == SDLK_RSHIFT || k == SDLK_LCTRL || k == SDLK_RCTRL || k == SDLK_LALT || k == SDLK_RALT ||
+           k == SDLK_LGUI || k == SDLK_RGUI || k == SDLK_CAPSLOCK || k == SDLK_NUMLOCKCLEAR || k == SDLK_SCROLLLOCK || k == SDLK_MODE;
+}
+/* FUN_000281e0: rank title (+0x10), then honor (+0x14), then missions done (+0xc), each the higher first */
 static int honor_cmp(const void *a, const void *b)
 {
     const pilot_rec *x = *(const pilot_rec *const *)a, *y = *(const pilot_rec *const *)b;
+    if (x->title != y->title) return x->title > y->title ? -1 : 1;
     if (x->honor != y->honor) return x->honor > y->honor ? -1 : 1;
     if (x->rank != y->rank) return x->rank > y->rank ? -1 : 1;
     return 0;
 }
+/* ---- Hall of Honor (FUN_00028250): background slot 2 (entry 1), amwlogo1 at (120,4); all 20 registry records sorted
+ * (qsort 0x48dc1, FUN_000281e0) and the first eight shown - a deleted record keeps its place and is skipped. Headings
+ * Pilot / Clan / Rank / Honor / Kills / Hit % / Last Mission at x 0, 125, 200, 325, 400, 460, 520, y 150, shell font
+ * 0x1c; rows from y 182 every 16 (used records only) in font 0x20 (DAT_0009116c): name, clan (0x7d3b8), rank title
+ * (0x7d394), honor "%d", kills "%d", hits x 100 / shots "%d%%" ("-" with no shots), the title of the last mission done
+ * ("----" with none). Any key or a left / right press returns. */
 static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     const pilot_rec *list[20];
-    int n = 0, i, done = 0;
+    int i, done = 0;
     smk *logo = open_smk("AMWLOGO1");
     Uint32 last = 0;
     reg_load();
-    for (i = 0; i < 20; i++) if (g_reg[i].used) list[n++] = &g_reg[i];
-    qsort(list, (size_t)n, sizeof list[0], honor_cmp);
+    for (i = 0; i < 20; i++) list[i] = &g_reg[i];
+    qsort(list, 20, sizeof list[0], honor_cmp);
     load_bg(1);
     while (!done) {
         SDL_Event e;
         const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
         static const int CX[7] = {0, 125, 200, 325, 400, 460, 520};
         static const char *HD[7] = {"Pilot", "Clan", "Rank", "Honor", "Kills", "Hit %", "Last Mission"};
+        int y = 182;
         draw_bg();
         if (logo) {
             Uint32 now = SDL_GetTicks();
             if (headless || now - last >= (Uint32)smk_frame_ms(logo) || last == 0) { smk_next(logo); last = now; }
             if (logo) blit_smk(logo, 120, 4);
         }
-        for (i = 0; i < 7; i++) draw_text(&g_flabel, CX[i] + 4, 150, HD[i], pal, -1);
-        for (i = 0; i < n && i < 8; i++) {
+        for (i = 0; i < 7; i++) draw_text(&g_flabel, CX[i], 150, HD[i], pal, -1);
+        for (i = 0; i < 8; i++) {
             const pilot_rec *r = list[i];
-            char v[48];
-            int y = 182 + i * 16, c = r->clan >= 0 && r->clan < 3 ? r->clan : (int)((r - g_reg) / 10);
-            draw_text(&g_flist, CX[0] + 4, y, r->name, pal, -1);
-            draw_text(&g_flist, CX[1] + 4, y, CLAN_NAME[c], pal, -1);
-            draw_text(&g_flist, CX[2] + 4, y, RANK_TITLE[r->title >= 0 && r->title < 9 ? r->title : 0], pal, -1);
-            snprintf(v, sizeof v, "%d", r->honor); draw_text(&g_flist, CX[3] + 4, y, v, pal, -1);
-            snprintf(v, sizeof v, "%d", r->stats[0]); draw_text(&g_flist, CX[4] + 4, y, v, pal, -1);
-            if (r->stats[2] > 0) snprintf(v, sizeof v, "%d%%", r->stats[1] * 100 / r->stats[2]); else snprintf(v, sizeof v, "-");
-            draw_text(&g_flist, CX[5] + 4, y, v, pal, -1);
-            snprintf(v, sizeof v, "%s", r->rank > 0 && r->rank <= 16 && c < 2 ? CAMPAIGN_TITLE[c][r->rank - 1] : "-");
-            draw_text(&g_flist, CX[6] + 4, y, v, pal, -1);
+            char v[48], nm[17];
+            int c = r->clan >= 0 && r->clan < 3 ? r->clan : (int)((r - g_reg) / 10);
+            if (!r->used) continue;
+            memcpy(nm, r->name, 16); nm[16] = 0;
+            if (headless && getenv("MW2_SHELL_HOH")) printf("hoh: %s\n", nm);   /* TEST ONLY */
+            draw_text(&g_fthin, CX[0], y, nm, pal, -1);
+            draw_text(&g_fthin, CX[1], y, CLAN_NAME[c], pal, -1);
+            draw_text(&g_fthin, CX[2], y, RANK_TITLE[r->title >= 0 && r->title < 9 ? r->title : 0], pal, -1);
+            snprintf(v, sizeof v, "%d", r->honor); draw_text(&g_fthin, CX[3], y, v, pal, -1);
+            snprintf(v, sizeof v, "%d", r->stats[0]); draw_text(&g_fthin, CX[4], y, v, pal, -1);
+            if (r->stats[2] != 0) snprintf(v, sizeof v, "%d%%", r->stats[1] * 100 / r->stats[2]); else snprintf(v, sizeof v, "-");
+            draw_text(&g_fthin, CX[5], y, v, pal, -1);
+            snprintf(v, sizeof v, "%s", r->rank > 0 && r->rank <= 16 && c < 2 ? CAMPAIGN_TITLE[c][r->rank - 1] : "----");
+            draw_text(&g_fthin, CX[6], y, v, pal, -1);
+            y += 16;
         }
         if (headless) break;
-        while (SDL_PollEvent(&e)) if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) done = 1;
+        while (SDL_PollEvent(&e))
+            if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && !key_is_modifier(e.key.keysym.sym)) ||
+                (e.type == SDL_MOUSEBUTTONDOWN && (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT))) done = 1;
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
         SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
         SDL_Delay(30);
@@ -3046,7 +3405,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     smk *logo = open_smk("AMWLOGO1");
     /* the original's rows (DIFFICULTY and HEAT TRACKING 20 px up, see above), the port's DISPLAY, RENDERER, TEXTURES */
     static const int ROW_Y[14] = {199, 219, 277, 297, 317, 337, 357, 377, 397, 416, 436, 456, 239, 258};
-    static const char *const ED_TEXT[PORTCFG_ED_COUNT] = {"ENHANCED", "DOS", "3DFX", "ATI RAGE", "S3 VIRGE", "POWERVR", "MATROX MYSTIQUE"};
+    static const char *const ED_TEXT[PORTCFG_ED_COUNT] = {"ENHANCED", "DOS", "3DFX", "ATI RAGE", "S3 VIRGE", "POWERVR", "MATROX MYSTIQUE", "RENDITION"};
     static const char *const TX_TEXT[PORTCFG_TX_COUNT] = {"ORIGINAL", "TITANIUM"};
     int tx_lock;
     memset(snd, 0, sizeof snd); memset(dif, 0, sizeof dif);
@@ -3072,8 +3431,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         int sel[14];
         char res[32], aa[16];
         /* TEXTURES is ORIGINAL and not changeable with the DOS renderer (its palette-indexed textures) or without the
-         * titanium/ folder; shown in grey then */
-        tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM);
+         * titanium/ folder, TITANIUM and not changeable with RENDITION (a Titanium plugin); shown in grey then */
+        tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM) || pc.renderer == PORTCFG_ED_RENDITION;
         sel[0] = dif[5] <= 2 ? dif[5] : 1; sel[1] = dif[4] ? 0 : 1;
         for (i = 0; i < 5; i++) sel[2 + i] = rd32(snd + 0x14 + 4 * i) ? 0 : 1;   /* ON / HIGH first */
         /* RESOLUTION: the original's three words when the sim draws at one of them (render=), else the port's NATIVE text */
@@ -3086,7 +3445,9 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         if (pc.aa) snprintf(res, sizeof res, "NATIVE %dX AA", pc.aa); else snprintf(res, sizeof res, "NATIVE");
         if (!headless) {
             while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) || (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
+                /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
+                 * one the DOS keyboard reads as a character (not a lone Shift / Ctrl / Alt) */
+                if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && !key_is_modifier(e.key.keysym.sym)) || (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 14; i++) {
@@ -3173,7 +3534,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 else if (k == 7) snprintf(vals[k], sizeof vals[k], "%s", sel[7] == 0 ? "320x200" : sel[7] == 1 ? "640x480" : sel[7] == 2 ? "1024x768" : res);
                 else if (k == 8) snprintf(vals[k], sizeof vals[k], "%s", aa);
                 else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.renderer >= 0 && pc.renderer < PORTCFG_ED_COUNT ? pc.renderer : 0]);
-                else if (k == 13) snprintf(vals[k], sizeof vals[k], "%s", TX_TEXT[!tx_lock && pc.texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
+                else if (k == 13) snprintf(vals[k], sizeof vals[k], "%s", TX_TEXT[portcfg_texset_for(&g_cfg, pc.renderer, pc.texset) == PORTCFG_TX_TITANIUM ? 1 : 0]);
                 else snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "ON" : "OFF");
                 lines[k] = vals[k]; ly[k] = ROW_Y[k] + 1; lx[k] = 393;
             }
@@ -3596,26 +3957,115 @@ static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     load_bg(prev_bg);
 }
 
-static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless)
+/* the global menu's item boxes (FUN_000258e0: records 0x90490.., x 320 - 0x7a .. 320 + 0x79, y 157 + 33 k -/+ 0x10,
+ * both ends inclusive); -1 off them */
+static int gm_hit(int x, int y)
+{
+    int i;
+    for (i = 0; i < 6; i++) if (x >= 198 && x <= 441 && y >= 141 + 33 * i && y <= 173 + 33 * i) return i;
+    return -1;
+}
+/* tests (headless): MW2_SHELL_MENU_EVENTS "m X,Y;l X,Y;r;k up|down|left|right|kp8|kp2|kp4|kp6|enter|esc|x|backspace|kpenter;
+ * tTEXT" - one event a pass: pointer moves, left / right presses, keys, typed text */
+static int gm_script_event(const char **sp, SDL_Event *e)
+{
+    const char *s = *sp;
+    char name[16] = "";
+    int x = 0, y = 0;
+    while (*s == ';' || *s == ' ') s++;
+    if (!*s) return 0;
+    memset(e, 0, sizeof *e);
+    if (s[0] == 'm' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_MOUSEMOTION; e->motion.x = x; e->motion.y = y; }
+    else if (s[0] == 'l' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_MOUSEBUTTONDOWN; e->button.button = SDL_BUTTON_LEFT; e->button.x = x; e->button.y = y; }
+    else if (s[0] == 'r') { e->type = SDL_MOUSEBUTTONDOWN; e->button.button = SDL_BUTTON_RIGHT; }
+    else if (s[0] == 't') {   /* typed text (SDL_TEXTINPUT), up to the ';' */
+        size_t n = 0;
+        e->type = SDL_TEXTINPUT;
+        while (s[1 + n] && s[1 + n] != ';' && n < sizeof e->text.text - 1) { e->text.text[n] = s[1 + n]; n++; }
+        e->text.text[n] = 0;
+    }
+    else if (s[0] == 'k' && sscanf(s + 1, "%15s", name) == 1) {
+        static const struct { const char *n; SDL_Keycode k; } K[] = {{"up", SDLK_UP}, {"down", SDLK_DOWN}, {"left", SDLK_LEFT}, {"right", SDLK_RIGHT},
+            {"kp8", SDLK_KP_8}, {"kp2", SDLK_KP_2}, {"kp4", SDLK_KP_4}, {"kp6", SDLK_KP_6}, {"enter", SDLK_RETURN}, {"esc", SDLK_ESCAPE}, {"x", SDLK_x},
+            {"backspace", SDLK_BACKSPACE}, {"kpenter", SDLK_KP_ENTER}};
+        size_t k;
+        char *c = strchr(name, ';');
+        if (c) *c = 0;
+        e->type = SDL_KEYDOWN;
+        for (k = 0; k < sizeof K / sizeof K[0]; k++) if (strcmp(name, K[k].n) == 0) e->key.keysym.sym = K[k].k;
+    }
+    while (*s && *s != ';') s++;
+    *sp = s;
+    return 1;
+}
+/* every screen's loop calls the global menu each pass (FUN_000258e0 from 0x1c080 briefing, 0x1dbe0 clan hall, 0x23890
+ * debriefing, 0x27160 Archive, 0x29680 Instant Action, 0x2a410 title, 0x339e0 Mech Lab, 0x37a50 Ready Room, 0x38310
+ * roster, 0x3b420 Star Configuration, 0x3d980 Cadet Training); it opens on Esc (0x2a6f0: key 0x1b -> 3) or a right-button
+ * press (0x377b0) */
+static int menu_opens(const SDL_Event *e)
+{
+    return (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE) ||
+           (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_RIGHT);
+}
+/* the pointer in the 640x480 frame (the screens' own copies go stale while a sub-screen polls the events) */
+static void pointer_now(SDL_Renderer *rd, int *x, int *y)
+{
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+    int wx, wy;
+    float lx, ly;
+    if (!rd || !g_win || !(SDL_GetWindowFlags(g_win) & SDL_WINDOW_MOUSE_FOCUS)) return;
+    SDL_GetMouseState(&wx, &wy);
+    SDL_RenderWindowToLogical(rd, wx, wy, &lx, &ly);
+    *x = (int)lx; *y = (int)ly;
+#else
+    (void)rd; (void)x; (void)y;
+#endif
+}
+
+/* the global menu (FUN_000258e0): the screen is kept (0x3e310) and the panel, shell image 7 (DATABASE entry 6), drawn at
+ * (198,116) 244x248 (0x3eac0); six items (0x7eefc) centred on x 320 at y 157 + 33 k less half the font height, grey in
+ * shell font 0x1f, the selected one white in 0x1e. On opening - and again after each sub-screen - item 0 is selected
+ * unless the pointer is on an item (the hover test runs on the first pass: its last position starts at -1); later the
+ * pointer selects only while it is on an item. Keys (0x2a6f0 codes): 0x8048 / 0x804b (keypad 8 / 4) previous, 0x804d /
+ * 0x8050 (keypad 6 / 2) next, wrapping; Enter (0x0d) picks; Esc closes. Left press: on an item picks it, anywhere
+ * else closes; right press closes. 0 NEW ALLEGIANCE -> 8; 1 COMBAT VARIABLES, 2 COCKPIT CONTROLS, 3 HALL OF HONOR,
+ * 4 THE KESHIK: the sub-screen, then the menu again (0x3e340 restores the screen, LAB_0002593d); 5 FLEE TO DOS: the
+ * dialog "Embrace cowardice?#Yes|No" (No by default): Yes -> -3, No -> the menu again. Returns the next screen, -1 to
+ * stay, -3 to quit. Port: the grey arrows move too (in DOS they read as 0xe0 and do nothing). */
+static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, int py)
 {
     static const char *ITEM[6] = {"NEW ALLEGIANCE", "COMBAT VARIABLES", "COCKPIT CONTROLS", "HALL OF HONOR", "THE KESHIK", "FLEE TO DOS"};
-    uint8_t saved[W * H * 3];
-    int sel = 0, done = 0, result = -1, mx2 = -1, my2 = -1, i, n0 = g_ntext, bg0 = g_bg_entry;
+    static uint8_t saved[W * H * 3];
+    static text_item tsaved[256];
+    const char *script = headless ? getenv("MW2_SHELL_MENU_EVENTS") : NULL;
+    static tt_item ttsaved[32];
+    int sel = 0, done = 0, closed = 0, result = -1, i, n0 = g_ntext, nt0 = g_ntt, bg0 = g_bg_entry, reopen = 1;
     memcpy(saved, g_fb, sizeof saved);
+    memcpy(tsaved, g_text, sizeof tsaved[0] * (size_t)n0);   /* and the screen's queued text (both kinds): a sub-screen */
+    memcpy(ttsaved, g_tt, sizeof ttsaved[0] * (size_t)nt0);  /* replaces them */
     while (!done) {
         SDL_Event e;
-        int x, y, choose = -1;
+        int choose = -1;
+        if (reopen) {   /* LAB_0002593d */
+            int h;
+            if (g_bg_entry != bg0 && bg0 >= 0) load_bg(bg0);   /* a sub-screen loaded its own background (and palette) */
+            pointer_now(rd, &px, &py);
+            h = gm_hit(px, py);
+            sel = h >= 0 ? h : 0;
+            reopen = 0;
+            if (script) printf("menu: open sel=%d\n", sel);
+        }
         memcpy(g_fb, saved, sizeof saved);
-        g_ntext = n0;   /* the screen's own text, then the panel over it */
+        memcpy(g_text, tsaved, sizeof tsaved[0] * (size_t)n0);
+        memcpy(g_tt, ttsaved, sizeof ttsaved[0] * (size_t)nt0);
+        g_ntext = n0; g_ntt = nt0;   /* the screen's own text, then the panel over it */
         db_shp(6, 198, 116);   /* the panel: shell image 7 */
         text_layer_cull(198, 116, 442, 364);
-        for (i = 0; i < 6; i++) {   /* items 0x7eefc: centred on x 320, y 157 + 33 k; grey (shell font 0x1f), the selected white (0x1e) */
+        for (i = 0; i < 6; i++) {
             const font *fo = i == sel ? &g_fbig : &g_fhead;
-            int tw = text_width(fo, ITEM[i]);
-            (void)x; (void)y;
-            draw_text(fo, 320 - tw / 2, 157 + 33 * i - font_height(fo) / 2, ITEM[i], (const uint8_t (*)[3])g_bg.pal, -1);
+            draw_text(fo, 320 - text_width(fo, ITEM[i]) / 2, 157 + 33 * i - font_height(fo) / 2, ITEM[i], (const uint8_t (*)[3])g_bg.pal, -1);
         }
-        if (headless) {   /* tests: MW2_SHELL_MENU=item selected (and MW2_MENU_KESHIK=1 runs The Keshik) -> MW2_SHELL_SHOT */
+        if (headless && !script) {   /* tests: MW2_SHELL_MENU=item selected (and MW2_MENU_KESHIK=1 runs The Keshik) -> MW2_SHELL_SHOT */
             if (getenv("MW2_SHELL_MENU") && getenv("MW2_SHELL_SHOT")) {
                 FILE *o;
                 if (getenv("MW2_MENU_KESHIK")) the_keshik(rd, tx, headless);
@@ -3628,41 +4078,59 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             }
             break;
         }
-        while (SDL_PollEvent(&e)) {
+        while (!done && choose < 0 && (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e))) {
             if (e.type == SDL_QUIT) { result = -3; done = 1; }
-            if (e.type == SDL_MOUSEMOTION) { mx2 = e.motion.x; my2 = e.motion.y; for (i = 0; i < 6; i++) if (mx2 >= 198 && mx2 < 442 && my2 >= 157 - 16 + 33 * i && my2 < 157 + 16 + 33 * i) sel = i; }
+            if (e.type == SDL_MOUSEMOTION) { int h; px = e.motion.x; py = e.motion.y; if ((h = gm_hit(px, py)) >= 0) sel = h; }
             if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_ESCAPE) done = 1;
-                if (e.key.keysym.sym == SDLK_UP) sel = (sel + 5) % 6;
-                if (e.key.keysym.sym == SDLK_DOWN) sel = (sel + 1) % 6;
-                if (e.key.keysym.sym == SDLK_RETURN) choose = sel;
+                SDL_Keycode k = e.key.keysym.sym;
+                if (k == SDLK_ESCAPE) done = closed = 1;
+                else if (k == SDLK_UP || k == SDLK_LEFT || k == SDLK_KP_8 || k == SDLK_KP_4) sel = (sel + 5) % 6;
+                else if (k == SDLK_DOWN || k == SDLK_RIGHT || k == SDLK_KP_2 || k == SDLK_KP_6) sel = (sel + 1) % 6;
+                else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) choose = sel;
             }
-            if (e.type == SDL_MOUSEBUTTONDOWN) {
-                if (e.button.x >= 198 && e.button.x < 442 && e.button.y >= 116 && e.button.y < 364) choose = sel; else done = 1;
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) done = closed = 1;
+            else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                int h = gm_hit(e.button.x, e.button.y);
+                px = e.button.x; py = e.button.y;
+                if (h >= 0) { sel = h; choose = h; } else done = closed = 1;
             }
+            if (script) break;   /* one scripted event a pass */
         }
+        if (script && !*script && choose < 0) done = 1;   /* the script ran out: as it stands */
+        if (script && choose >= 0) printf("menu: choose %d\n", choose);
         if (choose == 0) { result = 8; done = 1; }
-        else if (choose == 1) { combat_variables(rd, tx, headless); memcpy(g_fb, saved, sizeof saved); done = 1; result = -2; }
-        else if (choose == 2) { cockpit_controls(rd, tx, headless); memcpy(g_fb, saved, sizeof saved); }
-        else if (choose == 3) { hall_of_honor(rd, tx, headless); memcpy(g_fb, saved, sizeof saved); }
-        else if (choose == 4) { the_keshik(rd, tx, headless); memcpy(g_fb, saved, sizeof saved); }
-        else if (choose == 5) {   /* FLEE TO DOS: "Embrace cowardice?#Yes|No", No by default */
+        else if (choose >= 1 && choose <= 4) {
+            if (choose == 1) combat_variables(rd, tx, headless);
+            else if (choose == 2) cockpit_controls(rd, tx, headless);
+            else if (choose == 3) hall_of_honor(rd, tx, headless);
+            else the_keshik(rd, tx, headless);
+            reopen = 1;
+        } else if (choose == 5) {
             if (shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1) == 0) { result = -3; done = 1; }
-            else memcpy(g_fb, saved, sizeof saved);
+            else reopen = 1;
         }
-        if (!done) {
+        if (!done && !headless) {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
             SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
-    memcpy(g_fb, saved, sizeof saved);
+    if (script) {   /* tests: the frame as the script left it (menu included), then the state */
+        const char *shot = getenv("MW2_SHELL_SHOT");
+        FILE *o;
+        printf("menu: sel=%d result=%d%s\n", sel, result, closed ? " closed" : "");
+        if (shot && (o = fopen(shot, "wb"))) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
+        fflush(stdout);
+        exit(0);
+    }
     /* the screen underneath gets its own background back (Combat Variables / Cockpit Controls loaded theirs, and the
      * screen redrawing its changed parts over the wrong one left patches of it) */
     if (g_bg_entry != bg0 && bg0 >= 0) load_bg(bg0);
     memcpy(g_fb, saved, sizeof saved);
-    g_ntext = n0;
-    return result == -2 ? -1 : result;
+    memcpy(g_text, tsaved, sizeof tsaved[0] * (size_t)n0);
+    memcpy(g_tt, ttsaved, sizeof ttsaved[0] * (size_t)nt0);
+    g_ntext = n0; g_ntt = nt0;
+    return result;
 }
 
 
@@ -3736,7 +4204,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = 1;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0003d980 / FUN_00037a50 -> 0x258e0 */
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     if (x >= 5 && x <= 57 && y >= 149 && y <= 440) next = 1;
@@ -3764,7 +4232,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         if (*mx >= 5 && *mx <= 57 && *my >= 149 && *my <= 440) hover = 0;
         if (menu_done)
             for (i = 0; i < 6; i++) draw_text(&g_flabel, 540 - text_width(&g_flabel, TRN_LABEL[i]) / 2, 18 + 25 * i, TRN_LABEL[i], pal, -1);
-        if (hover == 0) draw_text(&g_flabel, 8, 203, "CLAN HALL", pal, -1);
+        if (hover == 0) draw_text(&g_flabel, 18, 203, "CLAN HALL", pal, -1);   /* 0x7d7cc: "CLAN HALL" (no '~') drawn from (18, 203) - DOSBox */
         f++;
         if (headless && getenv("MW2_SHELL_TRAIN") && f == 1) {   /* TEST ONLY: launch training item 1-6 as its button does */
             int it = atoi(getenv("MW2_SHELL_TRAIN"));
@@ -3901,8 +4369,8 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00027160 calls 0x258e0 before its own keys */
                 if (e.type == SDL_KEYDOWN) {
-                    if (e.key.keysym.sym == SDLK_ESCAPE) next = 1;
                     if ((e.key.keysym.sym == SDLK_DOWN || e.key.keysym.sym == SDLK_PAGEDOWN) && en[2]) sub++;
                     if ((e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_PAGEUP) && en[1]) sub--;
                     if (e.key.keysym.sym == SDLK_HOME || e.key.keysym.sym == SDLK_BACKSPACE) back = 1;   /* Home (0x8047) = BACK */
@@ -4070,9 +4538,9 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y * 3;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0001c080 -> 0x258e0 */
                 if (e.type == SDL_KEYDOWN) {
                     SDL_Keycode k = e.key.keysym.sym;
-                    if (k == SDLK_ESCAPE) next = 11;   /* the Ready Room */
                     if (k == SDLK_DOWN) top++;
                     if (k == SDLK_UP) top--;
                     if (k == SDLK_PAGEDOWN) top += bh / lh - 2;
@@ -4128,7 +4596,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
 /* ---- the debriefing (screen 3, FUN_00023890 + scoring 0x00021ee0): MW2MSN.CFG objectives, MW2CAR.CFG combat
  * counters, MW2DIF.CFG (+4 heat tracking, +5 difficulty). Honor: completion 5000 (0 if a primary failed),
  * secondary 1500 each, tertiary 500, wingman deaths -4000, enemy mechs 250 (total), vehicles 125 (total),
- * underweight 25 per ton (not yet: Star Config), hits / shots >= 0.7: 750; x 0.8 / 1.0 / 1.3 by difficulty;
+ * underweight 25 per ton (the SDSC limit - the star's tonnage), hits / shots >= 0.7: 750; x 0.8 / 1.0 / 1.3 by difficulty;
  * heat tracking off: none ("The Keshik deems it Dishonorable ..."); failure: none. Kills += mechs total +
  * vehicles direct, hits / shots accumulate always; honor and progress on success. Hotspots 0x7f17c + clan x 16:
  * EXIT (270,450)-(369,474), AFTERMATH (110,450)-(209,474), REPLAY (430,450)-(529,474); background 16 / 23. */
@@ -4270,18 +4738,25 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = 11;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00023890 -> 0x258e0 */
                 if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y;
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 3; i++) {
                         if (x < DEB_HS[i][0] || x > DEB_HS[i][2] || y < DEB_HS[i][1] || y > DEB_HS[i][3]) continue;
-                        if (i == 0) next = 11;                                  /* EXIT: the Ready Room */
+                        if (i == 0) next = success && g_reg[reg].rank >= 16 ? 16 : 11;   /* EXIT: the Ready Room; after the last
+                                                                     * mission won, the ending at once (0x23890: 0x10 when
+                                                                     * the next mission's index reaches 16) */
                         else if (i == 1 && mission_done >= 0 && mission_done < 16) {   /* AFTERMATH: DBFS / DBFF */
                             text_page(rd, tx, headless, clan, CAMPAIGN_SCEN[clan][mission_done], success ? "DBFS" : "DBFF");
                             load_bg(clan == 1 ? 22 : 15);
                         }
-                        else if (i == 2) { g_reg[reg] = before; reg_save(); next = 0; launch_campaign(clan, reg); next = 3; }   /* REPLAY */
+                        else if (i == 2) {   /* REPLAY (0x23890, 0x25000): to the briefing (state 0); after a success only
+                                              * when "Are you Sure?#Yes|No" (No by default) says Yes, and then the pilot's
+                                              * record goes back to its copy from before the mission (honor, progress, kills) */
+                            if (!success) next = 0;
+                            else if (shell_dialog(rd, tx, headless, "Are you Sure?#Yes|No", 1) == 0) { g_reg[reg] = before; reg_save(); next = 0; }
+                        }
                     }
                 }
             }
@@ -4400,8 +4875,8 @@ static void shell_message(SDL_Renderer *rd, SDL_Texture *tx, int headless, const
  * cheat list: the pilot's campaign position = the mission picked */
 typedef struct { int x0, y0, x1, y1, lx, ly; const char *label; } rr_hs;
 static const rr_hs RR_HS[2][4] = {
-    {{0, 0, 130, 479, 56, 223, "CLAN HALL"}, {300, 320, 559, 419, 450, 364, "MECH LAB"}, {510, 420, 559, 469, 542, 455, "STAR CONFIG"}, {140, 90, 399, 313, 265, 226, "MISSION BRIEFING"}},
-    {{0, 0, 130, 479, 56, 223, "CLAN HALL"}, {280, 340, 534, 439, 415, 370, "MECH LAB"}, {432, 440, 482, 479, 464, 460, "STAR CONFIG"}, {140, 90, 399, 313, 277, 226, "MISSION BRIEFING"}}};
+    {{0, 0, 130, 479, 56, 223, "CLAN HALL"}, {300, 320, 559, 419, 450, 364, "~MECH LAB"}, {510, 420, 559, 469, 542, 455, "~STAR CONFIG"}, {140, 90, 399, 313, 265, 226, "~MISSION BRIEFING"}},
+    {{0, 0, 130, 479, 56, 223, "CLAN HALL"}, {280, 340, 534, 439, 415, 370, "~MECH LAB"}, {432, 440, 482, 479, 464, 460, "~STAR CONFIG"}, {140, 90, 399, 313, 277, 226, "~MISSION BRIEFING"}}};
 static const char *RR_CODENAME[2][16] = {
     {"YELLOW", "ORANGE", "TEAL", "TAUPE", "JENNY", "SABLE", "GREY", "BROWN", "AMY", "SILVER", "AQUA", "KIM", "CYAN", "MAROON", "GOLD", "IRENE"},
     {"PINK", "GREEN", "RED", "FUCHSIA", "CINDY", "RUST", "UMBER", "TAN", "HEIDI", "PLUM", "WHITE", "JILL", "PUCE", "BLONDE", "BRONZE", "MARY"}};
@@ -4426,7 +4901,7 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
             while (SDL_PollEvent(&e)) {
                 if (e.type == SDL_QUIT) { next = -3; break; }
                 if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) next = 1;
+                if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0003d980 / FUN_00037a50 -> 0x258e0 */
                 if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 4; i++) {
@@ -4484,10 +4959,9 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
         }
         if (hover >= 0) {
             const rr_hs *h = &RR_HS[clan][hover];
-            int tw2 = text_width(&g_flabel, h->label), lx2 = h->lx - tw2 / 2;
-            if (lx2 < 4) lx2 = 4;
-            if (lx2 + tw2 > W - 4) lx2 = W - 4 - tw2;
-            draw_text(&g_flabel, lx2, h->ly, h->label, (const uint8_t (*)[3])g_bg.pal, -1);
+            const char *t = h->label;
+            int lx2 = label_x(&t, h->lx);
+            draw_text(&g_flabel, lx2, h->ly, t, (const uint8_t (*)[3])g_bg.pal, -1);
         }
         if (cheat)   /* "<~" labels: always shown */
             for (i = 0; i < 16; i++)
@@ -4603,7 +5077,7 @@ int main(int argc, char **argv)
     SDL_Texture *tx = NULL;
     const char *shot = getenv("MW2_SHELL_SHOT");
     int headless = shot != NULL, frames = getenv("MW2_SHELL_FRAMES") ? atoi(getenv("MW2_SHELL_FRAMES")) : 30;
-    int screen = getenv("MW2_SHELL_SCREEN") ? atoi(getenv("MW2_SHELL_SCREEN")) : 8, clan = getenv("MW2_SHELL_CLAN") ? atoi(getenv("MW2_SHELL_CLAN")) : 2, running = 1, mx = -1, my = -1, confirm = 0;
+    int screen = getenv("MW2_SHELL_SCREEN") ? atoi(getenv("MW2_SHELL_SCREEN")) : 8, clan = getenv("MW2_SHELL_CLAN") ? atoi(getenv("MW2_SHELL_CLAN")) : 2, running = 1, mx = -1, my = -1;
 #ifdef MW2_ONE_BINARY
     if (argc >= 2 && strcmp(argv[1], "--sim") == 0) return glview_main(argc - 1, argv + 1);   /* the simulation */
     snprintf(g_exe_path, sizeof g_exe_path, "%s", argv[0]);
@@ -4815,7 +5289,7 @@ int main(int argc, char **argv)
         running = 0;
     }
     if (getenv("MW2_SHELL_CV_LIVE") && rd) combat_variables(rd, tx, 0);
-    if (getenv("MW2_SHELL_MENU_LIVE") && rd) { load_bg(g_bg_entry < 0 ? 0 : g_bg_entry); global_menu(rd, tx, 0); }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */   /* tests: through the renderer (with MW2_SHELL_GRAB) */
+    if (getenv("MW2_SHELL_MENU_LIVE") && rd) { load_bg(g_bg_entry < 0 ? 0 : g_bg_entry); global_menu(rd, tx, 0, mx, my); }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */
     if (!g_text_hires) { char *bp = SDL_GetBasePath(); ttext_init(bp); SDL_free(bp); }
     if (getenv("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
@@ -4862,6 +5336,14 @@ int main(int argc, char **argv)
             reg_load();
             rg = reg_selected(clan);
             if (rg >= 0) star_reset_mission(clan, g_reg[rg].rank);
+        }
+        if (screen == 1 && clan >= 0 && clan <= 1 && g_from_screen == 12) {   /* main 0x36700 case 1 from the roster (12):
+                                                                               * FUN_0003ab50(0, 0, 3, 1, 100) and the pilot's
+                                                                               * name into record 0x840dc slot 0 (0x370ba) */
+            int rg;
+            reg_load();
+            rg = reg_selected(clan);
+            if (rg >= 0) prm_player_name(g_reg[rg].name);
         }
         if (screen == 1 && clan >= 0 && clan <= 1) {   /* first visit with no pilot: registration clip, then the roster */
             reg_load();
@@ -4937,7 +5419,8 @@ int main(int argc, char **argv)
                 FILE *o = fopen(shot, "wb");
                 if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
                 running = 0;
-            } else { screen = r; clan = (r == 9 || r == 13) ? g_ia_ctx : 2; }
+            } else if (r == -3) running = 0;
+            else { screen = r; clan = (r == 9 || r == 13) ? g_ia_ctx : 2; }
             continue;
         }
         load_bg(sd ? (sd->bg >= 0 ? sd->bg : (clan == 1 ? 17 : 10)) : (clan == 1 ? 17 : 10));   /* rooms not built: the hall's */
@@ -4951,27 +5434,20 @@ int main(int argc, char **argv)
                 while (SDL_PollEvent(&e)) {
                     if (e.type == SDL_QUIT) running = 0;
                     if (e.type == SDL_MOUSEMOTION) { mx = e.motion.x; my = e.motion.y; }
-                    if ((e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE && (screen == 1 || screen == 8) && !confirm) ||   /* title: Esc (DOS capture) */
-                        (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT && screen != 8)) {   /* the global menu */
-                        int r = global_menu(rd, tx, headless);
-                        if (r == -3) confirm = 1;
+                    if (menu_opens(&e)) {   /* the global menu (FUN_000258e0: the title 0x2a410, the clan hall 0x1dbe0, ...) */
+                        int r = global_menu(rd, tx, headless, mx, my);
+                        if (r == -3) running = 0;
                         else if (r >= 0) { next = r; nclan = 2; }
                         continue;
                     }
-                    if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
-                        if (confirm) confirm = 0;
-                        else if (screen == 5 || screen == 11 || screen == 12 || screen == 14) next = 1;   /* rooms: back to the hall */
-                        else if (screen != 8) next = 8; else confirm = 1;
-                    }
                     if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                         int bx = e.button.x, by = e.button.y;
-                        if (confirm) {   /* "Embrace cowardice? Yes / No" */
-                            if (by >= 250 && by < 290 && bx >= 230 && bx < 310) { next = -3; }
-                            else if (by >= 250 && by < 290 && bx >= 330 && bx < 410) confirm = 0;
-                        } else if (sd) {
+                        if (sd) {
                             for (i = 0; i < sd->nhs; i++)
                                 if (bx >= sd->hs[i].x0 && bx <= sd->hs[i].x1 && by >= sd->hs[i].y0 && by <= sd->hs[i].y1) {
-                                    if (sd->hs[i].next == -3) confirm = 1;
+                                    if (sd->hs[i].next == -3) {   /* the title's EXIT (0x2a410 case 3): the dialog, No by default */
+                                        if (shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1) == 0) running = 0;
+                                    }
                                     else {
                                         if (sd->id == 1 && sd->hs[i].next == 5) shell_sound(0x67, 0x32);   /* the hall's holoprojector (FUN_0001dbe0 case 1, 0x9169c) */
                                         next = sd->hs[i].next; nclan = sd->hs[i].clan; pending_video = sd->hs[i].video;
@@ -5004,10 +5480,9 @@ int main(int argc, char **argv)
                     if (mx >= sd->hs[i].x0 && mx <= sd->hs[i].x1 && my >= sd->hs[i].y0 && my <= sd->hs[i].y1) hover = i;
             if (hover >= 0) {   /* label on hover, centred at its position (shell font, background palette) */
                 const hotspot *h = &sd->hs[hover];
-                int tw2 = text_width(&g_flabel, h->label), lx2 = h->lx - tw2 / 2;
-                if (lx2 < 4) lx2 = 4;                       /* centred on the table position, kept on screen */
-                if (lx2 + tw2 > W - 4) lx2 = W - 4 - tw2;
-                draw_text(&g_flabel, lx2, h->ly, h->label, (const uint8_t (*)[3])g_bg.pal, -1);
+                const char *t = h->label;
+                int lx2 = label_x(&t, h->lx);                /* '~': centred on the table position, else from it */
+                draw_text(&g_flabel, lx2, h->ly, t, (const uint8_t (*)[3])g_bg.pal, -1);
             }
             if (!sd) {
                 char msg[96];
@@ -5018,19 +5493,10 @@ int main(int argc, char **argv)
                 snprintf(msg, sizeof msg, "%s - NOT BUILT YET - ESC", sd->name);
                 draw_text(&g_flabel, 320 - text_width(&g_flabel, msg) / 2, 460, msg, (const uint8_t (*)[3])g_bg.pal, -1);
             }
-            if (confirm) {
-                int x, y;
-                for (y = 200; y < 300; y++) for (x = 200; x < 440; x++) { uint8_t *q = g_fb + ((size_t)y * W + (size_t)x) * 3; q[0] /= 4; q[1] /= 4; q[2] /= 4; }
-            text_layer_cull(200, 200, 440, 300);
-                text_layer_cull(200, 200, 440, 300);
-                draw_text(&g_flabel, 320 - text_width(&g_flabel, "Embrace cowardice?") / 2, 220, "Embrace cowardice?", (const uint8_t (*)[3])g_bg.pal, -1);
-                draw_text(&g_flabel, 270 - text_width(&g_flabel, "YES") / 2, 265, "YES", (const uint8_t (*)[3])g_bg.pal, -1);
-                draw_text(&g_flabel, 370 - text_width(&g_flabel, "NO") / 2, 265, "NO", (const uint8_t (*)[3])g_bg.pal, -1);
-            }
             f++;
             if (headless && getenv("MW2_SHELL_MUSICLOG") && g_song) fprintf(stderr, "music entry %d playing\n", g_song_entry);
             if (headless) {
-                if (f >= frames && getenv("MW2_SHELL_MENU")) global_menu(rd, tx, headless);   /* tests: the menu over this screen */
+                if (f >= frames && (getenv("MW2_SHELL_MENU") || getenv("MW2_SHELL_MENU_EVENTS"))) global_menu(rd, tx, headless, mx, my);   /* tests: the menu over this screen */
                 if (f >= frames) {
                     FILE *o = fopen(shot, "wb");
                     if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
@@ -5045,7 +5511,7 @@ int main(int argc, char **argv)
         smk_close(ov);
         { int q; for (q = 0; q < 8; q++) smk_close(xov[q]); }
         if (pending_video) play_cinematic(rd, tx, pending_video, headless);   /* e.g. the registration clip */
-        if (next != -1) { screen = next; clan = nclan; confirm = 0; }
+        if (next != -1) { screen = next; clan = nclan; }
     }
     sfx_stop_loops(g_sfx);
     sfx_set_music(g_sfx, NULL, NULL);

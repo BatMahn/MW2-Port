@@ -198,6 +198,7 @@ static skygnd_ti c3d_ti_sg;
 /* the Titanium texture table (its own slot numbers) and the stars' camouflage sets, kept for its models (glr_set_titanium) */
 static c3d_scene c3d_ti_scene;
 static int c3d_ti_have_scene, c3d_ti_camo[8];
+static texture *c3d_ti_draw[GLR_SLOTS];   /* the table glr draws with: each slot's current bank-1 frame (glview scene_anim) */
 #if defined(__GNUC__)
 __attribute__((unused))
 #endif
@@ -267,7 +268,8 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
     }
     c3d_ti_scene = ts;   /* kept: the Titanium models' textures */
     c3d_ti_have_scene = 1;
-    glr_set_titanium(r, c3d_ti_scene.slot, c3d_ti_camo);
+    memcpy(c3d_ti_draw, c3d_ti_scene.slot, sizeof c3d_ti_draw);
+    glr_set_titanium(r, c3d_ti_draw, c3d_ti_camo);
     {   /* its bank-0 bitmaps (the models' colour type 3 billboards) and the palette shade of its colour type 1 polygons
          * (mercsw 0x1002f5e3): the planet's LITE (0x10071631: +8 / +12 / +16 the light vector, 999999 x 3 no light term
          * (0x10097cb4), 888888 x 3 a point light at the eye (0x100ad320; no Titanium mission uses either); +20 the ambient

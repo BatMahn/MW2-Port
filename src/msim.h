@@ -193,6 +193,7 @@ typedef struct {
     int         *seen_node;      /* per actor: the star's node last applied (0x10014520 runs on a change) */         /* per actor: whom it attacks (state 3), -1 the player, -2 none */    /* PLNT payload +0x38 == 0: explosions may take the scene light (0x1003de48 -> DAT_1025a6a8) */
     float       *centre_h;       /* per actor: centre above the feet, cm (MGEO int[0]: the climbable rise) */
     float        player_centre_h;
+    float       *draw_lift;      /* per actor: the model hangs this far above the feet (aircraft / dropships: the centre height) */
     int         *cmd;            /* per actor: commanded AI state (2 attack, 5 follow, 7 patrol, 8 godirect, 11 shutdown), 0 none */
     int         *cmd_target;     /* per actor: the commanded target actor (attack / defend), -1 none */
     int         *engage;         /* per actor: engine +0x154 "engage at will" (0x100124a0: 0 in the player's star, 1 elsewhere) */
@@ -244,6 +245,16 @@ typedef struct {
     mech3d       pl_pit;          /* the player's cockpit representation (repr 4 on the full skeleton): its collision */
     int          pl_pit_ok;        /* model while the view is the cockpit (player_cockpit) */
     int          player_cockpit;   /* 1: the camera is in the cockpit (mode 0; the front end sets it, default 1) */
+    /* levels of detail in the collision list (3Dfx 0x100267d0 -> 0x10026330 -> 0x10026430, DOS 0x37580 -> 0x37060): a unit's
+     * pieces are those of the representation it is DRAWN at - picked each frame by its distance from the camera - so shots,
+     * probes and the aim ray meet that representation's spheres. cam_*: the render camera (the front end sets it each
+     * frame; unset: the player's eye) and its LOD scale camera +0xa0 (2 x zoom / quality at the 640 reference) */
+    float        cam_eye[3], cam_a0;
+    int          cam_ok;
+    unsigned char *col_repr;       /* per actor: the representation 0-3 in the collision list */
+    mech3d     (*col_lod)[3];      /* per actor: representations 1-3 on the full skeleton, loaded when first needed */
+    unsigned char (*col_lod_ok)[3];
+    int          no_col_lod;       /* TEST ONLY (MW2_NO_COL_LOD): representation 0 for every unit, as before */
     float        player_twist;     /* the player's torso twist, degrees (the front end; poses the collision models) */
     mech3d       pl_shown;        /* the player's mech as drawn (posed with animation and twist): its mounts */
     int          pl_shown_ok;      /* per actor: inspected by the player's side */
@@ -333,6 +344,10 @@ int  msim_nearest_enemy(const msim *s, float *distance);
  * polygon terrain (upward faces) and type 0 boxes (their tops), the highest surface within 10 m of y,
  * else the highest below y, else 0. */
 float msim_ground(const msim *s, float x, float z, float y);
+/* the height actor i's model root is drawn at: the feet, or (aircraft class 5 and dropships class 8) the feet + the MGEO
+ * centre height - DOSBox TAUPSCN1: the dropship hovers about 75 m up (DROPA int[0] 7500), UMBE's gunships (AIRCRFTX/Y,
+ * ground-level geometry, int[0] 7500 / 5000) fly */
+float msim_draw_y(const msim *s, int i);
 /* jump-jet flames for a unit jetting at (x, y, z) facing heading (via on_effect) */
 void msim_jet_flames(msim *s, float x, float y, float z, float heading);
 /* the same at the mech's jet mounts (POFO slots 6 / 7) when it has them */
@@ -355,6 +370,14 @@ int  msim_can_move(const msim *s, float x0, float z0, float x, float z, float y,
 /* the same sphere test without the closing rule, against unit `other` only (-1 the player): is p1 inside its sphere?
  * (the engine's push-out of a unit set down inside another, 0x1000ba20) */
 int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], float n[3], float c[3], float *rr, float ov[3]);
+/* The second try after a mech-mech contact (engine 0x10019310 -> 0x10019a61): the move from the old centre p0 to the end
+ * projected onto the sphere (centre q, r1 + r2 = rr) of the move's end p1 is tested again; the end lies on the sphere, so
+ * whether it is "inside" (refused: the velocity doubled, 0x102473d4) is decided by rounding - the engine's own arithmetic
+ * emulated here (3D floats ~50 %, DOS whole cm ~12 %, msim_dos_int). 1: refused. */
+int  msim_contact_retest(const float p0[3], const float p1[3], const float q[3], float rr);
+/* the representation actor k is drawn and collided at (0-3; see col_repr) and its collision model, posed as the unit */
+int  msim_unit_repr(const msim *s, int k);
+const mech3d *msim_unit_hull(const msim *s, int k);
 /* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second
  * try): the unit ends a quarter of the untravelled distance off the touching point (the hit less the look-ahead R,
  * behind the start when the hit is nearer than R) along the move reflected by the surface (a type 6 sphere: on its

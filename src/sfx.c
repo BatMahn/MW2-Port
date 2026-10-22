@@ -517,6 +517,16 @@ void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan)
     SDL_UnlockAudioDevice(s->dev);
 }
 
+void sfx_pcm_rate(sfx *s, const unsigned char *pcm, int rate)
+{
+    int k;
+    if (!s || !pcm || rate <= 0) return;
+    SDL_LockAudioDevice(s->dev);
+    for (k = 0; k < SFX_VOICES; k++)
+        if (s->v[k].c == &s->v[k].own && s->v[k].own.data == pcm) s->v[k].step = (double)rate / (double)s->rate;
+    SDL_UnlockAudioDevice(s->dev);
+}
+
 void sfx_stop_loops(sfx *s)
 {
     int k;

@@ -7,10 +7,12 @@
  *   install= cd= music= ultrasnd= mt32= models= textures= skygnd=     optional overrides of the folder's parts
  *                          (mt32/: the MT-32 ROMs MT32_CONTROL.ROM + MT32_PCM.ROM for the menu music)
  *   textures_kind=ati | 3dfx
- *   renderer=enhanced | dos | 3dfx | ati | s3 | pvr | mga   (how the simulation is drawn: the port's enhanced mix, or one
- *                          of the original editions - its own archive, sky file, fog and texture filtering)
+ *   renderer=enhanced | dos | 3dfx | ati | s3 | pvr | mga | rendition   (how the simulation is drawn: the port's enhanced
+ *                          mix, or one of the original editions - its own archive, sky file, fog and texture filtering;
+ *                          rendition: the Titanium edition's Rendition Verite plugin, zredline.dll - Titanium textures only)
  *   textures=original | titanium   (original: the renderer's own textures, sky and ground; titanium: the Titanium
- *                          edition's 16-bit textures, sky dome and ground with the renderer's states - never with dos)
+ *                          edition's 16-bit textures, sky dome and ground with the renderer's states - never with dos,
+ *                          always with rendition)
  *                          (the old edition=<renderer> is still read; edition=titanium = renderer=enhanced textures=titanium;
  *                          textures= with any other value is the texture archive's path, as below)
  *   titanium=<folder>      the Titanium edition's 16-bit files (MW2.PRJ, SKYGND.PAR from the disc's Install/16bit);
@@ -58,7 +60,10 @@ typedef struct {
     int  dos_sky_smooth;      /* dos_shading= (dos_sky=): 0 dithered (default, the original), 1 smooth (the DOS renderer's
                                * Gouraud polygons and haze band blended) */
 } portcfg;
-enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA, PORTCFG_ED_COUNT };
+/* RENDITION: the Titanium edition's own renderer plugin for the Rendition Verite (plugin/zredline.dll, loaded by mercsw.dll):
+ * the enhanced mix's archives beside the Titanium archive, whose textures, sky dome, ground and fog it always draws */
+enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA,
+       PORTCFG_ED_RENDITION, PORTCFG_ED_COUNT };
 extern const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT];   /* "enhanced", "dos", ... (the file's words) */
 enum { PORTCFG_TX_ORIGINAL, PORTCFG_TX_TITANIUM, PORTCFG_TX_COUNT };
 extern const char *const PORTCFG_TX_NAME[PORTCFG_TX_COUNT];   /* "original", "titanium" */
@@ -70,9 +75,11 @@ int  portcfg_edition(const portcfg *c, int ed, char *models, char *textures, cha
  * (TEXTURES TITANIUM keeps the renderer's archives - its models and data, its textures for the names the Titanium
  * archive lacks - which portcfg_edition reports; the Titanium archive is opened beside them.) */
 int  portcfg_titanium(const portcfg *c, char *prj, char *sky);
-/* Can this texture set go with this renderer? ORIGINAL always; TITANIUM not with the DOS renderer (palette-indexed
- * textures) and only with the Titanium folder there. */
+/* Can this texture set go with this renderer? ORIGINAL always but with RENDITION (a Titanium plugin: Titanium textures
+ * only); TITANIUM not with the DOS renderer (palette-indexed textures) and only with the Titanium folder there. */
 int  portcfg_texset_ok(const portcfg *c, int renderer, int texset);
+/* The texture set this renderer draws with for a chosen one: TITANIUM with RENDITION, ORIGINAL when TITANIUM can't be had */
+int  portcfg_texset_for(const portcfg *c, int renderer, int texset);
 /* A renderer + texture set's files (portcfg_edition, then with TITANIUM the Titanium SKYGND.PAR as the sky file and no
  * fog file - the Titanium fog comes from its own SKYGND.PAR). Returns 0 if both are available. */
 int  portcfg_look(const portcfg *c, int renderer, int texset, char *models, char *textures, char *kind, char *sky, char *fog);

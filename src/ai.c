@@ -72,6 +72,29 @@ void ai_init(ai_mind *m, int order_prog)
     m->tgt = m->event_who = m->post_who = -2;
 }
 
+int ai_dos_int = 0;
+
+/* 3Dfx 0x10013600: fmod(err, 360); > 45 -> 819.2, < -45 -> -819.2, else err x 18.2044 (0x102472a4). DOS 0x229e0 works on
+ * the 16.16 error in WHOLE degrees: d = (err >> 16) % 360 (sar: floored), > 45 / < -45 the same caps, else
+ * ((d << 16) / 45) x 0x3333333 >> 16 rounded (shrd + adc) - an error in [0, 1) degree steers nothing and one in [-1, 0)
+ * a full degree's worth, so the DOS autopilot settles 0-1 degree right of the nav's bearing and walks a line beside the
+ * 3Dfx one (DOSBox TNJ4 Alpha -> Beta: ~7 m west of the straight line from 470 m in; the 3D look's float steering ~1 m) */
+float ai_nav_turn(float err)
+{
+    if (ai_dos_int) {
+        int d = (int)floorf(err), q;
+        long long p;
+        if (d > 0x2d) return 819.2f;
+        if (d < -0x2d) return -819.2f;
+        q = (d * 65536) / 0x2d;
+        p = (long long)q * 0x3333333;
+        return (float)((int)(p >> 16) + (int)((p >> 15) & 1)) / 65536.0f;
+    }
+    if (err > 45.0f) return 819.2f;
+    if (err < -45.0f) return -819.2f;
+    return err * 18.2044f;
+}
+
 static float wrap180(float a)
 {
     while (a > 180.0f) a -= 360.0f;
@@ -560,9 +583,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt)
         /* steering 0x10013600 */
         turn0 = m->turn;   /* as the manoeuvre left it (a start may have zeroed it) */
         err = wrap180(want - v->heading);
-        if (err > 45.0f) m->turn = 819.2f;
-        else if (err < -45.0f) m->turn = -819.2f;
-        else m->turn = err * 18.2044f;
+        m->turn = ai_nav_turn(err);   /* the DOS edition: whole degrees (DOS 0x229e0, from 0x2c472 / 0x2d230..0x2d3d8) */
         if (m->state == AI_ATTACK && m->man == 3) m->turn += 450.0f * m->weave;
         if (m->state == AI_ATTACK && m->man == 11) m->turn = 0;            /* 0x1001f290 case 11: +0xc = 0 */
         /* in attack only the manoeuvre handlers steer (0x100130f0 has no state-3 case): 4 (0x1001fdd0), 5 (0x1001fe30), 11

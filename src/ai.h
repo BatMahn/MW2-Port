@@ -186,6 +186,11 @@ void ai_post(ai_mind *m, int cond);
 /* the target of a guided launch reacts (engine 0x10020ac0): shooter_level = the shooter's pilot level (player 1).
  * side_free(ctx, side) reports whether a 50 m sidestep that way (-1 left, +1 right) is clear. */
 void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int (*side_free)(void *ctx, int side), void *ctx);
+/* The nav steering (3Dfx 0x10013600 / DOS 0x229e0, the AI's and the player's autopilot): err = bearing - heading in
+ * degrees (-180..180) -> the leg input +0xc (819.2 = full). ai_dos_int: the DOS edition's integer form (whole degrees,
+ * floored) */
+extern int ai_dos_int;
+float ai_nav_turn(float err);
 /* one AI step: evaluate the current state's rules, then move per state. dt in seconds. */
 void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt);
 

@@ -74,6 +74,8 @@ typedef struct {
      * 0 = none), the camera's factor}; the cloud layer's drift (slot 0x8c, U and V in texture repeats); effects
      * alpha-blended (Render type 8) instead of alpha-tested */
     float ti_fog[3];
+    int   ti_fog_vtx;        /* RENDITION (zredline.dll): that fog per vertex, interpolated across each polygon of the world,
+                              * the objects and the effects (the ground stays per pixel) */
     float ti_scroll[2];
     int   fx_blend;
     /* the Titanium lights (mercsw 0x1002ecaa, per vertex, one-sided; its SKYGND.PAR amb / wa / wb): ti_light on, the
@@ -86,6 +88,11 @@ typedef struct {
 #define GLR_TI_DYN 8
     int   ti_dyn_n;
     float ti_dyn[GLR_TI_DYN][7];     /* x, y, z (game), radius, r, g, b: the explosion and projectile lights */
+    /* the ATi Rage edition's texturing per colour type (ATi MW2.DLL 0x1002dcb0 -> 0x1002bc60 / 0x10068830 or 0x100686b0):
+     * 0 off (every textured polygon perspective-correct, alpha-0 texels masked); 1 DISPLAY DETAIL high: types 6, 7, 8, 10
+     * affine, 5, 9, 11 perspective-correct; 2 DISPLAY DETAIL low: all affine. Alpha mask only for types 8-11; types 5-7
+     * draw their alpha-0 texels' colour (C3D_ERS_TMAP_TEXOP none) */
+    int   ati_tex;
 } glr_view;
 
 /* Requires a current GL 3.3 core context. Returns NULL on failure (shader

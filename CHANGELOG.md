@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.4.11 (2026-10-22)
+
+- **Dropships and gunships fly**: dropships and aircraft are drawn at their flying height, as in the original - the
+  dropship on TEMPER EDGE (TAUP) now hovers about 75 m up and flies away over the hills instead of ploughing through
+  them; the gunships on UMBER WALL and the aircraft on BRONSCN1 fly at their heights too.
+- **External camera (C)** works as in the original: an orbit camera behind your mech that you steer - Shift+Z / Z out /
+  in, Ctrl+grey Up / Down higher / lower, Ctrl+grey Left / Right or Keypad 7 / 9 round the mech; "External camera
+  engaged.", HUD kept, no reticle; C again returns to the cockpit.
+- **Radar zoom per mode**: the small and large radar each keep their own range (250 m - 2 km); X does nothing with the
+  radar off.
+- **/ (RESET_INPUTS)** recentres torso, view and mouse like Keypad 5.
+- **Nav points without the autopilot**: walking into the selected nav marks it reached and selects the next one.
+- **Inspect**: in the DOS look a building can be inspected from 200 m plus its own size, as in DOS.
+- **Overheat alarm (DOS look)** follows the DOS heat rules: the alarm with the shutdown sequence, and again with "Heat
+  level critical" when heat keeps rising.
+- **Looping world sounds** (wind, machinery) start on their second update, at a quarter volume and a random pitch from the
+  original's table, as in the original.
+- **Shell**: the in-menu Esc / right-click menu now matches the original on every screen (layout, keys, return paths);
+  Hall of Honor rebuilt from the original; Yes/No dialogs for exit, delete pilot and replay as in DOS; hover labels and
+  button animations in Star Configuration / Mech Lab.
+- **Mech Lab**: the variant list shows only the original's standard / alternate configurations plus your designs; header
+  and callsign colours, the armour diagram, MASC slots, anti-missile counted as a weapon and the critical-slot texts as
+  in DOS.
+- **ATi look**: the ground and sky are no longer grainy and sparkling toward the horizon - they use the ATi edition's own
+  mip levels (models, terrain and scrub still point-sampled, as the ATi edition draws them).
+- **DOS look**: the cockpit struts are now pixel-identical to the original (whole-number projection and the original's
+  draw order); distance fog is applied per polygon as DOS does (PROVSCN1's mountains, far terrain); your eye sits at the
+  original's height (the MARO start view now lines up).
+- **DOS look autopilot and AI** steer to nav points in whole degrees as DOS does - no more brief swerve near TNJ4's Beta.
+- **Nav points** are only marked reached the way the original does it (the autopilot, the selected nav, or an objective) -
+  walking near one no longer ticks it off.
+- **Hit tests** use the model detail level a mech is drawn at (distant mechs are hit on their simpler shape, as in the
+  original); mech-to-mech contact slides as long as in DOSBox.
+- **Targeting**: unit targeting flags come from the mission data (e.g. the dropship bomb turrets can't be targeted).
+- **Red damage flash** is skipped when a palette fade is already running, as in the original.
+- **External camera**: the camera tilt control (bindable in Cockpit Controls) and the zoom / height controls also work on
+  the death camera.
+- **Star Configuration**: click a starmate's name to type a new one, as in the original; Instant Action names come from
+  the star records as in DOS.
+- **Mech Lab CUSTOMIZE**: ammo bins are numbered as in the original.
+- **Gravis Ultrasound music** follows the original driver's volume curve, envelopes and vibrato.
+- **Titanium**: animated textures step as Titanium's own engine does.
+- **Rendition renderer**: RENDERER RENDITION draws the Titanium edition the way its Rendition Verite plugin
+  (zredline.dll) did: Titanium textures, bilinear filtering without mipmaps, fog worked out per vertex, and missile smoke
+  drawn as unkeyed squares. Needs the titanium/ folder.
+- **ATi look**: the RUST and TEAL grounds are textured again; polygons drawn without transparency show their textures'
+  transparent texels as the ATi edition does; fire / smoke cards and decals are textured without perspective correction,
+  and everything is with Display detail Low, as in the ATi edition.
+- **HUD at 1024x768**: the altitude ladder, compass, reticle and speed readout sit exactly where the original puts them
+  (the ladder was 27 px too high); nav arrows are red as in the original; the speed turns blue while reversing.
+
 ## v0.4.10 (2026-10-21)
 
 - **Tab no longer restarts the mission**: a leftover model-viewer key (Tab = next mech, reload) was live during missions,

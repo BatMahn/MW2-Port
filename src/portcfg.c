@@ -229,7 +229,7 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
     return c->install[0] ? 0 : -1;
 }
 
-const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT] = {"enhanced", "dos", "3dfx", "ati", "s3", "pvr", "mga"};
+const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT] = {"enhanced", "dos", "3dfx", "ati", "s3", "pvr", "mga", "rendition"};
 const char *const PORTCFG_TX_NAME[PORTCFG_TX_COUNT] = {"original", "titanium"};
 
 static void cp(char *dst, const char *src) { snprintf(dst, PORTCFG_PATH, "%s", src ? src : ""); }
@@ -241,6 +241,9 @@ int portcfg_edition(const portcfg *c, int ed, char *models, char *textures, char
      * file, the PowerVR fog */
     cp(models, c->models); cp(textures, c->textures); cp(kind, c->textures_ati ? "ati" : "3dfx"); cp(sky, c->skygnd); cp(fog, c->skygnd_fog);
     if (ed == PORTCFG_ED_ENHANCED) return 0;
+    /* RENDITION (the Titanium plugin zredline.dll): the enhanced mix's archives for the models, data and the texture names
+     * the Titanium archive lacks; available with the Titanium folder only */
+    if (ed == PORTCFG_ED_RENDITION) return portcfg_titanium(c, NULL, NULL) == 0 ? 0 : -1;
     if (ed == PORTCFG_ED_DOS) {   /* the DOS archive (the install's, else the disc's) */
         if (!find_ci(c->install, "MW2.PRJ", a, sizeof a)) {
             snprintf(b, sizeof b, "%s/MECH2", c->cd);
@@ -287,13 +290,20 @@ int portcfg_titanium(const portcfg *c, char *prj, char *sky)
 
 int portcfg_texset_ok(const portcfg *c, int renderer, int texset)
 {
-    if (texset == PORTCFG_TX_ORIGINAL) return 1;
+    if (texset == PORTCFG_TX_ORIGINAL) return renderer != PORTCFG_ED_RENDITION;
     return texset == PORTCFG_TX_TITANIUM && renderer != PORTCFG_ED_DOS && portcfg_titanium(c, NULL, NULL) == 0;
+}
+
+int portcfg_texset_for(const portcfg *c, int renderer, int texset)
+{
+    if (renderer == PORTCFG_ED_RENDITION) return PORTCFG_TX_TITANIUM;
+    return portcfg_texset_ok(c, renderer, texset) ? texset : PORTCFG_TX_ORIGINAL;
 }
 
 int portcfg_look(const portcfg *c, int renderer, int texset, char *models, char *textures, char *kind, char *sky, char *fog)
 {
     char a[PORTCFG_PATH];
+    if (renderer == PORTCFG_ED_RENDITION) texset = PORTCFG_TX_TITANIUM;   /* (its only set) */
     if (portcfg_edition(c, renderer, models, textures, kind, sky, fog) != 0 || !portcfg_texset_ok(c, renderer, texset)) return -1;
     if (texset == PORTCFG_TX_TITANIUM) {   /* the Titanium sky file (its sky dome, ground, fog colours and depths) */
         if (portcfg_titanium(c, NULL, a) != 0 || !models[0]) return -1;

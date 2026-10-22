@@ -218,7 +218,8 @@ static int tgt_within(msim *s, int table, int type, int idx)
         tx = (float)p->pos[0]; ty = (float)p->pos[1]; tz = (float)p->pos[2];
     }
     if ((ux - tx) * (ux - tx) + (uy - ty) * (uy - ty) + (uz - tz) * (uz - tz) > r * r) return 0;
-    if (type == 1 && table == 0) s->navs[idx].visited = 1;   /* 0x10009b80: the player's side has been there (0x20) */
+    if (type == 1 && table == 0 && s->navs[idx].shown) s->navs[idx].visited = 1;   /* 0x10009b80: the player's side has been there (0x20;
+                                                     * the player's unit, a nav with NAVP +16 set - DOS 0x16190 the same) */
     return 1;
 }
 static int tgt_test(msim *s, int table, uint32_t kind, int type, int idx)
@@ -487,6 +488,10 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->ai_ok = ai_load(&s->ai, a) == 0;
     s->minds = calloc((size_t)(count ? count : 1), sizeof *s->minds);
     s->arch = a;
+    s->col_repr = calloc((size_t)(count ? count : 1), 1);
+    s->col_lod = calloc((size_t)(count ? count : 1), sizeof *s->col_lod);
+    s->col_lod_ok = calloc((size_t)(count ? count : 1), sizeof *s->col_lod_ok);
+    s->no_col_lod = getenv("MW2_NO_COL_LOD") != NULL || getenv("MW2_NO_LOD") != NULL;   /* TEST ONLY */
     s->cmd = calloc((size_t)(count ? count : 1), sizeof *s->cmd);
     s->cmd_target = calloc((size_t)(count ? count : 1), sizeof *s->cmd_target);
     s->engage = calloc((size_t)(count ? count : 1), sizeof *s->engage);
@@ -531,6 +536,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->radius = calloc((size_t)(count > 0 ? count : 1), sizeof *s->radius);
     s->fly_seen = calloc((size_t)count + 1, sizeof *s->fly_seen);
     s->centre_h = calloc((size_t)(count > 0 ? count : 1), sizeof *s->centre_h);
+    s->draw_lift = calloc((size_t)(count > 0 ? count : 1), sizeof *s->draw_lift);
     for (i = 0; s->twist_limit && s->radius && s->centre_h && i < count; i++) {
         prj_record mg;
         s->twist_limit[i] = 90.0f;
@@ -543,7 +549,10 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                 int32_t r = (int32_t)(mg.data[24] | (mg.data[25] << 8) | (mg.data[26] << 16) | ((uint32_t)mg.data[27] << 24));
                 int32_t hc = (int32_t)(mg.data[0] | (mg.data[1] << 8) | (mg.data[2] << 16) | ((uint32_t)mg.data[3] << 24));
                 if (r > 0 && r < 5000) s->radius[i] = (float)r;
-                if (hc > 0 && hc < 5000) s->centre_h[i] = (float)hc;
+                int air = actors[i].unit_class == 5 || actors[i].unit_class == 8;
+                /* aircraft and dropships: int[0] is their flying height (AIRCRFT* 30-100 m, DROPA 75 m) */
+                if (hc > 0 && (hc < 5000 || (air && hc <= 20000))) s->centre_h[i] = (float)hc;
+                if (air && s->draw_lift) s->draw_lift[i] = s->centre_h[i];
             }
             prj_record_free(&mg);
         }
@@ -574,6 +583,11 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         }
         s->height[i] = top > 100 ? top : 600;
     }
+    for (i = 0; s->draw_lift && i < count; i++)   /* hung from the centre from the start (msim_draw_y) */
+        if (s->draw_lift[i] != 0.0f) {
+            actors[i].mech.origin[1] = (int32_t)(s->units[i].y + s->draw_lift[i]);
+            mech3d_pose(&actors[i].mech, NULL, 0);
+        }
     if (prj_read_named(a, "BWD", scene, &rec) != PRJ_OK) return -1;
     mtbl_logic_init(&s->logic, rec.data, rec.size);
     prj_record_free(&rec);
@@ -1120,7 +1134,7 @@ static void ammo_booms(msim *s)
     int u;
     for (u = -1; u < s->actor_count; u++) {
         combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
-        const mech3d *m = u < 0 ? &s->pl_mech : &s->actors[u].mech;
+        const mech3d *m = u < 0 ? &s->pl_mech : msim_unit_hull(s, u);   /* its node objects: the drawn representation's */
         float o[3], p[3], h;
         int loc = cu->ammo_boom_loc;
         if (!loc) continue;
@@ -1346,6 +1360,7 @@ static void unit_messages(msim *s)
     }
 }
 
+static void collision_lods(msim *s);
 void msim_step(msim *s, int32_t dt_ms)
 {
     if (dt_ms <= 0) return;   /* a sub-millisecond frame: its time is carried to the next one (glview sim_ms) */
@@ -1457,7 +1472,7 @@ void msim_step(msim *s, int32_t dt_ms)
             s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y);
             combat_jets(&s->units[i], 0, dt, &s->rng);
             if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0; }
-            ac->mech.origin[1] = (int32_t)s->units[i].y;
+            ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
         if (!s->armed[i] || s->units[i].destroyed) continue;
         if (l == ac && m->event_cond == 7) {   /* the leader's tick: its posted sighting (0x10011c50 -> 0x10014ba0) */
@@ -1887,6 +1902,10 @@ void msim_step(msim *s, int32_t dt_ms)
                             hit = -s->bump_with[i] - 2; pushout = 1;
                         }
                         if (hit != -2) {
+                            /* the second try (0x10019a61, DOS 0x27109): the move to the end projected onto the sphere, tested
+                             * again - refused by rounding (msim_contact_retest), the velocity is doubled (0x102473d4, DOS
+                             * 0x2713b) and the projected end kept (the same object: a unit's id output is 0 both times) */
+                            const float vx2 = msim_contact_retest(p0, p1, c, rr) ? 2.0f : 1.0f;
                             touched = 1;
                             /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
                              * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
@@ -1903,6 +1922,7 @@ void msim_step(msim *s, int32_t dt_ms)
                                  * the next frame's move pushes it out (above) */
                                 float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
                                 if (bs < 1.0f) bs = 1.0f;
+                                bs *= vx2;
                                 (void)hl;
                                 ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
                                 s->units[i].ground = gnd;
@@ -1919,6 +1939,7 @@ void msim_step(msim *s, int32_t dt_ms)
                                 }
                                 {   /* bounced off / pushed out: to the sphere's surface, moving away along the normal (walking too) */
                                     if (bs < 1.0f) bs = 1.0f;
+                                    bs *= vx2;
                                     float rp = air || pushout ? rr + 1.0f : rr;   /* walking: onto the sphere itself (0x1000ba20) */
                                     float gx = c[0] + n[0] * rp, gz = c[2] + n[2] * rp;
                                     ac->mech.origin[0] = (int32_t)lrintf(gx); ac->mech.origin[2] = (int32_t)lrintf(gz);
@@ -2009,7 +2030,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 }
             }
             if (m->jet && s->on_effect) msim_jet_flames_at(s, &ac->mech, (float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2], ac->mech.heading);
-            ac->mech.origin[1] = (int32_t)s->units[i].y;
+            ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
         if (getenv("MW2_TEST_LEG") && s->now >= atoi(getenv("MW2_TEST_LEG")) && s->armed[i] && !s->units[i].loc_gone[7]) {   /* tests: the left leg shot off */
             int q; for (q = 0; q < 80 && !s->units[i].loc_gone[7]; q++) combat_hit(&s->units[i], 11, 8, 180.0f, &s->rng);
@@ -2070,6 +2091,7 @@ void msim_step(msim *s, int32_t dt_ms)
         ac->mech.pose_off = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? s->anim_pl[i].off : NULL;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
         mech3d_pose(&ac->mech, &ac->anim, ac->t);
     }
+    collision_lods(s);   /* the representations the next step's hit tests meet */
 }
 
 void msim_free(msim *s)
@@ -2081,7 +2103,7 @@ void msim_free(msim *s)
     free(s->msg_seen); s->msg_seen = NULL;
     free(s->twist_limit);
     free(s->minds);
-    free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
+    free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->draw_lift); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
     free(s->bld);
     free(s->inspected);
     free(s->ai_lock);
@@ -2104,6 +2126,11 @@ void msim_free(msim *s)
     s->twist_limit = NULL;
     if (s->pl_mech_ok) mech3d_free(&s->pl_mech);
     if (s->pl_pit_ok) mech3d_free(&s->pl_pit);
+    if (s->col_lod) {
+        int k, r;
+        for (k = 0; k < s->actor_count; k++) for (r = 0; r < 3; r++) if (s->col_lod_ok[k][r] == 1) mech3d_free(&s->col_lod[k][r]);
+    }
+    free(s->col_lod); s->col_lod = NULL; free(s->col_lod_ok); s->col_lod_ok = NULL; free(s->col_repr); s->col_repr = NULL;
     s->pl_pit_ok = 0;
     s->units = NULL;
     s->armed = NULL;
@@ -2211,6 +2238,86 @@ static void car_inc(msim *s, int off);
 
 /* the player's collision pieces: the cockpit set while the view is the cockpit (see msim_init), else the full model */
 static mech3d *player_hull(msim *s) { return s->pl_pit_ok && s->player_cockpit ? &s->pl_pit : &s->pl_mech; }
+/* an actor's pieces in the collision list: those of the representation it is drawn at (3Dfx 0x100267d0 picks it each frame,
+ * 0x10026330 -> 0x10026430 swaps the node objects: 0x10029a00 takes the old pieces out of the list, 0x1000db80 /
+ * 0x1000ffd0(6) puts the new ones in; DOS 0x37580 -> 0x37060 -> 0x37190 alike) */
+int msim_unit_repr(const msim *s, int k)
+{
+    return s->col_repr && k >= 0 && k < s->actor_count ? s->col_repr[k] : 0;
+}
+const mech3d *msim_unit_hull(const msim *s, int k)
+{
+    int r = msim_unit_repr(s, k);
+    return r > 0 && s->col_lod && s->col_lod_ok[k][r - 1] == 1 ? &s->col_lod[k][r - 1] : &s->actors[k].mech;
+}
+/* each step, after the posing: every actor's representation by the camera (cam_eye / cam_a0; unset, the player's eye at
+ * the 640 reference 2.0) - 3Dfx 0x100267d0: destroyed (+0x14 bit 2) 1; else the slant distance from the camera (0x1001d970)
+ * against cam_a0 x 3600 / 8500 / 22500 (0x10247694..9c): 0 / 1 / 2 / 3. DOS 0x37580 (msim_dos_int): the same thresholds
+ * (camera +0xb8 = zoom x half-width / (quality x 160), 0x3f1c1, 16.16) but at most one unit at 0 and few at 1: pass 1
+ * keeps the nearest by LEVEL distance (0x2ab60's second length) as a running minimum from t0 - each new lowest moves the
+ * earlier ones down (n1 -> n2 -> n3); pass 2: n1 with slant d < t0 -> 0; n2, or n3 with d < t1 -> 1; with n2 or n3 unset,
+ * d < t1 while fewer than 3 have 1 -> 1; else 2, or 3 from t2. The player (in the cockpit 4, player_hull) is not one of
+ * them here: outside the cockpit the port keeps its full model (the chase camera is nearer than t0) */
+static void collision_lods(msim *s)
+{
+    float cam[3], a0 = s->cam_ok && s->cam_a0 > 0 ? s->cam_a0 : 2.0f;
+    int k, n = s->actor_count, n1 = -1, n2 = -1, n3 = -1, cnt = 0;
+    float hmin = a0 * 3600.0f;
+    if (!s->col_repr || n <= 0) return;
+    if (s->cam_ok) memcpy(cam, s->cam_eye, sizeof cam);
+    else if (s->player_eye_ok) memcpy(cam, s->player_eye, sizeof cam);
+    else { cam[0] = s->player[0]; cam[1] = s->player_unit.y + s->player_centre_h; cam[2] = s->player[2]; }
+    for (k = 0; k < n; k++) {
+        const world_actor *ac = &s->actors[k];
+        float dx = (float)ac->mech.origin[0] - cam[0], dy = s->units[k].y - cam[1], dz = (float)ac->mech.origin[2] - cam[2];
+        float d = sqrtf(dx * dx + dy * dy + dz * dz), h = sqrtf(dx * dx + dz * dz);
+        int r;
+        if (s->armed[k] && s->units[k].destroyed && !s->units[k].intact_out) { s->col_repr[k] = 1; continue; }   /* +0x14 bit 2 */
+        if (s->no_col_lod) { s->col_repr[k] = 0; continue; }
+        if (!msim_dos_int) r = d < a0 * 3600.0f ? 0 : d < a0 * 8500.0f ? 1 : d < a0 * 22500.0f ? 2 : 3;
+        else {
+            r = -2;
+            if (h < hmin) { hmin = h; n3 = n2; n2 = n1; n1 = k; }
+        }
+        s->col_repr[k] = (unsigned char)(r < 0 ? 0xfe : r);
+    }
+    if (msim_dos_int && !s->no_col_lod) {
+        int32_t t0 = (int32_t)(a0 * 3600.0f), t1 = (int32_t)(a0 * 8500.0f), t2 = (int32_t)(a0 * 22500.0f);
+        for (k = 0; k < n; k++) {
+            const world_actor *ac = &s->actors[k];
+            float dx = (float)ac->mech.origin[0] - cam[0], dy = s->units[k].y - cam[1], dz = (float)ac->mech.origin[2] - cam[2];
+            int32_t d = (int32_t)sqrtf(dx * dx + dy * dy + dz * dz);
+            int r;
+            if (s->col_repr[k] != 0xfe) continue;
+            if (k == n1 && d < t0) r = 0;
+            else if (k == n2 || (k == n3 && d < t1)) { r = 1; cnt++; }
+            else if ((n2 < 0 || n3 < 0) && d < t1 && cnt < 3) { r = 1; cnt++; }
+            else r = d >= t2 ? 3 : 2;
+            s->col_repr[k] = (unsigned char)r;
+        }
+    }
+    for (k = 0; k < n && s->col_lod; k++) {   /* load (once) and pose the representation in use, on the full skeleton */
+        world_actor *ac = &s->actors[k];
+        int r = s->col_repr[k];
+        while (r > 0) {
+            if (!s->col_lod_ok[k][r - 1] && s->arch) {
+                mech3d *m = &s->col_lod[k][r - 1];
+                s->col_lod_ok[k][r - 1] = mech3d_load(s->arch, ac->skel, r, m) == 0 && m->part_count > 0 ? 1 : 2;
+                if (s->col_lod_ok[k][r - 1] == 1) mech3d_use_skeleton(m, &ac->mech);
+                else mech3d_free(m);
+            }
+            if (s->col_lod_ok[k][r - 1] == 1) break;
+            r--;
+        }
+        s->col_repr[k] = (unsigned char)r;
+        if (r > 0) {
+            mech3d *m = &s->col_lod[k][r - 1];
+            memcpy(m->origin, ac->mech.origin, sizeof m->origin);
+            m->heading = ac->mech.heading; m->twist = ac->mech.twist; m->pose_off = ac->mech.pose_off;
+            mech3d_pose(m, (const anim_set *)ac->mech.pose_anim, ac->mech.pose_t);
+        }
+    }
+}
 /* the engine's tick clock (DAT_1024ab44) */
 static int32_t sim_ticks(const msim *s) { return (int32_t)((int64_t)s->now * 182 / 1000); }
 /* 0x1003b740: an integer servo step - the 32-bit product (imul), divided toward zero (idiv), snapped to the target
@@ -2265,7 +2372,7 @@ static int aim_ray(msim *s, int self, const float from[3], const float dir[3], f
             rr = s->player_radius > 1200.0f ? s->player_radius : 1200.0f;
         } else {
             if (!s->armed[q] || s->units[q].destroyed) continue;
-            mq = &s->actors[q].mech;
+            mq = (mech3d *)msim_unit_hull(s, q);
             c[0] = (float)mq->origin[0] - from[0];
             c[1] = s->units[q].y + (s->centre_h ? s->centre_h[q] : s->height[q] * 0.5f) - from[1];
             c[2] = (float)mq->origin[2] - from[2];
@@ -2534,6 +2641,31 @@ int msim_aim_thing(const msim *s, float yaw_deg, float cone_deg, float *distance
     return best;
 }
 
+/* DOS MW2.EXE: at the load every thing record's +0x10 = its object's model +0x40 (0x4fd5f..0x4fdad: thing +4 -> 0x36790
+ * -> +0x6c -> +0x40), the model's bounding radius from 0x37f60: the centre of the vertex box ((min + max) >> 1, integers),
+ * the farthest vertex from it, its square root truncated (0x38086 fsqrt, 0x5c3c2 frndint with RC = chop, fistpl) - of the
+ * vertices as loaded (OBJ scale applied, 0x4fef0); cm */
+static int thing_model_radius(const mech3d_part *p)
+{
+    const wtb_object *o;
+    int32_t mn[3], mx[3], c[3];
+    double best = 0;
+    int v, j;
+    if (p->model.object_count < 1 || p->model.objects[0].vert_count < 1) return 0;
+    o = &p->model.objects[0];
+    mn[0] = mx[0] = o->verts[0].x; mn[1] = mx[1] = o->verts[0].y; mn[2] = mx[2] = o->verts[0].z;
+    for (v = 1; v < o->vert_count; v++) {
+        const int32_t q[3] = {o->verts[v].x, o->verts[v].y, o->verts[v].z};
+        for (j = 0; j < 3; j++) { if (q[j] < mn[j]) mn[j] = q[j]; if (q[j] > mx[j]) mx[j] = q[j]; }
+    }
+    for (j = 0; j < 3; j++) c[j] = (mn[j] + mx[j]) >> 1;
+    for (v = 0; v < o->vert_count; v++) {
+        double dx = (double)(o->verts[v].x - c[0]), dy = (double)(o->verts[v].y - c[1]), dz = (double)(o->verts[v].z - c[2]);
+        if (dx * dx + dy * dy + dz * dz > best) best = dx * dx + dy * dy + dz * dz;
+    }
+    return (int)sqrt(best);
+}
+
 int msim_inspect(msim *s, int actor, int thing)
 {
     float dx, dz, r;
@@ -2544,7 +2676,7 @@ int msim_inspect(msim *s, int actor, int thing)
         if (s->inspected[actor]) return 3;                                 /* inspected before (DAT_1024c8ac = 3) */
         dx = (float)s->actors[actor].mech.origin[0] - s->player[0]; dz = (float)s->actors[actor].mech.origin[2] - s->player[2];
         r = (s->radius ? s->radius[actor] : 450.0f) + 20000.0f;           /* the unit's radius +0xe8 (MGEO int[6]) + 200 m (0x102474d0) */
-        if (dx * dx + dz * dz > r * r) return 2;
+        if (dx * dx + dz * dz >= r * r) return 2;                          /* inspected only while distance < radius + 200 m */
         s->inspected[actor] = 1;
         return 1;
     }
@@ -2554,7 +2686,10 @@ int msim_inspect(msim *s, int actor, int thing)
         dx = (g->mn[0] + g->mx[0]) * 0.5f - s->player[0]; dz = (g->mn[2] + g->mx[2]) * 0.5f - s->player[2];
         r = 20000.0f;   /* the thing record's +0x10 + 200 m: the 3Dfx DLL never sets +0x10 (0; the loader 0x1003eb5c and the clear
                          * 0x10018920 leave it), so 200 m from its point; DOS sets it to the model's bounding radius (0x4fdad) */
-        if (dx * dx + dz * dz > r * r) return 2;
+        if (msim_dos_int && s->world && g->intact >= 0 && g->intact < s->world->part_count)
+            r += (float)thing_model_radius(&s->world->parts[g->intact]);   /* DOS 0x2a8d2: +0x10 + 0x4e20 against +0xc0 */
+        if (getenv("MW2_STATE_DUMP")) printf("INSPECT_THING d=%.0f r=%.0f\n", (double)sqrtf(dx * dx + dz * dz), (double)r);   /* TEST hook (tests/sequences) */
+        if (dx * dx + dz * dz >= r * r) return 2;   /* DOS 0x2a8e3: out of range when radius + 200 m <= the distance */
         g->inspected = 1;
         return 1;
     }
@@ -2605,7 +2740,7 @@ static void shot_units(msim *s, int owner, const float o[3], const float dv[3], 
         float cx, cz, ex, ez, lx, lz, len2, u, px, pz;
         if (i == owner) continue;
         if (i == -1) { if (!s->pl_mech_ok || s->player_unit.destroyed) continue; m = player_hull(s); }
-        else { if (!s->armed[i]) continue; m = &s->actors[i].mech; }
+        else { if (!s->armed[i]) continue; m = msim_unit_hull(s, i); }
         cx = (float)m->origin[0]; cz = (float)m->origin[2];
         /* coarse: horizontal distance from the segment to the unit < 20 m */
         ex = dv[0]; ez = dv[2]; lx = cx - o[0]; lz = cz - o[2];
@@ -3953,6 +4088,11 @@ void msim_jet_drag(float thrust, float top_cm_s, float *k, float *B)
     *B = (float)((u12 * 65536) / L) / 65536.0f;
 }
 float msim_ground(const msim *s, float x, float z, float y) { return msim_ground_n(s, x, z, y, NULL); }
+float msim_draw_y(const msim *s, int i)
+{
+    if (i < 0 || i >= s->actor_count) return 0.0f;
+    return s->units[i].y + (s->draw_lift ? s->draw_lift[i] : 0.0f);
+}
 
 int msim_wall_at(const msim *s, float x, float z, float n[3])
 {
@@ -4160,6 +4300,51 @@ int msim_unit_inside(const msim *s, int self, int other, const float p1[3], floa
     *rr = r1 + r2; c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
     contact_normal(p1, q, d, n);
     return 1;
+}
+
+/* 0x10030330 (3D) / DOS 0x200d0: the length estimate (4 max + mid + min) / 4 - x87 extended in the DLL, >> 2 in DOS */
+static long double approx_len3(float a, float b, float c)
+{
+    float x = fabsf(a), y = fabsf(b), z = fabsf(c), t;
+    if (x < z) { t = x; x = z; z = t; }
+    if (x < y) { t = x; x = y; y = t; }
+    return ((long double)x * 4.0L + (long double)z + (long double)y) * 0.25L;
+}
+static int32_t approx_len3_dos(int32_t a, int32_t b, int32_t c)
+{
+    int32_t x = a < 0 ? -a : a, y = b < 0 ? -b : b, z = c < 0 ? -c : c, t;
+    if (x < y) { t = x; x = y; y = t; }
+    if (x < z) { t = x; x = z; z = t; }
+    return (x * 4 + y + z) >> 2;
+}
+int msim_contact_retest(const float p0[3], const float p1[3], const float q[3], float rr)
+{
+    int k;
+    if (msim_dos_int) {
+        /* DOS 0x200d0 on whole cm: n = d << 16 / est (idiv, toward 0); the end = q + (n x R) >> 16 rounded at bit 15; the
+         * second try (DOS 0x26990) tests the same end: est(end - q) < R refuses it */
+        int32_t d[3], e[3], R = (int32_t)lrintf(rr), L;
+        for (k = 0; k < 3; k++) d[k] = (int32_t)lrintf(p1[k]) - (int32_t)lrintf(q[k]);
+        L = approx_len3_dos(d[0], d[1], d[2]);
+        for (k = 0; k < 3; k++) {
+            int64_t n16 = L == 0 ? (k == 2 ? 0x10000 : 0) : ((int64_t)d[k] * 65536) / L, pr = n16 * R;
+            e[k] = (int32_t)(pr >> 16) + (int32_t)((pr >> 15) & 1);
+        }
+        return approx_len3_dos(e[0], e[1], e[2]) < R;
+    } else {
+        /* 0x1000ba20 in floats: n = d / est(d) (float), the end = n x R + q (float); 0x1000b5e0 rebuilds the second try's
+         * end as old + (end - old) (0x1000b5e0: local_78 = delta + old), and 0x1000ba20 refuses it when est(end - q) < R */
+        float d[3], n[3], e[3], L;
+        for (k = 0; k < 3; k++) d[k] = p1[k] - q[k];
+        L = (float)approx_len3(d[0], d[1], d[2]);
+        for (k = 0; k < 3; k++) {
+            float t, end, dl;
+            n[k] = L <= 1e-7f ? (k == 2 ? 1.0f : 0.0f) : (float)((long double)d[k] / (long double)L);
+            t = n[k] * rr; end = t + q[k]; dl = end - p0[k]; end = dl + p0[k];
+            e[k] = end - q[k];
+        }
+        return approx_len3(e[0], e[1], e[2]) < (long double)rr;
+    }
 }
 
 void msim_block_normal(float n[3]) { n[0] = g_block_n[0]; n[1] = g_block_n[1]; n[2] = g_block_n[2]; }
@@ -4595,11 +4780,11 @@ static int probe_engine_ex(const msim *s, int self, const float p0[3], const flo
             int q;
             if (k == self) continue;
             if (k < 0) { if (!s->pl_mech_ok) continue; mq = s->pl_pit_ok && s->player_cockpit ? &s->pl_pit : &s->pl_mech; }
-            else mq = &s->actors[k].mech;
+            else mq = msim_unit_hull(s, k);
             for (q = 0; q < mq->part_count; q++) {
                 const mech3d_part *pp = &mq->parts[q];
                 float sph[4], e, hl;
-                if (pp->hidden || !piece_sphere(pp, sph)) continue;
+                if (pp->hidden || !pp->objl || !piece_sphere(pp, sph)) continue;   /* no OBJL entry: out of the list (mech3d.h) */
                 if (dos && dos_broad_reject(sph, p0, p1)) continue;
                 e = eseg_sphere(sph, &g0);
                 hl = e > 0.0f ? e : g0.len;   /* 0x100107b0: the end stays when the entry is 0 */

@@ -11,7 +11,7 @@
  *                keyboard's: the plain cursor-pad names are the keypad (LeftArrow = keypad 4, Home = keypad 7,
  *                Insert = keypad 0, Delete = keypad .), "Grey" ones the separate cursor block and the keypad's grey
  *                operators (GreySlash, GreyStar, GreyPlus, GreyMinus).
- * Only keyboard conditions are evaluated so far; joystick / mouse lines make a block never match (NOT YET).
+ * Stick and mouse lines are evaluated too (im_held: buttons and hat directions; im_axis: the axes - see g_im_dev).
  */
 #ifndef MW2_INPUTMAP_H
 #define MW2_INPUTMAP_H

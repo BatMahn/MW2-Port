@@ -132,7 +132,7 @@ def install_dir(name, mech):
 
 def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), env=None, mech='timbrwlf/tbr00std',
         mission='YELLSCN1', shots=(), dump='/0.25', nostart=False, size=None, edition='enhanced', files=None, dos_look=False,
-        look3dfx=False):
+        look3dfx=False, lookati=False):
     """One headless mission run of `secs` autopilot seconds (1/30 s frames). throttle -9 / twist -999: the keys drive
     them; keys: [(t, 'key')] presses; hold: [(t0, t1, 'key')]; shots: [(t, 'label')] -> Result.shots[label] = ppm path"""
     os.makedirs(os.path.join(OUT, name), exist_ok=True)
@@ -174,6 +174,11 @@ def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), en
     if look3dfx:   # RENDERER = 3DFX: the 3Dfx archive's own textures (portcfg_edition: textures = models, kind 3dfx)
         cmd = [GLVIEW, os.path.join(GAME, '3d', 'models.prj'), os.path.join(GAME, '3d', 'models.prj'), '3dfx', '@', mission]
         e['MW2_EDITION'] = '3dfx'
+    if lookati:   # RENDERER = ATI RAGE: the ATi archive for models, data and textures, its own sky file, no fog (portcfg_edition)
+        cmd = [GLVIEW, os.path.join(GAME, '3d', 'textures.prj'), os.path.join(GAME, '3d', 'textures.prj'), 'ati', '@', mission]
+        e['MW2_EDITION'] = 'ati'
+        e['MW2_SKYGND'] = os.path.join(GAME, '3d', 'ati', 'skygnd.par')
+        e.pop('MW2_SKYGND_FOG', None)
     t0 = time.time()
     try:
         p = subprocess.run(cmd, env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1538,8 +1543,15 @@ def eject_view_distance(c):
     sp = spread(r.shots['high']) if os.path.exists(r.shots['high']) else -1
     c(0 <= sp <= 12, '7 s after ejecting: the flat ground fill only (DOSBox: 125, 109, 73)', 'colour spread %d' % sp)
     r2 = c.run('_nocull', secs=UP + 8, keys=[(UP, 'ctrl+alt+e')], shots=shots, dos_look=True, size='320x200', env={'MW2_NO_FAR_CULL': '1'})
-    sp2 = spread(r2.shots['high']) if os.path.exists(r2.shots['high']) else -1
-    c(sp2 > 12, 'without the cull the terrain still shows (the check sees the difference)', 'colour spread %d' % sp2)
+    def off_fill(path):   # pixels not the flat ground fill (125, 109, 73)
+        w, h, px = ppm(path)
+        import numpy as np
+        a = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[int(h * 0.15):int(h * 0.85)].astype(np.int32)
+        return int((a != np.array([125, 109, 73])).any(axis=2).sum())
+    # (the far terrain is fogged nearly to the fill colour: the DOS fog per polygon, dos_fog_polygon_key - so the control
+    # counts the pixels off the fill rather than the colour spread)
+    sp2 = off_fill(r2.shots['high']) if os.path.exists(r2.shots['high']) else -1
+    c(sp2 > 0, 'without the cull the terrain still shows (the check sees the difference)', 'pixels off the fill %d' % sp2)
     o = next((s for s in r.states if s.get('over') == 1), None)
     t = r.tag('over')
     c(o is not None and t is not None and t['t'] - o['t'] >= 1.0, 'DOS: the exit fade runs before leaving',
@@ -2019,7 +2031,8 @@ def tnj1_slide_round_instructor(c):
 def tnj1_slide(c, fps):
     """TNJ1's slide round the standing instructor at `fps` frames a second (MW2_TEST_FPS; 30 = the default)"""
     r = c.run(suffix='' if fps == 30 else '_%d' % fps, secs=22, throttle=1, mission='TNJ1SCN1', dump='/0.25',
-              env={'MW2_TEST_FPS': fps} if fps != 30 else None)
+              env={'MW2_TEST_FPS': fps} if fps != 30 else None, dos_look=True)   # the DOS edition: DOSBox's (agent GC: the
+    # second try's x 2 is by edition, msim_contact_retest - the 3D editions' slide is shorter, contact_retest_by_edition)
     if fps != 30:
         c0 = c
         c = lambda cond, what, detail='': c0(cond, '%d fps: %s' % (fps, what), detail)
@@ -2170,7 +2183,10 @@ def aqua_time_to_death(c):
       '%s' % ['%.0f' % d for d in far])
     c(all(22.0 <= t <= 90.0 for t in ttd), 'each seed dead within DOSBox\'s range (game time 28.6-87.1 s, 20 timed runs)', '%s' % ttd)
     st = sorted(ttd)
-    c(36.0 <= (st[2] + st[3]) / 2.0 <= 52.0, 'the median of seeds 1-6 near DOSBox\'s (median 45 of 12 runs, 41 of 8; port seeds 1-24 43)', '%s' % ttd)
+    # 2026-10-21: with the DOS nav steering in whole degrees (ai_nav_turn, DOS 0x229e0) the attackers approach on lines
+    # 0-1 degree right of the float ones: port seeds 1-48 median 37.5, mean 44.2 (float steering: seeds 1-41 median 44,
+    # mean 44.9); seeds 1-6 median 34
+    c(32.0 <= (st[2] + st[3]) / 2.0 <= 52.0, 'the median of seeds 1-6 near DOSBox\'s (median 45 of 12 runs, 41 of 8; port seeds 1-48 37.5)', '%s' % ttd)
     c(sum(1 for t in ttd if t <= 30.0) <= 2, 'few early deaths (DOSBox 2 of 20 by 30 s)', '%s' % ttd)
     c(all(u <= 6 and u < m for u, m in uac),
       'the Stormcrow fires its weapons in turn: few UAC/20 rounds by 45 s (DOSBox 0-4 sounds), lasers outnumber them',
@@ -3584,7 +3600,9 @@ def red_flash_hud(c):
         if dos:
             c(g1 < g0 * 0.5, 'DOS: the HUD fades toward red', 'green px %d -> %d' % (g0, g1))
         else:
-            c(g0 > 300 and g1 > g0 * 0.85, '3D: the HUD keeps its colours', 'green px %d -> %d' % (g0, g1))
+            # (0.8: the weapon list itself loses ~500 green px between the two frames - recycling / hit states, not a
+            # fade - and the nav arrows are red now (DOSBox), 34 px less green: 0.8515 -> 0.85 had sat on the old 0.85)
+            c(g0 > 300 and g1 > g0 * 0.8, '3D: the HUD keeps its colours', 'green px %d -> %d' % (g0, g1))
 
 
 @sequence
@@ -4060,16 +4078,28 @@ def shot_hits_piece_spheres(c):
     0x10029060) as the hit - no polygon test; the nearest piece wins and its location (+0x16, OBJL) takes the damage
     (0x100171d0). YELLSCN1's Nova (actor 0, standing; its polygons end 7.7 m up; hips / torso spheres reach 9.6 m):
     a step 9 and 9.5 m above its feet still strikes it, on the centre torso group (3); 10 m up passes over; 5 m up strikes
-    it (the port had tested the polygons: nothing above 7.7 m)"""
+    it (the port had tested the polygons: nothing above 7.7 m). Agent GC: the pieces are those of the level of detail the
+    Nova is DRAWN at (0x100267d0 -> 0x10026330 -> 0x10026430 swaps them in the collision list): seen from 30 m (MW2_TEST_AIM)
+    its full model (repr 0) as above (the player 30 m north); from the start, 1.1 km off, repr 3 (NV4_*: the torso's sphere 2.6 m against NV1's 3.6)
+    - 5 and 9 m up meet the right arm's sphere (5), 9.5 m the torso, 10 m passes over"""
     seg = ','.join('9:0:%d:0' % dy for dy in (500, 900, 950, 1000))
-    r = c.run(secs=10, env={'MW2_TEST_SHOTSEG': seg, 'MW2_TEST_IMMOBILE': '0:0'})
-    res = {int(m.group(4)): (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-           for m in re.finditer(r'^testshot (\d) unit (-?\d+) loc (\d+) z -?\d+ \(dy (\d+) dx 0\)', r.out, re.M)}
-    c(len(res) == 4, 'four test steps', str(res))
-    c(res.get(500, (0,))[0] == 1 and res[500][1] == 0, '5 m up: the Nova struck', str(res.get(500)))
-    c(res.get(900) == (1, 0, 3) and res.get(950) == (1, 0, 3), '9 / 9.5 m up (over its polygons): its hips / torso sphere, '
-      'the centre torso', '%s %s' % (res.get(900), res.get(950)))
-    c(res.get(1000, (1,))[0] == 0, '10 m up: passes over', str(res.get(1000)))
+    for near in (True, False):
+        env = {'MW2_TEST_SHOTSEG': seg, 'MW2_TEST_IMMOBILE': '0:0'}
+        if near:
+            env['MW2_TEST_AIM'] = '0,-3000,500'   # 30 m north: the step from the south meets the Nova first
+        r = c.run('_near' if near else '_far', secs=10, env=env)
+        res = {int(m.group(4)): (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(5)))
+               for m in re.finditer(r'^testshot (\d) unit (-?\d+) loc (\d+) z -?\d+ \(dy (\d+) dx 0\) repr (\d)', r.out, re.M)}
+        tag = 'near (repr 0)' if near else 'far (repr 3)'
+        c(len(res) == 4 and all(v[3] == (0 if near else 3) for v in res.values()), tag + ': four test steps, the Nova at that level of detail', str(res))
+        c(res.get(500, (0,))[0] == 1 and res[500][1] == 0, tag + ': 5 m up: the Nova struck', str(res.get(500)))
+        if near:
+            c(res.get(900, ())[:3] == (1, 0, 3) and res.get(950, ())[:3] == (1, 0, 3), tag + ': 9 / 9.5 m up (over its polygons): its hips / '
+              'torso sphere, the centre torso', '%s %s' % (res.get(900), res.get(950)))
+        else:
+            c(res.get(900, ())[:3] == (1, 0, 5) and res.get(950, ())[:3] == (1, 0, 3), tag + ': 9 m up the right arm (NV4_RARM), 9.5 m the '
+              'torso', '%s %s' % (res.get(900), res.get(950)))
+        c(res.get(1000, (1, 0))[1] != 0, tag + ': 10 m up: passes over the Nova (near: on to the player, 30 m on)', str(res.get(1000)))
 
 
 @sequence
@@ -4081,8 +4111,10 @@ def tnj6_slide_round_instructor(c):
     (12000) - the "~5 s" of session 15 was a 40 fps reading; the port's 30 fps reference: ~10.4 s. The second try's
     velocity x 2 (0x10019a61, 0x102473d4) is not the gap: the projection lands ON the sphere, so the retest is decided by
     rounding (DOS 0x200d0's integers: inside ~12 % of the time; the 3D editions' floats ~half) - modelled at the 3D
-    editions' rate it made TNJ6 6.9 s and TNJ1 6.3 s against DOSBox's 8 s"""
-    r = c.run(secs=24, throttle=1, mission='TNJ6SCN1', dump='/0.25')
+    editions' rate it made TNJ6 6.9 s and TNJ1 6.3 s against DOSBox's 8 s. Agent GC: modelled by edition
+    (msim_contact_retest, the engines' own arithmetic): DOSBox is the DOS edition, so this runs the DOS edition (its ~12 %:
+    ~9.3 s); the 3D editions' ~half is checked in contact_retest_by_edition"""
+    r = c.run(secs=24, throttle=1, mission='TNJ6SCN1', dump='/0.25', dos_look=True)
     slow = [s for s in r.span(8.0, 24.0) if s['kmh'] < 30]
     c(slow and 9.0 < slow[0]['t'] < 10.5, 'stopped by the instructor at ~9.5 s', str([(s['t'], round(s['kmh'])) for s in r.span(9.0, 10.5)]))
     if not slow:
@@ -5033,6 +5065,1285 @@ def tab_in_mission_no_reload(c):
     c(a and b and abs(b.get('x', 0) - a.get('x', 0)) + abs(b.get('z', 0) - a.get('z', 0)) > 500, 'the player keeps walking (not reset to the start)',
       '%s,%s -> %s,%s' % (a and a.get('x'), a and a.get('z'), b and b.get('x'), b and b.get('z')))
 
+@sequence
+def dropship_flies_at_centre(c):
+    """aircraft (GP class 5) and dropships (class 8) hang from their centre - the feet + MGEO int[0] (DROPA 7500, AIRCRFTX
+    7500): DOSBox TAUPSCN1 shows the Wolf Dropship about 75 m up from the start, crossing over the player and flying away
+    high (the port drew it on the ground, into the hill); the repair vehicle (class 2) stays on its feet"""
+    r = c.run(secs=30, throttle=0, mission='TAUPSCN1', dump='/1', env={'MW2_TEST_WATCH': '0.1:2'})
+    st = [s for s in r.states if 'a_draw' in s]
+    c(len(st) > 20, 'dropship watched', str(len(st)))
+    lift = [s['a_draw'] - s['a_y'] for s in st]
+    c(lift and all(abs(d - 7500) <= 1 for d in lift), 'drawn 75 m over its feet', str(lift[:5]))
+    moved = [s for s in st if s['a_z'] < 40000]
+    c(moved, 'it flies off (towards -2000 m, -2000 m)', str([(s['t'], s['a_x'], s['a_z']) for s in st[-2:]]))
+    r2 = c.run(suffix='veh', secs=3, throttle=0, mission='TAUPSCN1', dump='/1', env={'MW2_TEST_WATCH': '0.1:1'})
+    st2 = [s for s in r2.states if 'a_draw' in s]
+    c(st2 and all(abs(s['a_draw'] - s['a_y']) <= 1 for s in st2), 'the repair vehicle stands on its feet',
+      str([(s['a_draw'], s['a_y']) for s in st2[:3]]))
+
+
+
+def _shell_env(d, **kw):
+    e = dict(os.environ, SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'),
+             MW2_BITMAP_TEXT='1')
+    e.update({k: str(v) for k, v in kw.items()})
+    return e
+
+
+@sequence
+def shell_global_menu(c):
+    """agent SH: the global menu (MW2SHELL FUN_000258e0): shell image 7 at (198,116), six items centred on x 320 at y 157 +
+    33 k, grey font 0x1f / the selected white 0x1e; on opening (and after a sub-screen) item 0 unless the pointer is on
+    an item (boxes x 198..441, y item -16..+16 inclusive); keypad 8 / 4 previous, 6 / 2 next (wrapping); Enter picks;
+    a left press off the items, a right press or Esc closes; COMBAT VARIABLES / COCKPIT CONTROLS / HALL OF HONOR /
+    THE KESHIK return to the menu, FLEE TO DOS's No too; NEW ALLEGIANCE -> 8. DOSBox: docs/reference/dos_global_menu.png
+    (opened with the pointer at the centre: COCKPIT CONTROLS), dos_global_menu_after_cv.png (back from Combat Variables
+    with the pointer on its item)"""
+    from PIL import Image
+    import numpy as np
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    d = os.path.join(OUT, 'shell_global_menu')
+    os.makedirs(d, exist_ok=True)
+    ref = os.path.join(REPO, 'docs', 'reference')
+
+    def menu(name, events, mouse='600,30'):
+        out = os.path.join(d, name + '.ppm')
+        e = _shell_env(d, MW2_SHELL_SCREEN=8, MW2_SHELL_FRAMES=2, MW2_SHELL_MOUSE=mouse, MW2_SHELL_MENU_EVENTS=events, MW2_SHELL_SHOT=out)
+        r = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120)
+        return [l[6:] for l in r.stdout.splitlines() if l.startswith('menu: ')], out
+
+    def same(out, refn, mask=None):
+        if not os.path.exists(out):
+            return -1
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
+        diff = np.abs(a - b).max(2) > 6
+        if mask:
+            x0, y0, x1, y1 = mask
+            diff[y0:y1, x0:x1] = False   # the DOS mouse pointer
+        return int(diff[116:364, 198:442].sum())
+
+    log, out = menu('open', '', mouse='320,239')
+    c(log[:1] == ['open sel=2'], 'opened with the pointer on COCKPIT CONTROLS: selected', str(log))
+    n = same(out, 'dos_global_menu.png')
+    c(n == 0, 'panel and items match DOSBox', '%d px differ' % n)
+    log, out = menu('after_cv', 'm320,190;l320,190')
+    c(log == ['open sel=0', 'choose 1', 'open sel=1', 'sel=1 result=-1'], 'COMBAT VARIABLES returns to the menu, the item under the pointer selected', str(log))
+    n = same(out, 'dos_global_menu_after_cv.png', (318, 188, 352, 218))
+    c(n == 0, 'after Combat Variables: matches DOSBox', '%d px differ' % n)
+    for ev, want, what in (('kkp2;kkp6;kkp8', 'sel=1 result=-1', 'keypad 2 / 6 next, 8 previous'),
+                           ('kkp4', 'sel=5 result=-1', 'keypad 4 wraps to FLEE TO DOS'),
+                           ('kdown;kright;kup;kleft;kleft', 'sel=5 result=-1', 'the grey arrows too (port)'),
+                           ('m320,173', 'sel=0 result=-1', 'y 173 is still item 0 (inclusive box)'),
+                           ('m320,174', 'sel=1 result=-1', 'y 174 is item 1'),
+                           ('m320,250;m600,30', 'sel=3 result=-1', 'the pointer off the items keeps the selection'),
+                           ('l320,125', 'sel=0 result=-1 closed', 'a left press off the items closes'),
+                           ('r', 'sel=0 result=-1 closed', 'a right press closes'),
+                           ('kesc', 'sel=0 result=-1 closed', 'Esc closes'),
+                           ('kx', 'sel=0 result=-1', 'another key does nothing'),
+                           ('kenter', 'sel=0 result=8', 'Enter on NEW ALLEGIANCE: the title (8)')):
+        log, _ = menu('ev', ev)
+        c(log[-1:] == [want], what, '%s -> %s' % (ev, log))
+    log, _ = menu('hall', 'kkp2;kkp2;kkp2;kenter')
+    c(log == ['open sel=0', 'choose 3', 'open sel=0', 'sel=0 result=-1'], 'HALL OF HONOR returns to the menu with item 0', str(log))
+    log, _ = menu('flee', 'l320,322')
+    c(log == ['open sel=0', 'choose 5', 'open sel=5', 'sel=5 result=-1'], "FLEE TO DOS: the dialog's No (default) returns to the menu", str(log))
+
+
+@sequence
+def shell_hall_of_honor(c):
+    """agent SH: the Hall of Honor (MW2SHELL FUN_00028250): headings at x 0, 125, 200, 325, 400, 460, 520 (y 150, font
+    0x1c), rows from y 182 every 16 in font 0x20, "----" with no mission done - pixel-identical to DOSBox
+    (docs/reference/dos_hall_of_honor.png); all 20 records sorted by rank title, honor, missions done (FUN_000281e0) and
+    the used ones among the first eight shown (a deleted record keeps its place)"""
+    from PIL import Image
+    import numpy as np
+    import struct
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    d = os.path.join(OUT, 'shell_hall_of_honor')
+    os.makedirs(d, exist_ok=True)
+    out = os.path.join(d, 'hoh.ppm')
+    subprocess.run([shell, mech2], env=_shell_env(d, MW2_SHELL_HOH=1, MW2_SHELL_SHOT=out), capture_output=True, timeout=120)
+    if not os.path.exists(out):
+        c(False, 'rendered')
+        return
+    a = np.array(Image.open(out).convert('RGB')).astype(int)
+    b = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_hall_of_honor.png')).convert('RGB')).astype(int)
+    n = int((np.abs(a - b).max(2) > 6)[100:340].sum())   # above: the logo clip's frame; below: the DOS pointer
+    c(n == 0, 'headings and the install pilot\'s row match DOSBox', '%d px differ' % n)
+    # a registry of our own: a game folder of links to MECH2 with its own MW2REG.CFG
+    g = os.path.join(d, 'game')
+    if os.path.isdir(g):
+        shutil.rmtree(g)
+    os.makedirs(g)
+    for f in os.listdir(mech2):
+        if f.upper() != 'MW2REG.CFG':
+            os.symlink(os.path.join(mech2, f), os.path.join(g, f))
+
+    def rec(used, clan, done, title, honor, name):
+        return struct.pack('<10i16si', used, 0, clan, done, title, honor, 0, 0, 0, 0, name.encode(), 0)
+
+    def rows(recs):
+        with open(os.path.join(g, 'MW2REG.CFG'), 'wb') as f:
+            for r in recs + [rec(0, 0, 0, 0, 0, '')] * (20 - len(recs)):
+                f.write(r)
+        r = subprocess.run([os.path.join(os.path.dirname(GLVIEW), 'mw2shell'), g], env=_shell_env(d, MW2_SHELL_HOH=1, MW2_SHELL_SHOT=out),
+                           capture_output=True, text=True, timeout=120)
+        return [l[5:] for l in r.stdout.splitlines() if l.startswith('hoh: ')]
+    got = rows([rec(1, 0, 2, 0, 1500, 'ALPHA'), rec(1, 1, 5, 1, 1000, 'BRAVO'), rec(0, 0, 9, 5, 9000, 'GONE'), rec(1, 0, 3, 0, 1500, 'CHARLIE')])
+    c(got == ['BRAVO', 'CHARLIE', 'ALPHA'], 'rank title first, then honor, then missions done', str(got))
+    got = rows([rec(0, 0, 9, 3, 5000, 'X%d' % k) for k in range(8)] + [rec(1, 0, 1, 0, 1200, 'LAST')])
+    c(got == [], 'eight deleted records ahead of the only pilot: no rows (as the original)', str(got))
+
+
+
+@sequence
+def shell_button_clips_and_labels(c):
+    """agent SH: the Star Configuration's button clips (MW2SHELL 0x3b8f6..): MECH LAB's clip shown while the pointer is on
+    it (context 2), a formation / starmate button's clip while the left button is held on it; hover labels without '~'
+    in the original's tables drawn from their x (FUN_0003c2c0) - the Star Configuration's NEXT FORMATION / DELETE
+    STARMATE, the clan hall's CADET TRAINING. DOSBox references docs/reference/dos_ia_star_config_*.png,
+    dos_wolf_hall_cadet_label.png (compared outside the DOS mouse pointer)"""
+    from PIL import Image
+    import numpy as np
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    d = os.path.join(OUT, 'shell_button_clips_and_labels')
+    os.makedirs(d, exist_ok=True)
+    ref = os.path.join(REPO, 'docs', 'reference')
+    for name, screen, clan, mouse, held, refn, region, ptr in (
+            ('lab_hover', 13, 2, '440,440', 0, 'dos_ia_star_config_lab_hover.png', (190, 412, 480, 480), (438, 438, 472, 468)),
+            ('next_held', 13, 2, '280,445', 1, 'dos_ia_star_config_next_held.png', (190, 412, 480, 480), (278, 443, 312, 473)),
+            ('delete_held', 13, 2, '215,445', 1, 'dos_ia_star_config_delete_held.png', (190, 412, 480, 480), (213, 443, 247, 473)),
+            ('hall_cadet', 1, 0, '210,340', 0, 'dos_wolf_hall_cadet_label.png', (190, 320, 330, 345), (208, 338, 240, 365))):
+        out = os.path.join(d, name + '.ppm')
+        e = _shell_env(d, MW2_SHELL_SCREEN=screen, MW2_SHELL_CLAN=clan, MW2_SHELL_FRAMES=2, MW2_SHELL_MOUSE=mouse, MW2_SHELL_NOREG=1,
+                       MW2_SHELL_SHOT=out)
+        if held:
+            e['MW2_SC_HELD'] = '1'
+        subprocess.run([shell, mech2], env=e, capture_output=True, timeout=120)
+        if not os.path.exists(out):
+            c(False, '%s rendered' % name)
+            continue
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
+        x0, y0, x1, y1 = region
+        if screen == 1:   # the hall's clips move: compare the label's bright pixels only
+            diff = (a.min(2) > 150) != (b.min(2) > 150)
+        else:
+            diff = np.abs(a - b).max(2) > 6
+        px0, py0, px1, py1 = ptr
+        diff[py0:py1, px0:px1] = False
+        n = int(diff[y0:y1, x0:x1].sum())
+        c(n == 0, '%s matches DOSBox' % name, '%d px differ' % n)
+
+
+@sequence
+def shell_mech_lab_traced(c):
+    """agent SH: Mech Lab details traced in MW2SHELL: the variant list (FUN_00032870) offers only <code>00std, the
+    archive's <code>NNstd and the player's <code>NNusr designs (not the TRN / AFU / DMG records); the header and 'Mech
+    name (widgets 0x82e38 / 0x82e64) in shell font 0x1b with colour 1 -> 6 (remap 0xa5530): grey 170 in every context -
+    DOSBox dos_mechlab_main.png (Wolf), dos_ia_mech_lab.png, dos_customize_0_engine.png; the armour diagram is the
+    wwomp4ar panel's art with only the selected location's WWOMP4MP frame over it (0x2bd20) - dos_customize_4.png /
+    _8.png; the main page counts MASC as equipment (0xa4850, Firemoth 1 t); critical texts "%s #%d", "%s", "Ammo (%s #%d)
+    #%d" and the unassigned "%s #%d (%d)" (0x2cb30 / 0x2ccf0); the callsign is the slot's record name ("ENEMY 1" on the
+    Instant Action enemy side, dos_ia_enemy_lab.png). DOSBox 2026-10-21: the Instant Action Kit Fox cycles Primary, Alt.
+    Config A-D and back (five variants), the Nova the same"""
+    from PIL import Image
+    import numpy as np
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    d = os.path.join(OUT, 'shell_mech_lab_traced')
+    os.makedirs(d, exist_ok=True)
+    ref = os.path.join(REPO, 'docs', 'reference')
+
+    def run(name, **kw):
+        out = os.path.join(d, name + '.ppm')
+        r = subprocess.run([shell, mech2], env=_shell_env(d, MW2_SHELL_SHOT=out, **kw), capture_output=True, text=True, timeout=120)
+        return r.stdout, out
+
+    def differ(out, refn, y0, y1, x0, x1):
+        if not os.path.exists(out):
+            return -1
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
+        return int((np.abs(a - b).max(2) > 6)[y0:y1, x0:x1].sum())
+
+    for k, code, n in ((0, 'frm', 5), (1, 'ktf', 5), (9, 'tbr', 5)):
+        log, _ = run('variants%d' % k, MW2_SHELL_SCREEN=9, MW2_SHELL_CLAN=0, MW2_SHELL_FRAMES=2, MW2_SHELL_LAB_CHASSIS=k)
+        v = [l.split()[2:] for l in log.splitlines() if l.startswith('lab variants:')]
+        want = ['%s%02dstd' % (code, i) for i in range(n)]
+        c(v[:1] == [want], '%s: the standard variants only' % code, str(v))
+        if k == 0:
+            m = [l for l in log.splitlines() if l.startswith('lab mass:')]
+            c(m[:1] == ['lab mass: weapons 4.50 equipment 1.00 used 19.75'], 'Firemoth: MASC 1 t as equipment', str(m))
+    for name, screen, clan, refn in (('wolf', 9, 0, 'dos_mechlab_main.png'), ('ia', 9, 2, 'dos_ia_mech_lab.png'),
+                                     ('ia_enemy', 9, 3, 'dos_ia_enemy_lab.png')):
+        _, out = run(name, MW2_SHELL_SCREEN=screen, MW2_SHELL_CLAN=clan, MW2_SHELL_FRAMES=2)
+        n = differ(out, refn, 0, 45, 0, 600)   # header and name; the DOS pointer sits at the right edge
+        c(n == 0, '%s lab header matches DOSBox' % name, '%d px differ' % n)
+        if clan == 3:   # "CALLSIGN: ENEMY 1", the left panel's "Endo-S" note (0x2c210)
+            n = differ(out, refn, 52, 300, 0, 210)
+            c(n == 0, 'enemy lab left panel matches DOSBox', '%d px differ' % n)
+    for page, refn, region, what in ((0, 'dos_customize_0_engine.png', (0, 45, 0, 600), 'CUSTOMIZING header'),
+                                     (6, 'dos_customize_4.png', (52, 480, 216, 424), 'armour diagram'),
+                                     (10, 'dos_customize_8.png', (52, 480, 216, 424), 'criticals diagram and slots')):
+        _, out = run('page%d' % page, MW2_SHELL_LAB_EDIT='mdg00std', MW2_LAB_PAGE=page, MW2_SHELL_FRAMES=3)
+        n = differ(out, refn, *region)
+        c(n == 0, '%s matches DOSBox' % what, '%d px differ' % n)
+    log, _ = run('crit', MW2_SHELL_LAB_EDIT='mdg00std', MW2_LAB_PAGE=10, MW2_LAB_LOC=4, MW2_LAB_UNASSIGN='4,5;1,8', MW2_SHELL_FRAMES=2)
+    sl = [l[11:] for l in log.splitlines() if l.startswith('crit slot: ')]
+    pl = [l[11:] for l in log.splitlines() if l.startswith('crit pool: ')]
+    c(sl[:7] == ['Shoulder', 'Upper Arm Actuator', 'Lower Arm Actuator', 'Ferro-Fibrous', '-', '-', 'Pulse Laser (Medium) #1'],
+      'location slots as the shell names them', str(sl))
+    c(pl == ['Pulse Laser (Large) #1 (2)', 'Ammo (LRM 20 #1) #1 (1)'], 'unassigned items with their slot counts', str(pl))
+
+@sequence
+def overheat_alarm_latch(c):
+    """agent SO: MECOVHW1 0xe9 and message 3 come only when the shutdown sequence (flag 4) starts with the latch 0x1000
+    clear (0x10016153..0x1001617c; DOS 0x251c5..0x251f9); the latch clears only on a frame at or below 65 with no sequence
+    pending (0x10016268; DOS 0x2530a). An override cooled to 60 and re-heated to 90 the very next frame starts a new
+    sequence silently; cooled for longer, the next sequence sounds again"""
+    def sounds(r, i):
+        return [float(m.group(1)) for m in re.finditer(r'SFXLOG (-?[\d.]+) snd %d ' % i, r.out)]
+    for dos in (False, True):
+        r = c.run('_dos' if dos else '_3d', secs=18, dos_look=dos, keys=[(10.5, 'o'), (12.0, 'o')], dump='/0.1',
+                  env={'MW2_SFX_LOG': '1', 'MW2_TEST_HEAT': '10:85,11:60/90,13:60,14:90'})
+        tag = 'DOS' if dos else '3D'
+        al = sounds(r, 0xe9)
+        seq = [now / 1000.0 for now, m in r.msgs if 'shutdown sequence initiated' in m.lower()]
+        a, b = r.at(11.4), r.at(14.4)
+        c(a.get('pend') == 1 and a.get('ovr') == 0, tag + ': the re-heat after the override started a new sequence', str(a))
+        c(b.get('pend') == 1, tag + ': the later re-heat started one too', str(b))
+        c(len(al) == 2 and al[0] < 10.6 and al[1] > 13.9, tag + ': MECOVHW1 at 10 s and 14 s only (not at the 11 s re-heat)', str(al))
+        c(len(seq) == 2 and seq[0] < 10.6 and seq[1] > 13.9, tag + ': "Shutdown sequence initiated" at 10 s and 14 s only', str(seq))
+
+
+@sequence
+def object_sound_loop_runs(c):
+    """agent SO: an object sound task (TSK type 4, 0x1000ec90 -> 0x10032cc0) does nothing on its first run (+0x18), then
+    each run sets the loop's level and pan and a playback rate from the table 0x1024f738 [rand(10)] (0x10032c50; DOS
+    0x41016 / 0x970d0): 9922..11907 Hz, re-drawn every run (DOSBox YELLSCN1 SB16, 6.0-7.5 s, 0.1 s windows: every clear
+    JETTAXI fit (correlation >= 0.3, 9 of 31) within 20 Hz of a table rate - 10143 / 11246 / 10804 - and changing from
+    window to window); YELLDRP1's JETTAXI (period 0) runs every frame"""
+    table = {9922, 10143, 10364, 10584, 10804, 11025, 11246, 11466, 11686, 11907}
+    for dos in (False, True):
+        tag = 'DOS' if dos else '3D'
+        r = c.run('_dos' if dos else '_3d', secs=4, throttle=0, dos_look=dos, env={'MW2_SFX_LOG': '1'})
+        lp = [(float(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+              for m in re.finditer(r'LOOPLOG (-?[\d.]+) task \d+ jettaxi run (\d+) vol (\d+) rate (\d+)', r.out)]
+        c(len(lp) > 60, tag + ': JETTAXI updated every frame (period 0)', str(len(lp)))
+        c(lp and lp[0][1] == 2, tag + ': the first run does nothing (the first update is run 2)', str(lp[:2]))
+        rates = [x[3] for x in lp]
+        c(rates and set(rates) <= table, tag + ': every rate from the table', str(sorted(set(rates) - table)))
+        c(len(set(rates)) >= 8, tag + ': the rate re-drawn run by run', str(sorted(set(rates))))
+
+
+@sequence
+def overheat_alarm_dos_rules(c):
+    """agent SO: the DOS edition's heat states (MW2.EXE 0x24f90) against the 3Dfx DLL's (0x10015f50). A jump straight
+    past 100: DOS starts the sequence at once (heat >= 81 with flag 4 clear, whatever the heat above: message 3 and
+    MECOVHW1 0xe9); the 3Dfx DLL's branch above 100 has no sequence start, so it begins only once the heat has fallen to
+    100. A jump to 90 then a volley: DOS also gives the 66 warning (message 0 + MECOVHW1) on the volley's frame of net gain,
+    as flag 4 is set and the heat is >= 66; the 3D editions' warning is reached only between 65 and 80 - one alarm"""
+    def sounds(r, i):
+        return [float(m.group(1)) for m in re.finditer(r'SFXLOG (-?[\d.]+) snd %d ' % i, r.out)]
+    for dos in (False, True):
+        tag = 'DOS' if dos else '3D'
+        r = c.run('_jump' + ('_dos' if dos else '_3d'), secs=16, dos_look=dos, dump='/0.1',
+                  env={'MW2_SFX_LOG': '1', 'MW2_TEST_HEAT': '10:105'})
+        al = sounds(r, 0xe9)
+        pend = next((s2['t'] for s2 in r.states if s2.get('pend')), None)
+        if dos:
+            c(pend is not None and pend < 10.25, 'DOS: the jump past 100 starts the sequence at once', str(pend))
+            c(len(al) == 1 and 9.95 <= al[0] < 10.2, 'DOS: MECOVHW1 with it', str(al))
+        else:
+            c(pend is not None and pend > 10.3, '3D: no sequence above 100 - it starts as the heat falls to 100', str(pend))
+            c(len(al) == 1 and pend is not None and abs(al[0] - pend) < 0.15, '3D: MECOVHW1 as it starts', '%s vs %s' % (al, pend))
+        r = c.run('_volley' + ('_dos' if dos else '_3d'), secs=14, dos_look=dos, dump='/0.1', keys=[(8.5, 'backslash')],
+                  hold=[(10.4, 10.5, 'space')], env={'MW2_SFX_LOG': '1', 'MW2_TEST_HEAT': '10:90'})
+        al = sounds(r, 0xe9)
+        warn = [now / 1000.0 for now, m in r.msgs if 'heat level critical' in m.lower()]
+        seq = [now / 1000.0 for now, m in r.msgs if 'shutdown sequence initiated' in m.lower()]
+        c(len(seq) == 1 and seq[0] < 10.2, tag + ': the sequence at the jump to 90', str(seq))
+        if dos:
+            c(len(warn) == 1 and 10.35 <= warn[0] < 10.9, 'DOS: "Heat level critical" on the volley (flag 4 set, heat >= 66)', str(warn))
+            c(len(al) == 2 and al[0] < 10.2 and 10.35 <= al[1] < 10.9, 'DOS: MECOVHW1 with the sequence and the warning', str(al))
+        else:
+            c(not warn, '3D: no warning above 80', str(warn))
+            c(len(al) == 1 and al[0] < 10.2, '3D: MECOVHW1 with the sequence only', str(al))
+
+
+@sequence
+def radar_zoom_per_mode(c):
+    """x / Shift+x (0x10004040, DOS 0x12410) act on the shown radar's own descriptor (0x1024a760[mode] +0x18; small and
+    large both 200000 = "R: 1.0km", min 50000, max 400000, reset once at the load 0x10003380), nothing with the radar off;
+    F2 (0x10003fb0) does nothing in the satellite map. DOSBox YELLSCN1: x 500 m; F2 large "R: 1.0km"; F2 off; x; F2 small
+    still "R: 500.0m"; F3, F2, F3: the small radar again"""
+    t = UP + 1
+    keys = [(t, 'x'), (t + 0.5, 'f2'), (t + 1, 'f2'), (t + 1.5, 'x'), (t + 2, 'f2'), (t + 2.5, 'f3'), (t + 3, 'f2'), (t + 3.5, 'f3'),
+            (t + 4, 'f2'), (t + 4.5, 'shift+x'), (t + 5, 'f2'), (t + 5.5, 'f2')]
+    r = c.run(secs=t + 6.2, keys=keys, dump='/0.1')
+    got = [(r.at(tt + 0.25)['radar_mode'], r.at(tt + 0.25)['radar_i'], r.at(tt + 0.25)['satmap']) for tt, _ in keys]
+    want = [(1, 1, 0), (2, 2, 0), (0, 2, 0), (0, 2, 0), (1, 1, 0), (1, 1, 1), (1, 1, 1), (1, 1, 0), (2, 2, 0), (2, 3, 0), (0, 2, 0), (1, 1, 0)]
+    c(got == want, 'mode / range / satellite after each key', ' '.join('%s%s' % (k, g) for (_, k), g in zip(keys, got)))
+
+
+@sequence
+def inspect_structure_dos_radius(c):
+    """INSPECT_TARGET on a structure: thing +0x10 + 200 m against the distance (3Dfx 0x1001d6xx, DOS 0x2a8d2). The 3Dfx DLL
+    never sets +0x10 (200 m from the thing's point); DOS MW2.EXE sets it at the load to the model's bounding radius
+    (0x4fdad: object model +0x40 from 0x37f60 - the vertex box's centre, the farthest vertex, rounded). ORANSCN1's pump
+    station (structure 12, 205 m away) taken with q q, then i: 3Dfx edition r = 200 m - out of range; DOS look 200 m + its
+    radius 10.89 m - inspected"""
+    seen = {}
+    for ed in ('enhanced', 'dos'):
+        r = c.run('_' + ed, secs=11.4, mission='ORANSCN1', env={'MW2_START': '89807,-9120', 'MW2_START_HEADING': 0},
+                  keys=[(10, 'q'), (10.5, 'q'), (11, 'i')], dump='/0.1', dos_look=(ed == 'dos'))
+        m = re.findall(r'INSPECT_THING d=(\d+) r=(\d+)', r.out)
+        res = re.findall(r'INSPECT r=(\d)', r.out)
+        c(r.at(10.7)['thing'] == 12 and len(m) == 1 and len(res) == 1, '%s: the pump station targeted, i pressed' % ed, '%s %s' % (r.at(10.7)['thing'], m))
+        if m and res:
+            seen[ed] = (int(m[0][0]), int(m[0][1]), res[0])
+    # 205 m from the station's centre
+    if 'enhanced' in seen:
+        c(seen['enhanced'][1:] == (20000, '2'), '3Dfx: 200 m - 205 m is out of range', str(seen['enhanced']))
+    if 'dos' in seen:
+        c(seen['dos'][1:] == (21089, '1'), 'DOS: 200 m + the model radius 10.89 m - inspected', str(seen['dos']))
+
+
+@sequence
+def nav_reached_autopilot_off(c):
+    """the selector's upkeep (0x1001d510 / DOS 0x2a6fe) with a nav selected and the autopilot off: within the nav's own
+    radius (+0xc0 < NAVP +0x10) it is marked visited (MECNAVPT 0xe7 if new) and the selector steps on (0x1001dac0(0) ->
+    0x1001cca0(1)) - the mech walks on, not steered. DOSBox TNJ1: n, 0, a; a again ~60 m before Nav Alpha: AUTOPILOT off,
+    the viewer "Nav Alpha 44m" -> "Nav Beta", the mech going straight on"""
+    keys = [(UP, 'n'), (UP + 0.3, '0'), (UP + 0.6, 'a'), (26.0, 'a')]
+    r = c.run(secs=30, keys=keys, mission='TNJ1SCN1', dump='/0.1')
+    x, z, rad = TNJ1_NAVS[1]
+    d = lambda s: math.hypot(s['x'] - x, s['z'] - z)
+    off = [s for s in r.states if s['t'] > 26.2]
+    c(off and all(s['autopilot'] == 0 for s in off), 'autopilot off from 26 s')
+    before = [s for s in off if d(s) > rad + 300 and s['t'] < 27.5]
+    sw = next((s for s in off if s['nav'] == 2), None)
+    c(before and all(s['nav'] == 1 for s in before), 'Nav Alpha kept while outside its 30 m', str(sorted(set(s['nav'] for s in before))))
+    c(sw is not None and d(sw) < rad, 'Nav Beta selected on entering Alpha\'s radius', '%s' % (sw and '%.1f m at %.2f s' % (d(sw) / 100, sw['t'])))
+    if sw:
+        c(abs(r.at(29.5)['heading'] - sw['heading']) < 1.0, 'not steered: the heading kept', '%.1f -> %.1f' % (sw['heading'], r.at(29.5)['heading']))
+        c(r.at(29.5)['nav'] == 2, 'Beta stays selected (the mech walks away from Alpha)', str(r.at(29.5)['nav']))
+
+
+@sequence
+def reset_inputs_as_keypad5(c):
+    """RESET_INPUTS (/, action 1: 0x10037880 / DOS 0x46060) sets the reset sinks torso_tilt_reset, torso_pan_reset,
+    pilot_tilt_reset, pilot_pan_reset, eyepoint_tilt_reset, eyepoint_pan_reset (control table 0x10256540) - Keypad 5's
+    pass: the demands 0 and the mouse recentred, so a later mouse move counts from the centre (the port had zeroed the
+    demands only: the next mouse count snapped the torso back to the old twist); Up's tilt is reset too"""
+    t0 = UP
+    mouse = '%g:0:0,%g:128:0,%g:64:0' % (t0, t0 + 0.5, t0 + 2.5)
+    hold = [(t0 + 1.0, t0 + 1.3, 'up')]
+    r = c.run(secs=t0 + 3.5, throttle=-9, hold=hold, keys=[(t0 + 2.0, 'slash')], env={'MW2_SINK_TRACE': '1', 'MW2_MOUSE': mouse}, dump='/0.25')
+    sk = [dict((k, float(v.split(',')[0])) for k, v in (kv.split('=') for kv in l.split()[1:])) for l in r.out.splitlines() if l.startswith('SINK ')]
+    def at(t):
+        return next((d for d in sk if d['t'] >= t), sk[-1] if sk else {})
+    if not sk:
+        c(False, 'SINK trace')
+        return
+    c(abs(at(t0 + 1.9)['dtw'] - 22.5) < 0.05 and at(t0 + 1.9)['dpi'] < -5, 'mouse 128 right: 22.5 degrees; Up: tilted down',
+      '%.2f %.2f' % (at(t0 + 1.9)['dtw'], at(t0 + 1.9)['dpi']))
+    c(abs(at(t0 + 2.3)['dtw']) < 0.01 and abs(at(t0 + 2.3)['dpi']) < 0.01, '/ : both demands 0', '%.2f %.2f' % (at(t0 + 2.3)['dtw'], at(t0 + 2.3)['dpi']))
+    c(abs(at(t0 + 3.2)['dtw'] - 11.25) < 0.05, 'mouse 64 more right: 11.25 from the centre (the mouse recentred)', '%.2f' % at(t0 + 3.2)['dtw'])
+
+@sequence
+def external_orbit_controls(c):
+    """COCKPIT_VIEW (c, action 9 0x10037a96) -> camera mode 1, the external orbit (0x1002dc90 -> 0x1002e280), alive as at the
+    death camera but steered by the pilot: track_distance (Shift+Z out / Z in), track_height (Ctrl + grey up / down),
+    eyepoint_pan (Ctrl + grey left / right, keypad 7 / 9) - "_delta" sinks x range (3600 / 3600 / 72) x ticks / 181;
+    distance 3 x the contact radius at the first entry, kept between 0.5 x and 4 x, height 0.25 x it, kept between
+    200 - the centre height and 4 x; no turning by itself while alive; "External camera engaged."; the HUD kept; c again:
+    the cockpit (pilot view and zoom reset). DOSBox YELLSCN1 (ext.ds): c glides out behind the mech, the HUD stays;
+    Ctrl+Left 1 s round to the side; Z 1 s closer; Shift+Z 2 s far out; Ctrl+Up 1 s higher; keypad 7 1 s further round;
+    3 s still: no change; c: the cockpit"""
+    t = UP + 1
+    hold = [(t + 2, t + 3, 'ctrl+left'), (t + 3.5, t + 4.5, 'z'), (t + 5, t + 7, 'shift+z'), (t + 7.5, t + 8.5, 'ctrl+up'),
+            (t + 9, t + 10, 'kp7')]
+    r = c.run(secs=t + 15, keys=[(t, 'c'), (t + 14, 'c')], hold=hold, dump='/0.25', shots=[(t - 0.5, 'pit'), (t + 1.9, 'out')])
+    orb = lambda s: tuple(float(x) for x in s['orb'].split(','))
+    s0, s1 = r.at(t + 1.9), r.at(t + 3.4)
+    c(r.before(t - 0.1)['camode'] == 0 and s0['camode'] == 1, 'c: camera mode 1', '%d -> %d' % (r.before(t - 0.1)['camode'], s0['camode']))
+    c(r.msg_time('External camera engaged') is not None, '"External camera engaged." (message 0x11)')
+    d0, h0, a0 = orb(s0)
+    c(abs(a0) < 0.01 and h0 == round(d0 * 0.25), 'start: angle 0, height 0.25 x distance', str(orb(s0)))
+    a1 = orb(s1)[2]
+    c(-70 < a1 < -50, 'Ctrl+Left 1 s: about 60 deg round (72 deg/s after the ramp; minus turns the angle down)', '%.1f' % a1)
+    c(abs(orb(r.at(t + 4.7))[0] - 0.5 * d0) < 1, 'Z 1 s: in, stopped at 0.5 x', '%s d0 %.0f' % (orb(r.at(t + 4.7)), d0))
+    c(abs(orb(r.at(t + 7.4))[0] - 4 * d0) < 1, 'Shift+Z 2 s: out to 4 x', '%s d0 %.0f' % (orb(r.at(t + 7.4)), d0))
+    c(orb(r.at(t + 8.9))[1] > h0 + 2500, 'Ctrl+Up 1 s: higher', str(orb(r.at(t + 8.9))))
+    a2 = orb(r.at(t + 10.4))[2]
+    c(a1 - 70 < a2 < a1 - 50, 'keypad 7 (eyepoint_pan_minus too) 1 s: as far again', '%.1f -> %.1f' % (a1, a2))
+    c(orb(r.at(t + 13.9)) == orb(r.at(t + 10.6)), 'no keys: the orbit stays put (no spin while alive)', '%s %s' % (orb(r.at(t + 10.6)), orb(r.at(t + 13.9))))
+    c(r.at(t + 14.3)['camode'] == 0, 'c again: the cockpit', str(r.at(t + 14.3)['camode']))
+    shot = r.shots.get('out')
+    if shot and os.path.exists(shot):
+        g = count_px(shot, lambda R, G, B: (G > 200) & (R < 140) & (B < 140))
+        c(g > 200, 'the HUD stays (green)', 'green px %d' % g)
+    if shot and os.path.exists(shot) and os.path.exists(r.shots.get('pit', '')):
+        grn = lambda R, G, B: (G > 200) & (R < 140) & (B < 140)
+        box = (0.45, 0.42, 0.55, 0.58)
+        g0, g1 = count_px(r.shots['pit'], grn, box), count_px(shot, grn, box)
+        c(g0 > 10 and g1 == 0, 'the reticle only in the cockpit (DAT_1024e674: mode 0)', 'centre green px cockpit %d external %d' % (g0, g1))
+
+
+@sequence
+def autopilot_dos_whole_degree_steering(c):
+    """the nav steering in the DOS edition (DOS 0x229e0, the player's autopilot and the AI): the 16.16 bearing error taken
+    in WHOLE degrees, floored (sar 16), then x 819.2 / 45 - an error in [0, 1) degree steers nothing, one in [-1, 0) a full
+    degree's worth; the 3Dfx code (0x10013600) is float (err x 18.2044). So the DOS autopilot settles 0-1 degree right of
+    the bearing and walks a line beside the 3D look's. DOSBox TNJ4 Alpha -> Beta (x through the kph readout, the distance
+    from the nav viewer): ~7 m west of the straight line from 470 m in, straight into S_1BQDAS with no deflection from range
+    (a 120 m probe 0 until 232 m); the port's float steering ran ~1 m off the line, where the DOS broad phase passes the
+    box for 2-3 checks at ~317 m (a quarter-throttle blip). From the same start 0.6 degree left of Beta: DOS look keeps
+    its heading to the box, the 3D look turns onto the bearing (and blips); 0.6 degree right: the DOS look turns until the
+    error is >= 0 and holds"""
+    face = 166195
+    nav2 = (-153774, 185721)
+    brg = math.degrees(math.atan2(nav2[0] - (-133566), nav2[1] - 141377))   # -24.50
+    env = {'MW2_START': '-133566,141377', 'MW2_START_HEADING': -25.1, 'MW2_TEST_NAVSEEN': '1,3'}
+    d = c.run('_dos', secs=20, keys=[(UP, '0'), (UP + 0.5, 'a')], env=env, mission='TNJ4SCN1', dump='/0.1', dos_look=True)
+    e = c.run('_3d', secs=20, keys=[(UP, '0'), (UP + 0.5, 'a')], env=env, mission='TNJ4SCN1', dump='/0.1')
+    dB = lambda s: math.hypot(nav2[0] - s['x'], nav2[1] - s['z']) / 100
+    q = next((s for s in d.span(UP + 1, 19.9) if abs(s['throttle'] - 0.25) < 0.01), None)
+    c(q is not None and dB(q) < 245 and q['z'] > face - 3500, 'DOS look: the first deflection only at the box (inside its sphere)',
+      '%s' % (q and '%.0f m from Beta' % dB(q)))
+    pre = d.span(UP + 1, (q['t'] if q else 19.9) - 0.05)
+    err = [math.degrees(math.atan2(nav2[0] - s['x'], nav2[1] - s['z'])) - s['heading'] for s in pre]
+    c(pre and all(-0.05 < x < 1.15 for x in err) and abs(d.at(UP + 5)['heading'] + 25.1) < 0.06,
+      'DOS look: the error held in [0, 1) degree (0.6 off at the start, not steered; a step only past 1 degree)',
+      '%.2f..%.2f' % (min(err), max(err)) if pre else '')
+    h3 = e.at(UP + 5)['heading']
+    c(abs(h3 - brg) < 0.25, '3D look: float steering onto the bearing', '%.2f (bearing %.2f)' % (h3, brg))
+    env['MW2_START_HEADING'] = -23.9
+    r = c.run('_dos_right', secs=UP + 6, keys=[(UP, '0'), (UP + 0.5, 'a')], env=env, mission='TNJ4SCN1', dump='/0.1', dos_look=True)
+    h1, h2 = r.at(UP + 3)['heading'], r.at(UP + 6)['heading']
+    c(brg - 1.0 < h1 <= brg + 0.1 and abs(h2 - h1) < 0.06, 'DOS look, 0.6 degree right: turned until the error is in [0, 1), then held',
+      '%.2f -> %.2f (bearing %.2f)' % (h1, h2, brg))
+
+
+@sequence
+def nav_visited_only_engine_paths(c):
+    """the nav's visited flag 0x20 (RRNP on the radar, skipped by the autopilot's first pick, an objective's "visited")
+    has three setters in the engine (0x10009b80 / DOS 0x16190, 0x10015c00 arrival, 0x1001d510 selector upkeep), each
+    with MECNAVPT 0xe7: an objective node's "within" test of a nav while the node is evaluated (the player inside the
+    nav's own radius - <= 0: 200 m - as a 3D distance, NAVP +16 set), the autopilot's arrival and the selected nav's own
+    radius. No minimum radius; the port had flagged every shown nav within max(radius, 60 m) every frame. TNJ1, nothing
+    selected, autopilot off: walking past Nav Alpha (30 m) 45 m off marks nothing; through it, Alpha (in the start node's
+    objectives) is flagged once inside 30 m, with one 0xe7"""
+    A = (-14863, 46816)
+    dA = lambda s: math.hypot(A[0] - s['x'], A[1] - s['z']) / 100
+    r = c.run('_past', secs=18, keys=[(UP, '0')], mission='TNJ1SCN1', dump='/0.25',
+              env={'MW2_START': '-19363,30000', 'MW2_START_HEADING': 0, 'MW2_SFX_LOG': '1'})
+    near = min(dA(s) for s in r.states)
+    c(40 < near < 50 and all(s['navseen'] == 0 and s['nav'] == -1 for s in r.states), 'past Alpha 45 m off: nothing visited (no 60 m minimum)',
+      'nearest %.1f m, seen %s' % (near, sorted(set(s['navseen'] for s in r.states))))
+    c(not re.search(r'SFXLOG [\d.]+ snd 231 ', r.out), 'no MECNAVPT')
+    r = c.run('_through', secs=18, keys=[(UP, '0')], mission='TNJ1SCN1', dump='/0.25',
+              env={'MW2_START': '-14863,30000', 'MW2_START_HEADING': 0, 'MW2_SFX_LOG': '1'})
+    f = next((s for s in r.states if s['navseen']), None)
+    before = [s for s in r.states if f and s['t'] < f['t']]
+    c(f is not None and f['navseen'] == 2 and dA(f) < 30 and before and dA(before[-1]) > 28,
+      'through Alpha: flagged (bit 1) once inside its 30 m', '%s' % (f and '%.1f m (before %.1f m)' % (dA(f), dA(before[-1]) if before else -1)))
+    c(len(re.findall(r'SFXLOG [\d.]+ snd 231 ', r.out)) == 1, 'one MECNAVPT (0xe7)', str(len(re.findall(r'SFXLOG [\d.]+ snd 231 ', r.out))))
+
+@sequence
+def contact_retest_by_edition(c):
+    """agent GC: after a mech-mech contact the engine tries the move to the end projected onto the sphere again (0x10019310
+    -> 0x10019a61, DOS 0x26990 -> 0x27109); that end lies ON the sphere, so the retest is decided by rounding, and refused
+    the velocity is doubled (0x102473d4, DOS 0x2713b: add eax,eax) - msim_contact_retest runs each engine's own
+    arithmetic: 3D floats (0x1000ba20: n = d / est(d), est (4 max + mid + min) / 4 0x10030330, the end rebuilt as old +
+    (end - old) by 0x1000b5e0) refuse ~50 %; DOS whole cm (0x200d0: n = d << 16 / est, idiv; end rounded at bit 15)
+    ~12 %. TNJ1's Firemoth pressing on round the instructor: the DOS edition ~7 s (DOSBox ~8 s at ~32 fps), the 3D
+    editions' doubled bounces make it ~5 s"""
+    out = {}
+    for dos in (True, False):
+        r = c.run('_dos' if dos else '_3d', secs=22, throttle=1, mission='TNJ1SCN1', dump='/0.25', dos_look=dos)
+        slow = [s for s in r.span(8.0, 22.0) if s['kmh'] < 30]
+        out[dos] = slow[-1]['t'] - slow[0]['t'] if slow else None
+    c(out[True] is not None and 6.0 <= out[True] <= 9.0, 'DOS edition: in contact 6-9 s (DOSBox ~8 s)', str(out))
+    c(out[False] is not None and 3.5 <= out[False] <= 6.5 and out[False] < out[True] - 1.0,
+      '3D editions: shorter by over 1 s (the doubled bounce about half the time)', str(out))
+
+
+@sequence
+def target_unit_flags(c):
+    """agent GC: the unit object's flag word +0x14 comes from the GPS chunk's word +0x1a (0x1003f3de -> 0x1003f3e5, kept by
+    every spawn 0x10023839): 0x400 nearly every unit, 0x1400 the GREE / RUST / WHIT enemies, 0xc00 the dropship bomb
+    turrets (TUR00DRP), 0 the CYAN doors. 0x1001d050 for the player: beyond 1750 m refused unless 0x1000; neither 0x400 nor
+    0x1000 refused while DAT_1024c8b0 is 0; 0x800 always refused. GREESCN1 at the start: t cycles all five Clan mechs, the
+    three Kit Foxes 2-3 km off included (the port had stopped at 1750 m: Stormcrow, Kit Fox only). TAN_SCN1's bomb turret
+    (actor 7, 30 m ahead with the reticle on it): q, q refused both times; a Hellbringer (actor 0, 0x400) the same way:
+    taken by the first q"""
+    keys = [(10 + 0.5 * i, 't') for i in range(10)]
+    r = c.run('_gree', secs=15.5, mission='GREESCN1', keys=keys, dump='/0.1', nostart=True, env={'MW2_LIST_ACTORS': '1'})
+    fl = {int(m.group(1)): int(m.group(2), 16) for m in re.finditer(r'^actor (\d+) \S+ \S+ flags (0x[0-9a-f]+|0)', r.out, re.M)}
+    seq = [r.at(t + 0.2)['tgt'] for t, _ in keys]
+    c(all(fl.get(k) == 0x1400 for k in range(5)), 'GREE: the five Clan mechs carry 0x1400 (GPS +0x1a)', str(fl))
+    c(sorted(set(seq)) == [0, 1, 2, 3, 4], 'GREE: t takes all five, beyond 1750 m too (0x1000)', str(seq))
+    for k, want in ((7, -1), (0, 0)):
+        r = c.run('_tan%d' % k, secs=4, mission='TAN_SCN1', keys=[(2, 'q'), (2.5, 'q')], dump='/0.1', nostart=True,
+                  env={'MW2_TEST_AIM': '%d,3000,0' % k, 'MW2_LIST_ACTORS': '1'})
+        a, b = r.at(2.2)['tgt'], r.at(2.7)['tgt']
+        if k == 7:
+            c(a == -1 and b == -1 and '0xc00' in r.out, 'TAN: the bomb turret (0xc00) never taken by q', '%d %d' % (a, b))
+        else:
+            c(a == 0 and b == 0, 'TAN: the Hellbringer (0x400) taken by q', '%d %d' % (a, b))
+
+
+@sequence
+def overheat_jump_dosbox_pulse(c):
+    """agent GC: the DOS one-frame heat jump past 81, as in DOSBox. DOSBox YELLSCN1 (SB16 wave capture, 2026-10-21) with a
+    patched MW2.EXE copy - the large pulse laser's heat 3.5 -> 85 (16.16 at file 0xb1f24) - and the Mad Dog's first LPLAS
+    fired once: the first pulse takes the heat from ~0 to 85 in one frame (past 66 and 81 together), the second pulse
+    (interval 60 ticks) adds 85 more. Heard (cross-correlated with the SNDS records): MECOVHW1 (0xe9) twice 0.37 s apart
+    (two runs: 57.22 / 57.59 s and 31.94 / 32.31 s; 0.33 s of game time, DOSBox's clock ~0.9) and Betty's "shutdown
+    sequence initiated" (voice 15) at the first, "heat level critical" (voice 64) queued behind it (+2.09 s = voice 15's
+    1.96 s); a second press 1.5 s later added nothing (the latches). So MW2.EXE 0x24f90: the jump's frame takes the >= 81
+    branch only (message 3 + 0xe9), the next frame with a net gain the >= 66 one (flag 4 set: message 0 + 0xe9). The 3D
+    editions (0x10016175): the sequence's alarm only"""
+    def sounds(r, i):
+        return [float(m.group(1)) for m in re.finditer(r'SFXLOG (-?[\d.]+) snd %d ' % i, r.out)]
+    for dos in (True, False):
+        r = c.run('_dos' if dos else '_3d', secs=13, dos_look=dos, dump='/0.05', mission='YELLSCN1', mech='maddog/mdg00std',
+                  hold=[(10.0, 10.1, 'space')], env={'MW2_SFX_LOG': '1', 'MW2_TEST_WHEAT': '25:85'})
+        al, lp = sounds(r, 0xe9), sounds(r, 277)
+        warn = [now / 1000.0 for now, m in r.msgs if 'heat level critical' in m.lower()]
+        seq = [now / 1000.0 for now, m in r.msgs if 'shutdown sequence initiated' in m.lower()]
+        hot = next((s['t'] for s in r.states if s['heat'] >= 81), None)
+        tag = 'DOS' if dos else '3D'
+        c(len(lp) == 1 and hot is not None and hot < 10.6, tag + ': one LPLAS volley, past 81 at its first pulse', '%s %s' % (lp, hot))
+        c(len(seq) == 1 and abs(seq[0] - hot) < 0.1, tag + ': the sequence at the jump', '%s %s' % (seq, hot))
+        if dos:
+            c(len(warn) == 1 and 0.25 <= warn[0] - seq[0] <= 0.45, 'DOS: "Heat level critical" at the second pulse (+0.33 s)', '%s %s' % (warn, seq))
+            c(len(al) == 2 and 0.25 <= al[1] - al[0] <= 0.45, 'DOS: MECOVHW1 twice, 0.33 s apart (DOSBox 0.37 s wall)', str(al))
+        else:
+            c(not warn and len(al) == 1, '3D: the sequence alarm only', '%s %s' % (warn, al))
+
+def _input_map_plus(extra):
+    """the installed INPUT.MAP with extra bindings appended (for controls the installed map leaves unbound)"""
+    with open(os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2', 'INPUT.MAP'), 'rb') as f:
+        return f.read() + extra.encode('latin-1')
+
+
+EYEPOINT_TILT_MAP = ('eyepoint_tilt_plus {\r\n\t+ keyboard\tSemicolon\r\n}\r\n'
+                     'eyepoint_tilt_minus {\r\n\t+ keyboard\tQuote\r\n}\r\n'
+                     'eyepoint_tilt_reset {\r\n\t+ keyboard\tBackSlash\r\n}\r\n')
+
+
+@sequence
+def external_orbit_eyepoint_tilt(c):
+    """eyepoint_tilt (control table 0x10256540 entry 60: sink 0x10159e18, -16..16, key-ramp shift 4, keeps its value)
+    bound in INPUT.MAP (the installed map binds none): in the external orbit (c, mode 1) 0x1002e280 aims the camera
+    pitch at -(eyepoint_tilt x 0.5 + the pitch to the target) through the 0.2 s servo - the plus side looks up to 8 deg
+    over the mech, the minus side 8 deg under; eyepoint_tilt_reset and RESET_INPUTS (/, 0x10037880 case 1) put it back"""
+    t = UP + 1
+    hold = [(t + 4, t + 5.5, 'semicolon'), (t + 8, t + 11, 'quote'), (t + 13, t + 13.2, 'backslash'),
+            (t + 15, t + 16.5, 'semicolon')]
+    r = c.run(secs=t + 20, keys=[(t, 'c'), (t + 18, 'slash')], hold=hold, files={'INPUT.MAP': _input_map_plus(EYEPOINT_TILT_MAP)})
+    tl = lambda s: float(s['orbtilt'])
+    pit = lambda s: float(s['campitch'])
+    b = r.at(t + 3.5)
+    c(b['camode'] == 1 and abs(tl(b)) < 1e-6, 'external orbit, tilt 0 to start', 'camode %d tilt %s' % (b['camode'], b['orbtilt']))
+    u = r.at(t + 7.5)
+    c(abs(tl(u) - 16) < 1e-3, 'eyepoint_tilt_plus held 1.5 s: +16 (full), kept after release', '%s -> %s' % (b['orbtilt'], u['orbtilt']))
+    c(abs(pit(u) - pit(b) - 8) < 0.3, 'the view 8 deg up (x 0.5)', '%.2f -> %.2f' % (pit(b), pit(u)))
+    d = r.at(t + 12.5)
+    c(abs(tl(d) + 16) < 1e-3 and abs(pit(d) - pit(b) + 8) < 0.3, 'eyepoint_tilt_minus: -16, the view 8 deg down',
+      'tilt %s pitch %.2f' % (d['orbtilt'], pit(d)))
+    z = r.at(t + 14.5)
+    c(abs(tl(z)) < 1e-6 and abs(pit(z) - pit(b)) < 0.3, 'eyepoint_tilt_reset: 0', 'tilt %s pitch %.2f' % (z['orbtilt'], pit(z)))
+    c(abs(tl(r.at(t + 17.5)) - 16) < 1e-3 and abs(tl(r.at(t + 18.7))) < 1e-6, 'RESET_INPUTS (/) resets it too',
+      '%s -> %s' % (r.at(t + 17.5)['orbtilt'], r.at(t + 18.7)['orbtilt']))
+
+
+@sequence
+def death_orbit_controls(c):
+    """the player destroyed (end flag): camera mode 1 still takes the orbit inputs (the sinks update every frame,
+    0x10039ee0; 0x1002dc90 passes distance / height / tilt whatever the state) - Shift+Z moves the camera out, Ctrl+Up
+    raises it, eyepoint_tilt still tilts - but the pan gives way to the self-turn of 0.25 deg a tick (DAT_1024c568 set,
+    DAT_1024e680 - the network watch mode - clear): Ctrl+Left adds nothing to it"""
+    r0 = c.run('_ref', secs=19, env={'MW2_TEST_PHIT': '10:3:11:200'})
+    d0 = next((s for s in r0.states if s['dead']), None)
+    c(d0 is not None, 'destroyed (reference run)')
+    if not d0:
+        return
+    td = d0['t']
+    hold = [(td + 1, td + 3, 'shift+z'), (td + 3.5, td + 4.5, 'ctrl+up'), (td + 5, td + 6, 'ctrl+left'), (td + 6.2, td + 7.2, 'semicolon')]
+    r = c.run(secs=19, env={'MW2_TEST_PHIT': '10:3:11:200'}, hold=hold, files={'INPUT.MAP': _input_map_plus(EYEPOINT_TILT_MAP)})
+    d = next((s for s in r.states if s['dead']), None)
+    c(d is not None and abs(d['t'] - td) < 0.01, 'destroyed at the same time', str(d and d['t']))
+    if not d:
+        return
+    orb = lambda s: tuple(float(x) for x in s['orb'].split(','))
+    a, b = orb(r.at(td + 0.75)), orb(r.at(td + 3.25))
+    c(r.at(td + 0.75)['camode'] == 1 and b[0] > a[0] * 1.5, 'Shift+Z after death: further out', '%s -> %s' % (a, b))
+    h0, h1 = orb(r.at(td + 3.25))[1], orb(r.at(td + 4.75))[1]
+    c(h1 > h0 + 2000, 'Ctrl+Up after death: higher', '%.0f -> %.0f' % (h0, h1))
+    turn = lambda s0, s1: (orb(s1)[2] - orb(s0)[2]) % 360
+    w = turn(r.at(td + 5.0), r.at(td + 6.0))
+    ref = turn(r0.at(td + 5.0), r0.at(td + 6.0))
+    c(abs(w - ref) < 1.0 and 40 < w < 50, 'Ctrl+Left after death: only the self-turn (0.25 deg a tick, 45.5 deg/s)',
+      'held %.1f, reference %.1f' % (w, ref))
+    c(abs(float(r.at(td + 7.6)['orbtilt']) - 16) < 1e-3, 'eyepoint_tilt after death: +16', str(r.at(td + 7.6)['orbtilt']))
+
+
+def _shell_game(c):
+    """a writable copy of the test game folder for the shell (MW2PRM.CFG, the lance files) and its config"""
+    gd = install_dir(c.name, None)
+    cfg = os.path.join(OUT, c.name, 'shell.cfg')
+    with open(cfg, 'w') as f:
+        f.write('game=%s\nedition=enhanced\n' % gd)
+    return gd, cfg
+
+
+def _prm_names(gd):
+    d = open(os.path.join(gd, 'MW2PRM.CFG'), 'rb').read()
+    return [[d[base + 0x14 + 0x24 * k + 0x14:base + 0x14 + 0x24 * k + 0x24].split(b'\0')[0].decode('latin-1') for k in range(3)]
+            for base in (0x10, 0x90)]
+
+
+@sequence
+def shell_star_name_typing(c):
+    """Star Configuration name typing (MW2SHELL FUN_0003b420 -> the line editor FUN_0002a910): a left press in a member's
+    name box (0x84210 / 0x8421c: x box..+99, y box..+9) for a member <= the star's size, the player's (member 0) only in
+    Instant Action, edits the record's name in place with a '_' cursor; 0x20..0x7f except '~', under 15 characters and
+    under 100 px with the cursor; Backspace; Enter / Esc (the text kept either way) / a left press end; stored in the star
+    record (MW2PRM.CFG 0x840dc / 0x8415c names, strcpy - the old tail stays). DOSBox (docs/reference/
+    dos_ia_star_name_typing.png, _formation.png): "MIKE" + "ab~c", Backspace, 16 x W -> "MIKEabWWWW_"; Enter; Friend 1 +
+    "Q", Esc -> "Friend 1Q"; NEXT FORMATION -> the names in their new boxes"""
+    from PIL import Image
+    import numpy as np
+    shell = os.path.join(REPO, 'mw2shell')
+    gd, cfg = _shell_game(c)
+    ref = os.path.join(REPO, 'docs', 'reference')
+    orig = open(os.path.join(gd, 'MW2PRM.CFG'), 'rb').read()[0x10 + 0x14 + 0x14:0x10 + 0x14 + 0x24]
+
+    def run(name, events, clan=2):
+        out = os.path.join(OUT, c.name, name + '.ppm')
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
+                  'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': str(clan), 'MW2_SHELL_FRAMES': '3', 'MW2_SHELL_MOUSE': '600,20',
+                  'MW2_SC_EVENTS': events, 'MW2_SHELL_SHOT': out})
+        r = subprocess.run([shell], env=e, cwd=REPO, capture_output=True, text=True, timeout=120 * TSCALE)
+        return r.stdout, out
+
+    def differ(out, refn, ptr, rows=(0, 480)):
+        if not os.path.exists(out):
+            return -1
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
+        d = np.abs(a - b).max(2) > 6
+        x0, y0, x1, y1 = ptr
+        d[y0:y1, x0:x1] = False   # the DOS mouse pointer
+        return int(d[rows[0]:rows[1]].sum())
+
+    typing = 'l 85,170;tab~c;k backspace;tWWWWWWWWWWWWWWWW'
+    log, out = run('typing', typing)
+    c("'MIKE'" in log, 'still typing: the record unchanged', log[-200:])
+    n = differ(out, 'dos_ia_star_name_typing.png', (124, 160, 162, 200))
+    c(n == 0, 'typing "MIKEabWWWW_" matches DOSBox (cursor, ~ refused, 100 px limit)', '%d px differ' % n)
+    log, out = run('formation', typing + ';k enter;l 315,136;tQ;k esc;l 280,445')
+    c("sc: name 0 'MIKEabWWWW'" in log and "sc: name 1 'Friend 1Q'" in log, 'Enter / Esc keep the typed names', log[-300:])
+    n = differ(out, 'dos_ia_star_name_formation.png', (270, 430, 320, 480), (0, 260))   # the heading and boxes (the grid
+    c(n == 0, 'NEXT FORMATION: the names in their boxes as DOSBox', '%d px differ' % n)            # animates; the DOS hover label)
+    nm = _prm_names(gd)
+    c(nm[0] == ['MIKEabWWWW', 'Friend 1Q', 'Friend 2'], 'stored in record 0x840dc (MW2PRM.CFG)', str(nm))
+    raw = open(os.path.join(gd, 'MW2PRM.CFG'), 'rb').read()[0x10 + 0x14 + 0x14:0x10 + 0x14 + 0x24]
+    c(raw == b'MIKEabWWWW\0' + orig[11:], 'strcpy over the field: the old tail stays', '%r (was %r)' % (raw, orig))
+    log, _ = run('wolf', 'l 85,170;tZZ;k enter', clan=0)
+    c("sc: name 0" not in log and _prm_names(gd)[0][0] == 'MIKEabWWWW', 'a clan star: the player\'s own name is not typed', log[-200:])
+    log, _ = run('wolf2', 'l 315,136;k backspace;tX;k enter', clan=0)
+    c(_prm_names(gd)[0][1] == 'Friend 1X', 'a clan star: a wingman\'s name is (the shared record)', str(_prm_names(gd)))
+
+
+@sequence
+def shell_ia_names_from_record(c):
+    """the Instant Action pilots' names come from the star records (MW2SHELL: friendly record 0x840dc - the clans' star,
+    whose slot 0 the roster fills with the pilot's name (0x370ba / 0x38644) - and enemy 0x8415c); FUN_0001d540 writes
+    each slot's name into the lance files (GPS +0x36, 15 characters). The port had used the registered pilot"""
+    shell = os.path.join(REPO, 'mw2shell')
+    gd, cfg = _shell_game(c)
+    p = os.path.join(gd, 'MW2PRM.CFG')
+    d = bytearray(open(p, 'rb').read())
+    for base, k, name in ((0x10, 0, b'ZED'), (0x10, 2, b'Wingo'), (0x90, 1, b'Baddie')):
+        o = base + 0x14 + 0x24 * k + 0x14
+        d[o:o + 16] = name + b'\0' * (16 - len(name))
+    open(p, 'wb').write(bytes(d))
+    e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+    e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd,
+              'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': '2', 'MW2_SHELL_FRAMES': '2', 'MW2_SC_EVENTS': '',
+              'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'sc.ppm')})
+    log = subprocess.run([shell], env=e, cwd=REPO, capture_output=True, text=True, timeout=120 * TSCALE).stdout
+    c("sc: names 'ZED' 'Friend 1' 'Wingo'" in log, 'Star Configuration: the record\'s names (not the registry\'s MIKE)', log[-200:])
+    e.update({'MW2_SHELL_SCREEN': '7', 'MW2_SHELL_CLICKS': '0', 'MW2_SIM': 'echo %s', 'MW2_SHELL_FRAMES': '3'})
+    del e['MW2_SC_EVENTS']
+    subprocess.run([shell], env=e, cwd=REPO, capture_output=True, timeout=120 * TSCALE)
+
+    def names(fn):
+        b = open(os.path.join(gd, fn), 'rb').read()
+        out, i = [], b.find(b'GPS')
+        while i >= 0:
+            out.append(b[i + 54:i + 69].split(b'\0')[0].decode('latin-1'))
+            i = b.find(b'GPS', i + 3)
+        return out
+    u, en = names('USERSTAR.BWD'), names('EN01STAR.BWD')
+    c(u[:1] == ['ZED'] and 'Wingo' in u, 'USERSTAR.BWD: the player and wingmen as the record names them', str(u))
+    c('Baddie' in en, 'EN01STAR.BWD: the enemy names from record 0x8415c', str(en))
+
+
+@sequence
+def shell_customize_ammo_bins(c):
+    """CUSTOMIZE ammo bin numbers as MW2SHELL keeps them (internal id 10000 + weapon x 100 + bin; load 0x310e2 numbers a
+    weapon's bins 1.. in the file's link order; ADD AMMO 0x2f590 = its bins + 1; DELETE AMMO 0x2f820 takes bin #n
+    wherever it sits; DELETE WEAPON 0x2f230 / 0x2b0d0 numbers the type's later weapons (and their bins) down; the save
+    0x30732 writes link ids 10000 + type x 100 + 1.. per type in table order). Dire Wolf DRW00STD: links 11701 (UAC/5),
+    10201 (LRM 10), 11702, 11703, 10202 - the right torso holds UAC/5 bins #2 / #3, the right arm #1 (the port had
+    numbered by slot order: #1 / #2 / #3)"""
+    shell = os.path.join(REPO, 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    d = os.path.join(OUT, c.name)
+    os.makedirs(d, exist_ok=True)
+
+    def run(ops):
+        e = _shell_env(d, MW2_SHELL_LAB_EDIT='drw00std', MW2_LAB_PAGE=10, MW2_SHELL_FRAMES=1, MW2_LAB_OPS=ops + ';',
+                       MW2_SHELL_SHOT=os.path.join(d, 'lab.ppm'))
+        out = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120).stdout
+        crit = dict((l.split(':')[0][9:], l.split(': ', 1)[1]) for l in out.splitlines() if l.startswith('crit loc '))
+        pool = [l[11:] for l in out.splitlines() if l.startswith('crit pool: ')]
+        links = next((l.split(':', 1)[1].split() for l in out.splitlines() if l.startswith('saved links:')), [])
+        return crit, pool, links
+
+    crit, pool, links = run('')
+    c(crit.get('1 slot 8') == 'Ammo (Ultra AC/5 #1) #2' and crit.get('1 slot 9') == 'Ammo (Ultra AC/5 #1) #3' and
+      crit.get('4 slot 10') == 'Ammo (Ultra AC/5 #1) #1' and crit.get('3 slot 10') == 'Ammo (LRM 10 #1) #2',
+      'loaded: bins numbered in the link order', str(crit))
+    c(links == ['11701>1701', '10201>201', '11702>1701', '11703>1701', '10202>201'], 'saved as the retail file', str(links))
+    crit, pool, links = run('d4')
+    c(crit.get('1 slot 9') == '-' and crit.get('1 slot 8') == 'Ammo (Ultra AC/5 #1) #2', 'DELETE AMMO: bin #3 goes (placed)', str(crit))
+    crit, pool, links = run('d4;a4')
+    c(pool == ['Ammo (Ultra AC/5 #1) #3 (1)'], 'ADD AMMO: bin #3 again, unassigned', str(pool))
+    crit, pool, links = run('a5;a5;a4')
+    c(pool == ['Ammo (LRM 10 #1) #3 (1)', 'Ammo (LRM 10 #1) #4 (1)', 'Ammo (Ultra AC/5 #1) #4 (1)'], 'ADD AMMO numbers per weapon', str(pool))
+    c(links[-3:] == ['10203>201', '10204>201', '11704>1701'], 'saved link ids per type in table order', str(links))
+    crit, pool, links = run('x6')   # Pulse Laser (Large) #1 deleted: #2..#4 become #1..#3
+    c(crit.get('4 slot 2') == 'Pulse Laser (Large) #1' and crit.get('5 slot 4') == 'Pulse Laser (Large) #3',
+      'DELETE WEAPON: the type\'s later weapons number down', str(crit))
+
+
+def _gf1_patch(path, vib=(0, 0, 0), trem=(0, 0), sustain=200, modes=0x65):
+    """a GF1 patch (GF1PATCH110) with one 16-bit looped 440 Hz sine sample: envelope rates 63 to the sustain level,
+    vibrato (sweep, rate, depth), tremolo (rate, depth)"""
+    import struct
+    rate, n = 44100, 44100
+    data = b''.join(struct.pack('<h', int(20000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n))
+    hdr = b'GF1PATCH110\0ID#000002\0' + b'\0' * 60 + bytes([1, 0, 0]) + struct.pack('<HHI', 1, 127, len(data)) + b'\0' * 36
+    ins = struct.pack('<H', 0) + b'test'.ljust(16, b'\0') + struct.pack('<I', len(data) + 96) + bytes([1]) + b'\0' * 40
+    lay = bytes([0, 0]) + struct.pack('<I', len(data) + 96) + bytes([1]) + b'\0' * 40
+    smp = b'sine'.ljust(7, b'\0') + bytes([0]) + struct.pack('<III', len(data), 0, len(data)) + struct.pack('<H', rate)
+    smp += struct.pack('<III', 8176, 12543854, 440000) + struct.pack('<h', 0) + bytes([7])
+    smp += bytes([63, 63, 63, 63, 63, 63]) + bytes([sustain, sustain, sustain, 0, 0, 0])
+    smp += bytes([0, trem[0], trem[1], vib[0], vib[1], vib[2], modes]) + struct.pack('<hH', 60, 1024) + b'\0' * 36
+    assert len(hdr) == 129 and len(ins) == 63 and len(lay) == 47 and len(smp) == 96
+    with open(path, 'wb') as f:
+        f.write(hdr + ins + lay + smp + data)
+
+
+def _xmi(events):
+    """FORM XMID / EVNT from [(delay ticks, bytes)]"""
+    import struct
+    ev = b''
+    for delay, b in events:
+        while delay > 127:
+            ev += bytes([127]); delay -= 127
+        if delay:
+            ev += bytes([delay])
+        ev += b
+    ev += b'\xff\x2f\x00'
+    body = b'XMID' + b'EVNT' + struct.pack('>I', len(ev)) + ev
+    return b'FORM' + struct.pack('>I', len(body)) + body
+
+
+def _vlq(v):
+    out = [v & 0x7f]
+    v >>= 7
+    while v:
+        out.insert(0, (v & 0x7f) | 0x80); v >>= 7
+    return bytes(out)
+
+
+@sequence
+def gus_driver_lfo_volume(c):
+    """the GUS music as MW2's Miles driver ULTRA.MDI plays it (src/gusmid.c): vibrato a triangle LFO ticked by GF1 timer 2
+    (45.29 Hz) - patch rate 50 -> (50 x 2334 + 5000) / 100 = 1217 mHz -> 9 ticks a quarter, a 0.795 s period; depth 84
+    (4 semitones, ratio 1.2599) -> +-13 % of the pitch; tremolo only at the sustain point, depth 255 -> +-16 of the
+    8-bit level (12 dB from trough to peak); velocity / volume through the curve 0x5196 into the envelope levels
+    (offset x v / 255 in the GF1's log scale): sustain 200 at velocity 127 / volume 100 -> level 193, velocity 64 -> 170"""
+    import struct, wave
+    import numpy as np
+    xmiplay = os.path.join(REPO, 'xmiplay')
+    d = os.path.join(OUT, c.name)
+    os.makedirs(os.path.join(d, 'MIDI'), exist_ok=True)
+    _gf1_patch(os.path.join(d, 'MIDI', 'vib.pat'), vib=(0, 50, 84))
+    _gf1_patch(os.path.join(d, 'MIDI', 'trem.pat'), trem=(50, 255))
+    _gf1_patch(os.path.join(d, 'MIDI', 'plain.pat'))
+    with open(os.path.join(d, 'MIDI', 'ULTRAMID.INI'), 'w') as f:
+        f.write('0, 0, 0, 0, 0, vib\n1, 1, 1, 1, 1, trem\n2, 2, 2, 2, 2, plain\n')
+
+    def render(name, events, secs):
+        xp = os.path.join(d, name + '.xmi')
+        open(xp, 'wb').write(_xmi(events))
+        out = os.path.join(d, name + '.wav')
+        subprocess.run([xmiplay, xp, '-', d, out, str(secs)], capture_output=True, timeout=120)
+        w = wave.open(out)
+        a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(float).reshape(-1, 2)
+        return a[:, 0] + a[:, 1]
+
+    # vibrato: the pitch from the zero crossings (A4 = 440 Hz)
+    x = render('vib', [(0, b'\xc0\x00'), (0, b'\x90\x45\x7f' + _vlq(600))], 4)
+    z = np.nonzero((x[:-1] <= 0) & (x[1:] > 0))[0]
+    zt = z / 44100.0
+    fr = 1.0 / np.diff(zt)
+    tm = zt[1:]
+    sel = (tm > 0.5) & (tm < 3.5)
+    fmax, fmin = fr[sel].max(), fr[sel].min()
+    c(abs(fmax / 440 - 1.12996) < 0.012 and abs(fmin / 440 - 0.87004) < 0.012, 'vibrato +-13 % (depth 84: 2^(4/12), half)',
+      '%.1f .. %.1f Hz' % (fmin, fmax))
+    pk = tm[sel][np.argmax(fr[sel])]
+    peaks = [t for t, f in zip(tm[sel], fr[sel]) if f > 440 * 1.11]
+    groups = [peaks[0]] if peaks else []
+    for t in peaks[1:]:
+        if t - groups[-1] > 0.3:
+            groups.append(t)
+    per = np.diff(groups).mean() if len(groups) > 1 else 0
+    c(abs(per - 36 / (1 / (69 * 320e-6))) < 0.03, 'vibrato period 36 ticks of 45.29 Hz (0.795 s)', '%.3f s (%s)' % (per, groups[:5]))
+    # tremolo: the level at the sustain point swings 4 x (16 x 16 12-bit units each way = 2 octaves of the GF1 scale)
+    x = render('trem', [(0, b'\xc0\x01'), (0, b'\x90\x45\x7f' + _vlq(600))], 4)
+    env = np.abs(x).reshape(-1, 441).max(1)   # 10 ms peaks
+    e = env[50:350]
+    c(abs(e.max() / e.min() - 4.0) < 0.35, 'tremolo depth 255: 12 dB trough to peak', '%.2f' % (e.max() / e.min()))
+    # velocity through the curve: sustain 200 -> 193 (vel 127) vs 170 (vel 64), the GF1 log scale
+    x = render('vel', [(0, b'\xc0\x02'), (0, b'\x90\x45\x7f' + _vlq(60)), (120, b'\x90\x45\x40' + _vlq(60))], 3)
+    a127, a64 = np.abs(x[int(0.2 * 44100):int(0.45 * 44100)]).max(), np.abs(x[int(1.2 * 44100):int(1.45 * 44100)]).max()
+    gf1 = lambda v: (256 + (v & 255)) * 2.0 ** (v >> 8)
+    want = gf1(193 * 16) / gf1(170 * 16)
+    c(abs(a127 / a64 / want - 1) < 0.03, 'velocity 127 / 64: levels 193 / 170 of the 8-bit log volume', '%.3f want %.3f' % (a127 / a64, want))
+
+
+@sequence
+def red_flash_dropped_while_fading(c):
+    """a red flash asked for while a palette fade runs is dropped (0x1002ad50 / DOS 0x3e7d0 with mode 1: no source palette,
+    return 0) - its way back included - but still counted (DAT_1024cd5c, 0x1001e6c0): hits at 4.0 s (n 1: 72 ticks, the
+    fade in 36 + back 36 = 0.4 s; DOS 36 + 5 frames), 4.15 s (n 2: inside it, dropped), 5.0 s (n 3: 217 ticks; DOS 73 / 218 in its fixed
+    point, its way back in frames)"""
+    hits = {'MW2_TEST_RFLASH': '4:1,4.15:1,5:1'}   # (the request a breaching CT / head hit raises, combat.c)
+    for tag, extra in (('', {}), ('_dos', {'dos_look': True})):
+        r = c.run(tag, secs=7, env=hits, nostart=True, **extra)
+        durs = [int(x) for x in re.findall(r'^FLASH now=\d+ dur=(\d+)', r.out, re.M)]
+        drop = re.findall(r'^FLASH_DROPPED now=(\d+) dur=(\d+) n=(\d+)', r.out, re.M)
+        want = [72, 217] if not tag else [73, 218]
+        c(durs == want, tag + ' flashes: the first and the third (n = 3: the dropped one counted)', '%s' % durs)
+        c(len(drop) == 1 and drop[0][2] == '2', tag + ' the second, inside the first fade, dropped', '%s' % drop)
+
+
+@sequence
+def dos_cockpit_projection(c):
+    """the DOS look's cockpit pixel for pixel as DOSBox (YELLSCN1 1024 x 768 at rest, docs/reference/
+    dos_cockpit_yell_dosbox.png): MW2.EXE projects in integers - round(world) - round(eye) (whole cm), the camera rows
+    built from the 16.16 angles through its sine table (0x3a838, 0x3b522, 0x3f230) and scaled by the zoom mantissas
+    (0x3ece0), >> 27 rounded, ((x << s) / z + 2) >> 2 (0x3dfb7) - and draws the cockpit set's polygons in the order its
+    quicksort leaves them (0x3cea0, equal keys not kept in order). dosbox-debug: every cockpit vertex's camera integers
+    and screen point and the draw list's order reproduced. Before: strut edges 1-3 px off and two equal-key polygons
+    swapped (77 % of the strut pixels as DOS, the dither phase flipping with the edges); now every one"""
+    from PIL import Image
+    import numpy as np
+    ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_cockpit_yell_dosbox.png')).convert('RGB')).astype(np.int32)
+    r = c.run('', secs=8, throttle=0, nostart=True, mech=None, size='1024x768', dos_look=True, shots=[(7.5, 'cp')])
+    path = r.shots.get('cp')
+    c(path and os.path.exists(path), 'picture')
+    if not path or not os.path.exists(path):
+        return
+    w, h, px = ppm(path)
+    a = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+    sat = lambda im: (im.max(2) - im.min(2)) > 40   # the HUD's own colours (green, amber, ...) left out, and their edges
+    hud = sat(ref) | sat(a)
+    for _ in range(4):
+        hud = hud | np.roll(hud, 1, 0) | np.roll(hud, -1, 0) | np.roll(hud, 1, 1) | np.roll(hud, -1, 1)
+    strut = ((ref.sum(2) < 160) | (a.sum(2) < 160)) & ~hud
+    strut[:60] = False                 # (the HUD's heading tape)
+    strut[550:700, 20:210] = False     # (the target display)
+    agree = (a == ref).all(2)[strut].mean()
+    c(strut.sum() > 80000, 'the struts in view', '%d px' % strut.sum())
+    c(agree >= 0.999, 'every strut pixel as DOSBox (edges, dither phase, overlaps)', '%.5f (before: 0.766)' % agree)
+
+
+@sequence
+def titanium_bank1_frames(c):
+    """TEXTURES TITANIUM steps its own map's bank-1 frame groups as the 3D editions do (Mw2win.exe 0x401560 loads
+    MERCSW.DLL - SimMain / SimWindowProc - as the 16-bit build's engine; mercsw 0x10001c74 every frame: (now - time) /
+    rate frames round the group, chunk handlers 0x100719c8.. BMPJ / BMID / BSEC / BMEN as 0x1002cf10..). MAROSCN1's fire
+    slot 0x9b in the Titanium table: 17 frames at 10 ticks; the port had held frame 0 (skipped without titanium/)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    r = c.run(secs=3.2, mission='MAROSCN1', mech=None, nostart=True,
+              env={'MW2_CONFIG': titanium_cfg('titanium_bank1_frames', tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'),
+                   'MW2_TEXTURES': 'titanium', 'MW2_ANIM_LOG': '0x9b'})
+    a = [(float(t), int(f), int(n), int(rt)) for t, f, n, rt in re.findall(r'^TIANIM t=([\d.]+) slot 0x9b frame (\d+) of (\d+) rate (\d+)', r.out, re.M)]
+    c(a and all(n == 17 and rt == 10 for t, f, n, rt in a), 'the Titanium slot 0x9b: 17 frames, 10 ticks each', str(a[:2]))
+    c(len(set(f for t, f, n, rt in a)) == 17, 'every frame shown in 3 s', str(sorted(set(f for t, f, n, rt in a))))
+    c(a and all(f == int(t * 182 / 10 + 1e-6) % 17 or f == (int(t * 182 / 10) - 1) % 17 for t, f, n, rt in a),
+      'frame = (ticks / 10) mod 17 from the mission start', str(a[:4]))
+
+
+@sequence
+def dos_unit_hips_eye(c):
+    """the DOS edition stands a mech's hips at its feet + the MGEO centre (dosbox-debug memory, MAROSCN1 / YELLSCN1: the
+    player's root object at y 550, its hips node's local translation (0, 0, 0) though the record's OBJ gives (0, 671, 17)
+    for the Mad Dog, every object's world position whole units). So the cockpit eye - the camera, DAT_0014fe94.. - is at
+    (42388, 931, -32100) at the MARO start, not the port's (42371, 1052, -32100): the whole world had sat ~1.2 m too low
+    in the DOS look (the MARO start view ~10-20 px lower than DOSBox). The 3D looks keep the port's placement"""
+    r = c.run('', secs=1.0, mission='MAROSCN1', mech=None, nostart=True, dos_look=True, env={'MW2_DEBUG_EYE': '1'})
+    e = re.findall(r'^eye (-?\d+) (-?\d+) (-?\d+)', r.out, re.M)
+    c(e and e[-1] == ('42388', '931', '-32100'), 'DOS look: the eye where DOSBox has the camera', '%s' % e[-1:])
+    r3 = c.run('_3d', secs=1.0, mission='MAROSCN1', mech=None, nostart=True, env={'MW2_DEBUG_EYE': '1'})
+    e3 = re.findall(r'^eye (-?\d+) (-?\d+) (-?\d+)', r3.out, re.M)
+    c(e3 and e3[-1] == ('42395', '1084', '-32109'), 'the 3D looks unchanged (the 3Dfx Mad Dog, hips at its OBJ offset)', '%s' % e3[-1:])
+
+
+@sequence
+def no_units_player_runs(c):
+    """PROVSCN1 launched alone (no star files: no units at all) - DOS ends it at once ("Press any key to exit...",
+    DOSBox, the start view drawn: docs/reference/prov_start_dosbox.png); the port had skipped the whole player update when
+    a mission had no actors (no cockpit, no camera of the player's). Now the player runs and the mission ends at once as
+    in DOS"""
+    r = c.run('', secs=1.0, mission='PROVSCN1', mech=None, nostart=True, dos_look=True, env={'MW2_DEBUG_EYE': '1'})
+    c(re.search(r'^eye ', r.out, re.M) is not None, 'the cockpit camera rides the player\'s eye')
+    c(re.search(r'^\s*0\.0s Mission successful', r.out, re.M) is not None, 'successful at once, as DOS')
+
+
+@sequence
+def dos_fog_polygon_key(c):
+    """the DOS fog is one step per polygon: the level less ((key << 4) / LITE +24) >> 4 with the key the polygon's largest
+    corner camera z in quarter units (0x3e1de -> 0x38ae0 -> 0x38ee0; DAT_0014fcc0 = 0), not the pixel's depth in cm.
+    PROVSCN1's start view (docs/reference/prov_start_dosbox.png, DOSBox: the mission ends at once with the view drawn):
+    the spire and its mirrored PROVMTN2 copy below the horizon (OBJ y scale -2 / -3) were 1-3 levels too dark. Before:
+    86 % of the spire area as DOSBox, now 97.6 % (whole view 87 -> 93 %; MARO 86 -> 91 %, YELL 94.5 -> 97.7 % of the whole frame)"""
+    from PIL import Image
+    import numpy as np
+    ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'prov_start_dosbox.png')).convert('RGB')).astype(np.int32)
+    r = c.run('', secs=1.0, throttle=0, mission='PROVSCN1', nostart=True, mech=None, size='1024x768', dos_look=True, shots=[(0.6, 'p')])
+    path = r.shots.get('p')
+    c(path and os.path.exists(path), 'picture')
+    if not path or not os.path.exists(path):
+        return
+    w, h, px = ppm(path)
+    a = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+    sp = (a[200:580, 100:360] == ref[200:580, 100:360]).all(2).mean()
+    c(sp >= 0.95, 'the spire and its mirrored copy as DOSBox (fog per polygon)', '%.4f (before: 0.864)' % sp)
+    allf = (a[:700] == ref[:700]).all(2).mean()
+    c(allf >= 0.92, 'the start view above the message bar', '%.4f (before: 0.870)' % allf)
+
+
+@sequence
+def ati_ground_mips(c):
+    """RENDERER = ATI RAGE (user report: "the ATi mode doesn't load the textures the same way"): one filter state,
+    "Filter Textures" on = C3D_ETFILT_MINPNT_MAG2BY2 (0x10068570), but the sky and ground fills register their textures
+    with a mip chain (0x1002e690 / 0x1002e7a0 -> 0x1002bc60 mip flag 1 -> 0x10068450 -> 0x10068240: 2x2 box levels,
+    0x10068080) while models, terrain and scrub have none (0x1002e059 / 0x100686b0: mip flag 0). The port had point
+    sampled the ground's full-size texture: a grainy, sparkling ground toward the horizon (high-frequency level 7-9x the
+    enhanced look's). Now point sampled in the nearest mip level: within 2x of the enhanced look's (trilinear), still
+    above it (point, not bilinear). TNJ1 and CYAN"""
+    def hf(path, box):
+        if not (path and os.path.exists(path)):
+            return -1.0
+        import numpy as np
+        w, h, a = ppm(path)
+        A = np.frombuffer(a, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.float64).mean(2)
+        x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+        S = A[y0 - 1:y1 + 1, x0 - 1:x1 + 1]
+        m = sum(S[1 + dy:S.shape[0] - 1 + dy, 1 + dx:S.shape[1] - 1 + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)) / 9.0
+        return float(np.abs(A[y0:y1, x0:x1] - m).mean())
+    # the flat ground just below the horizon (strongest minification), clear of the mechs and the cockpit struts
+    for mission, ground in (('TNJ1SCN1', (0.55, 0.52, 0.70, 0.62)), ('CYANSCN1', (0.40, 0.52, 0.60, 0.62))):
+        a = c.run('_ati_' + mission[:4], secs=1.5, throttle=0, twist=0, mission=mission, nostart=True, shots=[(1, 'v')],
+                  size='640x400', lookati=True)
+        e = c.run('_enh_' + mission[:4], secs=1.5, throttle=0, twist=0, mission=mission, nostart=True, shots=[(1, 'v')],
+                  size='640x400')
+        ha, he = hf(a.shots.get('v'), ground), hf(e.shots.get('v'), ground)
+        c(he > 0 and he < ha < 2.0 * he, mission + ': the ATi ground point sampled in its nearest mip level',
+          'high-frequency ATi %.2f, enhanced %.2f (without mips: 7-9x)' % (ha, he))
+        c.note('%s ground high-frequency: ATi %.2f, enhanced %.2f' % (mission, ha, he))
+
+
+# ---------------------------------------------------------------- RENDERER RENDITION (the Titanium plugin zredline.dll)
+
+@sequence
+def rendition_look(c):
+    """RENDERER RENDITION (port; the Titanium edition's Rendition Verite plugin zredline.dll): the Titanium textures
+    whatever TEXTURES says, bilinear without mips (VL_SetSrcFilter 1 at 0x10002623, mip pick 0x10004390 never on) and
+    the Titanium fog per vertex (VL_SetF per vertex, 0x100056d8). CYANSCN1 against RENDERER ENHANCED + TEXTURES
+    TITANIUM, the same frame (SILVSCN1: Titanium fog Z 15000): the same scene, the textures sharper and shimmering where
+    minified - the distant ground and world, the clouds (skipped without the titanium/ folder)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    shots = [(2.5, 'view')]
+    r = c.run(secs=3, throttle=0, nostart=True, mission='SILVSCN1', shots=shots, edition='rendition',
+              env={'MW2_CONFIG': titanium_cfg('rendition_look', tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'),
+                   'MW2_TEXTURES': 'original'})   # (RENDITION takes the Titanium textures all the same)
+    m = re.search(r'titanium: (\d+) textures from the Titanium archive', r.out)
+    c(m is not None and int(m.group(1)) > 0, 'the Titanium textures with TEXTURES ORIGINAL asked', m.group(0) if m else 'no titanium line')
+    c('rendition: bilinear without mips, the Titanium fog per vertex' in r.out, 'the Rendition look applied')
+    e = c.run('_enh', secs=3, throttle=0, nostart=True, mission='SILVSCN1', shots=shots,
+              env={'MW2_CONFIG': titanium_cfg('rendition_look_enh', tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'),
+                   'MW2_TEXTURES': 'titanium'})
+    c('rendition:' not in e.out, 'ENHANCED + TITANIUM: not the Rendition look')
+    whole = mean_diff(r.shots.get('view'), e.shots.get('view'), box=(0, 0, 1, 1))
+    low = mean_diff(r.shots.get('view'), e.shots.get('view'), box=(0, 0.45, 1, 1))
+    c(0 <= whole < 12, 'the same scene (sky dome, clear colour, models)', 'mean diff %.2f' % whole)
+    c(low > 0.3, 'the ground and world differ (bilinear without mips, vertex fog)', 'lower mean diff %.2f' % low)
+    c.note('mean diff vs ENHANCED + TITANIUM: whole %.2f, lower half %.2f' % (whole, low))
+
+
+@sequence
+def rendition_look_switch(c):
+    """the in-mission Renderer to RENDITION from ENHANCED / ORIGINAL (switch_look): the Titanium textures come with it
+    (TEXTURES follows, locked), and back to ENHANCED the Titanium textures stay; saved as renderer= / textures=; the
+    GRAPHICS menu's Textures row is locked with RENDITION (4 does nothing); without the titanium/ folder RENDITION is
+    not offered (MW2_EDITION=rendition -> enhanced) (skipped without the titanium/ folder)"""
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    shots = [(2.5, 'before'), (4.0, 'rendition'), (5.5, 'enhanced')]
+    cfg = titanium_cfg('rendition_look_switch', tdir)
+    r = c.run(secs=6, throttle=0, nostart=True, mission='YELLSCN1', shots=shots,
+              env={'MW2_CONFIG': cfg, 'MW2_TEST_VIDEO': '3:rendition,4.5:enhanced'})
+    i1 = r.out.find('video mode: rendition, textures titanium')
+    i2 = r.out.find('video mode: enhanced, textures titanium')
+    c(i1 >= 0, 'Renderer to rendition: textures titanium with it', 'no "video mode: rendition, textures titanium"')
+    c(i2 > i1 >= 0, 'Renderer back to enhanced (textures kept)', 'no "video mode: enhanced, textures titanium" after it')
+    blue = [count_px(r.shots.get(k), lambda R, G, B: (B > R + 80) & (B > G + 80), (0, 0, 1, 0.45)) for k in ('before', 'rendition', 'enhanced')]
+    c(0 <= blue[0] < 200 and blue[1] > 2000, 'the Titanium sky with RENDITION (YELL sky=64,64,200)', 'blue pixels %s' % blue)
+    c(r.last.get('t', 0) >= 5.5, 'the mission runs on through the switches')
+    with open(cfg) as f:
+        saved = f.read()
+    c('renderer=enhanced' in saved and 'textures=titanium' in saved, 'saved as renderer= / textures=', saved)
+    # the menu: Esc, 2 (Graphics), 4 (Textures) does nothing with RENDITION, 0 accepts
+    keys = [(3, 'esc'), (3.3, '2'), (3.6, '4'), (3.9, '0'), (4.2, 'esc')]
+    m = c.run('_menu', secs=5, throttle=0, nostart=True, mission='YELLSCN1', keys=keys, edition='rendition',
+              env={'MW2_CONFIG': titanium_cfg('rendition_look_switch_menu', tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'),
+                   'MW2_TEXTURES': 'titanium'})
+    c('video mode:' not in m.out, 'RENDITION: the Textures row locked (no look switch)', m.out[-300:])
+    # no Titanium folder: RENDITION falls back to the enhanced look
+    nt = os.path.join(OUT, 'rendition_look_switch', 'noti.cfg')
+    with open(nt, 'w') as f:
+        f.write('game=%s\nrenderer=rendition\ntitanium=/nonexistent\n' % os.path.join(OUT, 'rendition_look_switch', 'game'))
+    n = c.run('_noti', secs=2, throttle=0, nostart=True, mission='YELLSCN1', edition='rendition', env={'MW2_CONFIG': nt})
+    c('rendition:' not in n.out and 'textures from the Titanium archive' not in n.out, 'no titanium/ folder: no Rendition look')
+    c.note('saturated-blue sky pixels before / rendition / enhanced: %s' % blue)
+
+
+@sequence
+def rendition_smoke_unkeyed(c):
+    """RENDERER RENDITION, an LRM volley: zredline keys nothing for the particles (format-1 texture, Render type 7 ->
+    states 0x2a, no chroma, 0x100030d2; ARGB4444 without the key substitution, 0x1000413f), so the black around
+    particle.PID's disc is drawn at the same 3 / 15 - the trail darker than ENHANCED + TITANIUM's keyed discs, same
+    frame (skipped without the titanium/ folder or particle.PID)"""
+    tdir = titanium_dir()
+    pid = None
+    for d in (tdir, os.path.dirname(os.path.realpath(os.path.join(tdir, 'MW2.PRJ'))) if tdir else None):
+        if d and os.path.exists(os.path.join(d, 'particle.PID')):
+            pid = os.path.join(d, 'particle.PID')
+    if not tdir or not pid:
+        c.note('no titanium/ folder or no particle.PID: skipped')
+        return
+    tmp = os.path.join(OUT, 'rendition_smoke_dir')
+    os.makedirs(tmp, exist_ok=True)
+    for fn, src in (('MW2.PRJ', os.path.join(tdir, 'MW2.PRJ')), ('SKYGND.PAR', os.path.join(tdir, 'SKYGND.PAR')), ('particle.PID', pid)):
+        dst = os.path.join(tmp, fn)
+        if not os.path.exists(dst):
+            os.symlink(os.path.realpath(src), dst)
+    shots = [(3.6, 'smoke')]
+    keys, hold = [(2.5, 'backslash')], [(2.8, 3.0, 'space')]
+    box = (0.3, 0.25, 0.7, 0.7)
+    r = c.run(secs=4, throttle=0, nostart=True, mission='CYANSCN1', shots=shots, keys=keys, hold=hold, edition='rendition',
+              env=titanium_chase_env('rendition_smoke', tmp, 4))
+    c(re.search(r'titanium: missile smoke from ([\d.]+) s', r.out) is not None, 'the missiles smoke', r.out[-300:])
+    e = c.run('_enh', secs=4, throttle=0, nostart=True, mission='CYANSCN1', shots=shots, keys=keys, hold=hold,
+              env=titanium_chase_env('rendition_smoke_enh', tmp, 4))
+    o = c.run('_off', secs=4, throttle=0, nostart=True, mission='CYANSCN1', shots=shots, keys=keys, hold=hold, edition='rendition',
+              env=dict(titanium_chase_env('rendition_smoke_off', tmp, 4), MW2_NO_PARTICLES='1'))
+    oe = c.run('_enh_off', secs=4, throttle=0, nostart=True, mission='CYANSCN1', shots=shots, keys=keys, hold=hold,
+               env=dict(titanium_chase_env('rendition_smoke_enh_off', tmp, 4), MW2_NO_PARTICLES='1'))
+
+    def dark(p, q):   # the trail's darkening: pixels darker than the same look's frame without particles
+        if not (p and q and os.path.exists(p) and os.path.exists(q)):
+            return -1
+        import numpy as np
+        w, h, a = ppm(p)
+        _, _, b = ppm(q)
+        x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+        A = np.frombuffer(a, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32).sum(2)
+        B = np.frombuffer(b, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32).sum(2)
+        return int(((B - A) > 12).sum())
+    dr, de = dark(r.shots.get('smoke'), o.shots.get('smoke')), dark(e.shots.get('smoke'), oe.shots.get('smoke'))
+    c(dr > 0 and dr > de, 'RENDITION: the unkeyed squares darken more of the trail than the keyed discs', 'darkened px %d vs %d' % (dr, de))
+    c.note('pixels darkened by the trail (vs no particles): RENDITION %d, ENHANCED + TITANIUM %d' % (dr, de))
+
+@sequence
+def dos_hud_instrument_windows(c):
+    """the HUD's instruments at the engine's pixels for the screen's own size (user report: the DOS-look altitude ladder
+    ~27 px higher than DOSBox at 1024 x 768, 0 at y 330 for 357): every instrument window is its CPIT corners converted
+    as c << 16 / 319 (199) x (w - 1) (h - 1), rounded (0x10006000 / 0x10005b70), and its reference point a 16.16
+    fraction of the window's size in PIXELS (0x10005ec0 / DOS 0x13510) - the port had kept the 640 x 480 numbers in HUD
+    units, right only for the 640 set. Altitude tape (DOS table 0x968e0 entry 22, (0.7, 0.5)): caret 1024 x 768 (79, 357), tape at the
+    reference - its width, clipped to the window's rows y0..y1 inclusive, target / nav chevron (red for a nav too) two
+    caret widths right; compass (entry 23, (0.5, 0.4)): (513, 56), the DOS look in whole degrees, right arrow x1 + 6;
+    reticle at the view's centre row (h - 1) - ((h + 1) >> 1) (DOS 0x3f320 / 0x3ef30): 239 / 383; kph at entry 17's
+    (0, 0.9): (551, 453) / (882, 727). DOSBox YELLSCN1 at rest, n (Nav Epsilon), e (Falcon Firemoth), 640 x 480 and
+    1024 x 768: docs/reference/dos_hud_yell_{640,1024}_{nav,target}.png - every HUD pixel of the four instruments"""
+    from PIL import Image
+    import numpy as np
+    boxes = {'altitude tape': (0, 175, 75, 272), 'compass': (222, 15, 421, 62), 'reticle': (290, 215, 350, 265),
+             'kph': (530, 445, 600, 470)}
+    for size, tag, k in (('640x480', '640', 1.0), ('1024x768', '1024', 1.6)):
+        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
+        for shot in ('nav', 'target'):
+            path = r.shots.get(shot)
+            if not c(path and os.path.exists(path), '%s %s picture' % (tag, shot)):
+                continue
+            ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_hud_yell_%s_%s.png' % (tag, shot))).convert('RGB')).astype(np.int32)
+            w, h, px = ppm(path)
+            a = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+            for name, b in boxes.items():
+                x0, y0, x1, y1 = (int(round(v * k)) for v in b)
+                A, B = a[y0:y1, x0:x1], ref[y0:y1, x0:x1]
+                hud = ((A.max(2) - A.min(2)) > 60) | ((B.max(2) - B.min(2)) > 60)   # the HUD's own colours
+                same = ((A == B).all(2) & hud).sum()
+                c(hud.sum() > 50 and same == hud.sum(), '%s %s: the %s as DOSBox' % (tag, shot, name),
+                  '%d of %d HUD pixels' % (same, hud.sum()))
+    # the 3D editions keep their engine's layout at 640 x 480 (the 6 set): the altitude caret ALTMKR1 (0, 255, 85 in
+    # the 3Dfx palette) at (50, 223), as before
+    r = c.run('_3dfx', secs=1.0, throttle=0, nostart=True, mech=None, size='640x480', look3dfx=True, shots=[(0.6, 'v')])
+    path = r.shots.get('v')
+    if c(path and os.path.exists(path), '3Dfx picture'):
+        w, h, px = ppm(path)
+        a = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)[170:280, 0:80]
+        mk = (a[..., 0] == 0) & (a[..., 1] == 255) & (a[..., 2] == 85)
+        ys, xs = np.nonzero(mk)
+        c(len(ys) and ys.min() + 170 == 223 and xs.min() == 50, '3Dfx 640 x 480: the altitude caret unchanged (x 50, y 223)',
+          str((int(xs.min()), int(ys.min()) + 170) if len(ys) else None))
+
+
+
+def ati_hf(path, box):
+    """mean |pixel - its 3x3 mean| (luminance) over box (fractions of the frame); -1 if the shot is missing"""
+    if not (path and os.path.exists(path)):
+        return -1.0
+    import numpy as np
+    w, h, a = ppm(path)
+    A = np.frombuffer(a, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.float64).mean(2)
+    x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+    S = A[y0 - 1:y1 + 1, x0 - 1:x1 + 1]
+    m = sum(S[1 + dy:S.shape[0] - 1 + dy, 1 + dx:S.shape[1] - 1 + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)) / 9.0
+    return float(np.abs(A[y0:y1, x0:x1] - m).mean())
+
+
+def ati_diff_px(p1, p2, box):
+    """pixels that differ between two shots inside box (fractions of the frame); -1 if either is missing"""
+    if not (p1 and p2 and os.path.exists(p1) and os.path.exists(p2)):
+        return -1
+    import numpy as np
+    w, h, a = ppm(p1)
+    w2, h2, b = ppm(p2)
+    if (w, h) != (w2, h2):
+        return -1
+    x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+    A = np.frombuffer(a, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32)
+    B = np.frombuffer(b, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[y0:y1, x0:x1].astype(np.int32)
+    return int((np.abs(A - B).sum(2) > 0).sum())
+
+
+@sequence
+def ati_texop_alpha(c):
+    """RENDERER = ATI RAGE, the alpha flag (ATi MW2.DLL 0x1002dcb0, its 6th argument from the colour-type dispatcher
+    0x100281f0): types 5-7 (argument 0) are drawn with C3D_ERS_TMAP_TEXOP (state 10) none - 0x100686b0 / 0x10068830 -
+    their alpha-0 texels in their own colour, and so are the sky and ground fills (0x1002e690 / 0x1002e7a0 -> 0x1002bc60
+    alpha 0); only types 8-11 (argument 1) set the alpha mask (state 10 = 3). The port had masked every alpha-0 texel:
+    RUSTGROU (every texel alpha 0 in the ATi archive, as TEALGROU) left the RUST ground untextured, and the Wolf training
+    mechs' SNOW parts (slot 0x138) showed what is behind them instead of SNOW's black texels. MW2_TEST_ATI_TEX=0: the
+    port before"""
+    gnd = (0.40, 0.70, 0.60, 0.80)   # the flat ground between the cockpit struts
+    a = c.run('_rust', secs=1.5, throttle=0, twist=0, mission='RUSTSCN1', nostart=True, shots=[(1, 'v')], lookati=True)
+    b = c.run('_rust0', secs=1.5, throttle=0, twist=0, mission='RUSTSCN1', nostart=True, shots=[(1, 'v')], lookati=True,
+              env={'MW2_TEST_ATI_TEX': '0'})
+    ha, hb = ati_hf(a.shots.get('v'), gnd), ati_hf(b.shots.get('v'), gnd)
+    c(ha > 4.0 and 0 <= hb < 1.0, 'RUSTSCN1: the ground drawn textured (texture op none), not dropped by the mask',
+      'ground high-frequency %.2f (masked: %.2f)' % (ha, hb))
+    mech = (0.43, 0.33, 0.61, 0.65)   # the training mech ahead
+
+    def black(path):
+        if not (path and os.path.exists(path)):
+            return -1
+        import numpy as np
+        w, h, d = ppm(path)
+        A = np.frombuffer(d, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+        A = A[int(mech[1] * h):int(mech[3] * h), int(mech[0] * w):int(mech[2] * w)]
+        return int((A.sum(2) < 40).sum())
+    a = c.run('_tnw1', secs=1.5, throttle=0, twist=0, mission='TNW1SCN1', nostart=True, shots=[(1, 'v')], lookati=True)
+    b = c.run('_tnw10', secs=1.5, throttle=0, twist=0, mission='TNW1SCN1', nostart=True, shots=[(1, 'v')], lookati=True,
+              env={'MW2_TEST_ATI_TEX': '0'})
+    ka, kb = black(a.shots.get('v')), black(b.shots.get('v'))
+    c(ka > kb + 100 and kb >= 0, 'TNW1SCN1: the SNOW parts\' alpha-0 texels drawn black', 'black pixels %d (masked: %d)' % (ka, kb))
+    c.note('RUST ground hf %.2f / masked %.2f; TNW1 mech black px %d / masked %d' % (ha, hb, ka, kb))
+
+
+@sequence
+def ati_affine_types(c):
+    """RENDERER = ATI RAGE, perspective correction by colour type (DISPLAY DETAIL high): types 7 / 8 go to 0x100686b0
+    (C3D_ERS_TMAP_PERSP_COR, state 8, = 0: affine), types 6 / 10 to 0x10068830 (state 8 = 3) but with 0x1018a84c set
+    around the call, so every vertex has q = 1 (0x1002de4c -> 0x1002def4): affine as well; types 5 / 9 / 11 perspective-
+    correct. MAROSCN1's fire card (type 8, alpha mask) changes shape; nothing else in that view"""
+    fire = (0.60, 0.31, 0.74, 0.60)
+    a = c.run('_maro', secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')], lookati=True)
+    b = c.run('_maro0', secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')], lookati=True,
+              env={'MW2_TEST_ATI_TEX': '0'})
+    n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), fire)
+    c(n > 1000, 'MAROSCN1: the fire card drawn affine', '%d pixels differ in the fire card\'s box' % n)
+    c.note('fire card: %d pixels differ from the perspective-correct one' % n)
+
+
+@sequence
+def ati_detail_low_affine(c):
+    """RENDERER = ATI RAGE with COMBAT VARIABLES DISPLAY DETAIL low (MW2SND.CFG +0x1c = 0): the mission start applies it
+    (0x1000a180 -> 0x10066430 -> 0x10066570 -> 0x1002bc50: 0x1018a84c = 1), and every textured polygon gets q = 1 - all
+    affine, the terrain's type 5 too. Against the same run with types 5 / 9 / 11 kept perspective-correct
+    (MW2_TEST_ATI_TEX=1): the YELL hills differ"""
+    snd = bytearray(open(os.path.join(GTEST, 'MW2SND.CFG'), 'rb').read())
+    snd[0x1c:0x20] = b'\0\0\0\0'
+    f = {'MW2SND.CFG': bytes(snd)}
+    below = (0.0, 0.45, 1.0, 1.0)
+    a = c.run('_low', secs=1.5, throttle=0, twist=0, mission='YELLSCN1', nostart=True, shots=[(1, 'v')], lookati=True, files=f)
+    b = c.run('_low1', secs=1.5, throttle=0, twist=0, mission='YELLSCN1', nostart=True, shots=[(1, 'v')], lookati=True, files=f,
+              env={'MW2_TEST_ATI_TEX': '1'})
+    n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), below)
+    c(n > 15000, 'DISPLAY DETAIL low: the type 5 terrain drawn affine', '%d pixels differ below the horizon' % n)
+    c.note('detail low: %d pixels differ from types 5 / 9 / 11 perspective-correct' % n)
 
 def main():
     global GLVIEW, VERBOSE
@@ -5086,3 +6397,5 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+

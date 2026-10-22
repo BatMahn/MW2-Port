@@ -75,6 +75,8 @@ void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume)
 void sfx_stop_pcm(sfx *s, const unsigned char *pcm);
 /* set the volume (EFFECTS-scaled) and pan of every voice playing this buffer (a positional loop) */
 void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan);
+/* set the playback rate (Hz) of every voice playing this buffer (AIL_set_sample_playback_rate) */
+void sfx_pcm_rate(sfx *s, const unsigned char *pcm, int rate);
 /* Music: called from the audio thread to add `frames` stereo float frames into out. */
 typedef void (*sfx_music_fn)(void *user, float *out, int frames);
 void sfx_set_music(sfx *s, sfx_music_fn fn, void *user);

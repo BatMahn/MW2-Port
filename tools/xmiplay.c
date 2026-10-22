@@ -1,5 +1,6 @@
 /* xmiplay - render MW2 shell XMIDI music through Gravis UltraSound patches to a WAV.
- *   xmiplay DATABASE.MW2 entry ULTRASND-dir out.wav [max seconds] [memory KB] */
+ *   xmiplay DATABASE.MW2 entry ULTRASND-dir out.wav [max seconds] [memory KB]
+ *   xmiplay FILE.XMI - ULTRASND-dir out.wav [max seconds] [memory KB]   (an XMIDI file; tests) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +21,18 @@ int main(int argc, char **argv)
     FILE *o;
     double peak = 0;
     if (argc < 5) { fprintf(stderr, "usage: xmiplay DATABASE.MW2 entry ULTRASND-dir out.wav [seconds] [memory KB]\n"); return 2; }
-    if (shelldb_open(argv[1], &db)) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
-    n = shelldb_entry(&db, atoi(argv[2]), &x);
+    memset(&db, 0, sizeof db);
+    if (strcmp(argv[2], "-") == 0) {   /* a file */
+        FILE *fi = fopen(argv[1], "rb");
+        if (!fi) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+        fseek(fi, 0, SEEK_END); n = ftell(fi); fseek(fi, 0, SEEK_SET);
+        x = malloc(n > 0 ? (size_t)n : 1);
+        if (!x || fread(x, 1, (size_t)n, fi) != (size_t)n) { fclose(fi); return 1; }
+        fclose(fi);
+    } else {
+        if (shelldb_open(argv[1], &db)) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
+        n = shelldb_entry(&db, atoi(argv[2]), &x);
+    }
     b = gus_bank_open(argv[3], mem);
     if (!b) { fprintf(stderr, "cannot read %s/MIDI/ULTRAMID.INI\n", argv[3]); return 1; }
     s = n > 0 ? gus_song_open(b, x, (size_t)n, rate) : NULL;
@@ -53,6 +64,6 @@ int main(int argc, char **argv)
     }
     fclose(o);
     printf("%.1f s rendered, peak %.2f\n", (double)total / rate, peak);
-    gus_song_close(s); gus_bank_close(b); free(pcm); free(x); shelldb_close(&db);
+    gus_song_close(s); gus_bank_close(b); free(pcm); free(x); if (strcmp(argv[2], "-") != 0) shelldb_close(&db);
     return 0;
 }

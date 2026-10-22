@@ -21,6 +21,8 @@ typedef struct {
     double   low, high, root;           /* Hz */
     int      balance;                   /* 0..15 */
     uint8_t  env_rate[6], env_off[6];
+    uint8_t  trem_rate, trem_depth, vib_sweep, vib_rate, vib_depth;   /* header 50 / 51 / 52 / 53 / 54 (ULTRA.MDI keeps these,
+                                                                       * not the tremolo sweep, 0x2dc7) */
     int      modes;                     /* 0x01 16-bit, 0x02 unsigned, 0x04 loop, 0x08 bidir, 0x10 reverse, 0x20 sustain, 0x40 envelope */
     int      scale_freq, scale_factor;
 } gus_sample;
@@ -114,6 +116,7 @@ static gus_patch *get_patch(gus_bank *b, int prog)
         s->low = rd32(h + 22) / 1000.0; s->high = rd32(h + 26) / 1000.0; s->root = rd32(h + 30) / 1000.0;
         s->balance = h[36];
         memcpy(s->env_rate, h + 37, 6); memcpy(s->env_off, h + 43, 6);
+        s->trem_rate = h[50]; s->trem_depth = h[51]; s->vib_sweep = h[52]; s->vib_rate = h[53]; s->vib_depth = h[54];
         s->scale_freq = (int16_t)rd16(h + 56); s->scale_factor = rd16(h + 58);
         s->data = malloc(((size_t)s->len + 2) * sizeof(float));
         for (k = 0; k < s->len; k++) {
@@ -142,7 +145,14 @@ typedef struct {
     double pos, step;            /* samples */
     int dir;                     /* +1 / -1 (bidirectional loops) */
     double env;                  /* GF1 volume register 0..4095 */
-    float vel;
+    int vel;                     /* the note's velocity 1..127 */
+    int v11;                     /* ULTRA.MDI voice +0x11: the 8-bit volume the envelope offsets are scaled by */
+    int trem;                    /* tremolo running (the sustain point held) */
+    double trem_lo, trem_hi, trem_inc; int trem_dir;   /* 12-bit bounds, increment per GF1 frame, -1 / +1 */
+    int vib;                     /* vibrato LFO: on, ticks in the quadrant (+0x17), sweep countdown (+0x18), quadrant (+0x19), */
+    int vib_cnt, vib_sweep, vib_q, vib_quarter;   /* ticks per quadrant (+0x1a) */
+    double vib_dev;              /* the peak deviation as a fraction of the frequency ((ratio - 1) / 2, +0xc / +0xa) */
+    double vib_mul;              /* the frequency factor the LFO set */
     uint64_t off_at;             /* sample time of the scheduled note-off (0 = none) */
     uint64_t started;
 } voice;
@@ -155,6 +165,8 @@ struct gus_song_s {
     uint64_t t;                  /* samples rendered */
     double tick_base;            /* loop offset in ticks */
     int prog[16], vol[16], pan[16], expr[16], bend[16], pan_set[16], sustain[16];
+    int mod_depth[16], mod_rate[16];   /* the modulation wheel's vibrato (channel record +9 / +0xa, 0x36de) */
+    double lfo_next;             /* the next LFO timer tick (samples) */
     int loop_pos[4], loop_cnt[4]; double loop_tick[4]; int nloop;
     voice v[MAXV];
     int ended;
@@ -222,7 +234,7 @@ gus_song *gus_song_open(gus_bank *b, const uint8_t *xmi, size_t len, int rate)
     s = calloc(1, sizeof *s);
     if (!s) return NULL;
     s->bank = b; s->rate = rate; s->spt = rate / 120.0;
-    for (i = 0; i < 16; i++) { s->vol[i] = 127; s->pan[i] = 64; s->expr[i] = 127; s->bend[i] = 8192; }
+    for (i = 0; i < 16; i++) { s->vol[i] = 100; s->pan[i] = 64; s->expr[i] = 127; s->bend[i] = 8192; }   /* 0x52c6 / 0x52e6 */
     if (parse_evnt(s, evnt, el) <= 0) { gus_song_close(s); return NULL; }
     /* preload the patches the song uses (the GUS driver loads them before playing) */
     {
@@ -240,6 +252,95 @@ void gus_song_close(gus_song *s) { if (!s) return; free(s->ev); free(s); }
 double gus_song_seconds(const gus_song *s) { return (double)s->t / s->rate; }
 
 static double note_hz(double n) { return 440.0 * pow(2.0, (n - 69.0) / 12.0); }
+
+/* ULTRA.MDI (MW2 CD SND\, Miles AIL 3.10 "Gravis UltraSound MIDI Synth"; offsets in the file, ndisasm -b16):
+ * - volume: a voice's 8-bit volume +0x11 = (master 127 + 64) x T[velocity] x T[channel volume x expression / 127] / 48705
+ *   (0x4105, again on CC7 / CC11 at 0x3276), T the 128-byte curve at 0x5196; the envelope's offsets are scaled by it in
+ *   the GF1's logarithmic 8-bit scale: target = offset x v / 255, at least 5 (0x429f, 0x4967). Channel volume 100 and
+ *   expression 127 to start and on reset all controllers (0x52c6 / 0x52e6, 0x4f0f); sustain pedal on at 24 (0x4ec7).
+ * - envelope: note-on ramps from 5 to stage 0's target at its rate (0x4276..0x42c8); each ramp's end (0x4787) starts
+ *   the next stage; with the sustain mode (0x20) and the note held the end of stage 2 holds (0x4886) - with tremolo
+ *   there a looping volume ramp. Note-off (0x4488..): sustain mode -> stage 3 from the current volume (0x4593); an
+ *   envelope without it runs on untouched; no envelope (0x40) or fast release (0x80) -> stage 5's rate down to 5.
+ * - vibrato (0x3933, ticked by 0x3802 on GF1 timer 2: count 187 x 320 us = 45.29 Hz, 0x4bfd): depth / rate / sweep from
+ *   the patch, or the modulation wheel's (0x36de: depth = value x 30 / 128 + 2, rate 200, no sweep); LFO frequency
+ *   (rate x 2334 + 5000) / 100 mHz -> ticks a quarter = 45289 / (4 x that), rounded, at least 1; deviation (ratio - 1) / 2
+ *   of the frequency, ratio = 2^(depth / 21 / 12) interpolated in the table 0x5216; a triangle 0 -> +dev -> 0 -> -dev,
+ *   scaled by (sweep - countdown) / sweep while the countdown runs; restarted by note-on and pitch bend.
+ * - tremolo (0x3acc, run once the sustain point holds, 0x48c2): depth d -> (d + 1) >> 3 = w; around the sustain level
+ *   L = offset[2] x v / 255 (kept within 5 + w/2 .. 251 - w/2) from L - w/2 to L + w/2 (+1 if w is odd), a bidirectional
+ *   looping ramp at the patch rate's LFO frequency (increment / divider from 0x3bc7) */
+static const int VOL_T[128] = {   /* 0x5196 */
+    0, 129, 145, 155, 161, 166, 171, 174, 177, 180, 182, 185, 187, 188, 190, 192, 193, 195, 196, 197, 198, 199, 201, 202,
+    203, 203, 204, 205, 206, 207, 208, 208, 209, 210, 211, 211, 212, 213, 213, 214, 214, 215, 215, 216, 217, 217, 218, 218,
+    219, 219, 219, 220, 220, 221, 221, 222, 222, 222, 223, 223, 224, 224, 224, 225, 225, 226, 227, 228, 229, 230, 231, 231,
+    232, 233, 234, 234, 235, 236, 236, 237, 238, 238, 239, 239, 240, 241, 241, 242, 242, 243, 243, 244, 244, 244, 245, 245,
+    246, 246, 247, 247, 247, 248, 248, 249, 249, 249, 250, 250, 250, 251, 251, 251, 252, 252, 252, 253, 253, 253, 254, 254,
+    254, 254, 255, 255, 255, 255, 255, 255};
+static const int SEMI_T[13] = {1024, 1085, 1149, 1218, 1290, 1367, 1448, 1534, 1625, 1722, 1825, 1933, 2048};   /* 0x5216 */
+#define GF1_VOICES 28
+#define LFO_HZ (1.0 / (69 * 320e-6))   /* GF1 timer 2 at 187: 45.29 Hz (0x4c21; 0xb0e9 = 45289 in 0x3933) */
+
+static int voice_vol(const gus_song *s, int ch, int vel)   /* +0x11 */
+{
+    int cv = s->vol[ch] * s->expr[ch] / 127;
+    if (cv < 0) cv = 0;
+    if (cv > 127) cv = 127;
+    return (127 + 64) * VOL_T[vel] * VOL_T[cv] / 48705;
+}
+static double env_target(const voice *v, int stage)   /* 12-bit: offset x v / 255, at least 5 */
+{
+    int t = v->s->env_off[stage] * v->v11 / 255;
+    return (t < 5 ? 5 : t) * 16.0;
+}
+static void vib_setup(gus_song *s, voice *v, int start)   /* 0x3933 */
+{
+    const gus_sample *sm = v->s;
+    int depth = sm->vib_depth, rate = sm->vib_rate, sweep = sm->vib_sweep, fm, q, a, b, rem;
+    double ra, rb;
+    if (s->mod_depth[v->ch]) { depth = s->mod_depth[v->ch]; rate = s->mod_rate[v->ch]; sweep = 0; }
+    fm = (rate * 2334 + 5000) / 100;
+    q = 45289 / (4 * fm);
+    if ((uint32_t)(45289 % (4 * fm)) > (uint32_t)(2 * fm)) q++;
+    v->vib_quarter = q < 1 ? 1 : q;
+    a = depth / 21; b = a + 1; rem = depth % 21;
+    ra = (double)SEMI_T[a % 12] * (1 << (a / 12)); rb = (double)SEMI_T[b % 12] * (1 << (b / 12));
+    v->vib_dev = ((ra + (rb - ra) * rem / 21.0) / 1024.0 - 1.0) / 2.0;
+    v->vib = depth != 0;
+    if (start) { v->vib_sweep = sweep; v->vib_cnt = 0; v->vib_q = 0; }
+}
+static void vib_tick(gus_song *s, voice *v)   /* 0x3812: one timer tick */
+{
+    const gus_sample *sm = v->s;
+    double c, x;
+    if (!sm->vib_depth && !s->mod_depth[v->ch]) { v->vib_mul = 1.0; return; }
+    c = (double)v->vib_cnt / v->vib_quarter;
+    x = v->vib_q == 0 ? c : v->vib_q == 1 ? 1.0 - c : v->vib_q == 2 ? -c : -(1.0 - c);
+    if (v->vib_sweep && sm->vib_sweep) { x *= (double)(sm->vib_sweep - v->vib_sweep) / sm->vib_sweep; v->vib_sweep--; }
+    v->vib_mul = 1.0 + x * v->vib_dev;
+    if (++v->vib_cnt >= v->vib_quarter) { v->vib_q = (v->vib_q + 1) % 4; v->vib_cnt = 0; }
+}
+static void trem_setup(voice *v, int outrate)   /* 0x3acc: the looping ramp over the sustain level */
+{
+    const gus_sample *sm = v->s;
+    int L = sm->env_off[2] * v->v11 / 255, w = (sm->trem_depth + 1) >> 3, h = w >> 1, lo, hi, div = 0;
+    double span, per;
+    if (L - h < 5) L = h + 5;
+    if (L + h + (w & 1) > 251) L = 251 - h - (w & 1);
+    lo = L - h; hi = L + h + (w & 1);
+    span = (double)(hi - lo) * 16.0 * GF1_VOICES * 16.0;
+    per = (double)(5000000 / (sm->trem_rate * 2334 + 5000)) * 100000.0;
+    while (div <= 3 && span <= per) { span *= 8; div++; }
+    if (div > 3) div = 3;
+    {
+        int inc = (int)((span + per / 2) / per);
+        if (inc > 63) inc = 63;
+        v->trem_inc = inc / pow(8.0, div) * (GF1_FRAME / outrate);
+    }
+    v->trem_lo = lo * 16.0; v->trem_hi = hi * 16.0;
+    v->trem_dir = v->trem_lo < v->env ? -1 : 1;
+    v->trem = v->trem_inc > 0;
+}
 
 static void note_on(gus_song *s, int ch, int note, int vel, uint32_t dur)
 {
@@ -269,14 +370,40 @@ static void note_on(gus_song *s, int ch, int note, int vel, uint32_t dur)
         memset(v, 0, sizeof *v);
         v->active = 1; v->ch = ch; v->note = note; v->s = sm; v->dir = 1;
         v->step = (f / sm->root) * ((double)sm->rate / s->rate);
-        v->env = (sm->modes & 0x40) ? 0 : 4095;
-        v->vel = (float)((vel / 127.0) * (vel / 127.0));
+        v->vel = vel < 1 ? 1 : vel > 127 ? 127 : vel;
+        v->v11 = voice_vol(s, ch, v->vel);
+        v->env = 5 * 16.0;   /* the ramp starts at 5 (0x4291) */
+        v->vib_mul = 1.0;
+        vib_setup(s, v, 1);
         v->started = s->t;
         v->off_at = s->t + (uint64_t)((double)dur * s->spt) + 1;
     }
 }
 
-static void release(voice *v) { if (v->active && !v->released) { v->released = 1; if (v->stage < 3) v->stage = 3; } }
+static void release(voice *v)   /* note-off (0x4488..0x46ab) */
+{
+    const gus_sample *sm = v->s;
+    if (!v->active || v->released) return;
+    v->released = 1;
+    v->trem = 0;
+    if (!(sm->modes & 0x40) || (sm->modes & 0x80)) v->stage = 5;   /* stage 5's rate down to 5 */
+    else if (sm->modes & 0x20) { if (v->stage < 3) v->stage = 3; }   /* from the sustain point on */
+}
+
+static void set_volume(gus_song *s, int ch)   /* CC7 / CC11 (0x3586 -> 0x3266): each voice's volume again; the
+                                                * envelope keeps its place (the current level rescaled) */
+{
+    int k;
+    for (k = 0; k < MAXV; k++) {
+        voice *v = &s->v[k];
+        int nv;
+        if (!v->active || v->ch != ch) continue;
+        nv = voice_vol(s, ch, v->vel);
+        if (v->v11 > 0 && nv != v->v11) v->env = v->env * nv / v->v11;
+        v->v11 = nv;
+        if (v->trem) trem_setup(v, s->rate);
+    }
+}
 
 static void do_event(gus_song *s, const ev *e)
 {
@@ -285,13 +412,20 @@ static void do_event(gus_song *s, const ev *e)
     case 0x90: note_on(s, ch, e->a, e->b, e->dur); break;
     case 0x80: for (k = 0; k < MAXV; k++) if (s->v[k].active && s->v[k].ch == ch && s->v[k].note == e->a) release(&s->v[k]); break;
     case 0xc0: s->prog[ch] = e->a; break;
-    case 0xe0: s->bend[ch] = e->a | e->b << 7; break;
+    case 0xe0:
+        s->bend[ch] = e->a | e->b << 7;
+        for (k = 0; k < MAXV; k++) if (s->v[k].active && s->v[k].ch == ch && s->v[k].vib) vib_setup(s, &s->v[k], 1);   /* 0x3644 */
+        break;
     case 0xb0:
         switch (e->a) {
-        case 7: s->vol[ch] = e->b; break;
+        case 1:   /* modulation (0x36de): the channel's vibrato */
+            s->mod_depth[ch] = e->b ? e->b * 30 / 128 + 2 : 0; s->mod_rate[ch] = 200;
+            for (k = 0; k < MAXV; k++) if (s->v[k].active && s->v[k].ch == ch && (s->v[k].s->vib_depth || s->mod_depth[ch])) vib_setup(s, &s->v[k], e->b == 0);
+            break;
+        case 7: s->vol[ch] = e->b; set_volume(s, ch); break;
         case 10: s->pan[ch] = e->b; s->pan_set[ch] = 1; break;
-        case 11: s->expr[ch] = e->b; break;
-        case 64: s->sustain[ch] = e->b >= 64; break;
+        case 11: s->expr[ch] = e->b; set_volume(s, ch); break;
+        case 64: s->sustain[ch] = e->b >= 24; break;   /* 0x4ec7 */
         case 116:   /* AIL FOR loop: value = count (0 = forever) */
             if (s->nloop < 4) { s->loop_pos[s->nloop] = s->pos; s->loop_cnt[s->nloop] = e->b; s->loop_tick[s->nloop] = e->tick; s->nloop++; }
             break;
@@ -304,7 +438,10 @@ static void do_event(gus_song *s, const ev *e)
                 } else s->nloop--;
             }
             break;
-        case 121: s->vol[ch] = 127; s->expr[ch] = 127; s->bend[ch] = 8192; s->sustain[ch] = 0; break;
+        case 121:   /* reset all controllers (0x4eef): sustain off, no modulation, bend centred, volume 100, expression 127, pan the patch's */
+            s->sustain[ch] = 0; s->mod_depth[ch] = 0; s->bend[ch] = 8192; s->vol[ch] = 100; s->expr[ch] = 127; s->pan_set[ch] = 0;
+            set_volume(s, ch);
+            break;
         case 123: for (k = 0; k < MAXV; k++) if (s->v[k].active && s->v[k].ch == ch) release(&s->v[k]); break;
         }
         break;
@@ -321,26 +458,29 @@ static double gf1_amp(double v)
     return (256.0 + (iv & 255)) * ldexp(1.0, iv >> 8) / 16777216.0;
 }
 
-/* advance the envelope one output sample; returns 0 when the voice has finished */
+/* advance the envelope one output sample (the GF1's volume ramps); returns 0 when the voice has finished */
 static int envelope(voice *v, int outrate)
 {
     const gus_sample *sm = v->s;
     double target, inc;
     int r;
-    if (!(sm->modes & 0x40)) {   /* no envelope: full volume, quick fade on release */
-        if (v->released) { v->env -= 4095.0 * 100.0 / outrate; if (v->env <= 0) return 0; }
+    if (v->stage > 5) return 0;
+    if ((sm->modes & 0x20) && !v->released && v->stage == 3) {   /* the sustain point: held, or the tremolo's loop */
+        if (v->trem) {
+            v->env += v->trem_dir * v->trem_inc;
+            if (v->env >= v->trem_hi) { v->env = v->trem_hi - (v->env - v->trem_hi); v->trem_dir = -1; }
+            else if (v->env <= v->trem_lo) { v->env = v->trem_lo + (v->trem_lo - v->env); v->trem_dir = 1; }
+        }
         return 1;
     }
-    if (v->stage > 5) return 0;
-    if ((sm->modes & 0x20) && !v->released && v->stage == 3) return 1;   /* hold at the sustain point */
-    target = sm->env_off[v->stage] * 16.0;
+    target = v->stage == 5 && (!(sm->modes & 0x40) || (sm->modes & 0x80)) && v->released ? 5 * 16.0 : env_target(v, v->stage);
     r = sm->env_rate[v->stage];
     inc = (r & 63) / pow(8.0, r >> 6) * (GF1_FRAME / outrate);
     if (inc <= 0) inc = 1e-6;
     if (v->env < target) { v->env += inc; if (v->env >= target) { v->env = target; v->stage++; } }
     else { v->env -= inc; if (v->env <= target) { v->env = target; v->stage++; } }
     if (v->stage > 5) return 0;   /* end of release */
-
+    if (v->stage == 3 && (sm->modes & 0x20) && !v->released && sm->trem_depth) trem_setup(v, outrate);   /* 0x48c2 */
     return 1;
 }
 
@@ -354,6 +494,10 @@ int gus_song_render(gus_song *s, float *out, int frames)
             do_event(s, e);
         }
         if (s->pos >= s->nev) s->ended = 1;
+        if ((double)s->t >= s->lfo_next) {   /* the LFO timer (0x3802) */
+            s->lfo_next += s->rate / LFO_HZ;
+            for (k = 0; k < MAXV; k++) if (s->v[k].active && s->v[k].vib) vib_tick(s, &s->v[k]);
+        }
         for (k = 0; k < MAXV; k++) {
             voice *v = &s->v[k];
             const gus_sample *sm;
@@ -366,13 +510,13 @@ int gus_song_render(gus_song *s, float *out, int frames)
             i0 = (int)v->pos; frac = v->pos - i0;
             if (i0 < 0 || i0 >= sm->len) { v->active = 0; continue; }
             smp = sm->data[i0] + (sm->data[i0 + 1] - sm->data[i0]) * frac;   /* GF1 linear interpolation */
-            amp = gf1_amp(v->env) * v->vel * (s->vol[v->ch] / 127.0) * (s->vol[v->ch] / 127.0) * (s->expr[v->ch] / 127.0) * (s->expr[v->ch] / 127.0);
+            amp = gf1_amp(v->env);   /* velocity and volume are in the envelope's levels (v11) */
             pan = s->pan_set[v->ch] ? s->pan[v->ch] / 127.0 : sm->balance / 15.0;
             a = smp * amp * 0.35;
             out[f * 2] += (float)(a * cos(pan * 1.5707963));
             out[f * 2 + 1] += (float)(a * sin(pan * 1.5707963));
             /* advance with loops */
-            v->pos += v->step * v->dir;
+            v->pos += v->step * v->vib_mul * v->dir;
             if (sm->modes & 0x04) {
                 if (v->dir > 0 && v->pos >= sm->loop_end) {
                     if (sm->modes & 0x08) { v->dir = -1; v->pos = sm->loop_end - (v->pos - sm->loop_end); }

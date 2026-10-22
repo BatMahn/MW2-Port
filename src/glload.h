@@ -57,6 +57,7 @@
     X(glTexBuffer, PFNGLTEXBUFFERPROC) \
     X(glUniform1f, PFNGLUNIFORM1FPROC) \
     X(glUniform1i, PFNGLUNIFORM1IPROC) \
+    X(glUniform1iv, PFNGLUNIFORM1IVPROC) \
     X(glUniform2f, PFNGLUNIFORM2FPROC) \
     X(glUniform2i, PFNGLUNIFORM2IPROC) \
     X(glUniform3f, PFNGLUNIFORM3FPROC) \
@@ -111,6 +112,7 @@ MW2GL_FUNCS
 #define glTexBuffer mw2gl_glTexBuffer
 #define glUniform1f mw2gl_glUniform1f
 #define glUniform1i mw2gl_glUniform1i
+#define glUniform1iv mw2gl_glUniform1iv
 #define glUniform2f mw2gl_glUniform2f
 #define glUniform2i mw2gl_glUniform2i
 #define glUniform3f mw2gl_glUniform3f

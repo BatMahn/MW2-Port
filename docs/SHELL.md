@@ -36,7 +36,12 @@ Background slot 1 (DATABASE entry 0); Smacker AMWLOGO1 at (111, 33); ambient WAV
 Hotspot table 0x7e7fc: 7 ints each {x0, y0, x1, y1, label_x, label_y, text}; "~" prefix on labels.
 0 (219,294)-(426,419) TRIALS OF GRIEVANCE -> 7 (context 2) | 1 (427,245)-(634,373) WOLF CLAN HALL -> 15
 (context 0) | 2 (10,197)-(200,370) JADE FALCON CLAN HALL -> 15 (context 1) | 3 (0,450)-(639,479) EXIT ->
-"Embrace cowardice? Yes/No" -> -3. Labels drawn on hover with DATABASE font entry 28 (assumed behaviour).
+"Embrace cowardice?#Yes|No" (the shell dialog FUN_000263d0, No by default; 0x2a577) -> -3. Labels: the hotspot object
+(FUN_00028680 / FUN_000288d0) draws a label while the pointer is in its box, in shell font 0x1c (DATABASE entry 27);
+'<' = always shown; '~' = centred on the label x, otherwise drawn from it (FUN_0003c2c0). Without '~': the clan halls'
+CADET TRAINING / ARCHIVE HOLOPROJECTOR / READY ROOM / REGISTER, the Ready Room's and Cadet Training's CLAN HALL, the
+Star Configuration's NEXT / PREV FORMATION, ADD / DELETE STARMATE, CHANGE MECH and the Mech Lab's NEXT / PREV CHASSIS /
+VARIANT (DOSBox: each starts at its x). Every screen's loop also calls the global menu (below) each pass.
 
 ## Music (XMIDI) and the Gravis UltraSound
 - DATABASE entries 33-72 are 40 LZSS-packed XMIDI songs in five arrangements of eight, one per
@@ -45,10 +50,24 @@ Hotspot table 0x7e7fc: 7 ints each {x0, y0, x1, y1, label_x, label_y, text}; "~"
   0x20000000 = keep the current music. Database index = number + driver offset (table 0x83e14):
   ADLIB/SBLASTER/PAS 0, ADLIBG/OPL3/SBPRO/PASPLUS/TANDY 8, SBAWE 16, MT32 24, MPU401/SNDSCAPE/ULTRA 32.
   Entry = index - 1, so the GUS set is entries 65-72 (0x22 -> 65, 0x23 -> 66 ... 0x29 -> 72).
+- A screen's song (FUN_00035c10) is started once and set to repeat for ever: FUN_00039ff0 stores 0 at +0x14 and
+  calls AIL_set_sequence_loop_count(seq, 0) (0x5201c, its debug string 0x78b95); the same song still playing is left
+  alone on a screen change. Some songs also carry XMIDI FOR / NEXT (controllers 116 / 117) loops inside.
 - ULTRA.MDI (Miles GUS driver): ULTRADIR/ULTRASND env, ultrasnd.ini, memory-size column of
   MIDI/ULTRAMID.INI (1024.GUS / 768 / 512 / 256, or CUSTOM.GUS), patches MIDI/<name>.pat.
-  src/gusmid.c reproduces this; the envelope frame rate (44100) and the GM volume/velocity
-  curves (squared) are ASSUMED. Vibrato / tremolo from the patches NOT YET.
+  src/gusmid.c reproduces this, traced in ULTRA.MDI (ndisasm -b16 offsets): 28 voices -> GF1 frame rate 22050
+  (0x8ca / 0x1bb2 / 0x2041); a voice's 8-bit volume = (master 127 + 64) x T[velocity] x T[volume x expression / 127]
+  / 48705 with the curve T at 0x5196, scaling the envelope offsets in the GF1 log scale (offset x v / 255, at least 5;
+  0x4105, 0x429f, 0x4967); channel volume 100 / expression 127 at start and on CC121 (0x4f0f); sustain pedal >= 24
+  (0x4ec7); the envelope always runs (ramp from 5), holds at the end of stage 2 with the sustain mode, note-off ->
+  stage 3 (sustain mode) / untouched (envelope without it) / stage 5's rate to 5 (no envelope, fast release; 0x4488..);
+  vibrato: GF1 timer 2 (count 187 = 45.29 Hz) ticks a triangle LFO, quarter = 45289 / (4 x (rate x 2334 + 5000) / 100)
+  ticks, deviation (2^(depth / 252) - 1) / 2 of the pitch (table 0x5216), sweep (sweep - n) / sweep, restarted by
+  pitch bend; the modulation wheel sets depth value x 30 / 128 + 2 at rate 200 (0x3933 / 0x3802 / 0x36de); tremolo
+  only at the sustain point: a looping volume ramp of +-((depth + 1) >> 4) 8-bit steps around the sustain level at
+  the rate's LFO frequency (0x3acc / 0x48c2). Not modelled: the FC register's integer rounding of the vibrato, a ramp
+  in progress when the volume changes (the port rescales the level), RPN bend range (fixed 2, the driver's default),
+  the voice playing out its sample after the envelope's end (silent: level 5).
 
 ## Instant Action - "Trials of Grievance" (screen 7, FUN_00029680)
 Background entry 8. Videos: friendly clan emblem (13,205), enemy (483,329) - clans WIAWOLF, WIAJF,
@@ -85,10 +104,15 @@ Grievance" in context 2), "Maximum 'Mechs in current Star: %d", "Keshik Defined 
 (fitted to the capture) and its box text (pilot cut at 92 px, 'Mech, "%d.00 T", 12 apart) at 0x84210 / 0x8421c
 (Wolf and context 2) or 0x84228 / 0x84234 (Falcon). Captures: docs/reference/dos_ia_star_config.png (text, boxes,
 buttons 0 pixels different; the animated grid aside) and dos_ia_mech_lab.png (header, panels, labels 0; the
-turntable's phase aside). The context-2 Mech Lab header is grey 170 (entry 6) where the clans' is entry 7:
-measured, mechanism ASSUMED. In the campaign an unchosen slot shows the mission's own 'Mech, and "Maximum 'Mechs"
+turntable's phase aside). The Mech Lab header and 'Mech name (widgets 0x82e38 / 0x82e64, draw 0x2c1e0) are shell font
+0x1b (DAT_00091174 = DATABASE entry 26) through the remap table 0xa5530 (colour 1 -> 6, built at 0x33aa7): grey 170 in
+every context (dos_mechlab_main.png, dos_ia_mech_lab.png, dos_ia_enemy_lab.png). The callsign is the star record's
+name for the slot being changed (0x34184): the pilot's for the player's slot (put there by the roster, 0x38644),
+"Friend 1" / "Friend 2", and the Instant Action enemies "Enemy 1".. (the records' data, 0x840dc / 0x8415c +0x28).
+In the campaign an unchosen slot shows the mission's own 'Mech, and "Maximum 'Mechs"
 is the mission's star size (SDSC; Pyre Light 1). docs/reference/dos_wolf_star_config.png: header, box, EXIT 0 pixels
-different (the animated grid aside). Enemy pilot names "Enemy n" ASSUMED.
+different (the animated grid aside). The star records' names can be typed over in the Star Configuration
+(FUN_0003ad60: a click on a box's name line, FUN_0002a910) - not in the port.
 
 ## Launch handoff (screen 10, FUN_000375a0 / FUN_0003abb0 / FUN_0001d540 / FUN_0001d6c0)
 - mw2prm.cfg (536 bytes): return screen, clan context, flag, command line
@@ -103,7 +127,7 @@ different (the animated grid aside). Enemy pilot names "Enemy n" ASSUMED.
   (0x114 friendly, 0x115 enemy), then jscamoia -> 0x101.
 - Instant Action missions (e.g. JACKSCN1) include UserStar, en01star..en05star and instmap1; a STAR
   chunk lists 5 enemy stars with formation "trialline"; nav points jackST01 (player) .. jackST51.
-  The port's simulation does not yet spawn star lances (0 actors) - NOT YET.
+  The simulation spawns the star lances (see below; the duel arenas without EN01STAR have none).
 
 ## Star lances in the simulation (engine: STAR 0x10042d40, GPS 0x1003f305)
 - Star table (16 stars, 0x38 bytes each); STAR chunk entries {u32, u32, formation[16]}; each GPS joins
@@ -147,7 +171,7 @@ Mechwarrior, Star Commander, Nova Commander, Star Captain, Nova Captain, Star Co
 Commander, Khan), +20 honor (install's pilot: 1850), +24.. kills / hits / shots, +40 name. Clans 0x7d3b8: Wolf,
 Jade Falcon, Ghost Bear. Roster hotspots 0x7f0bc + clan x 16 -> 0x7d5b8 / 0x7df20 (15): 0 NEW ALLEGIANCE,
 1-10 pilot rows (32,83)-(297,116) step 35, names drawn at (42, 92 + 35 i); 11 ACCEPT, 12 DELETE MECHWARRIOR
-("Terminate MechWarrior?#Yes|No"), 13 LAUNCH OLD MISSION (missions done > 0), 14 PILOT INFO; background slot 17 / 24.
+("Terminate MechWarrior?#Yes|No", the shell dialog, No by default; Yes clears +0 and the name only, 0x3869d), 13 LAUNCH OLD MISSION (missions done > 0), 14 PILOT INFO; background slot 17 / 24.
 Empty row: text entry; a new pilot is selected with rank 0. Hall of Honor table (FUN_00028250): Pilot, clan,
 rank title, Honor, Kills, Hit %, Last Mission.
 
@@ -220,7 +244,10 @@ mechs 250 x total, vehicles 125 x total, underweight 25 per ton, hit ratio >= 0.
 (EASY / MEDIUM / HARD); heat tracking off or failure: none. Pilot: kills += mechs total + vehicles direct,
 hits / shots accumulate; honor and campaign progress on success. Text: "\g%03d\b%03d%s" = value right-aligned at
 x 350. Hotspots 0x7f17c + clan x 16 (background 16 / 23): EXIT (270,450)-(369,474), AFTERMATH (110,450)-(209,474),
-REPLAY (430,450)-(529,474: "Are you Sure?#Yes|No" after a success; restores the pilot record).
+REPLAY (430,450)-(529,474) -> the briefing (state 0); after a success only when "Are you Sure?#Yes|No" (No by default,
+0x25000) says Yes, and the pilot record goes back to its copy from before the mission. EXIT -> the Ready Room, or after
+the 16th mission won the ending (0x10) at once. Alt+W (0x8011) / Alt+L (0x8026) - not for a pilot named NOHERCSALLOWED -
+redo the debriefing as a success / failure (a cheat; not in the port).
 
 ## Star Configuration (screen 13, FUN_0003b420) and the Mech Lab (screen 9, FUN_000339e0)
 Star record 0x841dc (per clan): +0 formation 0-5 (the six -of= formations), +4 the slot being changed, +8 max size 3,
@@ -231,8 +258,14 @@ Friend 1, Friend 2). Hotspots 0x7f11c + clan x 16 (9; background slot 15 / 22): 
 bay}; wingman names at (81,166) (313,133) (508,189). Clips: grid, bays awostr1-3 / ajfstr1-3, buttons wwobkg
 wwodsgn wwocn wwocp wwovn wwovp (Falcon wjf*, Instant Action context aia* / wia*); per-mech showcase awosc%s.
 The Mech Lab saves designs as mek\%s%02dusr.mek ("Invalid 'Mech specification" checks: criticals, mass).
-Port: the star is saved per clan as STAR<clan>.CFG (the original's storage not confirmed); the Mech Lab picks
-chassis and standard loadout only (weapon editing not yet); campaign launches use the star and its formation.
+The star is kept in MW2PRM.CFG +0x10 in the original layout (0x3a810 / 0x3a850); CUSTOMIZE edits weapons, armour
+and equipment (below); campaign launches use the star and its formation.
+Button clips (Star Configuration 0x3b8f6.., Mech Lab 0x34557..): every pass hides slots 6-9 (the CN / CP / VN / VP
+button art, 0x395d0(k, 0x20)) and pauses slot 5 (wwodsgn / wwostar; bit 0) - in context 2 hides it; the pointer on
+hotspot 1 (MECH LAB / STAR CONFIG) runs it (context 2: shows it, 0x39610); the left button held (+0x33) on hotspot
+2-5 shows that button's clip (Star Configuration 2 -> 6, 3 -> 7, 4 -> 8, 5 -> 9; Mech Lab 2 -> 8, 3 -> 9, 4 -> 6,
+5 -> 7). DOSBox (Instant Action): MECH LAB lit under the pointer, the arrow pressed while the button is held; the
+Wolf wwodsgn still away from MECH LAB, animating on it.
 
 ## Mission setup and aftermath records
 <mission 4 letters>BRF2: SDSC {?, star tonnage limit, ?, star size} + 16-byte default loadouts (trials: the assigned
@@ -241,9 +274,20 @@ mechs; e.g. YELL 60 t mdg00std, SABL 85 t 2 x tbr00std, IREN 100 t tbr02std); SU
 GPS unit records, not text.)
 
 ## Global menu, Hall of Honor, Cadet Training, Archive
-Global menu FUN_000258e0 (Esc / right button; Esc on the title too): panel = shell image 7 (DATABASE entry 6, SHP
-244x248) at (198,116); items grey in shell font 0x1f (entry 30), the selected white in 0x1e (entry 29), y 157 + 33 k minus
-half the font height (15); DOS capture docs/reference/dos_global_menu.png: the panel 0 pixels different.
+Global menu FUN_000258e0, called each pass by every screen's loop (briefing 0x1c080, clan hall 0x1dbe0, debriefing
+0x23890, Archive 0x27160, Instant Action 0x29680, title 0x2a410, Mech Lab 0x339e0 - CUSTOMIZE too, Ready Room 0x37a50,
+roster 0x38310 - not while a name is typed -, Star Configuration 0x3b420, Cadet Training 0x3d980): it opens on Esc
+(0x2a6f0: key 0x1b -> 3) or a right-button press (0x377b0). The screen is kept (0x3e310); panel = shell image 7
+(DATABASE entry 6, SHP 244x248) at (198,116) (0x3eac0); items 0x7eefc centred on x 320, y 157 + 33 k minus half the
+font height, grey in shell font 0x1f (entry 30), the selected white in 0x1e (entry 29); boxes x 198..441, y item
+-16..+16, inclusive. On opening and after each sub-screen (LAB_0002593d) item 0 is selected unless the pointer is on an
+item (the hover test runs on the first pass); later the pointer selects only on an item. Keys: 0x8048 / 0x804b
+(keypad 8 / 4) previous, 0x804d / 0x8050 (keypad 6 / 2) next, wrapping; Enter picks; Esc closes. A left press on an
+item picks it, anywhere else closes; a right press closes. 0 NEW ALLEGIANCE -> 8; 1 COMBAT VARIABLES (any key or a
+right press leaves), 2 COCKPIT CONTROLS, 3 HALL OF HONOR, 4 THE KESHIK: the sub-screen, then the menu again (0x3e340);
+5 FLEE TO DOS: "Embrace cowardice?#Yes|No" (No by default): Yes -> -3, No -> the menu again. DOSBox: the grey arrows
+read as 0xe0 and do nothing (the port takes them too). Captures docs/reference/dos_global_menu.png (opened with the
+pointer at the centre: COCKPIT CONTROLS), dos_global_menu_after_cv.png, dos_flee_dialog.png, dos_title_exit_dialog.png.
 Font header: "1." , glyph count, height (+8), transparent index. Shell font handles: 0x1a.. = DATABASE entry - 1.
 The Keshik (FUN_00021400): background shell image 5 (entry 4, "THE KESHIK"), the amwlogo1 clip at (120,4), credits from
 MW2SHELL.EXE's table 0x7ca80 (388 lines, 20 px apart, 1 px a step from y 460; '<' font 0x1b, '>' 0x1c, '~' 0x1b colour
@@ -253,9 +297,12 @@ captures docs/reference/dos_cockpit_devices.png / dos_cockpit_editor.png. FLEE T
 in the shell dialog (FUN_000263d0), No by default; every shell message now uses that dialog.
 Older note: items 0x7eefc NEW ALLEGIANCE, COMBAT
 VARIABLES, COCKPIT CONTROLS, HALL OF HONOR (FUN_00028250), THE KESHIK, FLEE TO DOS; centred x 320, y 157 + 33 k.
-Hall of Honor: background slot 2 (entry 1), logo amwlogo1 (120,4); columns Pilot 0, Clan 125, Rank 200, Honor 325,
-Kills 400, Hit % 460, Last Mission 520 (the title of mission "missions done" - 1), headers y 150, 8 rows from 182 step 16,
-sorted by honor then missions (FUN_000281e0).
+Hall of Honor (FUN_00028250): background slot 2 (entry 1), logo amwlogo1 (120,4); headings Pilot / Clan / Rank /
+Honor / Kills / Hit % / Last Mission at x 0, 125, 200, 325, 400, 460, 520, y 150, shell font 0x1c; all 20 registry
+records sorted (FUN_000281e0: rank title, then honor, then missions done, the higher first) and the used ones among the
+first eight drawn from y 182 every 16 in font 0x20: name, clan, rank title, "%d" honor, "%d" kills, hits x 100 /
+shots "%d%%" ("-" with no shots), the title of mission "missions done" - 1 ("----" with none). Any key, a left or right
+press returns. DOSBox: docs/reference/dos_hall_of_honor.png.
 Cadet Training (screen 14, FUN_0003d980): 0x7f23c (7; background slot 13 / 20): CLAN HALL (5,149)-(57,440); NAV
 COMPUTER, MECH HANDLING, WEAPONS USAGE, HUNTING, INSPECTION, TRIAL at (450, 13 + 25 k) -> tnw1-6 / tnj1-6; clips
 awotrnwn (453,0) once, instructor awotrnwa / awotrnwb alternating at (72,224).
@@ -292,7 +339,11 @@ mission", "Error: Too many mechs of this variant to save", "Delete this 'Mech? A
 
 ### Mech Lab main page: matched to a DOS capture (pixel-identical text and panels)
 Captured in DOSBox (title -> Wolf hall -> roster: select + ACCEPT -> Ready Room -> MECH LAB; pointer acceleration off,
-1:1 relative moves). Header: DATABASE font 30, centred, y 4 and 28. Panels: font 31, ink remapped 1 -> palette 6
+1:1 relative moves). Header: shell font 0x1b (DATABASE entry 26) with colour 1 -> 6, centred, y 4 and 28.
+Variants (FUN_00032870): <code>00std, then <code>NNstd (NN 1..99) when the archive has it, then the player's
+MEK\<code>NNusr.mek by NN - the archive's TRN / AFU / DMG / TPE / SPC records are not offered (DOSBox: the Instant
+Action Kit Fox cycles Primary, Alt. Config A-D). The main page's masses come from the load FUN_00030db0: every MEK item
+(the anti-missile system too) is a weapon, Equipment = MASC (0x31720: tons x 4 + 50) / 100 when a 5001 slot exists). Panels: font 31, ink remapped 1 -> palette 6
 (170,170,170): "Variant:" at (20,64) and the configuration name at (65,64); COMPONENT / MASS / NOTES at y 86, x 20 / 98 /
 147; rows from y 108 every 11; Used / Max Mass at y 229 / 240; WEAPONS AND AMMO at (444,64), lines from y 86. Buttons:
 font 27, same ink. Turntable: SHP AWOMP<code> (30 frames), origin (175,127) + each frame's offset, 13 frames / s,
@@ -323,8 +374,18 @@ tall right wwomp7cr for the WEAPONS TABLE and UNASSIGNED CRITICALS; tall middle 
 location name white at (224,64), slots from y 79) or wwomp5wa (weapons). Values at x 544; the Armor list centred at x 344.5;
 up / down arrows = font 31 codes 1 / 2 at (551 | 581, 168 | 202). Internal page rows in the Armor page's order. Weapons
 table: 27 rows (energy 7, ballistic 10, missile 10; no flamer, Narc, AMS) at y 86 .. 394 with gaps at 163 and 284.
-Diagram (WWOMP4MP): head at (291,223); the pieces' art carries the cross-hatching: the selected location drawn as it is,
-the others filled with palette (247,89,0) (full armour; other levels ASSUMED the same); ~100 outline pixels differ.
+Diagram: the wwomp4ar panel's own art (the whole 'Mech in (247,89,0), whatever the armour); over it only the selected
+location's cross-hatched piece, WWOMP4MP frame = location (clip slot 12, FUN_0002bd20) at (216 + 0x7ff64[loc], 52 +
+0x7ff84[loc]) = head (291,223), torsos (262|302|342, 258), arms (226|378, 256), legs (255|325, 362): dos_customize_4 /
+_8 0 pixels different. Criticals (0x2cb30): "-", weapons "%s #%d", equipment by the table 0x7f4c4 (id / 50), ammo
+"Ammo (%s #%d) #%d"; UNASSIGNED CRITICALS (0x2ccf0) one line per item with its slot count: "%s #%d (%d)", "%s (%d)",
+"Ammo (%s #%d) #%d (%d)" (the port numbers a weapon's bins by order: its MEK slots carry one id for every bin). An
+item goes into the location's first free slots, together or not, all or none (0x2ae40). MASC: one 1-slot item each,
+5001 .. 5000 + tons (0x2ff5c / 0x30427); heat sinks beyond rating / 25 one item each of 1 / 2 slots (0x2e483);
+Endo / Ferro 7 one-slot items (0x2ebe0 / 0x2e900); XL slots 0-1 of both side torsos (0x2d7f0); armour at most 9 head,
+2 x internal elsewhere, internal by tonnage from the table 0x7f59c (0x31537); armour mass = points / 16 (Ferro / 19.2,
+0x314a4) to the nearest half ton; the points a mass buys = (hundredths of a ton x 16 (x 1.2 Ferro) + 49) / 100, the
+allocation trimmed round-robin to it (0x2bbd0).
 SAVE: "Unassigned criticals detected" / "Chassis can not support current mass" / "Too many mechs of this variant"
 (01-99) / "Error saving 'Mech"; writes <install>/MEK/<code>NNusr.mek as "User Variant #N". DELETE (main page, user
 designs): "Delete this 'Mech? Are you sure?" Yes / No.

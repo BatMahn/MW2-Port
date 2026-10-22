@@ -23,6 +23,10 @@ typedef struct {
     int       node;          /* skeleton node this part hangs on (-1 for world objects) */
     int       group;         /* damage location 1-8 from the record's OBJL chunks (0 = none):
                                 1 head, 2 RT, 3 CT, 4 LT, 5 RA, 6 LA, 7 RL, 8 LL (engine 0x100171d0; TW1_RARM is group 5) */
+    int       objl;          /* its node has an OBJL entry of its own (group above may be inherited). The engine keeps a unit's
+                                pieces WITHOUT one out of the collision list: every representation swap (0x10026330 ->
+                                0x1000dca0, DOS 0x37060 -> 0x1f9b0) unlinks them, and the first frame swaps every unit (its
+                                +0x1c starts at -1, 0x100235e0) - mech3d_hull_hit and the probes skip them */
     wtb_model model;
     int       flat;          /* draw untextured, in each polygon's palette colour (cockpit frame) */
     int       objtype;       /* world objects: OBJ type word (bwd_obj.objtype); 0 for mech parts */
@@ -56,6 +60,7 @@ typedef struct {
     int       ti;            /* `model` is a Titanium one (mech3d_ti_load): drawn with the Titanium texture table */
     const wtb_model *ti_model;   /* world objects: the Titanium archive's model at the same record / OBJ index
                                   * (world3d_ti_attach), drawn in place of `model`; NULL none */
+    int       dos_pit;       /* the cockpit set (repr 4) in the DOS look: its polygons in the DOS draw order (glr) */
     int       ti_insignia;   /* world objects: added to that model's slot 0x3f (its structure's AFFL team, mercsw 0x100748ab) */
 } mech3d_part;
 
@@ -96,6 +101,7 @@ typedef struct {
     float        mount_local[8][3];   /* rest pose, heading 0, origin 0 (filled by mech3d_load) */
     float        mount_from[3];       /* the origin mount_pos was posed at */
     unsigned     mount_local_ok;
+    int32_t      centre_h;       /* MGEO int[0] of the record's name (the unit's centre above its feet), 0 if none */
 } mech3d;
 /* the mount slot for a weapon in MEK location loc (H, LT, CT, RT, LA, RA, LL, RL), -1 if none */
 int  mech3d_mount_slot(int loc);
@@ -115,6 +121,12 @@ int  mech3d_load(prj_archive *a, const char *record, int repr, mech3d *out);
 /* Combat Variables DISPLAY DETAIL: 0 high, 1 low (engine 0x1002ff90: detail level 1 / 2). Loads asking for representation
  * 0 use this one instead when the model has it. */
 extern int mech3d_lod;
+/* The DOS edition's unit placement (MW2.EXE; DOSBox memory, dosbox-debug): an animated unit's root object stands at its
+ * feet + the MGEO centre height (DAT unit y: Mad Dog 550 cm on flat ground) and the root's child - the hips, every mech -
+ * has a zero local translation: the record's OBJ offset for it (Mad Dog (0, 671, 17)) is not applied, the walk's
+ * translation keys still add. So a mech stands (hips - centre) lower than its own geometry implies (Mad Dog 121 cm, the
+ * eye at 931 cm, not 1052). Set by the DOS look (glview); 0: the port's placement (the feet at the unit's y) */
+extern int mech3d_dos_hips;
 /* Combat Variables OBJECT DENSITY LOW (MW2SND.CFG +0x20 = 0): world objects of class 0xC0 (OBJ type word & 0xf0) are left
  * out, as the engine's 0x1000de50 takes them off both the drawn and the collision lists (DOS MW2.EXE 0x1fbf0 the same).
  * In the data: gates, fences, lights, trees, spires, small buildings, some hills and craters. */
@@ -223,8 +235,9 @@ int  world3d_paths_step(world3d_paths *p, mech3d *world, float now_ticks);
 int  world3d_paths_destroyed(world3d_paths *p, mech3d *world, int intact, int destroyed);
 void world3d_paths_free(world3d_paths *p);
 /* The running sound tasks (TSK type 4, 0x1000ec90 -> 0x10032cc0): the node's world position now, the audible range (cm),
- * the SNDTABLE name, and a stable id (the task). Returns how many (at most max). */
-typedef struct { float pos[3]; int range, task; char name[24]; } world3d_sound;
+ * the SNDTABLE name, a stable id (the task) and how many times the task has run (the engine updates the loop once per
+ * run, every TSK period). Returns how many (at most max). */
+typedef struct { float pos[3]; int range, task, runs; char name[24]; } world3d_sound;
 int  world3d_paths_sounds(const world3d_paths *p, world3d_sound *out, int max);
 
 /* The same pieces as separate, posable actors (origin + heading set, rest pose). */
@@ -251,6 +264,7 @@ typedef struct {
     int      ai_level;       /* GPS pilot level 1-4 */
     float    ai_range[3];    /* GPS ranges, cm: [0] code -4, [1] code -1, [2] code -2 */
     unsigned obj_class;      /* GPS +0x18: the class the objective nodes attach the unit by (0x1003f38b / 0x1003ff60) */
+    unsigned unit_flags;     /* GPS +0x1a: the object's flag word +0x14 bits 0x400 / 0x800 / 0x1000 (targeting, 0x1001d050) */
     int      unit_class;     /* the skeleton record's GP chunk +2 (engine 0x1003e740: the class table 0x1024c330, 0x20 per
                                 entry): 1 mechs, 2 hovercraft, 4 tanks, 5 aircraft, 8 dropships - all driven by the mech
                                 controller / locomotion (0x1001a180 / 0x10019310); 3 turrets (0x10021a50 / 0x100219e0: fixed

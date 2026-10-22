@@ -37,6 +37,7 @@ static int world_pos(const node *nodes, const node *base, int i, int32_t out[3],
 }
 
 int mech3d_lod;
+int mech3d_dos_hips;
 int world3d_density_low;
 int world3d_scrg_step;
 static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d *out);
@@ -56,6 +57,7 @@ void mech3d_use_skeleton(mech3d *dst, const mech3d *src)
     memcpy(dst->bind_node, src->bind_node, sizeof src->bind_node);
     memcpy(dst->bind_track, src->bind_track, sizeof src->bind_track);
     dst->eye_node = src->eye_node; dst->twist_node = src->twist_node;
+    dst->centre_h = src->centre_h;
     memcpy(dst->pofo_node, src->pofo_node, sizeof src->pofo_node);
 }
 static int load_on_full_skeleton(prj_archive *a, const char *record, int repr, mech3d *out)
@@ -152,6 +154,13 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
         memcpy(out->skel_offset[out->skel_count], nd->offset, sizeof nd->offset);
         out->skel_count++;
     }
+    {   /* the centre height (MGEO int[0], the record's own name; engine controller +0xcc, 0x100400b0) */
+        prj_record mg;
+        if (prj_read_named(a, "MGEO", record, &mg) == PRJ_OK) {
+            if (mg.size >= 4) out->centre_h = (int32_t)(mg.data[0] | (mg.data[1] << 8) | (mg.data[2] << 16) | ((uint32_t)mg.data[3] << 24));
+            prj_record_free(&mg);
+        }
+    }
     /* the pilot's eye node: EYEO { i16 node } (engine 0x1003eabe) */
     out->eye_node = -1;
     for (k = 0; k < n; k++)
@@ -168,7 +177,7 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
         if (strcmp(chunks[k].tag, "OBJL") == 0 && chunks[k].size >= 4) {
             int nodei = (int16_t)(chunks[k].data[0] | (chunks[k].data[1] << 8));
             int grp = (int16_t)(chunks[k].data[2] | (chunks[k].data[3] << 8));
-            for (i = 0; i < out->part_count; i++) if (out->parts[i].node == nodei) out->parts[i].group = grp;
+            for (i = 0; i < out->part_count; i++) if (out->parts[i].node == nodei) { out->parts[i].group = grp; out->parts[i].objl = 1; }
         }
     /* pieces with no OBJL group (JN1DECLL / JN1DECLR: the Jenner's arm decals) belong to the location of the nearest
      * grouped piece up the node tree - they went on floating when their arm was shot off */
@@ -692,6 +701,10 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     snprintf(ac->skel, sizeof ac->skel, "%s", skel);
                     ac->ai_skill = g.skill;
                     ac->obj_class = m.records[i].chunks[k].size >= 26 ? (unsigned)(m.records[i].chunks[k].data[24] | m.records[i].chunks[k].data[25] << 8) : 6u;
+                    /* GPS +0x1a: the unit object's flag word +0x14 (0x1003f3de -> 0x1003f3e5; 0x10023839 keeps 0x400 / 0x800 /
+                     * 0x1000 at every (re)spawn): 0x400 most units, 0x1000 some (GREE / RUST / WHIT enemies), 0x800 the
+                     * dropship bomb turrets (TUR00DRP), 0 the CYAN doors - the player's targeting rules (0x1001d050) */
+                    ac->unit_flags = m.records[i].chunks[k].size >= 28 ? (unsigned)(m.records[i].chunks[k].data[26] | m.records[i].chunks[k].data[27] << 8) : 0x400u;
                     ac->tex_offset = g.table >= 0 && g.table < 64 && star_tex[g.table] >= 0 && star_tex[g.table] < 16 ? star_tex[g.table] : 0;
                     ac->ai_level = g.pilot_level;
                     {   int q; for (q = 0; q < 3; q++) ac->ai_range[q] = (float)(g.ranges[q] ? g.ranges[q] : 250) * 100.0f; }
@@ -799,6 +812,7 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
     float hr[9];
     int i, k, pass;
     static const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const int dos_hips = mech3d_dos_hips && m->bind_count > 0 && m->centre_h > 0;   /* an animated unit (a mech) */
 
     mat3_axis(hr, 1, m->heading);
     memset(done, 0, MECH3D_MAX_NODES * sizeof *done);
@@ -815,6 +829,8 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
             }
             memcpy(lrot, I, sizeof I);
             for (k = 0; k < 3; k++) lpos[k] = (float)m->skel_offset[i][k];
+            if (dos_hips && pi >= 0 && (m->skel_parent[pi] < 0 || m->skel_parent[pi] == m->skel_index[pi]))
+                lpos[0] = lpos[1] = lpos[2] = 0;   /* the DOS hips: no OBJ offset (mech3d_dos_hips) */
             if (m->twist_node >= 0 && m->skel_index[i] == m->twist_node && m->twist != 0) {
                 mat3_axis(tmp, 1, m->twist);
                 mat3_mul(lrot, lrot, tmp);
@@ -839,10 +855,17 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
                 mat3_mul(wrot[i], hr, lrot);
                 for (k = 0; k < 3; k++)
                     wpos[i][k] = hr[k * 3] * lpos[0] + hr[k * 3 + 1] * lpos[1] + hr[k * 3 + 2] * lpos[2] + (float)m->origin[k];
+                if (dos_hips) {   /* the DOS root object: feet + the centre, whole units */
+                    wpos[i][1] += (float)m->centre_h;
+                    for (k = 0; k < 3; k++) wpos[i][k] = floorf(wpos[i][k] + 0.5f);
+                }
             } else {
                 mat3_mul(wrot[i], wrot[pi], lrot);
                 for (k = 0; k < 3; k++)
                     wpos[i][k] = wpos[pi][k] + wrot[pi][k * 3] * lpos[0] + wrot[pi][k * 3 + 1] * lpos[1] + wrot[pi][k * 3 + 2] * lpos[2];
+                /* DOS: every object's world position is whole units - the parent's plus its turned local offset, rounded
+                 * (0x3b20c: >> 29 rounded) - so the eye and the parts sit where the original's integers put them */
+                if (dos_hips) for (k = 0; k < 3; k++) wpos[i][k] = wpos[pi][k] + floorf(wrot[pi][k * 3] * lpos[0] + wrot[pi][k * 3 + 1] * lpos[1] + wrot[pi][k * 3 + 2] * lpos[2] + 0.5f);
             }
             done[i] = 1;
             progress = 1;
@@ -1161,7 +1184,7 @@ int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone
     for (i = 0; i < m->part_count; i++) {
         mech3d_part *p = &m->parts[i];
         float l0[3], v[3], c2, b, tp, e, hl, r;
-        if (p->hidden || p->model.object_count < 1 || mech3d_fly_loc(m, i, gone_mask)) continue;   /* blown off: out of
+        if (p->hidden || !p->objl || p->model.object_count < 1 || mech3d_fly_loc(m, i, gone_mask)) continue;   /* blown off: out of
                                                                                                     * the list (0x10015be0) */
         if (!p->sphere_ok) build_sphere(p);
         r = p->hull_radius;
@@ -1218,6 +1241,7 @@ typedef struct {
     int      nframes, *cparts, ncparts;   /* type 1: the frame count; the world parts of the node's model */
     int      range;               /* type 4: audible range, cm */
     char     snd[24];             /* type 4: the sound's SNDTABLE name */
+    int      runs;                /* type 4: runs so far (the caller acts once per run, 0x1000ec90 case 1) */
 } wp_task;
 struct world3d_paths {
     wp_rec   *recs;
@@ -1455,7 +1479,8 @@ static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now)
         }
         return 1;
     }
-    return 1;             /* type 4 (sound): played by the caller (world3d_paths_sounds) */
+    if (t->type == 4) t->runs++;   /* sound: played by the caller once per run (world3d_paths_sounds) */
+    return 1;
 }
 
 static void wp_place_parts(world3d_paths *P, mech3d *world, int only_rec, int only_under)
@@ -1551,7 +1576,10 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                     for (s = strtok_r(buf, ",", &e); s && t->nframes < 16; s = strtok_r(NULL, ",", &e))
                         t->frames[t->nframes++] = (uint16_t)(strtol(s, NULL, 0) << 4);
                     ok = t->nframes > 0;
-                } else if (tk.type == 4) { /* "%d,%[^,],%d": range (m x 100), the sound's name, on (absent: on, ASSUMED) */
+                } else if (tk.type == 4) { /* "%d,%[^,],%d": range (m x 100), the sound's name, on. Absent, the engine
+                                            * reads +0x14 unset (HeapAlloc flags 1, no zeroing, 0x1000ecbd) - moot in the data:
+                                            * every record without it (YELLARE6 mecinds1, 3Dfx SHEPWLD1 jng) names a sound
+                                            * missing from SNDTABLE (TABL 11), which plays nothing; taken as on */
                     int on = 1, n = sscanf(tk.params, "%d,%23[^,],%d", &t->range, t->snd, &on);
                     t->range *= 100;
                     ok = n >= 2 && on;
@@ -1703,6 +1731,7 @@ int world3d_paths_sounds(const world3d_paths *P, world3d_sound *out, int max)
         memcpy(out[n].pos, w.t, sizeof w.t);
         out[n].range = t->range;
         out[n].task = i;
+        out[n].runs = t->runs;
         snprintf(out[n].name, sizeof out[n].name, "%s", t->snd);
         n++;
     }

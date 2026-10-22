@@ -12,6 +12,7 @@
 
 #include "glr.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,8 +84,14 @@ struct glr {
     /* the DOS edition */
     int    dos;
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
-    GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir, u_dos_vtx, u_dos_smooth, u_vpo;
+    GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir, u_dos_vtx, u_dos_smooth, u_vpo, u_dos_eye, u_dos_rx, u_dos_ry, u_dos_rz, u_dos_ps;
     GLint  u_far, u_vp;
+    /* the DOS cockpit set's polygons (glr_view: mech3d_part.dos_pit), in emission order: their world corners (game
+     * coordinates) for the draw order (dos_pit_ranks) */
+#define GLR_PIT_MAX 128
+    int    pit_n, pit_nv[GLR_PIT_MAX];
+    float  pit_v[GLR_PIT_MAX][WTB_MAX_POLY_VERTS][3];
+    GLint  u_pit_rank;
     /* the palette fade of the 3D editions (0x1002ad50): textured polygons in a flat colour, untextured ones toward a
      * target palette by their palette index (glr_set_world_fade) */
     GLuint ptab_tex;
@@ -92,7 +99,7 @@ struct glr {
     int    dsign;                           /* glr_set_damage_shade */
     float  tint[3], pfade;
     int    tint_on;
-    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_hz_x, u_hz_smooth, u_tifog, u_blend;
+    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_hz_x, u_hz_smooth, u_tifog, u_blend, u_ati;
     /* the Titanium edition's sky dome (glr_set_skydome): triangles (pos, texel uv / (size - 1), slot) by slot */
     GLuint dome_vao, dome_vbo, dome_tex[GLR_SLOTS];
     float *dome_v;                          /* x, y, z, u, v per vertex (game coordinates, GL z) */
@@ -111,6 +118,29 @@ struct glr {
     int    spr_next;
 };
 
+#define DOS_PROJ_GLSL \
+    /* a vertex as MW2.EXE projects it, in its integers: the world vertices (+0xc..+0x14) and the camera (DAT_0014fe94 / \
+     * 90 / 98) are whole units (cm), so the vertex relative to the camera is round(W) - round(E) (the vertices' \
+     * fixed-point transforms round to nearest, 0x3b522 / 0x3b20c); 0x3dd5c / 0x3e1de turn it by the camera matrix (2.29) \
+     * whose x and y rows carry the zoom's mantissas (0x3ece0: DAT_0014fe40 / 44, 0x3ef30) - x = (R.d) x xm / 2^14, y = \
+     * (U.d) x ym / 2^14, z = (F.d) x 4, each >> 27 rounded (the adc); then 0x3dfb7: ((x << xs) / z + 2) >> 2 from the \
+     * window's centre (idiv: truncated). DOSBox (dosbox-debug, YELLSCN1 1024 x 768, the cockpit's draw list): every \
+     * vertex's camera integers and screen point reproduced from the port's float world points this way. u_dos_rx / ry / \
+     * rz: the three rows / 2^27 (game coordinates, dos_cam_rows); u_dos_ps: xs, ys (port: the zoom from the projection's \
+     * x focal) */ \
+    "uniform vec3 u_dos_eye, u_dos_rx, u_dos_ry, u_dos_rz; uniform ivec2 u_dos_ps;\n" \
+    "int dos_idiv(int n, int d) { int q = abs(n) / abs(d); return (n < 0) != (d < 0) ? -q : q; }\n" /* idiv: truncated */ \
+    "float dos_rnd(float v) { return floor(v + 0.5); }\n" \
+    "int dos_pq(int c, int s, int z) { int q; if (abs(c) < (1 << (30 - s))) q = dos_idiv(c << s, z); else q = int(trunc(float(c) * exp2(float(s)) / float(z))); return (q + 2) >> 2; }\n" \
+    "float dos_camz(vec3 w) { vec3 d = vec3(dos_rnd(w.x) - dos_rnd(u_dos_eye.x), dos_rnd(w.y) - dos_rnd(u_dos_eye.y), dos_rnd(-w.z) - dos_rnd(-u_dos_eye.z)); return dos_rnd(dot(u_dos_rz, d)); }\n" \
+    "ivec2 dos_scr(vec3 w) {\n" \
+    "  vec3 d = vec3(dos_rnd(w.x) - dos_rnd(u_dos_eye.x), dos_rnd(w.y) - dos_rnd(u_dos_eye.y), dos_rnd(-w.z) - dos_rnd(-u_dos_eye.z));\n" \
+    "  int xc = int(dos_rnd(dot(u_dos_rx, d))), yc = int(dos_rnd(dot(u_dos_ry, d))), zc = max(int(dos_rnd(dot(u_dos_rz, d))), 1);\n" \
+    "  ivec2 c = ivec2(u_vp) / 2;\n" \
+    "  return ivec2(c.x + dos_pq(xc, u_dos_ps.x, zc), c.y - dos_pq(yc, u_dos_ps.y, zc));\n" \
+    "}\n" \
+    ""
+
 static const char *VS =
     "#version 330 core\n"
     "layout(location=0) in vec3 a_pos;\n"
@@ -123,12 +153,22 @@ static const char *VS =
     "layout(location=7) in vec4 a_tic;\n"
     "uniform mat4 u_mvp, u_view;\n"
     "uniform float u_far; uniform vec2 u_vp;\n"
+    "uniform int u_dos; uniform samplerBuffer u_dos_vtx;\n"
+    DOS_PROJ_GLSL
+    "uniform int u_pit_rank[128];\n"   /* GLR_PIT_MAX: the DOS cockpit polygons' places in the draw order (dos_pit_ranks) */
     "out vec3 v_normal; out vec2 v_uv; out vec3 v_color; flat out int v_texsel; out vec3 v_viewpos; out vec3 v_world;\n"
     "out vec3 v_bary; flat out int v_emask, v_bb, v_tif, v_dnib; flat out vec4 v_sph;\n"
     "out vec3 v_tic; flat out int v_ticm;\n"
+    "flat out float v_dkey;\n"
     "noperspective out vec2 v_gs;\n"   /* the DOS Gouraud shade (a_uv), screen-linear as MW2.EXE 0x59e77 steps it */
+    /* the Titanium vertex fog worked out at the vertex (u_tifog.z = 1: the RENDITION renderer - zredline.dll sends each
+     * vertex's fog byte, 0x100056d8, and the Verite iterates it across the polygon, screen-linear INFERRED) */
+    "uniform vec4 u_tifog;\n"
+    "noperspective out float v_tivf;\n"
+    "noperspective out vec2 v_uvl;\n"   /* the texel uv screen-linear: the ATi Rage edition's affine polygons (u_ati) */
     "void main() {\n"
-    "  int e = int(a_edge + 0.5);\n"
+    "  int e = int(a_edge + 0.5), pit = e / 65536;\n"
+    "  e -= 65536 * pit;\n"
     "  v_dnib = e / 2048; e -= v_dnib * 2048;\n"   /* a mech location's damage nibble (glr_set_damage_shade) */
     "  v_bb = e >= 1024 ? 1 : 0;\n"
     /* Titanium (edge code + 256: its model normal, length kept; + 512: a flat palette colour, unlit) */
@@ -166,15 +206,75 @@ static const char *VS =
     "      p = k < 2 ? a_normal : a_pos;\n"
     "    }\n"
     "  }\n"
+    /* the DOS Gouraud fill's coverage (MW2.EXE 0x59e77): a row's span runs from the left chain's x >> 16 to the right
+     * chain's INCLUSIVE (0x5a1dc..0x5a213: w = xR - xL, w + 1 pixels) and the rows from the top vertex's to the bottom
+     * vertex's inclusive (0xa178c = ybot - ytop, 0x5a337 / 0x5a33d), each chain from its vertex's x + 0.5 (0x5a01f) - about
+     * half a pixel more on the right and below than GL's centre rule. So the polygon (its fan, every triangle) is drawn
+     * 2 px larger on screen - each vertex pushed out along its two edges' outward normals (miter, at most 8 px) - and the
+     * fragment keeps exactly the DOS span's pixels (dos_gouraud); polygons crossing the near plane are left as they are */
+    "  if (u_dos != 0 && int(a_color.r + 0.5) == 3 && a_texsel > 0.5 && e < 256) {\n"
+    "    int s = int(a_texsel + 0.5) - 1, rel = gl_VertexID - s, t = rel / 3, cn = rel - 3 * t;\n"
+    "    vec2 Q[18]; int n = 0; bool ok = true; vec2 h = 0.5 * u_vp;\n"
+    "    for (int k = 0; k < 16; k++) {\n"
+    "      int b = s + 3 * k;\n"
+    "      for (int c = (k == 0 ? 0 : 1); c < 3; c++) {\n"
+    "        if (c == 2 && ((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) == 0) break;\n"
+    "        vec4 wp = vec4(texelFetch(u_dos_vtx, (b + c) * 13).r, texelFetch(u_dos_vtx, (b + c) * 13 + 1).r, texelFetch(u_dos_vtx, (b + c) * 13 + 2).r, 1.0), q = u_mvp * wp;\n"
+    "        if (q.z + q.w < 0.0 || q.w <= 0.0) ok = false; else { ivec2 sp = dos_scr(wp.xyz); Q[n] = vec2(float(sp.x) + 0.5, u_vp.y - float(sp.y) - 0.5) - h; }\n"
+    "        n++;\n"
+    "      }\n"
+    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) break;\n"
+    "    }\n"
+    "    int j = cn == 0 ? 0 : t + cn;\n"
+    "    if (ok && n >= 3 && j < n && gl_Position.w > 0.0) {\n"
+    "      float area = 0.0;\n"
+    "      for (int i = 0; i < n; i++) { vec2 a = Q[i], b = Q[(i + 1) % n]; area += a.x * b.y - a.y * b.x; }\n"
+    "      vec2 A = Q[(j + n - 1) % n], B = Q[j], C = Q[(j + 1) % n], e1 = B - A, e2 = C - B;\n"
+    "      float sg = area > 0.0 ? 1.0 : -1.0;\n"
+    "      vec2 n1 = length(e1) > 1e-4 ? sg * vec2(e1.y, -e1.x) / length(e1) : vec2(0.0), n2 = length(e2) > 1e-4 ? sg * vec2(e2.y, -e2.x) / length(e2) : vec2(0.0);\n"
+    "      vec2 m = n1 + n2; float d = 1.0 + dot(n1, n2);\n"
+    "      vec2 off = d > 1e-3 ? 3.0 * m / d : 3.0 * m;\n"
+    "      if (length(off) > 24.0) off = off / length(off) * 24.0;\n"
+    "      gl_Position.xy += off / h * gl_Position.w;\n"
+
+    "    }\n"
+    "  }\n"
+    /* the DOS cockpit set: painted over everything, in the DOS draw order (MW2.EXE 0x3cea0 / 0x3d040: its list sorted
+     * by each polygon's key, the farthest first, and drawn in turn) - a later polygon nearer in depth; one the original
+     * leaves out (wholly behind the eye or off the window, 0x3e1de) is not drawn */
+    "  if (pit > 0 && u_dos != 0) {\n"
+    "    int rk = u_pit_rank[min(pit - 1, 127)];\n"
+    "    if (rk < 0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
+    "    else gl_Position.z = (-1.0 + 0.01 * (1.0 - float(rk + 1) / 256.0)) * gl_Position.w;\n"
+    "  }\n"
     /* the view distance (the planet's VIEW far; DOS MW2.EXE 0x3f500, 3Dfx 0x1002fba0): an object whose bounding sphere
      * lies wholly beyond it - centre distance > far + r, or depth - r > far - is not drawn (all its vertices off screen) */
     "  if (u_far > 0.0 && a_sphere.w > 0.0) {\n"
     "    vec3 sc = (u_view * vec4(a_sphere.xyz, 1.0)).xyz;\n"
     "    if (dot(sc, sc) > (u_far + a_sphere.w) * (u_far + a_sphere.w) || -sc.z - a_sphere.w > u_far) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
     "  }\n"
+    /* the DOS fog key (MW2.EXE 0x3e1de -> *0x97080 = 0x38ae0 -> 0x38ee0): one per polygon - the largest of its corners'
+     * camera z (quarter units: dos_camz; the list key DAT_0014fcc0 = 0) - and the level less ((key << 4) / LITE +24) >> 4,
+     * not the pixel's depth in cm. The polygon's corners from this layer's buffer: its fan triangles back to the one that
+     * starts it (edge bit 4) and on to the one that closes it (bit 2); -1 (the pixel depth) for a vertex not found there */
+    "  v_dkey = -1.0;\n"
+    "  if (u_dos != 0) {\n"
+    "    int vid = gl_VertexID, t = vid / 3, k, c;\n"
+    "    if (abs(texelFetch(u_dos_vtx, vid * 13).r - a_pos.x) + abs(texelFetch(u_dos_vtx, vid * 13 + 2).r - a_pos.z) < 0.01) {\n"
+    "      for (k = 0; k < 16 && t > 0; k++) { if (((int(texelFetch(u_dos_vtx, 3 * t * 13 + 12).r + 0.5) % 32 / 3) & 4) != 0) break; t--; }\n"
+    "      float km = -1e9;\n"
+    "      for (k = 0; k < 16; k++) {\n"
+    "        int b = 3 * (t + k);\n"
+    "        for (c = 0; c < 3; c++) km = max(km, dos_camz(vec3(texelFetch(u_dos_vtx, (b + c) * 13).r, texelFetch(u_dos_vtx, (b + c) * 13 + 1).r, texelFetch(u_dos_vtx, (b + c) * 13 + 2).r)));\n"
+    "        if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) break;\n"
+    "      }\n"
+    "      v_dkey = km;\n"
+    "    }\n"
+    "  }\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
+    "  { float vz = max(-v_viewpos.z, 1.0); v_tivf = 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, vz / u_tifog.y) : 1.0) * u_tifog.w; }\n"
     "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(floor(a_texsel + 0.5)); v_sph = a_sphere;\n"
-    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5); v_gs = a_uv;\n"
+    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5); v_gs = a_uv; v_uvl = a_uv;\n"
     "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
     "  v_bary = vec3(corner == 0 ? 1.0 : 0.0, corner == 1 ? 1.0 : 0.0, corner == 2 ? 1.0 : 0.0); v_emask = (e / 3) | (hi << 3);\n"
     "}\n";
@@ -184,6 +284,7 @@ static const char *FS =
     "in vec3 v_normal; in vec2 v_uv; in vec3 v_color; flat in int v_texsel; in vec3 v_viewpos; in vec3 v_world; flat in int v_dnib;\n"
     "in vec3 v_bary; flat in int v_emask, v_bb, v_tif; flat in vec4 v_sph;\n"
     "in vec3 v_tic; flat in int v_ticm;\n"
+    "flat in float v_dkey;\n"
     "uniform int u_point; uniform vec3 u_lpos;\n"
     /* the Titanium lights (mercsw 0x1002ecaa): u_tilit 1 objects, 2 the ground (one colour, 0x1005527e); the ambient, two
      * world lights (type 1 directional - the unit vector the light travels along -, 2 point - its position), the
@@ -230,9 +331,13 @@ static const char *FS =
      * viewport (origin, size); u_dos_smooth: the port's dos_shading=smooth */
     "uniform samplerBuffer u_dos_vtx; uniform mat4 u_mvp; uniform vec2 u_vp, u_vpo; uniform int u_dos_smooth;\n"
     "noperspective in vec2 v_gs;\n"
+    "noperspective in float v_tivf;\n"
     "uniform float u_alpha; uniform int u_mga_lod;\n"
-    /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), w the camera's
-     * factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
+    /* the ATi Rage edition (glr_view.ati_tex): a bank-1 textured polygon's bits in -v_texsel above its texture switch
+     * class (set_layer): 4 affine, 8 no alpha mask, 16 colour types 5-11 */
+    "noperspective in vec2 v_uvl; uniform int u_ati;\n"
+    /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), z 1 = per vertex
+     * (v_tivf, RENDITION) else per pixel, w the camera's factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
     "uniform vec4 u_tifog; uniform int u_blend;\n"
     /* the DOS horizon fill (MW2.EXE 0x3c000): a pixel is sky when its view ray's world y >= 0 - ray = R (sx - cx) / fx +
      * U (cy - sy) / fy + F; above the line a haze band of u_hz_band pixels fades from 0xEE (on the line) to 0xE0;
@@ -269,9 +374,9 @@ static const char *FS =
      * dither's mean - within the polygon's own shades */
     "vec4 dos_gclip(int i) { int b = i * 13; return u_mvp * vec4(texelFetch(u_dos_vtx, b).r, texelFetch(u_dos_vtx, b + 1).r, texelFetch(u_dos_vtx, b + 2).r, 1.0); }\n"
     "float dos_gshade(int i, float g) { int b = i * 13; return texelFetch(u_dos_vtx, b + 7).r + texelFetch(u_dos_vtx, b + 6).r * g; }\n"
-    "int dos_idiv(int n, int d) { int q = abs(n) / abs(d); return (n < 0) != (d < 0) ? -q : q; }\n"   /* idiv: truncated */
     "int dos_q(float p) { return (int(trunc(p * 4.0)) + 2) >> 2; }\n"   /* 0x3dfb7: quarter pixels, + 2 >> 2 */
     "ivec2 dos_gvtx(vec4 q) { vec2 p = q.xy / q.w * 0.5 * u_vp; ivec2 c = ivec2(u_vp) / 2; return ivec2(c.x + dos_q(p.x), c.y - dos_q(p.y)); }\n"
+    DOS_PROJ_GLSL
     /* one chain (dir -1: backward, the first, 0x5a5eb; + 1 forward, 0x5a689) at DOS row y: (x, c) in 16.16 */
     "ivec2 dos_gchain(ivec2 V[20], int C[20], int m, int top, int dir, int y, int ybot) {\n"
     "  int a = top, b = (a + dir + m) % m, r0 = V[top].y;\n"
@@ -289,29 +394,32 @@ static const char *FS =
     "  int k = int(px), r = int(py);\n"
     "  uint val = 0u; bool exact = false;\n"
     "  if (v_texsel > 0) {\n"
-    "    vec4 P[18]; float C[18]; ivec2 V[20]; int CF[20]; int n = 0, m = 0, s = v_texsel - 1, L1 = int(lev) + 1;\n"
+    "    vec4 P[18]; float C[18]; int I[18]; ivec2 V[20]; int CF[20]; int n = 0, m = 0, s = v_texsel - 1, L1 = int(lev) + 1;\n"
     "    for (int t = 0; t < 16; t++) {\n"
     "      int b = s + 3 * t;\n"
-    "      if (t == 0) { P[0] = dos_gclip(b); C[0] = dos_gshade(b, g); n = 1; }\n"
-    "      P[n] = dos_gclip(b + 1); C[n] = dos_gshade(b + 1, g); n++;\n"
-    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) { P[n] = dos_gclip(b + 2); C[n] = dos_gshade(b + 2, g); n++; break; }\n"
+    "      if (t == 0) { P[0] = dos_gclip(b); C[0] = dos_gshade(b, g); I[0] = b; n = 1; }\n"
+    "      P[n] = dos_gclip(b + 1); C[n] = dos_gshade(b + 1, g); I[n] = b + 1; n++;\n"
+    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) { P[n] = dos_gclip(b + 2); C[n] = dos_gshade(b + 2, g); I[n] = b + 2; n++; break; }\n"
     "    }\n"
     "    cmin = 1e9; cmax = -1e9;\n"
     "    for (int i = 0; i < n; i++) {\n"   /* the near plane (z + w >= 0), the shade carried */
     "      vec4 a = P[i], b = P[(i + 1) % n]; float da = a.z + a.w, db = b.z + b.w;\n"
     "      cmin = min(cmin, C[i]); cmax = max(cmax, C[i]);\n"
-    "      if (da >= 0.0) { V[m] = dos_gvtx(a); CF[m] = int(floor(C[i] * 65536.0 + 0.5)); m++; }\n"
+    "      if (da >= 0.0) { int b2 = I[i] * 13; V[m] = dos_scr(vec3(texelFetch(u_dos_vtx, b2).r, texelFetch(u_dos_vtx, b2 + 1).r, texelFetch(u_dos_vtx, b2 + 2).r)); CF[m] = int(floor(C[i] * 65536.0 + 0.5)); m++; }\n"
     "      if ((da >= 0.0) != (db >= 0.0)) { float t = da / (da - db); V[m] = dos_gvtx(mix(a, b, t)); CF[m] = int(floor(mix(C[i], C[(i + 1) % n], t) * 65536.0 + 0.5)); m++; }\n"
     "    }\n"
     "    if (m >= 3) {\n"
     "      int top = 0, ybot = V[0].y;\n"
     "      for (int i = 0; i < m; i++) { if (V[i].y <= V[top].y) top = i; ybot = max(ybot, V[i].y); }\n"   /* 0x59f58: the last of the least y */
-    "      int y = clamp(int(u_vp.y) - 1 - (int(py) - int(u_vpo.y)), V[top].y, ybot);\n"   /* the DOS row (y down) */
+    "      int y0 = int(u_vp.y) - 1 - (int(py) - int(u_vpo.y)), y = clamp(y0, V[top].y, ybot);\n"   /* the DOS row (y down) */
+    "      if (m == n && y0 != y) discard;\n"   /* not near-clipped: the DOS span's rows only (see the vertex shader) */
     "      ivec2 e1 = dos_gchain(V, CF, m, top, -1, y, ybot), e2 = dos_gchain(V, CF, m, top, 1, y, ybot);\n"
     "      if (e2.x <= e1.x) { ivec2 t2 = e1; e1 = e2; e2 = t2; }\n"   /* 0x5a1d5 */
     "      int x0 = e1.x >> 16, w = (e2.x >> 16) - x0;\n"
     "      int st = w != 0 ? dos_idiv(e2.y - e1.y, max(w >> 1, 1)) : 0;\n"
-    "      k = clamp(int(px) - int(u_vpo.x) - x0, 0, w); r = y - V[top].y;\n"
+    "      k = int(px) - int(u_vpo.x) - x0;\n"
+    "      if (m == n && (k < 0 || k > w)) discard;\n"   /* and its pixels, both ends inclusive (0x5a213) */
+    "      k = clamp(k, 0, w); r = y - V[top].y;\n"
     "      val = uint(e1.y) + uint(k >> 1) * uint(st); exact = true;\n"
     "      cc = float(int(val)) / 65536.0;\n"
     "    }\n"
@@ -382,7 +490,7 @@ static const char *FS =
     "    if (nl > 0.0 && dot(v_viewpos, mat3(u_view) * nf) >= 0.0) discard;\n"
     "    float f = nl > 0.0 ? trunc(127.0 * dot(nf, Ld)) : 127.0;\n"
     "    float lev = floor(floor(C / 2.0) * (floor(f * (128.0 - u_dos_amb) / 128.0) + u_dos_amb) / 1088.0);\n"
-    "    if (u_dos_fogdist > 0.0) lev -= floor(max(-v_viewpos.z, 0.0) / u_dos_fogdist);\n"
+    "    if (u_dos_fogdist > 0.0) lev -= v_dkey >= 0.0 ? float((int(v_dkey) * 16 / int(u_dos_fogdist)) >> 4) : floor(max(-v_viewpos.z, 0.0) / u_dos_fogdist);\n"
     "    lev = clamp(lev, 0.0, 15.0);\n"
     "    if (kind == 1) { o_color = vec4(dos_colour(base + lev), 1.0); return; }\n"
     /* Gouraud (0x3bb80): each vertex's baked index a = ramp | i, rescaled by the polygon's level - ramp + i (L + 1) / 16 -
@@ -402,10 +510,14 @@ static const char *FS =
     /* the Combat Variables texture switches (0x1002a8a0 render flags DAT_1024e228, 0x1002a748..): a textured polygon whose
      * object class (-v_texsel: 1 OBJECT, 2 TERRAIN) is switched off is drawn in its texture's average colour (v_color) */
     "  if (u_textured != 0 && u_mono.a <= 0.0 && (v_texsel >= 0 || ((-v_texsel) & u_notex) == 0)) {\n"
-    "    vec4 t;\n"
-    "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, v_uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
-    "    else t = texture(u_tex, v_uv / u_texsize);\n"
-    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
+    "    vec4 t; int af = u_ati != 0 && v_texsel < 0 ? -v_texsel : 0;\n"
+    /* ATi (0x1002dcb0): an affine polygon - q = 1 at every vertex (0x1002def4 / 0x1002df03) or C3D_ERS_TMAP_PERSP_COR 0
+     * (0x100686b0) - takes its texel uv screen-linear; DISPLAY DETAIL low (u_ati 2: 0x1018a84c = 1) every type 5-11 */
+    "    vec2 uv = (af & 4) != 0 || (u_ati == 2 && (af & 16) != 0) ? v_uvl : v_uv;\n"
+    "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
+    "    else t = texture(u_tex, uv / u_texsize);\n"
+    /* ATi types 5-7: C3D_ERS_TMAP_TEXOP none - the alpha-0 texels drawn in their own colour, not masked */
+    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && (af & 8) == 0) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
     /* an untextured polygon's palette colour toward the fade's target palette (its index + 1 in v_texsel) */
     "  else if (u_pfade > 0.0 && v_texsel > 0 && v_bb == 0) base = mix(base, texture(u_ptab, vec2((float(v_texsel - 1) + 0.5) / 256.0, 0.5)).rgb, u_pfade);\n"
     "  float n = length(v_normal);\n"
@@ -431,7 +543,7 @@ static const char *FS =
     /* Titanium (mercsw.dll): the vertex fog the D3D plugin takes as the specular alpha a (fog = 1 - a); the world, the
      * objects and the ground (0x10053474, 0x10001b53): a = (1 - min(1, z / Z)) x the camera's factor (density Y's
      * ground fog / low cloud, 0x1006a851); Z = 0: no distance fog */
-    "  if (u_tifog.x > 0.5) ff = 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, fz / u_tifog.y) : 1.0) * u_tifog.w;\n"
+    "  if (u_tifog.x > 0.5) ff = u_tifog.z > 0.5 ? v_tivf : 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, fz / u_tifog.y) : 1.0) * u_tifog.w;\n"
     "  o_color = vec4(lit + (u_fog_color - lit) * ff, u_blend != 0 ? ta * u_alpha : u_alpha);\n"
     "}\n";
 
@@ -520,6 +632,12 @@ glr *glr_create(void)
     r->u_dos_vtx = glGetUniformLocation(r->prog, "u_dos_vtx");
     r->u_dos_smooth = glGetUniformLocation(r->prog, "u_dos_smooth");
     r->u_vpo = glGetUniformLocation(r->prog, "u_vpo");
+    r->u_dos_eye = glGetUniformLocation(r->prog, "u_dos_eye");
+    r->u_pit_rank = glGetUniformLocation(r->prog, "u_pit_rank");
+    r->u_dos_rx = glGetUniformLocation(r->prog, "u_dos_rx");
+    r->u_dos_ry = glGetUniformLocation(r->prog, "u_dos_ry");
+    r->u_dos_rz = glGetUniformLocation(r->prog, "u_dos_rz");
+    r->u_dos_ps = glGetUniformLocation(r->prog, "u_dos_ps");
     glUseProgram(r->prog);   /* the buffer sampler on its own unit always: a samplerBuffer left on unit 0 with u_tex's
                               * sampler2D makes every draw invalid */
     glUniform1i(r->u_dos_vtx, 3);
@@ -539,6 +657,7 @@ glr *glr_create(void)
     U(u_tilit); U(u_tiamb); U(u_tilt); U(u_tilv); U(u_tilc); U(u_tignd); U(u_tidn); U(u_tidp); U(u_tidc);
 #undef U
     r->u_blend = glGetUniformLocation(r->prog, "u_blend");
+    r->u_ati = glGetUniformLocation(r->prog, "u_ati");
     glGenVertexArrays(1, &r->dome_vao);
     glGenBuffers(1, &r->dome_vbo);
     glGenTextures(GLR_SLOTS, r->dome_tex);
@@ -697,6 +816,42 @@ static int ti_shade_level(const glr *r, const wtb_object *o, const wtb_poly *q, 
     return ti_shade_finish(q->n >= 3 ? ti_shade_base(sh, q->normal, c0, NULL) : (int)sh->amb, c);
 }
 
+/* The three corners MW2.EXE takes a polygon's normal from (0x380a0, at the model's load - after the OBJ scale, 0x4fef0):
+ * a triangle its corners 0, 1, 2; a larger polygon its longest edge P0 -> P1 (|dx|, |dy|, |dz| as (4 max + the other
+ * two) >> 2; the edges idx[k] -> idx[k + 1] from k = n - 1 down, the first longest kept) and the corner C (from idx[n - 1]
+ * down, P0 / P1 skipped) whose cross product's bit length (0x3a4b9's return: the top bit of |x| | |y| | |z|) is the
+ * first strictly largest, stopping at one above 16. The normal is -cross(P1 - P0, C - P1) (0x3a4b9). A mountain's
+ * non-planar quads (PROVMTN2) light by it, not by corners 0-2 */
+static void dos_normal_corners(const wtb_object *o, const wtb_poly *q, int *a, int *b, int *c)
+{
+    int n = q->n, k, best = -1, len = 0, i;
+    *a = q->idx[0]; *b = q->idx[1]; *c = q->idx[2];
+    if (n <= 3) return;
+    for (k = n - 1; k >= 0; k--) {   /* 0x38183: ebx the corner after idx[k] */
+        const wtb_vertex *p = &o->verts[q->idx[(k + 1) % n]], *s = &o->verts[q->idx[k]];
+        int dx = abs(p->x - s->x), dy = abs(p->y - s->y), dz = abs(p->z - s->z), t, l;
+        if (dx < dy) { t = dx; dx = dy; dy = t; }
+        if (dx < dz) { t = dx; dx = dz; dz = t; }
+        l = (dx * 4 + dy + dz) >> 2;
+        if (l > len) { len = l; *a = q->idx[k]; *b = q->idx[(k + 1) % n]; }
+    }
+    if (len == 0) return;
+    for (i = n - 1; i >= 0; i--) {   /* 0x3821d */
+        const wtb_vertex *P0 = &o->verts[*a], *P1 = &o->verts[*b], *C = &o->verts[q->idx[i]];
+        int64_t x, y, z;
+        uint64_t m;
+        int e = 0;
+        if (q->idx[i] == *a || q->idx[i] == *b) continue;
+        x = (int64_t)(P1->y - P0->y) * (C->z - P1->z) - (int64_t)(C->y - P1->y) * (P1->z - P0->z);
+        y = (int64_t)(P1->z - P0->z) * (C->x - P1->x) - (int64_t)(C->z - P1->z) * (P1->x - P0->x);
+        z = (int64_t)(P1->x - P0->x) * (C->y - P1->y) - (int64_t)(C->x - P1->x) * (P1->y - P0->y);
+        m = (uint64_t)(x < 0 ? -x : x) | (uint64_t)(y < 0 ? -y : y) | (uint64_t)(z < 0 ? -z : z);
+        while (m >> (e + 1)) e++;
+        if (e > best) { best = e; *c = q->idx[i]; }
+        if (e > 16) break;
+    }
+}
+
 static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256][3],
                      texture *const slots[GLR_SLOTS], int camo, int clan, int bounds)
 {
@@ -705,7 +860,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     size_t cap = 0, n = 0, *count, *pos;
     float *buf = NULL, *sph = NULL, *tic = NULL, *tipn = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     glr_tipoly *tip = NULL;
-    int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0;
+    int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0, pit_o = -1;
 
     for (pi = 0; pi < m->part_count; pi++) {
         const wtb_model *pm = r->ti_slots && m->parts[pi].ti_model ? m->parts[pi].ti_model : &m->parts[pi].model;
@@ -729,6 +884,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         if (pass == 1) {
             size_t acc = 0;
             for (b = 0; b < GLR_BATCHES; b++) { pos[b] = acc; acc += count[b]; }
+            if (li == 1) r->pit_n = 0;
         }
         for (pi = 0; pi < m->part_count; pi++) {
             const mech3d_part *part = &m->parts[pi];
@@ -897,6 +1053,11 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * (0x98); the mission maps' own texture in slot 0xf0 (a clan crest) is not meant for them */
                 if (pass == 0) { count[batch] += (size_t)(q->n - 2) * 3; continue; }
                 v0 = &o->verts[q->idx[0]]; v1 = &o->verts[q->idx[1]]; v2 = &o->verts[q->idx[2]];
+                if (r->dos && !model->extended && q->n > 3) {   /* DOS: the normal's corners (dos_normal_corners) */
+                    int na, nb, nc;
+                    dos_normal_corners(o, q, &na, &nb, &nc);
+                    v0 = &o->verts[na]; v1 = &o->verts[nb]; v2 = &o->verts[nc];
+                }
                 e1[0] = (float)(v1->x - v0->x); e1[1] = (float)(v1->y - v0->y); e1[2] = (float)(v1->z - v0->z);
                 e2[0] = (float)(v2->x - v0->x); e2[1] = (float)(v2->y - v0->y); e2[2] = (float)(v2->z - v0->z);
                 face[0] = e1[1] * e2[2] - e1[2] * e2[1];
@@ -1004,6 +1165,26 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     for (k4 = 0; k4 < q->n; k4++) if ((float)o->verts[q->idx[k4]].b < ti_vmin) ti_vmin = (float)o->verts[q->idx[k4]].b;
                 }
                 pfirst = pos[batch];
+                pit_o = -1;
+                if (r->dos && part->dos_pit && !model->extended && li == 1 && r->pit_n < GLR_PIT_MAX && q->n <= WTB_MAX_POLY_VERTS) {
+                    int k4, c4;   /* (its corners as the fan below places them) */
+                    pit_o = r->pit_n++;
+                    r->pit_nv[pit_o] = q->n;
+                    for (k4 = 0; k4 < q->n; k4++) {
+                        const wtb_vertex *v4 = &o->verts[q->idx[k4]];
+                        float *w4 = r->pit_v[pit_o][k4];
+                        if (part->has_rot) {
+                            const float *R = part->rot;
+                            float vx = (float)v4->x, vy = (float)v4->y, vz = (float)v4->z;
+                            for (c4 = 0; c4 < 3; c4++) w4[c4] = R[c4 * 3] * vx + R[c4 * 3 + 1] * vy + R[c4 * 3 + 2] * vz + (float)part->pos[c4];
+                        } else {
+                            float cy4 = cosf(part->yaw * 3.14159265f / 180.0f), sy4 = sinf(part->yaw * 3.14159265f / 180.0f);
+                            w4[0] = cy4 * (float)v4->x + sy4 * (float)v4->z + (float)part->pos[0];
+                            w4[1] = (float)(v4->y + part->pos[1]);
+                            w4[2] = -sy4 * (float)v4->x + cy4 * (float)v4->z + (float)part->pos[2];
+                        }
+                    }
+                }
                 for (j = 1; j + 1 < q->n; j++) {
                     int tri[3] = {0, j, j + 1};
                     float cy = cosf(part->yaw * 3.14159265f / 180.0f), sy = sinf(part->yaw * 3.14159265f / 180.0f);
@@ -1070,6 +1251,18 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         if (tk2) f[11] = (float)-k2cls;   /* (v_ticm 3: drawn only with its class's textures off) */
                         if (r->dos && !model->extended && tk4 && batch == GLR_SLOTS) f[11] = (float)(pfirst + 1);   /* DOS Gouraud: its fan's first vertex + 1 (dos_gouraud) */
                         if (tik == 1 && batch >= GLR_TI && batch < GLR_TB) f[11] = (float)-k2cls;   /* (textured kinds 5-7: their switch class) */
+                        if (batch < GLR_SLOTS && model->extended && !ti) {
+                            /* the ATi Rage edition's path per colour type (ATi MW2.DLL dispatcher 0x100281f0 -> 0x1002dcb0, as
+                             * 3Dfx 0x10026e80 -> 0x1002c880): its 4th argument (perspective) 1 for types 5, 6, 9, 10, 11 ->
+                             * 0x1002bc60 -> 0x10068830 (C3D_ERS_TMAP_PERSP_COR 3), 0 for 7, 8 -> 0x100686b0 (PERSP_COR 0);
+                             * types 6 / 10 set 0x1018a84c around the call, which gives every vertex q = 1 (0x1002de4c ->
+                             * 0x1002def4); the 6th (alpha) 1 for types 8-11 -> C3D_ERS_TMAP_TEXOP 3 (alpha mask), else 0
+                             * (none). Bits above the switch class (only the ATi look reads them, the shader's u_ati): 4
+                             * affine, 8 no alpha mask, 16 a type 5-11 polygon */
+                            const int ty = (q->color >> 12) & 15;
+                            if (ty >= 5 && ty <= 11)
+                                f[11] = (float)-(notex_cls + 16 + (ty == 6 || ty == 7 || ty == 8 || ty == 10 ? 4 : 0) + (ty <= 7 ? 8 : 0));
+                        }
                         if (tik) {
                             float *t = tic + pos[batch] * 4;
                             memcpy(tipn + pos[batch] * 6, f, 6 * sizeof *f);
@@ -1080,7 +1273,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         /* the wireframe's edges: this corner (0-2) + 3 x the polygon's own edges in this fan triangle
                          * (bit 0: corner 1 - 2, always; bit 1: corner 2 - 0 when it closes the polygon; bit 2: corner 0 - 1
                          * when it starts it), so the triangulation's diagonals are not drawn (DOS draws polygon outlines) */
-                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && (q->color >> 12) == 0xb) ? 512 : 0) + 2048 * dnib);   /* (+ 512: unlit) */
+                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && (q->color >> 12) == 0xb) ? 512 : 0) + 2048 * dnib + (pit_o >= 0 ? 65536 * (pit_o + 1) : 0));   /* (+ 512: unlit; + 65536 x (1 + n): the DOS cockpit set's polygon n) */
                         for (c = 0; c < 3; c++) {
                             if (f[c] < mn[c]) mn[c] = f[c];
                             if (f[c] > mx[c]) mx[c] = f[c];
@@ -1619,6 +1812,168 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
 void glr_draw(glr *r, const glr_view *v, int w, int h) { glr_draw_rect(r, v, 0, 0, w, h); }
 
 /* Draw into the window rectangle x, y (from the bottom left), w x h: a cockpit viewport (rear / down view). */
+/* The DOS cockpit set's draw order (MW2.EXE): each polygon facing the eye (0x3e1de; glview culls the same way) has its
+ * corners turned into the camera's integers (as dos_gvtx_w: round(W) - round(E), the matrix rows, >> 27 rounded); one
+ * whose corners are all nearer than the near plane (DAT_0014feb0 = 32, quarter units; DOSBox) is dropped, a crossing
+ * edge gets a corner on the plane (0x3de4e: x, y interpolated with imul / idiv), each corner projected (0x3dfb7) with
+ * its window outcode (left 1, right 2, top 4, bottom 8); the polygon is listed only when 3 or more corners remain and
+ * no outcode bit is common to all (DAT_0014fcd0), its key the largest corner depth (DAT_0014fcc0 flags clear). The list,
+ * in the order the polygons came (the set's parts, each polygon in turn: DOSBox, the head piece's record addresses), is
+ * sorted by 0x3cea0 - a quicksort, largest key first, that does not keep equal keys in order - and drawn from the
+ * first (0x3d040). ranks[n]: polygon n's place, -1 not listed. pf / ps: the projection's integers (glr_draw_rect) */
+/* The DOS camera's rows (MW2.EXE). Angles are degrees in 16.16; sin (0x3a838) takes a x 1024 / 360 (x 0x5b05b05b >> 29,
+ * rounded) and interpolates its quarter-wave table (2.29, 257 entries, DAT_000fe1d4) by the low 16 bits; cos (0x3a8a8) is
+ * sin(a + 90). The camera (0x3f230) builds its matrix with 0x3b522(pitch +0x10, yaw +0xc, roll +0x14, mode 0) - a lone yaw
+ * (or pitch / roll) as a plain rotation of the table's values, else the mode-0 products (each >> 29 rounded) and the
+ * middle column as a cross product (0x3b078) - and keeps its transpose (0x3b42b) at +0x54: rows x, y, z (+0x54, +0x60,
+ * +0x6c). 0x3ece0 scales the x and y rows by the zoom mantissas (round16, DAT_0014fe40 / 44). DOSBox (dosbox-debug,
+ * YELLSCN1 at heading 158 + 5 / 65536, the NAVP's 16.16): x row (-0.927, 0, -0.375) x 0x8000, y row 0xffff, z row
+ * (0.375, 0, -0.927) - all to the bit. The port's camera has no roll. rows[3][3] in DOS units (game x, y, z) */
+static const int32_t DOS_SIN[257] = {
+    0, 3294177, 6588231, 9882037, 13175471, 16468409, 19760727, 23052301,
+    26343007, 29632721, 32921319, 36208678, 39494674, 42779183, 46062081, 49343245,
+    52622551, 55899876, 59175096, 62448089, 65718730, 68986897, 72252467, 75515317,
+    78775323, 82032364, 85286316, 88537057, 91784465, 95028417, 98268791, 101505466,
+    104738318, 107967228, 111192073, 114412731, 117629082, 120841004, 124048377, 127251079,
+    130448990, 133641990, 136829958, 140012775, 143190321, 146362475, 149529119, 152690133,
+    155845399, 158994797, 162138209, 165275516, 168406601, 171531346, 174649633, 177761344,
+    180866362, 183964571, 187055854, 190140094, 193217176, 196286983, 199349400, 202404311,
+    205451603, 208491159, 211522865, 214546608, 217562273, 220569747, 223568917, 226559670,
+    229541892, 232515473, 235480299, 238436260, 241383244, 244321140, 247249837, 250169225,
+    253079195, 255979637, 258870441, 261751498, 264622701, 267483941, 270335111, 273176102,
+    276006808, 278827123, 281636941, 284436154, 287224659, 290002350, 292769123, 295524873,
+    298269497, 301002891, 303724952, 306435579, 309134668, 311822119, 314497829, 317161699,
+    319813628, 322453516, 325081264, 327696773, 330299944, 332890680, 335468882, 338034455,
+    340587300, 343127323, 345654427, 348168517, 350669499, 353157279, 355631762, 358092856,
+    360540468, 362974506, 365394878, 367801493, 370194260, 372573090, 374937893, 377288580,
+    379625062, 381947251, 384255060, 386548402, 388827191, 391091341, 393340766, 395575382,
+    397795106, 399999852, 402189538, 404364083, 406523403, 408667418, 410796047, 412909209,
+    415006826, 417088818, 419155107, 421205615, 423240265, 425258980, 427261684, 429248302,
+    431218759, 433172981, 435110894, 437032426, 438937503, 440826055, 442698010, 444553298,
+    446391848, 448213592, 450018461, 451806387, 453577303, 455331142, 457067838, 458787326,
+    460489540, 462174418, 463841894, 465491908, 467124396, 468739297, 470336550, 471916095,
+    473477873, 475021824, 476547892, 478056017, 479546144, 481018217, 482472179, 483907977,
+    485325555, 486724862, 488105843, 489468448, 490812625, 492138322, 493445491, 494734082,
+    496004046, 497255337, 498487905, 499701706, 500896694, 502072823, 503230049, 504368329,
+    505487620, 506587880, 507669066, 508731140, 509774060, 510797787, 511802283, 512787509,
+    513753430, 514700008, 515627208, 516534995, 517423335, 518292194, 519141539, 519971339,
+    520781563, 521572179, 522343159, 523094472, 523826092, 524537989, 525230138, 525902513,
+    526555087, 527187837, 527800739, 528393769, 528966906, 529520127, 530053412, 530566741,
+    531060094, 531533454, 531986801, 532420119, 532833392, 533226604, 533599741, 533952788,
+    534285731, 534598559, 534891260, 535163823, 535416236, 535648492, 535860581, 536052495,
+    536224227, 536375770, 536507119, 536618269, 536709216, 536779956, 536830486, 536860805,
+    536870912,
+};
+static int64_t dos_r29(int64_t v) { return (v >> 29) + ((v >> 28) & 1); }
+static int32_t dos_sin(int32_t a)
+{
+    int64_t p = (int64_t)a * 0x5b05b05b;
+    uint32_t u3 = (uint32_t)((p >> 29) + ((p >> 28) & 1)), u5 = (u3 >> 14) & 0x3fc, u2 = u3;
+    int32_t t0, t1, v;
+    if (u3 & 0x1000000u) { u2 = ~u3; u5 ^= 0x3fc; }
+    t0 = DOS_SIN[u5 >> 2]; t1 = DOS_SIN[(u5 >> 2) + 1];
+    {
+        uint64_t l = (uint64_t)(uint32_t)(t1 - t0) * (uint64_t)(u2 & 0xffff);
+        v = (int32_t)((uint32_t)t0 + (uint32_t)(l >> 16) + (uint32_t)((l >> 15) & 1));
+    }
+    return (u3 & 0x2000000u) ? -v : v;
+}
+static int32_t dos_cos(int32_t a) { return dos_sin(a + 0x5a0000); }
+static void dos_cam_rows(float yaw_deg, float pitch_deg, int64_t rows[3][3])
+{
+    int32_t a = (int32_t)lrint(-(double)pitch_deg * 65536.0), b = (int32_t)lrint((double)yaw_deg * 65536.0), m[9];
+    int i;
+    for (i = 0; i < 9; i++) m[i] = (i % 4 == 0) ? 0x20000000 : 0;   /* 0x3b4c1 */
+    if (a == 0) { m[8] = m[0] = dos_cos(b); m[2] = dos_sin(b); m[6] = -m[2]; }
+    else if (b == 0) { m[8] = m[4] = dos_cos(a); m[7] = dos_sin(a); m[5] = -m[7]; }
+    else {   /* mode 0, roll 0: cC = 1, sC = 0 */
+        int64_t cA = dos_cos(a), cB = dos_cos(b), cC = 0x20000000, sA = dos_sin(a), sB = dos_sin(b), sC = 0;
+        m[0] = (int32_t)(dos_r29(cC * cB) + dos_r29(dos_r29(sC * sA) * sB));
+        m[3] = (int32_t)dos_r29(cA * sC);
+        m[6] = (int32_t)(dos_r29(dos_r29(cB * sC) * sA) - dos_r29(cC * sB));
+        m[2] = (int32_t)dos_r29(cA * sB);
+        m[5] = (int32_t)-sA;
+        m[8] = (int32_t)dos_r29(cA * cB);
+        m[1] = (int32_t)dos_r29((int64_t)m[5] * m[6] - (int64_t)m[3] * m[8]);   /* 0x3b078(m, 1) */
+        m[4] = (int32_t)dos_r29((int64_t)m[8] * m[0] - (int64_t)m[6] * m[2]);
+        m[7] = (int32_t)dos_r29((int64_t)m[2] * m[3] - (int64_t)m[0] * m[5]);
+    }
+    for (i = 0; i < 3; i++) { rows[i][0] = m[i]; rows[i][1] = m[3 + i]; rows[i][2] = m[6 + i]; }   /* the transpose */
+}
+static int64_t dos_round16(int64_t v) { return (v >> 16) + ((v >> 15) & 1); }
+
+static int64_t dos_rdiv(int64_t n, int64_t d) { int64_t q = (n < 0 ? -n : n) / (d < 0 ? -d : d); return (n < 0) != (d < 0) ? -q : q; }
+static int dos_pq64(int64_t c, int s, int64_t z) { return (int)((dos_rdiv(c * ((int64_t)1 << s), z) + 2) >> 2); }
+static void dos_qsort(int *id, int *key, int lo, int hi)   /* 0x3cea0, element by element */
+{
+    while (hi > lo) {
+        int i = lo, j = hi + 1, pv = key[lo], t;
+        for (;;) {
+            do i++; while (i <= hi && pv < key[i]);   /* (the original reads on past the end; a later key stops it or i >= j) */
+            do j--; while (pv > key[j]);
+            if (i >= j) break;
+            t = id[i]; id[i] = id[j]; id[j] = t;
+            t = key[i]; key[i] = key[j]; key[j] = t;
+        }
+        t = id[lo]; id[lo] = id[j]; id[j] = t;
+        t = key[lo]; key[lo] = key[j]; key[j] = t;
+        if (lo < j - 1) dos_qsort(id, key, lo, j - 1);
+        lo = j + 1;
+    }
+}
+static void dos_pit_ranks(const glr *r, const int64_t R[3][3], const float eye_gl[3], int w, int h, const int ps[2], int *ranks)
+{
+    int id[GLR_PIT_MAX], key[GLR_PIT_MAX], nl = 0, o, k, c;
+    const int PIT_NEAR = 32;
+    double E[3] = {floor(eye_gl[0] + 0.5), floor(eye_gl[1] + 0.5), floor(-eye_gl[2] + 0.5)};
+    for (o = 0; o < r->pit_n; o++) {
+        int nv = r->pit_nv[o], cam[WTB_MAX_POLY_VERTS][3], beh[WTB_MAX_POLY_VERTS], all_beh = 1, cnt = 0, kmax = INT_MIN, oand = 15;
+        ranks[o] = -1;
+        for (k = 0; k < nv; k++) {
+            const float *W = r->pit_v[o][k];
+            int64_t d[3];
+            for (c = 0; c < 3; c++) d[c] = (int64_t)(floor(W[c] + 0.5) - E[c]);
+            for (c = 0; c < 3; c++) { int64_t t = R[c][0] * d[0] + R[c][1] * d[1] + R[c][2] * d[2]; cam[k][c] = (int)((t >> 27) + ((t >> 26) & 1)); }   /* >> 27 rounded */
+            beh[k] = cam[k][2] < PIT_NEAR;
+            if (!beh[k]) all_beh = 0;
+        }
+        if (all_beh) continue;
+        {   /* 0x3e1de's walk: the first corner if in front; then each corner: a plane corner where the side changes
+             * (0x3de4e(previous, this)), the corner if in front; last, the plane corner back to the first */
+            int px[2 * WTB_MAX_POLY_VERTS], py[2 * WTB_MAX_POLY_VERTS], pz[2 * WTB_MAX_POLY_VERTS], np2 = 0, k2;
+            for (k = 0; k <= nv; k++) {
+                int cur = k % nv, prv = (k + nv - 1) % nv;
+                if (k > 0 && beh[cur] != beh[prv]) {
+                    const int *A = cam[prv], *B = cam[cur];
+                    int64_t ex = A[0], ey = A[1];
+                    if (B[2] <= A[2]) {
+                        int64_t dz = A[2] - B[2], e2 = PIT_NEAR - B[2];
+                        if (dz) { ex = dos_rdiv((int64_t)(A[0] - B[0]) * e2, dz) + B[0]; ey = dos_rdiv((int64_t)(A[1] - B[1]) * e2, dz) + B[1]; }
+                    } else {
+                        int64_t dz = B[2] - A[2], e2 = PIT_NEAR - A[2];
+                        ex = dos_rdiv((int64_t)(B[0] - A[0]) * e2, dz) + A[0]; ey = dos_rdiv((int64_t)(B[1] - A[1]) * e2, dz) + A[1];
+                    }
+                    px[np2] = (int)ex; py[np2] = (int)ey; pz[np2] = PIT_NEAR; np2++;
+                }
+                if (k < nv && !beh[cur]) { px[np2] = cam[cur][0]; py[np2] = cam[cur][1]; pz[np2] = cam[cur][2]; np2++; }
+            }
+            for (k2 = 0; k2 < np2; k2++) {
+                int sx = w / 2 + dos_pq64(px[k2], ps[0], pz[k2]), sy = h / 2 - dos_pq64(py[k2], ps[1], pz[k2]), oc = 0;
+                if (sx > w - 1) oc |= 2;
+                if (sx < 0) oc |= 1;
+                if (sy > h - 1) oc |= 8;
+                if (sy < 0) oc |= 4;
+                oand &= oc;
+                if (pz[k2] > kmax) kmax = pz[k2];
+                cnt++;
+            }
+        }
+        if ((cnt > 2 || nv < 3) && oand == 0) { id[nl] = o; key[nl] = kmax; nl++; }
+    }
+    if (nl > 1) dos_qsort(id, key, 0, nl - 1);
+    for (k = 0; k < nl; k++) ranks[id[k]] = k;
+}
+
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
 {
     float proj[16], view[16], mvp[16], eye[3], L[3], ll, dist;
@@ -1687,6 +2042,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glUniform1i(r->u_mga_lod, 0);
     glUniform1f(r->u_alpha, 1.0f);
     glUniform1i(r->u_blend, 0);
+    glUniform1i(r->u_ati, r->dos ? 0 : v->ati_tex);
     glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
     glUniform1i(r->u_unlit, r->dos);            /* DOS: the sky and ground are flat palette colours, unlit (0x3c000) */
     {   /* the Titanium lights (glr_view.ti_light), in GL coordinates (z negated); off until the ground and the layers */
@@ -1755,6 +2111,9 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 f = env_vertex(f, gx[k], 0, gz[k], 0, 1, 0, gx[k] * gs, -gz[k] * gs);
             }
         }
+        /* the sky and ground fills draw without the alpha mask in the ATi look (ATi 0x1002e690 / 0x1002e7a0 -> 0x1002bc60
+         * alpha argument 0 -> 0x10068830 C3D_ERS_TMAP_TEXOP none): the ATi bit 8 on vertices 0-35 (u_ati only) */
+        for (q = 0; q < 36; q++) env[q * FLOATS_PER_VERTEX + 11] = -8.0f;
         {   /* the PowerVR fog veil (0x1005ED90): a plane at y 55555.55, world-fixed, here +-64e6 around the eye (vertices 36-41) */
             float vx[4] = {cx - 64e6f, cx + 64e6f, cx + 64e6f, cx - 64e6f}, vz[4] = {cz - 64e6f, cz - 64e6f, cz + 64e6f, cz + 64e6f};
             for (c = 0; c < 6; c++) { int k = QUAD[c]; f = env_vertex(f, vx[k], 55555.55f, vz[k], 0, -1, 0, 0, 0); }
@@ -1956,6 +2315,46 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glUniform1f(r->u_dos_fogdist, v->dos_fogdist);
         glUniform1i(r->u_dos_dir, v->point_light ? 0 : v->dos_dir);
         glUniform1i(r->u_dos_smooth, v->dos_sky_smooth);   /* the port's dos_shading=smooth */
+        {   /* the projection's integers (MW2.EXE 0x3ef30): zoom 16.16 (from the x focal; clamped 0x8000..0x100000) x the
+             * half width, normalised to a 16-bit mantissa (top bit 15) and a shift (top bit - 13); y the same from
+             * round16(zoom x 0xffff) (the view's +0x44 - DOSBox 1024 x 768: DAT_0014fe44 = 0xffff, shifts 12 / 11) */
+            uint32_t hw = (uint32_t)w >> 1, zoom = (uint32_t)(proj[0] * 65536.0f + 0.5f), ms[2]; int sh2[2], k3, c3;
+            uint64_t val[2];
+            int64_t rows[3][3], R[3][3];
+            if (zoom > 0x100000u) zoom = 0x100000u;
+            if (zoom < 0x8000u) zoom = 0x8000u;
+            if (hw < 1) hw = 1;
+            val[0] = (uint64_t)zoom * hw;
+            val[1] = (uint64_t)((((uint64_t)zoom * 0xffffu) >> 16) + ((((uint64_t)zoom * 0xffffu) >> 15) & 1)) * hw;
+            for (k3 = 0; k3 < 2; k3++) {
+                int t = 31;
+                uint32_t lo = (uint32_t)val[k3];
+                while (t > 0 && !(lo >> t)) t--;
+                sh2[k3] = 2; ms[k3] = lo;
+                if (t > 15) { sh2[k3] = t - 13; ms[k3] = (uint32_t)(val[k3] >> (t - 15)); }
+            }
+            if (v->free_cam) dos_cam_rows(v->look_yaw, v->look_pitch, rows);
+            else for (c3 = 0; c3 < 3; c3++) {   /* (other cameras: the view's rows, game coordinates) */
+                rows[0][c3] = (int64_t)llrint((c3 == 2 ? -view[8] : view[c3 * 4]) * 536870912.0);
+                rows[1][c3] = (int64_t)llrint((c3 == 2 ? -view[9] : view[c3 * 4 + 1]) * 536870912.0);
+                rows[2][c3] = (int64_t)llrint((c3 == 2 ? view[10] : -view[c3 * 4 + 2]) * 536870912.0);
+            }
+            for (c3 = 0; c3 < 3; c3++) {   /* 0x3ece0: the x and y rows x the mantissas (round16) */
+                R[0][c3] = dos_round16((int64_t)ms[0] * rows[0][c3]);
+                R[1][c3] = dos_round16((int64_t)ms[1] * rows[1][c3]);
+                R[2][c3] = rows[2][c3];
+            }
+            glUniform3f(r->u_dos_eye, eye[0], eye[1], eye[2]);
+            glUniform3f(r->u_dos_rx, (float)((double)R[0][0] / 134217728.0), (float)((double)R[0][1] / 134217728.0), (float)((double)R[0][2] / 134217728.0));
+            glUniform3f(r->u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));
+            glUniform3f(r->u_dos_rz, (float)((double)R[2][0] / 134217728.0), (float)((double)R[2][1] / 134217728.0), (float)((double)R[2][2] / 134217728.0));
+            glUniform2i(r->u_dos_ps, sh2[0], sh2[1]);
+            if (r->pit_n > 0) {   /* the cockpit set's draw order */
+                int rk[GLR_PIT_MAX];
+                dos_pit_ranks(r, (const int64_t (*)[3])R, eye, w, h, sh2, rk);
+                glUniform1iv(r->u_pit_rank, r->pit_n, rk);
+            }
+        }
         glUniform1f(r->u_fog_density, 0);
     }
     glActiveTexture(GL_TEXTURE0);
@@ -2126,7 +2525,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
             glUniformMatrix4fv(r->u_view, 1, GL_FALSE, view);
             glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
-            glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
+            /* (RENDITION: the world, objects and effects fogged per vertex; the ground and dome above per pixel / unfogged) */
+            glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
             glUniform1f(r->u_far, v->ortho_w > 0 ? 0.0f : v->far_cull);
             glBindVertexArray(0);
         }

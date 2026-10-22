@@ -91,7 +91,8 @@ typedef struct {
                                      * shutdown timeout, a cook-off; the DOS self-destruct): its case 4 runs the same
                                      * update, before the next frame's input handler moves the camera (msim on_player_down) */
     float         shut_ticks, over_ticks, damage_carry;
-    int           heat_warning;   /* one tick: "Heat level critical" (65-80 with a net gain; latched, 0x10015f50) */
+    int           heat_warning;   /* one tick: "Heat level critical" (65-80 with a net gain; latched, 0x10015f50; DOS
+                                   * 0x24f90: from 66 up, 66-80 or with a sequence pending) */
     int           warn_latch;     /* engine DAT_1024bfd0: the warning was given; cleared below 65 after 724 ticks */
     float         warn_ticks, heat_mark, last_ticks;   /* ticks since the warning; heat after the last tick; last tick's length */
     int           auto_shutdown;  /* one tick: the sequence shut the mech down (message 0xd "Shutting down") */
@@ -99,6 +100,10 @@ typedef struct {
     int           human;          /* a human pilot: edge-triggered fire, no range check (0x100437a0) */
     uint32_t      fire_held, fire_prev, fire_edge;   /* human: weapons whose trigger is held now / last tick / newly pressed */
     int           shutdown_pending;  /* engine flag 4: sequence started above 80, shuts down 1086 ticks later */
+    int           alarm_latch;       /* engine flag 0x1000: the sequence's alarm was given; cleared at or below 65 with no
+                                      * sequence pending (0x10016268; DOS 0x10d bit 0x10, 0x2530a) */
+    int           seq_alarm;         /* one tick: a sequence started with the latch clear - message 3 "Shutdown sequence
+                                      * initiated" and MECOVHW1 0xe9 (0x10016153..0x1001617c; DOS 0x251c5..0x251f9) */
     int           override;          /* engine flag 8: the pilot overrode the shutdown */
     int           manual_down;       /* SHUTDOWN_MECH shut it down (informational: the heat restart still applies with flag 4) */
     /* Combat Variables (MW2DIF.CFG, engine block DAT_1024ac6c): the player's switches */
@@ -177,6 +182,9 @@ void combat_set_planet(const combat_planet *p);
 extern int combat_damage_live;
 extern int combat_ct_split;
 extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 2 a 30 fps frame (0x27c63); 0: ticks / 4 */
+extern float combat_test_wheat[31];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
+                                        table (DOSBox: MW2.EXE copy, the large pulse laser's heat 3.5 -> 85 at file 0xb1f24) */
+extern int combat_heat_dos;        /* 1: the DOS edition's heat states (MW2.EXE 0x24f90); 0: the 3Dfx DLL's (0x10015f50) */
 extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
 /* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */

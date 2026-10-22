@@ -14,7 +14,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 - **Simulation:** every mission, with AI, mission logic, combat, heat, movement, jump jets, HUD, autopilot and
   path-driven dropships / convoys. Locked missiles home on the target's centre; destroyed buildings stay destroyed.
 - **Look:** chosen in Combat Variables with two settings. RENDERER: ENHANCED (the default: 3Dfx look + PowerVR fog), DOS,
-  3DFX, ATI RAGE, S3 VIRGE, POWERVR or MATROX MYSTIQUE. TEXTURES: ORIGINAL (each renderer's own textures, sky and
+  3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE or RENDITION (the Titanium disc's Rendition Verite renderer; needs the Titanium files). TEXTURES: ORIGINAL (each renderer's own textures, sky and
   ground) or TITANIUM (with the Titanium disc's files, its own models and lighting).
 - **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
   MT-32 emulator or Gravis UltraSound patches.
@@ -22,7 +22,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 202 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 240 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build
@@ -106,7 +106,10 @@ with that renderer's filtering; the renderers that have fog (ENHANCED, POWERVR) 
 and depths, made for its sky), the others (3DFX, ATI RAGE, S3 VIRGE, MATROX MYSTIQUE) none, as in their editions; the
 Titanium effects are always alpha-blended (the Titanium engine's choice for its textures). The missions, models and
 data stay the renderer's own: Titanium renamed most of its mech and building textures, so those keep the renderer's
-textures of the same name - the effects, the grounds and the sky come from the Titanium files.
+textures of the same name - the effects, the grounds and the sky come from the Titanium files. RENDERER RENDITION is the
+Titanium edition's own Rendition Verite renderer: it always uses the Titanium textures (TEXTURES shows TITANIUM,
+greyed), with bilinear filtering without mipmaps, the Titanium fog worked out per vertex, and missile smoke drawn
+without a colour key, as that card drew it.
 
 ### Gravis UltraSound patches (optional)
 Without the MT-32 ROMs the menu music can play through the Gravis UltraSound's General MIDI patch set instead. Get the
@@ -170,7 +173,7 @@ behave as MSCDEX does.
 
 ## Tools
 - `glview 3DFX.PRJ ATI.PRJ ati @ CYAN` plays the mission in a Timber Wolf: W/S throttle, X stop, A/D legs,
-  mouse torso twist/pitch, F or left mouse fire, C chase/cockpit, G free camera (then WASD/Q/E fly).
+  mouse torso twist/pitch, F or left mouse fire, C external camera / cockpit, G free camera (then WASD/Q/E fly).
 - `glview 3DFX.PRJ ATI.PRJ ati [MECH MISSION]` - interactive viewer (SDL2 + OpenGL 3.3). Drag to orbit, wheel to
   zoom, F fullscreen at desktop resolution, Tab mech, N mission, C camo (0-7), I clan insignia, B filtering,
   M anti-aliasing, [ ] fog, Space walk animation; in world view P runs the mission (camera = player). Build with `make gl` (needs SDL2 dev files).
@@ -220,7 +223,7 @@ remembers the folder in the per-user settings file:
     resolution=desktop        # desktop (native fullscreen) | window | 2560x1440 ...
     aa=4                      # anti-aliasing: 0 2 4 8
     render=native             # native | 320x200 | 640x480 | 1024x768 (the original's resolutions, scaled up in blocks)
-    renderer=enhanced         # enhanced | dos | 3dfx | ati | s3 | pvr | mga
+    renderer=enhanced         # enhanced | dos | 3dfx | ati | s3 | pvr | mga | rendition
     textures=original         # original | titanium (the old edition= is still read: edition=titanium becomes
                               # renderer=enhanced textures=titanium)
     # optional overrides: install= cd= music= ultrasnd= models= textures= skygnd= skygnd_fog= textures_kind=ati|3dfx
@@ -230,7 +233,7 @@ Resolution (with anti-aliasing), the display mode and the look are also in the g
 button) -> COMBAT VARIABLES (RESOLUTION, DISPLAY, RENDERER, TEXTURES - RENDERER and TEXTURES head the DETAIL group). Controls follow your install's GAMEKEY.MAP / INPUT.MAP; set them up in the
 global menu -> COCKPIT CONTROLS, as in the original.
 In a mission, Esc opens the original's MAIN MENU and pauses the game: Abort Mission, Graphics (Textured Sky / Ground and
-the port's Renderer - Enhanced, 3Dfx, ATi, S3, PowerVR or Matrox - and Textures - Original or Titanium - switched on
+the port's Renderer - Enhanced, 3Dfx, ATi, S3, PowerVR, Matrox or Rendition - and Textures - Original or Titanium - switched on
 the spot and kept for the next mission), Audio Ctrl (music / effects / voice sliders), Combat Variables (textures, detail, density, explosion chunks)
 and Flee to Windows (leaves the game). Digits pick an item, arrows / Space change a value, 0 or Enter accepts, Esc
 backs out. Ctrl+Q still aborts the mission directly. The DOS renderer keeps its own archive: choose it in the shell
