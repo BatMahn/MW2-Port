@@ -44,6 +44,9 @@ int   dp_read_file(const char *dos_path, unsigned char **data, size_t *len);
  * are skipped). Returns 0 and fills out on success. */
 int   dp_resolve(const char *dos_path, char *out, size_t outlen);
 
+/* dp_resolve() in one folder only (any case of each component); 0 and out filled if found. */
+int   dp_resolve_in(const char *root, const char *dos_path, char *out, size_t outlen);
+
 /* fopen() through dp_resolve(). Writes ("w"/"a") go to the first root, creating
  * the file with the original DOS spelling if it doesn't exist yet. */
 FILE *dp_fopen(const char *dos_path, const char *mode);

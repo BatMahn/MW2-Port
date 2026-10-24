@@ -227,6 +227,11 @@ int dp_resolve(const char *dos_path, char *out, size_t outlen)
     return -1;
 }
 
+int dp_resolve_in(const char *root, const char *dos_path, char *out, size_t outlen)
+{
+    return root && *root ? resolve_in_dir(root, dos_path, out, outlen) : -1;
+}
+
 int dp_read_file(const char *dos_path, unsigned char **data, size_t *len)
 {
     int i;

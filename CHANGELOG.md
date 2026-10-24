@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.13 (2026-10-23)
+
+- **Controls (player report: controls kept resetting)**: GAMEKEY.MAP and INPUT.MAP are now read from your install
+  folder or the disc copy, in any letter case - edited files had been ignored, so the default keys came back every time.
+  Both files are read exactly as the original reads them (the first line for a key wins, every keyboard key name incl.
+  LeftControl and One..Zero, up to 8 keys per control). Cockpit Controls remembers your current configuration
+  (GIDDI/CONFIG00.CPC) and ACCEPT no longer rewrites INPUT.MAP unless you changed devices. The leftover debug keys G
+  (free camera) and [ ] (fog) no longer act in missions. See "Customising controls" in the README for a WASD + mouse
+  setup.
+
 ## v0.4.12 (2026-10-22)
 
 - **3D looks (3DFX, S3, MATROX, ENHANCED)**: fire / smoke cards and decals are textured without perspective correction

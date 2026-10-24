@@ -1,16 +1,19 @@
 /*
  * inputmap.h - the original's two input files, as MECH2 reads them:
  *
- *   GAMEKEY.MAP  "ACTION   key" lines (# comments): discrete commands; a key is a name ("t", "F7", "Esc", "BSP",
- *                "PAUSE", "`", "\", "'", ";", "/") with optional CTRL+ / ALT+ / SHIFT+ prefixes (any case). An
- *                action may be listed more than once (ALL_PT_MENU: b and CTRL+F1). The modifiers must match exactly
- *                (t = NEXT_TARGET, CTRL+t = RESET_TARGETTING).
+ *   GAMEKEY.MAP  "COMMAND key" lines (MW2.EXE 0x484e0; '#' starts a comment anywhere): discrete commands. A key is
+ *                one character ("t", "`", "\", ";", "/" ...) or a name - F1-F12, Esc, Tab, Enter, BSP, Insert, Pause,
+ *                Plus - joined by '+' with CTRL / ALT / SHIFT in any order and case. One command per key: the first
+ *                line naming a key wins, later ones are ignored; a command may have several keys (ALL_PT_MENU: b and
+ *                CTRL+F1) and is unbound by deleting its lines. Modifiers must match exactly (t = NEXT_TARGET, CTRL+t =
+ *                RESET_TARGETTING). An unknown command or a broken line ends the reading (the lines before it stay).
  *   INPUT.MAP    "control {" blocks of conditions "+ device key" (held) / "- device key" (not held), all of which
- *                must hold; a control listed in several blocks is on when any block is (the Cockpit Controls screen
- *                writes this file from the device templates KEYBOARD.MAP, JOYSTICK.MAP, ...). Key names are the DOS
- *                keyboard's: the plain cursor-pad names are the keypad (LeftArrow = keypad 4, Home = keypad 7,
- *                Insert = keypad 0, Delete = keypad .), "Grey" ones the separate cursor block and the keypad's grey
- *                operators (GreySlash, GreyStar, GreyPlus, GreyMinus).
+ *                must hold (up to 8); a control listed in several blocks is on when any block is (the Cockpit Controls
+ *                screen writes this file; KEYBOARD.MAP, JOYSTICK.MAP, ... are templates in the same syntax). Key names
+ *                are KEYBOARD.DLL's (IM_KEYNAMES): the plain cursor-pad names are the keypad (LeftArrow = keypad 4,
+ *                Home = keypad 7, Insert = keypad 0, Delete = keypad .), "Grey" ones the separate cursor block and the
+ *                keypad's grey operators (GreySlash, GreyStar, GreyPlus, GreyMinus); letters, One..Zero, LeftShift ...
+ * Both: any case, CR LF or LF line ends, tabs or spaces; a UTF-8 byte order mark is skipped (port).
  * Stick and mouse lines are evaluated too (im_held: buttons and hat directions; im_axis: the axes - see g_im_dev).
  */
 #ifndef MW2_INPUTMAP_H
@@ -38,7 +41,8 @@ typedef struct { int sign, device, code; } im_cond;   /* device 0 keyboard (code
  * the offset from the centre, -512..511; one SDL relative-motion unit is taken as one mickey (port) */
 typedef struct { SDL_Joystick *joy; Uint32 mouse_buttons; int mouse_x, mouse_y; } im_devstate;
 static im_devstate g_im_dev;
-typedef struct { char name[40]; int ncond; im_cond c[6]; } im_rule;
+#define IM_MAX_COND 8   /* conditions in a block: the sim takes 8 (0x47ed0, "chord too big" past them) */
+typedef struct { char name[40]; int ncond; im_cond c[IM_MAX_COND]; } im_rule;
 typedef struct { char action[40]; SDL_Keycode key; int ctrl, alt, shift; } im_bind;
 typedef struct {
     im_rule rules[IM_MAX_RULES];
@@ -48,45 +52,130 @@ typedef struct {
     int     have_gamekey, have_input;
 } inputmap;
 
+/* INPUT.MAP keyboard key names: GIDDI\KEYBOARD.DLL's list, in its order - entry i is DOS scan code i + 1 (the sim looks a
+ * name up in the driver's list, any case, MW2.EXE 0x47950; a name starting with a digit is the entry number itself,
+ * atoi). Plain cursor names are the keypad, "Grey" ones the cursor block and the keypad's operators. 0 = no PC key
+ * (SDL has none); -1 / -2 / -3: either Control / Shift / Alt */
+static const struct { const char *name; int sc; } IM_KEYNAMES[] = {
+    {"Esc", SDL_SCANCODE_ESCAPE}, {"One", SDL_SCANCODE_1}, {"Two", SDL_SCANCODE_2}, {"Three", SDL_SCANCODE_3},
+    {"Four", SDL_SCANCODE_4}, {"Five", SDL_SCANCODE_5}, {"Six", SDL_SCANCODE_6}, {"Seven", SDL_SCANCODE_7},
+    {"Eight", SDL_SCANCODE_8}, {"Nine", SDL_SCANCODE_9}, {"Zero", SDL_SCANCODE_0}, {"Minus", SDL_SCANCODE_MINUS},
+    {"Equal", SDL_SCANCODE_EQUALS}, {"Backspace", SDL_SCANCODE_BACKSPACE}, {"Tab", SDL_SCANCODE_TAB}, {"Q", SDL_SCANCODE_Q},
+    {"W", SDL_SCANCODE_W}, {"E", SDL_SCANCODE_E}, {"R", SDL_SCANCODE_R}, {"T", SDL_SCANCODE_T}, {"Y", SDL_SCANCODE_Y},
+    {"U", SDL_SCANCODE_U}, {"I", SDL_SCANCODE_I}, {"O", SDL_SCANCODE_O}, {"P", SDL_SCANCODE_P},
+    {"LeftBracket", SDL_SCANCODE_LEFTBRACKET}, {"RightBracket", SDL_SCANCODE_RIGHTBRACKET}, {"Enter", SDL_SCANCODE_RETURN},
+    {"LeftControl", SDL_SCANCODE_LCTRL}, {"A", SDL_SCANCODE_A}, {"S", SDL_SCANCODE_S}, {"D", SDL_SCANCODE_D},
+    {"F", SDL_SCANCODE_F}, {"G", SDL_SCANCODE_G}, {"H", SDL_SCANCODE_H}, {"J", SDL_SCANCODE_J}, {"K", SDL_SCANCODE_K},
+    {"L", SDL_SCANCODE_L}, {"Semicolon", SDL_SCANCODE_SEMICOLON}, {"Quote", SDL_SCANCODE_APOSTROPHE},
+    {"BackQuote", SDL_SCANCODE_GRAVE}, {"LeftShift", SDL_SCANCODE_LSHIFT}, {"BackSlash", SDL_SCANCODE_BACKSLASH},
+    {"Z", SDL_SCANCODE_Z}, {"X", SDL_SCANCODE_X}, {"C", SDL_SCANCODE_C}, {"V", SDL_SCANCODE_V}, {"B", SDL_SCANCODE_B},
+    {"N", SDL_SCANCODE_N}, {"M", SDL_SCANCODE_M}, {"Comma", SDL_SCANCODE_COMMA}, {"Period", SDL_SCANCODE_PERIOD},
+    {"Slash", SDL_SCANCODE_SLASH}, {"RightShift", SDL_SCANCODE_RSHIFT}, {"GreyStar", SDL_SCANCODE_KP_MULTIPLY},
+    {"LeftAlt", SDL_SCANCODE_LALT}, {"Space", SDL_SCANCODE_SPACE}, {"CAPSLock", SDL_SCANCODE_CAPSLOCK},
+    {"F1", SDL_SCANCODE_F1}, {"F2", SDL_SCANCODE_F2}, {"F3", SDL_SCANCODE_F3}, {"F4", SDL_SCANCODE_F4}, {"F5", SDL_SCANCODE_F5},
+    {"F6", SDL_SCANCODE_F6}, {"F7", SDL_SCANCODE_F7}, {"F8", SDL_SCANCODE_F8}, {"F9", SDL_SCANCODE_F9}, {"F10", SDL_SCANCODE_F10},
+    {"NUMLock", SDL_SCANCODE_NUMLOCKCLEAR}, {"ScrollLock", SDL_SCANCODE_SCROLLLOCK}, {"Home", SDL_SCANCODE_KP_7},
+    {"UpArrow", SDL_SCANCODE_KP_8}, {"PageUp", SDL_SCANCODE_KP_9}, {"GreyMinus", SDL_SCANCODE_KP_MINUS},
+    {"LeftArrow", SDL_SCANCODE_KP_4}, {"Keypad5", SDL_SCANCODE_KP_5}, {"RightArrow", SDL_SCANCODE_KP_6},
+    {"GreyPlus", SDL_SCANCODE_KP_PLUS}, {"End", SDL_SCANCODE_KP_1}, {"DownArrow", SDL_SCANCODE_KP_2},
+    {"PageDown", SDL_SCANCODE_KP_3}, {"Insert", SDL_SCANCODE_KP_0}, {"Delete", SDL_SCANCODE_KP_PERIOD},
+    {"SYSREQ", SDL_SCANCODE_SYSREQ}, {"KeypadEnter", SDL_SCANCODE_KP_ENTER}, {"LeftBackSlash", SDL_SCANCODE_NONUSBACKSLASH},
+    {"F11", SDL_SCANCODE_F11}, {"F12", SDL_SCANCODE_F12}, {"GreySlash", SDL_SCANCODE_KP_DIVIDE}, {"PA1", 0},
+    {"F13", SDL_SCANCODE_F13}, {"F14", SDL_SCANCODE_F14}, {"F15", SDL_SCANCODE_F15}, {"GreyHome", SDL_SCANCODE_HOME},
+    {"GreyUpArrow", SDL_SCANCODE_UP}, {"GreyPageUp", SDL_SCANCODE_PAGEUP}, {"GreyLeftArrow", SDL_SCANCODE_LEFT},
+    {"GreyRightArrow", SDL_SCANCODE_RIGHT}, {"GreyEnd", SDL_SCANCODE_END}, {"GreyDownArrow", SDL_SCANCODE_DOWN},
+    {"GreyPageDown", SDL_SCANCODE_PAGEDOWN}, {"GreyInsert", SDL_SCANCODE_INSERT}, {"GreyDelete", SDL_SCANCODE_DELETE},
+    {"F21", SDL_SCANCODE_F21}, {"F22", SDL_SCANCODE_F22}, {"F23", SDL_SCANCODE_F23}, {"F24", SDL_SCANCODE_F24},
+    {"UNNAMED_1", 0}, {"EraseEOF", 0}, {"CopyPlay", 0}, {"RightCtrl", SDL_SCANCODE_RCTRL}, {"RightAlt", SDL_SCANCODE_RALT},
+    {"CRSel", SDL_SCANCODE_CRSEL}, {"EXSel", SDL_SCANCODE_EXSEL}, {"UNAMED_2", 0}, {"Clear", SDL_SCANCODE_CLEAR},
+    {"Shift", -2}, {"Control", -1}, {"Alt", -3},
+};
+
+/* an INPUT.MAP keyboard key name -> SDL scancode (or -1 / -2 / -3 for either Control / Shift / Alt); 0 none */
 static int im_scancode(const char *n)
 {
-    static const struct { const char *name; int sc; } T[] = {
-        {"Equal", SDL_SCANCODE_EQUALS}, {"Minus", SDL_SCANCODE_MINUS}, {"Comma", SDL_SCANCODE_COMMA}, {"Period", SDL_SCANCODE_PERIOD},
-        {"Space", SDL_SCANCODE_SPACE}, {"Enter", SDL_SCANCODE_RETURN}, {"Tab", SDL_SCANCODE_TAB}, {"Escape", SDL_SCANCODE_ESCAPE},
-        {"Backspace", SDL_SCANCODE_BACKSPACE}, {"Slash", SDL_SCANCODE_SLASH}, {"Semicolon", SDL_SCANCODE_SEMICOLON},
-        {"Quote", SDL_SCANCODE_APOSTROPHE}, {"BackSlash", SDL_SCANCODE_BACKSLASH}, {"Tilde", SDL_SCANCODE_GRAVE},
-        {"LeftBracket", SDL_SCANCODE_LEFTBRACKET}, {"RightBracket", SDL_SCANCODE_RIGHTBRACKET},
-        /* the keypad, by its cursor names (numlock off) */
-        {"LeftArrow", SDL_SCANCODE_KP_4}, {"RightArrow", SDL_SCANCODE_KP_6}, {"UpArrow", SDL_SCANCODE_KP_8}, {"DownArrow", SDL_SCANCODE_KP_2},
-        {"Home", SDL_SCANCODE_KP_7}, {"End", SDL_SCANCODE_KP_1}, {"PageUp", SDL_SCANCODE_KP_9}, {"PageDown", SDL_SCANCODE_KP_3},
-        {"Insert", SDL_SCANCODE_KP_0}, {"Delete", SDL_SCANCODE_KP_PERIOD}, {"Keypad5", SDL_SCANCODE_KP_5},
-        {"KeypadEnter", SDL_SCANCODE_KP_ENTER}, {"NUMLock", SDL_SCANCODE_NUMLOCKCLEAR},
-        {"GreySlash", SDL_SCANCODE_KP_DIVIDE}, {"GreyStar", SDL_SCANCODE_KP_MULTIPLY}, {"GreyPlus", SDL_SCANCODE_KP_PLUS},
-        {"GreyMinus", SDL_SCANCODE_KP_MINUS},
-        /* the grey cursor block */
-        {"GreyLeftArrow", SDL_SCANCODE_LEFT}, {"GreyRightArrow", SDL_SCANCODE_RIGHT}, {"GreyUpArrow", SDL_SCANCODE_UP},
-        {"GreyDownArrow", SDL_SCANCODE_DOWN}, {"GreyHome", SDL_SCANCODE_HOME}, {"GreyEnd", SDL_SCANCODE_END},
-        {"GreyPageUp", SDL_SCANCODE_PAGEUP}, {"GreyPageDown", SDL_SCANCODE_PAGEDOWN}, {"GreyInsert", SDL_SCANCODE_INSERT},
-        {"GreyDelete", SDL_SCANCODE_DELETE},
-        {"Control", -1}, {"Shift", -2}, {"Alt", -3},
-    };
-    size_t i;
-    for (i = 0; i < sizeof T / sizeof T[0]; i++) if (strcasecmp(T[i].name, n) == 0) return T[i].sc;
-    if (strlen(n) == 1 && isalpha((unsigned char)n[0])) return SDL_SCANCODE_A + (tolower((unsigned char)n[0]) - 'a');
-    if (strlen(n) == 1 && n[0] >= '1' && n[0] <= '9') return SDL_SCANCODE_1 + (n[0] - '1');
-    if (strcmp(n, "0") == 0) return SDL_SCANCODE_0;
-    if ((n[0] == 'F' || n[0] == 'f') && atoi(n + 1) >= 1 && atoi(n + 1) <= 12) return SDL_SCANCODE_F1 + atoi(n + 1) - 1;
-    return SDL_SCANCODE_UNKNOWN;
+    static const struct { const char *name; int sc; } ALIAS[] = {   /* port: names the driver lacks, kept from earlier */
+        {"Escape", SDL_SCANCODE_ESCAPE}, {"Tilde", SDL_SCANCODE_GRAVE}};
+    size_t i, nk = sizeof IM_KEYNAMES / sizeof IM_KEYNAMES[0];
+    if (isdigit((unsigned char)n[0])) {   /* 0x47950: ctype digit -> the entry number (atoi) */
+        int e = atoi(n);
+        return e >= 0 && (size_t)e < nk ? IM_KEYNAMES[e].sc : 0;
+    }
+    for (i = 0; i < nk; i++) if (strcasecmp(IM_KEYNAMES[i].name, n) == 0) return IM_KEYNAMES[i].sc;
+    for (i = 0; i < sizeof ALIAS / sizeof ALIAS[0]; i++) if (strcasecmp(ALIAS[i].name, n) == 0) return ALIAS[i].sc;
+    return 0;   /* unknown: the sim warns and takes entry 0 (Esc); the port never holds it */
 }
 
-static SDL_Keycode im_keycode(const char *n)
+/* GAMEKEY.MAP's commands, the sim's table 0x9dca4 (153 names, compared in any case); a line naming anything else ends
+ * the file's reading */
+static const char *const IM_GAMEKEY_ACTIONS[] = {
+    "RESET_INPUTS", "MFD_CYCLE", "TOGGLE_HTAL", "TOGGLE_REAR_VIEW", "TOGGLE_DOWN_VIEW", "TOGGLE_WEAPON_DISPLAY",
+    "TOGGLE_DAMAGE_DISPLAY", "TOGGLE_TARGET_DISPLAY", "COCKPIT_VIEW", "FREEEYE_VIEW", "TRACK_VIEW", "TRACK_NEXT", "TRACK_PREV",
+    "ORDINANCE_VIEW", "JUMP_DEBUGGER", "REQUEST_ORDINANCE", "FEET_TO_TORSO", "INSPECT_TARGET", "TOGGLE_HUD", "JETTISON_AMMO",
+    "COCKPIT_ZOOM_IN", "COCKPIT_ZOOM_OUT", "COCKPIT_RESET_ZOOM", "DECREASE_THROTTLE", "INCREASE_THROTTLE", "THROTTLE_STOP",
+    "THROTTLE_2", "THROTTLE_3", "THROTTLE_4", "THROTTLE_5", "THROTTLE_6", "THROTTLE_7", "THROTTLE_8", "THROTTLE_9",
+    "THROTTLE_FULL", "NEXT_GAMETHING", "PREV_GAMETHING", "RESET_GAMETHING", "RESET_TARGETTING", "NEXT_NAVPOINT",
+    "PREV_NAVPOINT", "RESET_NAVPOINT", "NEXT_GAMEPIECE", "PREV_GAMEPIECE", "RESET_GAMEPIECE", "NEXT_RADAR_MODE",
+    "RADAR_ZOOM_IN", "RADAR_ZOOM_OUT", "RADAR_RESET_ZOOM", "RADAR_MAP_TOGGLE", "MAIN_MENU", "USER_MENU", "ALL_PT_MENU",
+    "PT_2_MENU", "PT_3_MENU", "HELP_MENU", "EJECT", "TOGGLE_AUTOEJECT", "STARTUP_MECH", "SHUTDOWN_MECH", "REVERSE_DIRECTION",
+    "OVERRIDE_SHUTDOWN", "INFRARED", "ENHANCED_VISION", "DISPLAY_OBJECTIVES", "TOGGLE_AUTOPILOT", "TOGGLE_GROUP_FIRE",
+    "NEXT_TARGET", "PREV_TARGET", "RESET_TARGET", "TARGET_NEAREST_ENEMY", "TARGET_FRIENDLY", "TARGET_AT_RETICLE",
+    "TARGET_LAST_SHOT", "NEXT_OBJECTIVE", "PUNCH_IN_AUTO_HDG", "TOGGLE_MASC", "SELF_DESTRUCT", "PAUSE_GAME", "EXIT_SIM",
+    "ABOUT_BANNER", "DUMP_GIF", "DEBUG_CRITICAL_HITS_1", "DEBUG_CRITICAL_HITS_2", "DEBUG_CRITICAL_HITS_3",
+    "DEBUG_CRITICAL_HITS_4", "DEBUG_CRITICAL_HITS_5", "DEBUG_CRITICAL_HITS_6", "DEBUG_CRITICAL_HITS_7",
+    "DEBUG_CRITICAL_HITS_8", "DEBUG_CRITICAL_HITS_9", "DEBUG_CRITICAL_HITS_0", "SELECT_HEAD", "SELECT_RIGHT_TORSO",
+    "SELECT_CENTER_TORSO", "SELECT_LEFT_TORSO", "SELECT_RIGHT_ARM", "SELECT_LEFT_ARM", "SELECT_RIGHT_LEG", "SELECT_LEFT_LEG",
+    "AI_0_MONO_OBJECTIVES", "AI_1_MONO_OBJECTIVES", "AI_2_MONO_OBJECTIVES", "AI_3_MONO_OBJECTIVES", "AI_4_MONO_OBJECTIVES",
+    "AI_5_MONO_OBJECTIVES", "AI_6_MONO_OBJECTIVES", "AI_7_MONO_OBJECTIVES", "AI_8_MONO_OBJECTIVES", "AI_9_MONO_OBJECTIVES",
+    "OBJECTIVES_OFF", "NEXT_MONO_OBJECTIVE", "PREV_MONO_OBJECTIVE", "FAIL_MONO_OBJECTIVE", "SUCCEED_MONO_OBJECTIVE",
+    "TOGGLE_GP_TEXT_MAPS", "TOGGLE_GT_TEXT_MAPS", "TOGGLE_GS_TEXT_MAPS", "TOGGLE_TERRAIN_TEXT_MAPS", "GO_TURBO_CONTROL",
+    "TOGGLE_MEM_INFO", "TOGGLE_CACHE_INFO", "COLLISION_WIREFRAME", "TOGGLE_FRAMERATE_MAIN", "TOGGLE_SCENE_INFO_MAIN",
+    "TOGGLE_EYE_POSITION_MAIN", "TOGGLE_VULNERABILITY", "TOGGLE_AMMO_LIMIT", "TOGGLE_SPLASH_DAMAGE",
+    "TOGGLE_COLLISION_DAMAGE", "TOGGLE_HEAT_TRACKING", "TOGGLE_LOD_QUALITY", "DUMP_CACHE_ONCE", "DUMP_CACHE_REPEAT",
+    "TOGGLE_RADAR_DAMAGE", "TOGGLE_FRAMERATE", "CRACK_MODE", "TOGGLE_EYE_POSITION", "TOGGLE_SCENE_INFO", "TOGGLE_WIREFRAME",
+    "TOGGLE_PALETTE", "ADD_WEAPON_TO_GROUP_1", "ADD_WEAPON_TO_GROUP_2", "ADD_WEAPON_TO_GROUP_3", "NEXT_WEAPON_GROUP",
+    "FIRE_WEAPON_GROUP", "CREATE_NAVPOINT_TEST", "DELETE_NAVPOINT_TEST", "TOGGLE_SAVE_FRAMES", "PLAY_CURRENT_MIDI",
+    "PLAY_NEXT_MIDI", "HACK_JETS", "KILL_TARGETTED_MECH"};
+
+/* INPUT.MAP's controls, the sim's table 0x9d1c4 (87 names, any case); a block naming anything else ends the reading */
+static const char *const IM_INPUT_CONTROLS[] = {
+    "torso_tilt", "torso_tilt_plus", "torso_tilt_minus", "torso_tilt_reset", "torso_pan", "torso_pan_plus", "torso_pan_minus",
+    "torso_pan_set", "torso_pan_reset", "throttle", "legs_pan_delta", "jumpjet_enabled", "jumpjet_fire_left",
+    "jumpjet_fire_right", "jumpjet_fire_forward", "jumpjet_fire_backward", "throttle_plus", "throttle_minus", "throttle_set",
+    "weapon_fire", "weapon_cycle", "weapon_fire_group", "weapon_fire_group_1", "weapon_fire_group_2", "weapon_fire_group_3",
+    "weapon_cycle_group", "toggle_group_fire", "legs_pan_minus", "legs_pan_plus", "advance_nav", "previous_nav", "reset_nav",
+    "advance_target", "previous_target", "reset_target", "target_reticle", "target_friendly", "nearest_enemy",
+    "target_last_shot", "inspect_target", "advance_gamepiece", "previous_gamepiece", "reset_gamepiece", "advance_gamething",
+    "previous_gamething", "reset_gamething", "self_destruct", "autopilot", "pilot_tilt", "pilot_tilt_plus", "pilot_tilt_minus",
+    "pilot_tilt_reset", "pilot_pan", "pilot_pan_plus", "pilot_pan_minus", "pilot_pan_reset", "glance_left", "glance_right",
+    "glance_up", "glance_down", "eyepoint_tilt", "eyepoint_tilt_plus", "eyepoint_tilt_minus", "eyepoint_tilt_reset",
+    "eyepoint_pan_delta", "eyepoint_pan_plus", "eyepoint_pan_minus", "eyepoint_pan_reset", "eyepoint_slide_delta",
+    "eyepoint_slide_plus", "eyepoint_slide_minus", "track_distance_delta", "track_distance_plus", "track_distance_minus",
+    "track_height_delta", "track_height_plus", "track_height_minus", "zoom_factor", "zoom_factor_plus", "zoom_factor_minus",
+    "zoom_factor_reset", "menu_item", "menu_item_reset", "menu_value", "menu_value_reset", "menu_enter", "menu_abort"};
+
+static int im_find(const char *const *list, size_t n, const char *name)
 {
-    if (strcasecmp(n, "Esc") == 0) return SDLK_ESCAPE;
-    if (strcasecmp(n, "BSP") == 0) return SDLK_BACKSPACE;
-    if (strcasecmp(n, "PAUSE") == 0) return SDLK_PAUSE;
-    if ((n[0] == 'F' || n[0] == 'f') && n[1] && atoi(n + 1) >= 1 && atoi(n + 1) <= 12) return SDLK_F1 + atoi(n + 1) - 1;
-    if (strlen(n) == 1) return (SDL_Keycode)tolower((unsigned char)n[0]);
-    return SDLK_UNKNOWN;
+    size_t i;
+    for (i = 0; i < n; i++) if (strcasecmp(list[i], name) == 0) return (int)i;
+    return -1;
+}
+
+/* a GAMEKEY.MAP key token (MW2.EXE 0x484e0: the names table 0x9e7a4, any case; any other token is its first character,
+ * lower case 0x75dee - so "Space" reads as s) -> SDL keycode; *mods |= 1 Ctrl, 2 Alt, 4 Shift */
+static SDL_Keycode im_keytoken(const char *t, int *mods)
+{
+    static const struct { const char *name; SDL_Keycode k; } N[] = {
+        {"TAB", SDLK_TAB}, {"INSERT", SDLK_INSERT}, {"ESC", SDLK_ESCAPE}, {"BSP", SDLK_BACKSPACE}, {"ENTER", SDLK_RETURN},
+        {"PAUSE", SDLK_PAUSE}, {"PLUS", '+'}};
+    size_t i;
+    if (strcasecmp(t, "CTRL") == 0) { *mods |= 1; return SDLK_UNKNOWN; }
+    if (strcasecmp(t, "ALT") == 0) { *mods |= 2; return SDLK_UNKNOWN; }
+    if (strcasecmp(t, "SHIFT") == 0) { *mods |= 4; return SDLK_UNKNOWN; }
+    if ((t[0] == 'F' || t[0] == 'f') && t[1] && strspn(t + 1, "0123456789") == strlen(t + 1) && atoi(t + 1) >= 1 && atoi(t + 1) <= 12)
+        return SDLK_F1 + atoi(t + 1) - 1;
+    for (i = 0; i < sizeof N / sizeof N[0]; i++) if (strcasecmp(N[i].name, t) == 0) return N[i].k;
+    return (SDL_Keycode)tolower((unsigned char)t[0]);
 }
 
 /* the US layout's scancode for a GAMEKEY.MAP key (the original reads scan codes) */
@@ -97,6 +186,7 @@ static SDL_Scancode im_key_scancode(SDL_Keycode k)
         {'/', SDL_SCANCODE_SLASH}, {',', SDL_SCANCODE_COMMA}, {'.', SDL_SCANCODE_PERIOD}, {'-', SDL_SCANCODE_MINUS},
         {'=', SDL_SCANCODE_EQUALS}, {'[', SDL_SCANCODE_LEFTBRACKET}, {']', SDL_SCANCODE_RIGHTBRACKET}, {' ', SDL_SCANCODE_SPACE},
         {SDLK_ESCAPE, SDL_SCANCODE_ESCAPE}, {SDLK_BACKSPACE, SDL_SCANCODE_BACKSPACE}, {SDLK_PAUSE, SDL_SCANCODE_PAUSE},
+        {SDLK_TAB, SDL_SCANCODE_TAB}, {SDLK_INSERT, SDL_SCANCODE_INSERT}, {SDLK_RETURN, SDL_SCANCODE_RETURN}, {'+', SDL_SCANCODE_KP_PLUS},
     };
     size_t i;
     if (k >= 'a' && k <= 'z') return (SDL_Scancode)(SDL_SCANCODE_A + (k - 'a'));
@@ -107,48 +197,78 @@ static SDL_Scancode im_key_scancode(SDL_Keycode k)
     return SDL_SCANCODE_UNKNOWN;
 }
 
+/* a line as the sim's reader takes it (0x47a00): cut at the first '#' or newline; *lineno counts every line; a leading
+ * UTF-8 byte order mark (a modern editor's) is dropped (port); returns 0 for a line with nothing but blanks */
+static int im_line(char *line, int *lineno)
+{
+    char *p;
+    if (++*lineno == 1 && (unsigned char)line[0] == 0xef && (unsigned char)line[1] == 0xbb && (unsigned char)line[2] == 0xbf)
+        memmove(line, line + 3, strlen(line + 3) + 1);
+    if ((p = strpbrk(line, "#\n"))) *p = 0;
+    for (p = line; *p; p++) if (!isspace((unsigned char)*p)) return 1;
+    return 0;
+}
+
+/* GAMEKEY.MAP (MW2.EXE 0x484e0): each line "COMMAND key" ("%s %s"); the key is tokens joined by '+' in any order (CTRL,
+ * ALT, SHIFT and one key). One command per key: a key already taken keeps its first line ("remapping key" warning, the
+ * line ignored); a command may have several keys. Reading stops - the lines before it kept - at a line without two
+ * words, a key with no token, or an unknown command */
 static void im_parse_gamekey(inputmap *m, FILE *f)
 {
     char line[256];
-    while (fgets(line, sizeof line, f) && m->nbinds < IM_MAX_BINDS) {
-        char act[64], key[64], *p;
-        im_bind *b;
-        if (line[0] == '#' || sscanf(line, "%63s %63s", act, key) != 2) continue;
-        b = &m->binds[m->nbinds];
-        memset(b, 0, sizeof *b);
-        snprintf(b->action, sizeof b->action, "%.39s", act);
-        p = key;
-        for (;;) {
-            if (strncasecmp(p, "CTRL+", 5) == 0) { b->ctrl = 1; p += 5; }
-            else if (strncasecmp(p, "ALT+", 4) == 0) { b->alt = 1; p += 4; }
-            else if (strncasecmp(p, "SHIFT+", 6) == 0) { b->shift = 1; p += 6; }
-            else break;
-        }
-        b->key = im_keycode(p);
-        if (b->key != SDLK_UNKNOWN) m->nbinds++;
+    int lineno = 0;
+    while (fgets(line, sizeof line, f)) {
+        char act[64], key[64], *t;
+        im_bind nb;
+        int i, ai, mods = 0, dup = 0;
+        if (!im_line(line, &lineno)) continue;
+        if (sscanf(line, "%63s %63s", act, key) != 2) { fprintf(stderr, "GAMEKEY.MAP line %d: read error - the rest is ignored\n", lineno); break; }
+        memset(&nb, 0, sizeof nb);
+        nb.key = SDLK_UNKNOWN;
+        for (t = strtok(key, "+"), i = 0; t; t = strtok(NULL, "+"), i++) { SDL_Keycode k = im_keytoken(t, &mods); if (k != SDLK_UNKNOWN) nb.key = k; }
+        if (!i) { fprintf(stderr, "GAMEKEY.MAP line %d: bad sequence - the rest is ignored\n", lineno); break; }
+        nb.ctrl = mods & 1; nb.alt = (mods >> 1) & 1; nb.shift = (mods >> 2) & 1;
+        for (i = 0; i < m->nbinds; i++)
+            if (m->binds[i].key == nb.key && m->binds[i].ctrl == nb.ctrl && m->binds[i].alt == nb.alt && m->binds[i].shift == nb.shift) dup = 1;
+        if (dup) { fprintf(stderr, "GAMEKEY.MAP line %d: key '%s' already taken - line ignored\n", lineno, act); continue; }
+        ai = im_find(IM_GAMEKEY_ACTIONS, sizeof IM_GAMEKEY_ACTIONS / sizeof IM_GAMEKEY_ACTIONS[0], act);
+        if (ai < 0) { fprintf(stderr, "GAMEKEY.MAP line %d: no gamekey %s - the rest is ignored\n", lineno, act); break; }
+        snprintf(nb.action, sizeof nb.action, "%s", IM_GAMEKEY_ACTIONS[ai]);
+        if (nb.key != SDLK_UNKNOWN && m->nbinds < IM_MAX_BINDS) m->binds[m->nbinds++] = nb;
     }
     m->have_gamekey = 1;
 }
 
+/* INPUT.MAP (MW2.EXE 0x48090): "control {" (the name in any case; an unknown one ends the reading), then up to 8
+ * conditions "+|- device key" (more: "chord too big", the reading ends), "}" closes the block */
 static void im_parse_input(inputmap *m, FILE *f)
 {
     char line[256];
     im_rule *r = NULL;
+    int lineno = 0;
     while (fgets(line, sizeof line, f)) {
         char *p = line, a[64], b[64], c[64];
+        if (!im_line(line, &lineno)) continue;
         while (*p == ' ' || *p == '\t') p++;
-        if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
         if (*p == '}') { if (r) { m->nrules++; r = NULL; } continue; }
-        if (!r && sscanf(p, "%63s %63s", a, b) >= 1 && strchr(p, '{') && m->nrules < IM_MAX_RULES) {
+        if (!r && sscanf(p, "%63s %63s", a, b) >= 1 && strchr(p, '{')) {
             char *br = strchr(a, '{');
+            int q;
             if (br) *br = 0;
+            if (im_find(IM_INPUT_CONTROLS, sizeof IM_INPUT_CONTROLS / sizeof IM_INPUT_CONTROLS[0], a) < 0) {
+                fprintf(stderr, "INPUT.MAP line %d: unknown control %s - the rest is ignored\n", lineno, a);
+                break;
+            }
+            if (m->nrules >= IM_MAX_RULES) break;
             r = &m->rules[m->nrules];
             memset(r, 0, sizeof *r);
-            snprintf(r->name, sizeof r->name, "%.39s", a);
+            for (q = 0; a[q] && q < 39; q++) r->name[q] = (char)tolower((unsigned char)a[q]);
             continue;
         }
-        if (r && sscanf(p, "%63s %63s %63s", a, b, c) == 3 && r->ncond < 6) {
-            im_cond *k = &r->c[r->ncond++];
+        if (r && sscanf(p, "%63s %63s %63s", a, b, c) == 3) {
+            im_cond *k;
+            if (r->ncond >= IM_MAX_COND) { fprintf(stderr, "INPUT.MAP line %d: chord too big - the rest is ignored\n", lineno); r = NULL; break; }
+            k = &r->c[r->ncond++];
             k->sign = a[0] == '-' ? -1 : 1;
             k->device = strcasecmp(b, "keyboard") == 0 ? 0 : strcasecmp(b, "mouse") == 0 ? 2 :
                         (strcasecmp(b, "joystick") == 0 || strcasecmp(b, "fltstck") == 0 || strcasecmp(b, "msjstick") == 0 ||
@@ -174,7 +294,8 @@ static void im_parse_input(inputmap *m, FILE *f)
     m->have_input = 1;
 }
 
-/* both files from the game directory (dir/NAME, any case of the name tried by the caller); returns 0 if both load */
+/* both files (full paths, already resolved by the caller - any case of the names, the install folder before the disc's);
+ * returns 0 if both load */
 static int im_load(inputmap *m, const char *gamekey, const char *input)
 {
     FILE *f;
@@ -184,7 +305,6 @@ static int im_load(inputmap *m, const char *gamekey, const char *input)
     return m->have_gamekey && m->have_input ? 0 : -1;
 }
 
-/* the key event (sym, mod) is bound to action */
 /* any INPUT.MAP condition on device d (2 = the mouse) */
 static int im_uses(const inputmap *m, int d)
 {
@@ -193,13 +313,15 @@ static int im_uses(const inputmap *m, int d)
     return 0;
 }
 
+/* the key event (sym, mod) is bound to action: the key's one command (GAMEKEY.MAP keeps a key's first line). The
+ * keypad's + is the PLUS key */
 static int im_action(const inputmap *m, const char *action, SDL_Keycode sym, Uint16 mod)
 {
     int i, ctrl = (mod & KMOD_CTRL) != 0, alt = (mod & KMOD_ALT) != 0, shift = (mod & KMOD_SHIFT) != 0;
+    if (sym == SDLK_KP_PLUS) sym = '+';
     for (i = 0; i < m->nbinds; i++) {
         const im_bind *b = &m->binds[i];
-        if (b->key != sym || strcmp(b->action, action) != 0) continue;
-        if (b->ctrl == ctrl && b->alt == alt && b->shift == shift) return 1;
+        if (b->key == sym && b->ctrl == ctrl && b->alt == alt && b->shift == shift) return strcmp(b->action, action) == 0;
     }
     return 0;
 }
@@ -284,8 +406,7 @@ static int im_cond_held(const im_cond *c, const Uint8 *ks)
     if (c->code == -1) on = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
     else if (c->code == -2) on = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
     else if (c->code == -3) on = ks[SDL_SCANCODE_LALT] || ks[SDL_SCANCODE_RALT];
-    else if (c->code <= 0) return 0;
-    else on = ks[c->code] != 0;
+    else on = c->code > 0 && ks[c->code] != 0;   /* an unknown key (0): never held */
     return c->sign > 0 ? on : !on;
 }
 

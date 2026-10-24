@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-23, v0.4.12)
+## Status (2026-10-23, v0.4.13)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 
@@ -26,7 +26,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 250 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 252 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build
@@ -176,8 +176,8 @@ the "busy" flag the game polls to loop music, and per-channel volume all
 behave as MSCDEX does.
 
 ## Tools
-- `glview 3DFX.PRJ ATI.PRJ ati @ CYAN` plays the mission in a Timber Wolf: W/S throttle, X stop, A/D legs,
-  mouse torso twist/pitch, F or left mouse fire, C external camera / cockpit, G free camera (then WASD/Q/E fly).
+- `glview 3DFX.PRJ ATI.PRJ ati @ CYAN` plays the mission in a Timber Wolf with the game's controls (GAMEKEY.MAP /
+  INPUT.MAP, see "Customising controls"); with `MW2_DEBUG_KEYS=1` G toggles a free camera (then WASD/Q/E fly) and [ ] the fog.
 - `glview 3DFX.PRJ ATI.PRJ ati [MECH MISSION]` - interactive viewer (SDL2 + OpenGL 3.3). Drag to orbit, wheel to
   zoom, F fullscreen at desktop resolution, Tab mech, N mission, C camo (0-7), I clan insignia, B filtering,
   M anti-aliasing, [ ] fog, Space walk animation; in world view P runs the mission (camera = player). Build with `make gl` (needs SDL2 dev files).
@@ -243,6 +243,84 @@ and Flee to Windows (leaves the game). Digits pick an item, arrows / Space chang
 backs out. Ctrl+Q still aborts the mission directly. The DOS renderer keeps its own archive: choose it in the shell
 (in a DOS mission Renderer and Textures stay as they are).
 The MW2_* environment variables remain for development and tests only.
+
+## Customising controls
+
+The port uses the original game's two control files, exactly as MechWarrior 2 reads them:
+
+| File | What it holds | Syntax |
+|---|---|---|
+| `GAMEKEY.MAP` | one-press commands: menus, targeting, views, throttle presets (1-0), autopilot, shutdown, vision modes ... | one `COMMAND key` per line |
+| `INPUT.MAP` | everything held or moved: throttle up / down, turning the legs, torso twist / tilt, looking, jump jets, firing - keyboard, mouse and joystick | `control {` then `+ device key` lines, then `}` |
+
+**Where they live.** The game looks in your install folder first (`MW2-game/install/`), then in the disc copy
+(`MW2-game/cd/MECH2/`, where the originals are). Upper or lower case file names both work. To customise, **copy
+`GAMEKEY.MAP` and `INPUT.MAP` from `cd/MECH2/` into `install/` and edit those copies** (the disc copies stay as they
+were). The folder layout is the same on macOS, Windows and Linux; where `MW2-game` itself is depends on where you put
+it (next to the app / `mw2.exe`, or in your home folder - see FOLDER_SETUP.md). The game's log names the two files it
+read: `controls: GAMEKEY.MAP <path>, INPUT.MAP <path>`.
+
+**Cockpit Controls** (global menu) writes INPUT.MAP for you, as in the original: ACCEPT on the first page rewrites it
+only if you changed the selected devices; CUSTOM CONFIGURATION starts from the selected devices' defaults (Load Custom
+brings back a saved set), and ACCEPT CONFIG AND EXIT writes INPUT.MAP (the old one becomes INPUT.BAK) and remembers the
+set as the current one (`install/GIDDI/CONFIG00.CPC`; Save Custom 1-4 go to `CONFIG01-04.CPC`). It never touches
+GAMEKEY.MAP. If you write INPUT.MAP by hand, don't accept a configuration in Cockpit Controls afterwards (or keep a copy).
+
+**GAMEKEY.MAP rules.** A key is one character (`t`, `;`, `` ` ``, `\` ...) or F1-F12, Esc, Tab, Enter, BSP, Insert,
+Pause, Plus, with `CTRL+`, `ALT+`, `SHIFT+` in front (any case). Each key does one command: if two lines name the same
+key, the first wins. A command can have several keys, and deleting its lines unbinds it. Anything after `#` is a
+comment. A misspelt command makes the game ignore the rest of the file (as the original did) - the log says which line.
+
+**INPUT.MAP rules.** Keyboard key names are the ones listed in `GIDDI`'s keyboard driver: letters `A`-`Z`, `One` ...
+`Zero`, `Space`, `Tab`, `Enter`, `Minus`, `Equal`, `Comma`, `Period`, `Slash`, `LeftShift`, `LeftControl`, `LeftAlt`,
+`Shift` / `Control` / `Alt` (either side), `GreyUpArrow` / `GreyLeftArrow` ... (the arrow keys), while the plain
+`UpArrow`, `Home`, `Insert` ... are the numeric keypad. `KEYBOARD.MAP`, `MOUSE.MAP` and `JOYSTICK.MAP` next to INPUT.MAP
+are the original's templates with every control listed at the top.
+
+**Keys that are not yours to rebind:** Alt+Enter (fullscreen), and on macOS the Cmd shortcuts. Everything else in a
+mission comes from the two files (the port's development keys only work with `MW2_DEBUG_KEYS=1`).
+
+**Example: WASD + mouse.** In GAMEKEY.MAP, move the three commands that sit on W, A and S:
+
+    TOGGLE_AUTOPILOT                p          (was a)
+    ENHANCED_VISION                 h          (was w)
+    # SHUTDOWN_MECH                 s          (deleted: Ctrl+s - STARTUP_MECH - switches the mech off and on as well)
+
+In INPUT.MAP, add (tab or spaces between the words):
+
+    throttle_plus {
+        + keyboard  W
+    }
+    throttle_minus {
+        + keyboard  S
+    }
+    legs_pan_minus {
+        + keyboard  A
+    }
+    legs_pan_plus {
+        + keyboard  D
+    }
+
+The mouse: as long as INPUT.MAP has no `mouse` lines, the port reads the mouse the way the original's MOUSE.MAP sets it
+(move = torso twist and tilt, left button = fire). Once you add any mouse line, only your mouse lines count, so add the
+whole set:
+
+    torso_pan {
+        + mouse  Left/Right
+    }
+    torso_tilt {
+        - mouse  Up/Down
+    }
+    weapon_fire {
+        + mouse  LeftBtn
+    }
+    weapon_cycle {
+        + mouse  RightBtn
+    }
+
+The same can be clicked together in Cockpit Controls: select Mouse (the keyboard is always on), CUSTOM CONFIGURATION,
+click Throttle then W and S (in the order its "+/-" shows), Chassis then A and D (L/R), Save Custom 1, ACCEPT CONFIG AND EXIT
+(GAMEKEY.MAP still needs the edit above).
 
 ## Building a package
 

@@ -131,8 +131,8 @@ test_gamefolder: tests/test_gamefolder.c src/portcfg.c src/portcfg.h
 test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
-test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h
-	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools $$($(SDL2_CONFIG) --cflags) tests/test_inputmap.c $$($(SDL2_CONFIG) --libs) -o $@
+test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h src/datapath.c src/datapath.h
+	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools -Isrc $$($(SDL2_CONFIG) --cflags) tests/test_inputmap.c src/datapath.c $$($(SDL2_CONFIG) --libs) -o $@
 
 # make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso] [TITANIUM=/path/to/MW2-game/titanium]
 TITANIUM ?= $(MW2)/../MW2-game/titanium

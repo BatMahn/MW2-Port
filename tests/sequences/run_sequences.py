@@ -6669,6 +6669,91 @@ def look3d_texcache_tie_s3_reload(c):
         k = sum(1 for l in r.out.splitlines() if l.startswith('TEXCACHE slot=0x138'))
         c('PALSLOT' in r.out and k == want, '%s: V1_PLAIN decided %d time(s) around the light amplification reload' % (tag, want), '%d' % k)
 
+
+@sequence
+def controls_player_wasd_maps(c):
+    """first public bug report (2026-10-23): "controls keep getting reset ... trying to set up a nice WASD keyboard and
+    mouse setup ... some keys are reserved". The sim reads GAMEKEY.MAP / INPUT.MAP as every game file (install folder,
+    then the disc's MECH2 folder, ANY case of the name - the port had opened only exact upper-case names in the install
+    folder, so lower-case copies, and the disc copy the documented layout keeps them in, were ignored and the built-in
+    bindings used every time). A WASD set in lower-case files: GAMEKEY.MAP moves TOGGLE_AUTOPILOT (a), SHUTDOWN_MECH (s)
+    and ENHANCED_VISION (w) off (MW2.EXE 0x484e0: one command per key, only what the file says); INPUT.MAP drives with
+    W/S (throttle) and A/D (legs); the port's development keys (G free camera, [ ] fog) are off in missions"""
+    gk = (b'\xef\xbb\xbf# WASD\r\nMAIN_MENU\tEsc\r\nTOGGLE_AUTOPILOT p\r\nSHUTDOWN_MECH ctrl+d\r\nSTARTUP_MECH CTRL+s\r\n'
+          b'ENHANCED_VISION v\r\nINFRARED l\r\nEXIT_SIM Ctrl+Q\r\n')
+    im = (b'throttle_plus {\r\n\t+ keyboard\tW\r\n}\r\nthrottle_minus {\r\n\t+ keyboard\tS\r\n}\r\n'
+          b'legs_pan_minus {\r\n\t+ keyboard\tA\r\n}\r\nlegs_pan_plus {\r\n\t+ keyboard\tD\r\n}\r\n'
+          b'weapon_fire {\r\n\t+ keyboard\tSpace\r\n}\r\n')
+    r = c.run(secs=17, files={'gamekey.map': gk, 'input.map': im},
+              keys=[(9.5, 'a'), (9.7, 's'), (9.9, 'w'), (10.1, 'g'), (10.3, ']'), (10.5, ']'), (15.0, 'p')],
+              hold=[(UP + 1.5, UP + 4.5, 'w'), (UP + 5, UP + 6, 'd')])
+    if not c(len(r.states) > 0, 'the mission ran'):
+        return
+    c(re.search(r'controls: GAMEKEY.MAP \S*/gamekey\.map, INPUT.MAP \S*/input\.map', r.out) is not None,
+      'the lower-case gamekey.map / input.map are the ones read', (re.findall(r'controls: .*', r.out) or ['-'])[0])
+    s1 = r.at(11.0)
+    c(s1['autopilot'] == 0 and s1['shut'] == 0 and s1['vision'] == 0, 'a / s / w do nothing once moved off in GAMEKEY.MAP',
+      'autopilot %d shut %d vision %d' % (s1['autopilot'], s1['shut'], s1['vision']))
+    c(s1['pilot'] == 1 and s1['fog'] == r.at(9.4)['fog'], 'g and ] are not port debug keys in a mission',
+      'pilot %d fog %s -> %s' % (s1['pilot'], r.at(9.4)['fog'], s1['fog']))
+    c(r.at(UP + 4.4)['throttle'] > 0.3, 'held W raises the throttle (INPUT.MAP throttle_plus)', 'throttle %.2f' % r.at(UP + 4.4)['throttle'])
+    h0, h1 = r.at(UP + 5)['heading'], r.at(UP + 6.2)['heading']
+    c(abs(h1 - h0) > 5, 'held D turns the legs (INPUT.MAP legs_pan_plus)', 'heading %.1f -> %.1f' % (h0, h1))
+    c(r.at(15.5)['autopilot'] == 1, 'p is TOGGLE_AUTOPILOT now', 'autopilot %d' % r.at(15.5)['autopilot'])
+
+
+@sequence
+def cockpit_controls_current_config(c):
+    """Cockpit Controls keeps the current configuration as the original (MW2SHELL FUN_00021020): GIDDI\\CONFIG00.CPC is
+    loaded on entry ("Current Config:" its name, the devices it uses selected - the disc's "Joystick w/Mouse": joystick,
+    keyboard, mouse), ACCEPT with the selection unchanged writes nothing (0x1f7e0) - a hand-edited input.map survives;
+    a changed selection writes the defaults and saves CONFIG00 in the install folder; Save Custom 2 renames "Default
+    Config" to "Custom Config #2" (FUN_00020b00) and ACCEPT CONFIG AND EXIT keeps it as the current one; the next visit
+    shows it. INPUT.MAP is written under the spelling already there (input.map), never beside it"""
+    shell = os.path.join(REPO, 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    os.makedirs(os.path.join(OUT, c.name), exist_ok=True)
+    gd = install_dir(c.name, 'timbrwlf/tbr00std')
+    mine = b'# mine\nthrottle_plus {\n\t+ keyboard\tW\n}\n'
+    with open(os.path.join(gd, 'input.map'), 'wb') as f:
+        f.write(mine)
+    os.chmod(os.path.join(gd, 'input.map'), 0o444)
+    cfg = os.path.join(OUT, c.name, 'mw2port.cfg')
+
+    def visit(clicks):
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_SHELL_MENU': '2',
+                  'MW2_MENU_COCKPIT': '1', 'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'cc.ppm'), 'MW2_CC_CLICKS': clicks})
+        p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
+        out = p.stdout.decode('latin-1')
+        with open(os.path.join(OUT, c.name, 'log.txt'), 'a') as f:
+            f.write('--- %s\n%s' % (clicks, out))
+        return [l for l in out.splitlines() if l.startswith('cc: ')]
+
+    def names():
+        return sorted(os.listdir(gd))
+
+    v = visit('10,300')   # ACCEPT, nothing changed
+    c(v and v[0] == 'cc: current "Joystick w/Mouse" devices joystick keyboard mouse', 'CONFIG00.CPC is the current configuration', str(v[:1]))
+    c(open(os.path.join(gd, 'input.map'), 'rb').read() == mine and 'INPUT.MAP' not in names() and 'GIDDI' not in names(),
+      'ACCEPT with the devices unchanged writes nothing', str(names()))
+    v = visit('10,190;10,300')   # mouse off, ACCEPT
+    c('cc: accepted "Default Config"' in v, 'a changed selection is accepted with its defaults', str(v))
+    im = open(os.path.join(gd, 'input.map'), 'rb').read()
+    c(im.startswith(b'# mw2shell CockPit Config generated map file') and b'joystick' in im and b'mouse' not in im and 'INPUT.MAP' not in names(),
+      'INPUT.MAP rewritten under its own name (input.map), the read-only one moved to INPUT.BAK', str(names()))
+    c(os.path.exists(os.path.join(gd, 'GIDDI', 'CONFIG00.CPC')), 'CONFIG00.CPC saved in the install folder')
+    v = visit('10,322;10,396;10,443')   # CUSTOM CONFIGURATION, Save Custom 2, ACCEPT CONFIG AND EXIT
+    c(v and v[0] == 'cc: current "Default Config" devices joystick keyboard', 'the next visit shows the accepted one', str(v[:1]))
+    c('cc: accepted "Custom Config #2"' in v and os.path.exists(os.path.join(gd, 'GIDDI', 'CONFIG02.CPC')),
+      'Save Custom 2 names it Custom Config #2 and writes CONFIG02.CPC', str(v))
+    v = visit('10,440')   # ABORT
+    c(v and v[0] == 'cc: current "Custom Config #2" devices joystick keyboard', 'kept as the current configuration', str(v[:1]))
+
+
+
 def main():
     global GLVIEW, VERBOSE
     ap = argparse.ArgumentParser()

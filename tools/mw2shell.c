@@ -3723,11 +3723,19 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * (entry 3) above y 95 (the logo and "COCKPIT CONTROLS"), two red column rules at x 172 and 477, the thin font (31):
  * white, grey (154) and red (255,16,24), rows 11 px apart.
  * Page 1 (table 0x7c6c0): "Current Config:" (0,110), SELECT INPUT DEVICES (0,132), the drivers from (0,154) - red =
- *   selected, a click toggles; ACCEPT (0,297): the selected devices' default configs merged, INPUT.MAP written;
- *   CUSTOM CONFIGURATION (0,319): the editor; ABORT (0,440).
+ *   selected; a click toggles a driver that is there (0x1f6a0: not the keyboard, at most 4 selected) and marks the
+ *   selection changed (0x8d180); ACCEPT (0,297) (0x1f7e0): only if the selection changed, the selected devices'
+ *   defaults merged (RESET DEFAULTS, FUN_00020c10) and accepted (FUN_00020e60) - else nothing is written;
+ *   CUSTOM CONFIGURATION (0,319) (0x1f810): the selected devices' defaults merged, then the editor; ABORT (0,440).
+ * The current configuration is GIDDI\CONFIG00.CPC: loaded on entry (FUN_00021020 -> FUN_00020a40(0); none: "NO CONFIG",
+ *   no bindings), the devices it uses selected (FUN_00020540: the keyboard, then each driver a binding names, at most 4);
+ *   accepting writes INPUT.MAP and saves it there again under its name (FUN_00020e60 -> FUN_00020b00(0)).
  * Page 2 (table 0x7a9b4): INPUT DEVICES (0,110), drivers from (0,132) (red = the one listed on the right); Current
- *   Config (0,275) and its name (8,286); RESET DEFAULTS (0,308); Load Custom 1-4 (0,330..); Save Custom 1-4 (0,385..);
- *   ACCEPT CONFIG AND EXIT (0,440); ABORT (0,462). GAME CONTROLS (176,110) and the level ("Primary Controls" ..
+ *   Config (0,275), the slot's name (90,275: "Default", "Custom 1".. - table 0x7a9a0 by DAT_0007a954) and the
+ *   configuration's name (20,286); RESET DEFAULTS (0,308) (FUN_00020c10, slot 0); Load Custom 1-4 (0,330..)
+ *   (FUN_00020a40: the slot, then CONFIGnn.CPC if there, its devices selected); Save Custom 1-4 (0,385..) (FUN_00020b00:
+ *   "Default Config" / "Custom Config #.." renamed "Custom Config #n", CONFIGnn.CPC written); ACCEPT CONFIG AND EXIT
+ *   (0,440) (FUN_00020e60); ABORT (0,462) (0x1eaf0: nothing saved). GAME CONTROLS (176,110) and the level ("Primary Controls" ..
  *   "Quaternary Controls", centred on 370) - a click on it changes the level; from (176,132) each control: label,
  *   direction ("+/-", "L/R", ...: a click reverses), modifier at 261 ("--", "Ctrl", "Alt", "Shft": a click cycles),
  *   the binding at 285. A click on a control then on an input at the right assigns it (two-button controls take two
@@ -3736,47 +3744,118 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * Layout measured on DOS captures (docs/reference/dos_cockpit_*.png); the colours of selected / current items and the
  * click behaviour inferred from the captures. */
 static cc_device g_ccdev[CC_DEVICES];
-static int g_ccsel[CC_DEVICES], g_ccsel_init;
-static char g_ccname[64] = "Default Config";
+static int g_ccsel[CC_DEVICES];
+static cc_config g_cccur;      /* the configuration being worked on (0x8b438): CONFIG00.CPC on entry */
+static int g_ccslot;           /* DAT_0007a954: the slot shown beside "Current Config:" (0 Default, 1-4 Custom n) */
+static int g_ccchanged;        /* DAT_0008d180: the device selection changed on the first page */
 static int cc_colour(int r, int g, int b)
 {
     int i, best = 0, bd = 1 << 30;
     for (i = 0; i < 256; i++) { int d = abs(g_bg.pal[i][0] - r) + abs(g_bg.pal[i][1] - g) + abs(g_bg.pal[i][2] - b); if (d < bd) { bd = d; best = i; } }
     return best;
 }
-static const char *giddi_dir(void) { static char p[1100]; snprintf(p, sizeof p, "%s", gpath("GIDDI")); return p; }
+/* the GIDDI folder with the drivers and their default CPC files (the disc's, or a full install's) */
+static const char *giddi_dir(void)
+{
+    static char p[1100];
+    char *sl;
+    snprintf(p, sizeof p, "%s", gpath("GIDDI/KEYBOARD.DLL"));
+    if ((sl = strrchr(p, '/'))) *sl = 0;
+    return p;
+}
+/* a GIDDI file to read: the install folder's, else the disc's (any case) */
+static const char *cc_read_path(const char *name) { char n[64]; snprintf(n, sizeof n, "GIDDI/%s", name); return gpath(n); }
+/* a file to write in the install folder (where the original writes, its own folder): <install>[/<dir>]/<name>, keeping
+ * the spelling of a folder / file already there (lower-case copies on a case-sensitive disk), the folder made if missing */
+static const char *inst_write_path(const char *dir, const char *name)
+{
+    static char out[2][1100];
+    static int k;
+    char *o = out[k ^= 1], d[1100], hit[1100];
+    if (!dir) snprintf(d, sizeof d, "%s", g_dir);
+    else if (dp_resolve_in(g_dir, dir, hit, sizeof hit) == 0) snprintf(d, sizeof d, "%s", hit);
+    else { snprintf(d, sizeof d, "%s/%s", g_dir, dir); mkdir(d, 0755); }
+    if (dp_resolve_in(d, name, hit, sizeof hit) == 0) snprintf(o, sizeof out[0], "%s", hit);
+    else snprintf(o, sizeof out[0], "%.1000s/%s", d, name);
+    return o;
+}
+/* FUN_00020730: every binding cleared (device -1, type 0 for the seven analog slots, 1 for the rest), slot 0 */
+static void cc_clear(cc_config *c)
+{
+    int l, sl;
+    for (l = 0; l < CC_LEVELS; l++)
+        for (sl = 0; sl < CC_SLOTS; sl++) { cc_binding *b = &c->b[l][sl]; memset(b, 0, sizeof *b); b->device = -1; b->type = sl > 6; }
+    g_ccslot = 0;
+}
+/* FUN_00020540: the devices a configuration uses - the keyboard, every driver one of its bindings names - those whose
+ * driver is there, at most 4 in the list's order */
+static void cc_select_from(const cc_config *c)
+{
+    int k, l, sl, n = 0;
+    for (k = 0; k < CC_DEVICES; k++) g_ccsel[k] = k == 2;
+    for (l = 0; l < CC_LEVELS; l++)
+        for (sl = 0; sl < CC_SLOTS; sl++) if (c->b[l][sl].device >= 0 && c->b[l][sl].device < CC_DEVICES) g_ccsel[c->b[l][sl].device] = 1;
+    for (k = 0; k < CC_DEVICES; k++) { if (!g_ccsel[k] || (!g_ccdev[k].present && k != 2) || n > 3) g_ccsel[k] = 0; else n++; }
+}
 static void cc_init(void)
 {
-    FILE *f;
-    char line[256];
-    int k;
+    cc_config c;
     cc_devices(g_ccdev, giddi_dir());
-    if (g_ccsel_init) return;
-    g_ccsel_init = 1;
-    if ((f = fopen(gpath("INPUT.MAP"), "rb"))) {   /* the devices the current INPUT.MAP uses */
-        while (fgets(line, sizeof line, f)) {
-            char sg[8], dv[32];
-            if (sscanf(line, " %7s %31s", sg, dv) == 2 && (sg[0] == '+' || sg[0] == '-'))
-                for (k = 0; k < CC_DEVICES; k++) if (strcmp(dv, CC_DEVNAME[k]) == 0) g_ccsel[k] = 1;
-        }
-        fclose(f);
-    } else g_ccsel[2] = 1;
+    memset(&g_cccur, 0, sizeof g_cccur);
+    snprintf(g_cccur.name, sizeof g_cccur.name, "NO CONFIG");
+    cc_clear(&g_cccur);
+    if (cc_load(&c, cc_read_path("CONFIG00.CPC")) == 0) g_cccur = c;   /* FUN_00020a40(0) */
+    cc_select_from(&g_cccur);
+    g_ccchanged = 0;
 }
+/* RESET DEFAULTS (FUN_00020c10): the selected devices' defaults, "Default Config", slot 0 */
+static void cc_reset_defaults(void) { cc_merge_defaults(&g_cccur, giddi_dir(), g_ccsel); g_ccslot = 0; }
+/* INPUT.MAP from the configuration (FUN_000201a0 writes temp.map; FUN_00020e60 then input.map -> input.bak and temp.map
+ * -> input.map), in the install folder under the spelling already there */
 static int cc_write_inputmap(SDL_Renderer *rd, SDL_Texture *tx, int headless, const cc_config *c)
 {
     static char out[65536];
     size_t n = cc_generate(c, g_ccdev, g_ccsel, out, sizeof out);
-    char path[1100], bak[1100];
+    char path[1100], bak[1100], tmp[1100];
     FILE *f;
     if (!n) { shell_message(rd, tx, headless, "Error: Sim can not|handle that many controls.#Ok"); return -1; }
-    snprintf(path, sizeof path, "%s/INPUT.MAP", g_dir);
-    snprintf(bak, sizeof bak, "%s/INPUT.BAK", g_dir);
+    snprintf(path, sizeof path, "%s", inst_write_path(NULL, "INPUT.MAP"));
+    snprintf(bak, sizeof bak, "%s", inst_write_path(NULL, "INPUT.BAK"));
+    snprintf(tmp, sizeof tmp, "%s", inst_write_path(NULL, "TEMP.MAP"));
+    if ((f = fopen(tmp, "wb"))) {
+        int bad = fwrite(out, 1, n, f) != n;
+        if (fclose(f) != 0 || bad) { remove(tmp); f = NULL; }
+    }
+    if (!f) { shell_message(rd, tx, headless, "Error: Could not write map file.#Ok"); return -1; }   /* FUN_000201a0 */
     remove(bak);
     rename(path, bak);                               /* input.map -> input.bak, as the original */
-    if (!(f = fopen(path, "wb")) || fwrite(out, 1, n, f) != n) { if (f) fclose(f); rename(bak, path); return -1; }
-    fclose(f);
+    if (rename(tmp, path) != 0) {                    /* (Windows: a read-only INPUT.MAP could not be moved) */
+        remove(tmp);
+        shell_message(rd, tx, headless, "Error: Could not write map file.#Ok");
+        return -1;
+    }
+    return 0;
+}
+/* ACCEPT CONFIG AND EXIT / ACCEPT (FUN_00020e60): INPUT.MAP, then the configuration kept as the current one */
+static int cc_accept(SDL_Renderer *rd, SDL_Texture *tx, int headless)
+{
+    if (cc_write_inputmap(rd, tx, headless, &g_cccur) != 0) return -1;
+    cc_save(&g_cccur, inst_write_path("GIDDI", "CONFIG00.CPC"));   /* FUN_00020b00(0): slot 0, the name kept */
+    if (headless && getenv("MW2_CC_CLICKS")) printf("cc: accepted \"%s\"\n", g_cccur.name);   /* TEST ONLY */
     shell_message(rd, tx, headless, "Cockpit Control Configured.#Ok");
     return 0;
+}
+/* TEST ONLY: MW2_CC_CLICKS="x,y;x,y;..." - headless, one left click a frame on the Cockpit Controls pages */
+static int cc_test_click(int *mx, int *my)
+{
+    static int used;
+    const char *q = getenv("MW2_CC_CLICKS");
+    int i;
+    if (!q) return 0;
+    for (i = 0; i < used && q; i++) if ((q = strchr(q, ';'))) q++;
+    if (!q || sscanf(q, "%d,%d", mx, my) != 2) return 0;
+    used++;
+    return 1;
 }
 static smk *g_cclogo;          /* the amwlogo1 clip at (120,4), as FUN_00021020 plays it on these pages */
 static Uint32 g_cclogo_t;
@@ -3820,7 +3899,9 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         cc_text(0, 110, "INPUT DEVICES", grey);
         for (k = 0; k < CC_DEVICES; k++) cc_text(0, 132 + 11 * k, g_ccdev[k].title, k == shown ? red : g_ccsel[k] ? white : grey);   /* DOS: the selected white, others grey */
         cc_text(0, 275, "Current Config:", grey);
-        cc_text(8, 286, cfg->name, white);
+        { static const char *const SLOT[5] = {"Default", "Custom 1", "Custom 2", "Custom 3", "Custom 4"};   /* 0x7a9a0 */
+          cc_text(90, 275, SLOT[g_ccslot >= 0 && g_ccslot <= 4 ? g_ccslot : 0], grey); }
+        cc_text(20, 286, cfg->name, white);
         cc_text(0, 308, "RESET DEFAULTS", white);
         for (k = 0; k < 4; k++) { char t[24]; snprintf(t, sizeof t, "Load Custom %d", k + 1); cc_text(0, 330 + 11 * k, t, white);
                                   snprintf(t, sizeof t, "Save Custom %d", k + 1); cc_text(0, 385 + 11 * k, t, white); }
@@ -3854,8 +3935,8 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         }
         if (msg[0]) cc_text(176, 470, msg, red);
         f++;
-        if (headless) { if (f >= 2) done = 1; continue; }
-        while (SDL_PollEvent(&e)) {
+        if (headless) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } button = SDL_BUTTON_LEFT; }
+        else while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { done = 1; break; }
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) done = 1;
             if (e.type == SDL_MOUSEWHEEL) wheel = e.wheel.y;
@@ -3867,18 +3948,22 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
             msg[0] = 0;
             if (mx < 172) {
                 if (my >= 132 && my < 132 + 11 * CC_DEVICES) { shown = row; scroll = 0; }
-                else if (my >= 308 && my < 319) { cc_merge_defaults(cfg, giddi_dir(), g_ccsel); }
-                else if (my >= 330 && my < 374) {
-                    char p[1100];
-                    snprintf(p, sizeof p, "%.1000s/CONFIG%02d.CPC", giddi_dir(), (my - 330) / 11 + 1);
-                    if (cc_load(cfg, p) == 0) snprintf(g_ccname, sizeof g_ccname, "%s", cfg->name); else snprintf(msg, sizeof msg, "No configuration saved there.");
-                } else if (my >= 385 && my < 429) {
-                    char p[1100], m[64];
+                else if (my >= 308 && my < 319) { cc_merge_defaults(cfg, giddi_dir(), g_ccsel); g_ccslot = 0; }   /* FUN_00020c10 */
+                else if (my >= 330 && my < 374) {   /* FUN_00020a40: the slot first, then its file if there (else nothing) */
+                    char nm[16];
+                    cc_config c;
+                    g_ccslot = (my - 330) / 11 + 1;
+                    snprintf(nm, sizeof nm, "CONFIG%02d.CPC", g_ccslot);
+                    if (cc_load(&c, cc_read_path(nm)) == 0) { *cfg = c; cc_select_from(cfg); }
+                } else if (my >= 385 && my < 429) {   /* FUN_00020b00 */
+                    char nm[16], m[64];
                     int n = (my - 385) / 11 + 1;
-                    snprintf(cfg->name, sizeof cfg->name, "Custom Config #%d", n);
-                    snprintf(p, sizeof p, "%.1000s/CONFIG%02d.CPC", giddi_dir(), n);
-                    if (cc_save(cfg, p) == 0) { snprintf(m, sizeof m, "Configuration %d Saved.#Ok", n); shell_message(rd, tx, headless, m); }
-                } else if (my >= 440 && my < 451) { if (cc_write_inputmap(rd, tx, headless, cfg) == 0) { snprintf(g_ccname, sizeof g_ccname, "%s", cfg->name); done = 1; } }
+                    g_ccslot = n;
+                    if (strcmp(cfg->name, "Default Config") == 0 || strncmp(cfg->name, "Custom Config #", 15) == 0)
+                        snprintf(cfg->name, sizeof cfg->name, "Custom Config #%d", n);
+                    snprintf(nm, sizeof nm, "CONFIG%02d.CPC", n);
+                    if (cc_save(cfg, inst_write_path("GIDDI", nm)) == 0) { snprintf(m, sizeof m, "Configuration %d Saved.#Ok", n); shell_message(rd, tx, headless, m); }
+                } else if (my >= 440 && my < 451) { if (cc_accept(rd, tx, headless) == 0) done = 1; }
                 else if (my >= 462 && my < 473) done = 1;
             } else if (mx < 477) {
                 if (my >= 110 && my < 121) level = (level + 1) % CC_LEVELS;
@@ -3914,19 +3999,23 @@ static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     int done = 0, k, f = 0, prev_bg = g_bg_entry;
     int white = -1, grey, red;
-    cc_config cfg;
     load_bg(3);
     g_cclogo = open_smk("AMWLOGO1");
     g_cclogo_t = 0;
     grey = cc_colour(154, 154, 154); red = cc_colour(255, 16, 24);
     cc_init();
-    if (getenv("MW2_CC_EDITOR")) { cc_merge_defaults(&cfg, giddi_dir(), g_ccsel); cc_editor(rd, tx, headless, &cfg); if (g_cclogo) smk_close(g_cclogo); g_cclogo = NULL; load_bg(prev_bg); return; }   /* tests */
+    if (getenv("MW2_CC_EDITOR")) { cc_reset_defaults(); cc_editor(rd, tx, headless, &g_cccur); if (g_cclogo) smk_close(g_cclogo); g_cclogo = NULL; load_bg(prev_bg); return; }   /* tests */
+    if (headless && getenv("MW2_CC_CLICKS")) {   /* TEST ONLY */
+        printf("cc: current \"%s\" devices", g_cccur.name);
+        for (k = 0; k < CC_DEVICES; k++) if (g_ccsel[k]) printf(" %s", CC_DEVNAME[k]);
+        printf("\n");
+    }
     while (!done) {
         SDL_Event e;
         int mx = -1, my = -1;
         char t[96];
         cc_frame(1);
-        snprintf(t, sizeof t, "Current Config: %s", g_ccname);
+        snprintf(t, sizeof t, "Current Config: %s", g_cccur.name);
         cc_text(0, 110, t, grey);
         cc_text(0, 132, "SELECT INPUT DEVICES", grey);
         for (k = 0; k < CC_DEVICES; k++) cc_text(0, 154 + 11 * k, g_ccdev[k].title, g_ccsel[k] ? red : white);
@@ -3934,19 +4023,26 @@ static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         cc_text(0, 319, "CUSTOM CONFIGURATION", white);
         cc_text(0, 440, "ABORT", white);
         f++;
-        if (headless) { if (f >= 2) done = 1; continue; }
-        while (SDL_PollEvent(&e)) {
+        if (headless) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } }
+        else while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) done = 1;
             if (e.type == SDL_MOUSEBUTTONDOWN) { mx = e.button.x; my = e.button.y; }
         }
         if (mx >= 0 && mx < 172) {
-            if (my >= 154 && my < 154 + 11 * CC_DEVICES) { k = (my - 154) / 11; if (g_ccdev[k].present || k == 2) g_ccsel[k] = !g_ccsel[k]; }
-            else if (my >= 297 && my < 308) {
-                if (cc_merge_defaults(&cfg, giddi_dir(), g_ccsel) == 0 && cc_write_inputmap(rd, tx, headless, &cfg) == 0) { snprintf(g_ccname, sizeof g_ccname, "Default Config"); done = 1; }
-            } else if (my >= 319 && my < 330) {
-                cc_merge_defaults(&cfg, giddi_dir(), g_ccsel);
-                snprintf(cfg.name, sizeof cfg.name, "%s", "Default Config");
-                cc_editor(rd, tx, headless, &cfg);
+            if (my >= 154 && my < 154 + 11 * CC_DEVICES) {   /* 0x1f6a0: a driver that is there, not the keyboard; at most 4 */
+                int q, n = 0;
+                k = (my - 154) / 11;
+                for (q = 0; q < CC_DEVICES; q++) n += g_ccsel[q] != 0;
+                if (k != 2 && g_ccdev[k].present) {
+                    if (g_ccsel[k]) { g_ccsel[k] = 0; g_ccchanged = 1; }
+                    else if (n < 4) { g_ccsel[k] = 1; g_ccchanged = 1; }
+                }
+            } else if (my >= 297 && my < 308) {   /* 0x1f7e0: written only for a changed selection */
+                if (g_ccchanged) { cc_reset_defaults(); cc_accept(rd, tx, headless); }
+                done = 1;
+            } else if (my >= 319 && my < 330) {   /* 0x1f810: the editor starts from the selected devices' defaults */
+                cc_reset_defaults();
+                cc_editor(rd, tx, headless, &g_cccur);
                 done = 1;
             } else if (my >= 440 && my < 451) done = 1;
         }

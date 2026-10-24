@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "common3d.h"
+#include "datapath.h"
 #include "inputmap.h"
 #include "inputmap_defaults.h"
 #include "msim.h"
@@ -144,6 +145,9 @@ static const char *HB(const char *base)
 static int        g_im_ok, g_im_mouse;   /* g_im_mouse: INPUT.MAP uses the mouse (else the port reads it as MOUSE.MAP does) */
 static float      g_eye_pan, g_eye_tilt, g_zoom = 1.0f;   /* pilot_pan / pilot_tilt / zoom_factor (the cockpit view) */
 #define A(name) (g_im_ok && im_action(&g_im, name, k, e.key.keysym.mod))
+/* the port's own development keys in a mission (G free camera, [ ] fog density): only with MW2_DEBUG_KEYS=1 - in play
+ * every key belongs to GAMEKEY.MAP / INPUT.MAP (user report 2026-10-23: rebinding to G dropped the piloting) */
+static int dbg_keys(void) { static int v = -1; if (v < 0) v = getenv("MW2_DEBUG_KEYS") && atoi(getenv("MW2_DEBUG_KEYS")) > 0; return v; }
 #define H(name) (g_im_ok && im_held(&g_im, name, ks))
 
 static mech3d    g_mech;          /* the viewed mech, kept for posing */
@@ -4669,7 +4673,8 @@ static void test_dump(const char *tag)
            g_camode, pu->ejected, pu->intact_out, combat_auto_eject(), (double)g_cam_eye[0], (double)g_cam_eye[1], (double)g_cam_eye[2],
            (double)g_cam_yaw, g_follow, intact);
     for (i = 0; i < pu->weapon_count; i++) printf("%s%d:%d:%d:%d", i ? ";" : "", pu->weapons[i].weapon, pu->weapons[i].state, pu->weapons[i].ammo, pu->weapons[i].location);
-    printf(" orb=%.0f,%.0f,%.1f orbtilt=%.2f campitch=%.2f", (double)g_orb_d, (double)g_orb_h, (double)g_orb_ang, (double)g_orb_tilt, (double)g_cam_pitch);
+    printf(" orb=%.0f,%.0f,%.1f orbtilt=%.2f campitch=%.2f pilot=%d fog=%g", (double)g_orb_d, (double)g_orb_h, (double)g_orb_ang, (double)g_orb_tilt, (double)g_cam_pitch,
+           g_pilot, g_view ? (double)g_view->fog_density : -1.0);
     printf(" lvl=%d,%d,%d dhits=%d,%d snow=%d,%d snow_n=%d,%d snow_on=%d,%d snow_flips=%d,%d", g_inst_lvl[INST_RADAR], g_inst_lvl[INST_AUX], g_inst_lvl[INST_TGT],
            pu->display_hits, pu->display_hits5, g_snow_show[0], g_snow_show[1], g_snow_n[0], g_snow_n[1], g_snow_on_n[0], g_snow_on_n[1], g_snow_flips[0], g_snow_flips[1]);
     {   /* spawn overlap (training report) and the scrub billboards: units within 10 m of the player, the player's mech */
@@ -4986,13 +4991,19 @@ int main(int argc, char **argv)
             snprintf(g_auto_out, sizeof g_auto_out, "%s", out);
         }
     }
-    {   /* the original's controls: GAMEKEY.MAP and INPUT.MAP from the game directory (the shell's Cockpit Controls writes
-         * INPUT.MAP); without them, the files as the game installs them (tools/inputmap_defaults.h) */
+    {   /* the original's controls: GAMEKEY.MAP and INPUT.MAP as the sim opens them ("gamekey.map" / "input.map", MW2.EXE
+         * 0x484e0 / 0x483b0) - found like every game file (datapath: the install folder, then the disc's MECH2 folder, any
+         * case of the name; the shell's Cockpit Controls writes INPUT.MAP into the install folder); without them, the files
+         * as the game installs them (tools/inputmap_defaults.h) */
         const char *dir = getenv("MW2_INSTALL_DIR") ? getenv("MW2_INSTALL_DIR") : ".";
-        char gk[1100], in[1100];
-        snprintf(gk, sizeof gk, "%s/GAMEKEY.MAP", dir);
-        snprintf(in, sizeof in, "%s/INPUT.MAP", dir);
-        im_load(&g_im, gk, in);
+        char gk[2048], in[2048];
+        int hk, hi;
+        dp_add_roots_from_env();
+        hk = dp_resolve_in(dir, "GAMEKEY.MAP", gk, sizeof gk) == 0 || dp_resolve("GAMEKEY.MAP", gk, sizeof gk) == 0;
+        hi = dp_resolve_in(dir, "INPUT.MAP", in, sizeof in) == 0 || dp_resolve("INPUT.MAP", in, sizeof in) == 0;
+        im_load(&g_im, hk ? gk : NULL, hi ? in : NULL);
+        printf("controls: GAMEKEY.MAP %s, INPUT.MAP %s\n", g_im.have_gamekey ? gk : "missing - the installed bindings",
+               g_im.have_input ? in : "missing - the installed bindings");
         if (!g_im.have_gamekey) { FILE *f = fmemopen((void *)IM_DEFAULT_GAMEKEY, strlen(IM_DEFAULT_GAMEKEY), "r"); if (f) { im_parse_gamekey(&g_im, f); fclose(f); } }
         if (!g_im.have_input) { FILE *f = fmemopen((void *)IM_DEFAULT_INPUT, strlen(IM_DEFAULT_INPUT), "r"); if (f) { im_parse_input(&g_im, f); fclose(f); } }
         g_im_ok = g_im.nbinds > 0 && g_im.nrules > 0;
@@ -5469,7 +5480,7 @@ int main(int argc, char **argv)
                         g_eye_pan = g_eye_tilt = 0; g_zoom = 1.0f;
                     }
                 }
-                else if (g_world && k == SDLK_g && !(e.key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) { g_pilot = !g_pilot; SDL_SetRelativeMouseMode(g_pilot ? SDL_TRUE : SDL_FALSE); }   /* port: free camera */
+                else if (g_world && dbg_keys() && k == SDLK_g && !(e.key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) { g_pilot = !g_pilot; SDL_SetRelativeMouseMode(g_pilot ? SDL_TRUE : SDL_FALSE); }   /* port: free camera (MW2_DEBUG_KEYS=1 only) */
                 else if (g_world && (A("THROTTLE_STOP") || A("THROTTLE_2") || A("THROTTLE_3") || A("THROTTLE_4") || A("THROTTLE_5") ||
                                      A("THROTTLE_6") || A("THROTTLE_7") || A("THROTTLE_8") || A("THROTTLE_9") || A("THROTTLE_FULL"))) {
                     static const char *const TH[10] = {"THROTTLE_STOP", "THROTTLE_2", "THROTTLE_3", "THROTTLE_4", "THROTTLE_5",
@@ -5495,8 +5506,8 @@ int main(int argc, char **argv)
                 else if (k == SDLK_SPACE && !g_world) g_walk = !g_walk;
                 else if (k == SDLK_p && !g_world) g_patrol = !g_patrol;
                 else if (k == SDLK_m && !g_world) { msaa = !msaa; if (msaa) glEnable(GL_MULTISAMPLE); else glDisable(GL_MULTISAMPLE); }
-                else if (k == SDLK_RIGHTBRACKET) v.fog_density = v.fog_density <= 0 ? 0.0001f : v.fog_density * 1.25f;
-                else if (k == SDLK_LEFTBRACKET) v.fog_density = v.fog_density < 0.00011f ? 0 : v.fog_density / 1.25f;
+                else if (k == SDLK_RIGHTBRACKET && (!g_world || dbg_keys())) v.fog_density = v.fog_density <= 0 ? 0.0001f : v.fog_density * 1.25f;
+                else if (k == SDLK_LEFTBRACKET && (!g_world || dbg_keys())) v.fog_density = v.fog_density < 0.00011f ? 0 : v.fog_density / 1.25f;
             }
         }
         if (reload) load(r, ma, ta, ati, rec, mission, camo, clan);
