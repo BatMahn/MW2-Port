@@ -216,3 +216,5 @@ Result: the rule conditions match. The engine has no "attacked from beyond range
 - 2026-10-22: merged build - make check ALL PASSED, suite 250 / 0 failed, Windows build OK.
 - 2026-10-23 (first player bug report: controls reset after each exit, WASD hard, reserved keys; agent KB): the sim only opened <install>/GAMEKEY.MAP / INPUT.MAP exactly - now datapath (install, then cd/MECH2, any case); GAMEKEY / INPUT.MAP read as MW2.EXE 0x484e0 / 0x48090 (first key wins, all KEYBOARD.DLL names, 8-condition chords); Cockpit Controls CONFIG00.CPC current config, ACCEPT only on a device change; G / [ ] debug keys behind MW2_DEBUG_KEYS; README 'Customising controls'.
 - 2026-10-23: merged build - make check ALL PASSED, suite 252 / 0 failed, Windows build OK.
+- 2026-10-24 (user: <20 fps on M4 Pro, log 'GLD_TEXTURE_INDEX_BUFFER is unloadable'): u_dos_vtx (samplerBuffer, unit 3) read in the vertex shader since v0.4.12 but only bound in the DOS look; a 1-texel R32F placeholder buffer texture now always on unit 3, layer TBO set up on unit 3 (never unit 0).
+- 2026-10-24: build - make check ALL PASSED, suite 252 / 0 failed, Windows build OK.

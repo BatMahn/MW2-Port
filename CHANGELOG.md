@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.14 (2026-10-24)
+
+- **macOS frame rate**: since v0.4.12 the renderer could drop to under 20 fps on Macs (Terminal showed "UNSUPPORTED ...
+  GLD_TEXTURE_INDEX_BUFFER is unloadable"). The DOS look's polygon buffer was only bound in the DOS look, so in the other
+  looks Apple's OpenGL found nothing on that sampler and took its slow path. A small placeholder buffer is now always
+  bound. No visual change.
+
 ## v0.4.13 (2026-10-23)
 
 - **Controls (player report: controls kept resetting)**: GAMEKEY.MAP and INPUT.MAP are now read from your install

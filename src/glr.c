@@ -102,6 +102,8 @@ struct glr {
     GLint  u_mono, u_mvp, u_view, u_light, u_ambient, u_fog_density, u_fog_color, u_texsize, u_tex, u_textured, u_unlit, u_wire, u_shadow;
     /* the DOS edition */
     int    dos;
+    GLuint nul_buf, nul_tbo;                /* a 1-texel R32F buffer texture: unit 3 never left empty (macOS GL falls back
+                                             * to a slow path for a shader whose samplerBuffer has nothing loadable bound) */
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
     GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir, u_dos_vtx, u_dos_smooth, u_vpo, u_dos_eye, u_dos_rx, u_dos_ry, u_dos_rz, u_dos_ps;
     GLint  u_far, u_vp;
@@ -685,6 +687,18 @@ glr *glr_create(void)
     glGenBuffers(1, &r->dome_vbo);
     glGenTextures(GLR_SLOTS, r->dome_tex);
     glGenTextures(1, &r->dos_tex);
+    {
+        static const float z = 0;
+        glGenBuffers(1, &r->nul_buf);
+        glBindBuffer(GL_TEXTURE_BUFFER, r->nul_buf);
+        glBufferData(GL_TEXTURE_BUFFER, sizeof z, &z, GL_STATIC_DRAW);
+        glBindBuffer(GL_TEXTURE_BUFFER, 0);
+        glGenTextures(1, &r->nul_tbo);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
+        glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, r->nul_buf);
+        glActiveTexture(GL_TEXTURE0);
+    }
     glGenTextures(1, &r->ptab_tex);
     return r;
 }
@@ -696,6 +710,8 @@ void glr_destroy(glr *r)
     glDeleteTextures(GLR_SLOTS, r->tex_a);
     glDeleteTextures(2, r->env_tex);
     glDeleteTextures(1, &r->dos_tex);
+    glDeleteTextures(1, &r->nul_tbo);
+    glDeleteBuffers(1, &r->nul_buf);
     glDeleteTextures(1, &r->ptab_tex);
     glDeleteBuffers(1, &r->env_vbo);
     glDeleteVertexArrays(1, &r->env_vao);
@@ -1393,9 +1409,12 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     glBindVertexArray(L->vao);
     glBindBuffer(GL_ARRAY_BUFFER, L->vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * FLOATS_PER_VERTEX * sizeof *buf), buf, GL_STATIC_DRAW);
-    glBindTexture(GL_TEXTURE_BUFFER, L->tbo);   /* (the DOS Gouraud fill reads its polygon from it) */
+    glActiveTexture(GL_TEXTURE3);               /* (the DOS Gouraud fill reads its polygon from it; set up on unit 3, the
+                                                 * buffer sampler's, so no other unit ever holds a buffer texture) */
+    glBindTexture(GL_TEXTURE_BUFFER, L->tbo);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, L->vbo);
-    glBindTexture(GL_TEXTURE_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
+    glActiveTexture(GL_TEXTURE0);
     {
         static const int sizes[6] = {3, 3, 2, 3, 1, 1};
         size_t off = 0;
@@ -2247,6 +2266,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     }
     glUniform2f(r->u_texsize, 1, 1);            /* environment UVs are in texture repeats */
     glUniform1i(r->u_textured, 1);
+    glActiveTexture(GL_TEXTURE3);               /* the buffer sampler's unit: a loadable buffer texture for every draw */
+    glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
     glActiveTexture(GL_TEXTURE0);
     {
         static const float off[4] = {0, 0, 0, 0};
@@ -2549,7 +2570,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);   /* the wireframe's edges come from the fragment shader */
     }
     glBindVertexArray(L->vao);
-    if (r->dos) { glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_BUFFER, L->tbo); glActiveTexture(GL_TEXTURE0); }
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_BUFFER, r->dos ? L->tbo : r->nul_tbo); glActiveTexture(GL_TEXTURE0);
     for (s = 0; s <= GLR_SLOTS; s++) {
         if (L->batch_count[s] <= 0) continue;
         if (s < GLR_SLOTS) {
