@@ -40,6 +40,18 @@ typedef struct {
     uint32_t *rgba;   /* 0xAABBGGRR, malloc'd */
     int       type;   /* TEX_TITANIUM: the record's u16 type (mercsw keeps it at +0x14 of its texture entry, 0x100029cc;
                          0x1000219e returns it); 0 for the other encodings */
+    /* TEX_3DFX_555 / TEX_3DFX_4444: the same texels read the other way (malloc'd; NULL for the other encodings). The 3Dfx
+     * and S3 engines store no format: a texture is read as ARGB4444 when the polygon that first draws it has the alpha
+     * flag (types 8-11), else as ARGB1555 (3Dfx 0x10067240 -> 0x10066e70 -> 0x10066a30: Glide 0xc / 0xb; S3 0x100107a0
+     * -> 0x10010170: S3DTK_TEXARGB4444 / 1555) - glr holds both readings (tex / tex_a) and draws a texture in the one its
+     * first polygon chose (upfmt; glr_view.tex_cache) */
+    uint32_t *alt;
+    int       alt4444;   /* 1: alt is the ARGB4444 reading (rgba the RGB555 one); 0: alt the RGB555, rgba the ARGB4444 */
+    int       a1555;     /* TEX_3DFX_*: the texels with bit 15 set (the ARGB1555 reading's alpha bit) */
+    int       cel;       /* the archive's CEL record id (the engines' texture id; 0 unknown) - set by the loader */
+    /* (3Dfx / S3, with alt) the reading the engine's texture cache holds for it: 0 none yet, 1 ARGB1555, 2 ARGB4444 - the
+     * first polygon that draws it decides (glr: glr_view.tex_cache); the loader clears it, glview at an S3 palette reload */
+    int       upfmt;
 } texture;
 
 int  tex_decode(const uint8_t *data, size_t len, int encoding, texture *out);

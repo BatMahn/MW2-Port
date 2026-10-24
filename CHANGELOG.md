@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.4.12 (2026-10-22)
+
+- **3D looks (3DFX, S3, MATROX, ENHANCED)**: fire / smoke cards and decals are textured without perspective correction
+  (everything at Display detail Low) as in those editions; the ENHANCED look draws the RUST and TEAL grounds again; fire,
+  smoke and jet cards are no longer lit; the 3DFX / S3 TEAL fire card no longer shows as a blue square.
+- **DOS-look HUD** at 640x480 and 1024x768 now matches the original pixel for pixel: the selected weapon framed as its
+  whole slot, the damage outline centred, the target display (range shown as "1.08k" as in DOS), the heat / jets /
+  throttle bars, the rear view, the radar circle and the off-radar nav marker.
+- **3DFX / S3 looks**: a texture keeps the format of the first polygon that draws it, as those editions' texture cache
+  does - in the Wolf training missions the mechs' plain dark parts show orange-brown, as in the original.
+- **Gravis Ultrasound music** follows the original driver exactly: pitch and vibrato in its integer steps, pitch bend
+  re-tunes held notes with the bend-range setting, volume changes glide from where the envelope had got to, and samples
+  play to their end after the envelope - drums no longer cut off after 3 ms.
+- **Won't fix**: a few DOS-look HUD items (on-screen nav marker / target bracket, radar cone end and message line at
+  640x480) can sit 1-2 px off the original.
+
 ## v0.4.11 (2026-10-22)
 
 - **Dropships and gunships fly**: dropships and aircraft are drawn at their flying height, as in the original - the

@@ -88,11 +88,20 @@ typedef struct {
 #define GLR_TI_DYN 8
     int   ti_dyn_n;
     float ti_dyn[GLR_TI_DYN][7];     /* x, y, z (game), radius, r, g, b: the explosion and projectile lights */
-    /* the ATi Rage edition's texturing per colour type (ATi MW2.DLL 0x1002dcb0 -> 0x1002bc60 / 0x10068830 or 0x100686b0):
-     * 0 off (every textured polygon perspective-correct, alpha-0 texels masked); 1 DISPLAY DETAIL high: types 6, 7, 8, 10
-     * affine, 5, 9, 11 perspective-correct; 2 DISPLAY DETAIL low: all affine. Alpha mask only for types 8-11; types 5-7
-     * draw their alpha-0 texels' colour (C3D_ERS_TMAP_TEXOP none) */
+    /* the 3D engines' texturing per colour type (3Dfx 0x10026e80 -> 0x1002c880, S3 0x1000aa90 -> 0x1001da40, Matrox
+     * 0x100687b5 -> 0x1005104c, ATi 0x100281f0 -> 0x1002dcb0), bits: 1 types 6, 7, 8, 10 affine, 5, 9, 11 perspective-
+     * correct; 2 (with 1) DISPLAY DETAIL low: all affine; 4 the alpha mask only for types 8-11 - types 5-7 and the sky /
+     * ground fills draw their alpha-0 texels' colour. 0: every textured polygon perspective-correct and masked (PowerVR,
+     * DOS, the Titanium textures) */
     int   ati_tex;
+    /* the 3Dfx / S3 texture cache (textures with two readings, texture.alt): 0 off - each polygon its own flag's reading;
+     * 1 the 3Dfx engine's, 2 the S3 engine's. The cache is keyed by the texture's data, not by its format (3Dfx 0x10066e70:
+     * entry +8 = the texel pointer; S3 0x1000fff0: surface +0 = it), so a texture holds the reading of the first polygon
+     * that draws it (texture.upfmt) - the engines draw a frame's polygons farthest first (0x1002b9b0 key = the deepest
+     * corner, quicksort 0x10029ff0), so in the first frame that shows the texture the farthest visible polygon decides.
+     * 3Dfx: an alpha-flag polygon on a 128 x 128 CEL with id 1..0x51b reads mw2.mip instead (0x1002c880 -> 0x100669f0, its
+     * own cache entry, ARGB4444) */
+    int   tex_cache;
 } glr_view;
 
 /* Requires a current GL 3.3 core context. Returns NULL on failure (shader

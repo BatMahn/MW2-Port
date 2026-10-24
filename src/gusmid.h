@@ -2,9 +2,11 @@
  * gusmid.h - XMIDI music played through Gravis UltraSound patches, as MW2's Miles driver
  * ULTRA.MDI does: ULTRAMID.INI maps each GM program (drums: 128 + note) to a patch for the
  * card's memory size (1024K column by default); patches load from <dir>/MIDI/<name>.pat.
- * Voices emulate the GF1: six-point envelope (rate = 6-bit increment, 2-bit range: every
- * 1/8/64/512 frames), 12-bit logarithmic volume, sample loops, per-sample pitch ranges; the driver's
- * volume curve, sustain / release rules, vibrato (timer LFO) and tremolo (looping volume ramp) - see gusmid.c.
+ * Voices emulate the GF1 as the driver programs it: the frequency control register in the driver's integers,
+ * volume ramps (rate = 6-bit increment, 2-bit range: every 1/8/64/512 frames) with their end interrupts driving the
+ * six-point envelope, 12-bit logarithmic volume, sample loops, per-sample pitch ranges; the driver's volume curve,
+ * sustain / release / volume-change rules, pitch bend with RPN 0, vibrato (timer LFO) and tremolo (looping volume
+ * ramp) - see gusmid.c.
  */
 #ifndef MW2_GUSMID_H
 #define MW2_GUSMID_H

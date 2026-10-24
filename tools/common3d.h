@@ -62,6 +62,8 @@ static texture *c3d_texture(prj_archive *texs, int ati, const char *name, int al
     }
     if (prj_read_named(texs, "CEL", name, &r) != PRJ_OK) { free(t); return NULL; }
     if (tex_decode(r.data, r.size, enc, t) != 0) { free(t); t = NULL; }
+    else if (c3d_ti && t->alt) { free(t->alt); t->alt = NULL; }   /* (the TEXTURES TITANIUM looks: one reading, as before) */
+    if (t) t->cel = r.id;   /* (the 3Dfx mw2.mip index, glr_view.tex_cache) */
     prj_record_free(&r);
     return t;
 }
@@ -76,6 +78,19 @@ static void c3d_free_scene(c3d_scene *s)
         if (s->bank0[i]) { tex_free(s->bank0[i]); free(s->bank0[i]); s->bank0[i] = NULL; }
         for (k = 1; k < BWD_TEXMAP_FRAMES; k++) if (s->fr[i][k]) { tex_free(s->fr[i][k]); free(s->fr[i][k]); s->fr[i][k] = NULL; }
         s->nfr[i] = 0;
+    }
+}
+
+/* the S3 engine's texture cache forgets the readings it holds (texture.upfmt): a palette reload (0x1003ec90 -> 0x1000f870
+ * snapshots the use counter 0x1006225c into 0x10062260; 0x10010170 uploads again, in the drawing polygon's format, any
+ * texture last used before it) */
+static void c3d_texture_cache_reset(c3d_scene *s)
+{
+    int i, k;
+    for (i = 0; i < GLR_SLOTS; i++) {
+        if (s->slot[i]) s->slot[i]->upfmt = 0;
+        if (s->bank0[i]) s->bank0[i]->upfmt = 0;
+        for (k = 1; k < BWD_TEXMAP_FRAMES; k++) if (s->fr[i][k]) s->fr[i][k]->upfmt = 0;
     }
 }
 

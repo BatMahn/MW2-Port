@@ -56,18 +56,29 @@ VARIANT (DOSBox: each starts at its x). Every screen's loop also calls the globa
 - ULTRA.MDI (Miles GUS driver): ULTRADIR/ULTRASND env, ultrasnd.ini, memory-size column of
   MIDI/ULTRAMID.INI (1024.GUS / 768 / 512 / 256, or CUSTOM.GUS), patches MIDI/<name>.pat.
   src/gusmid.c reproduces this, traced in ULTRA.MDI (ndisasm -b16 offsets): 28 voices -> GF1 frame rate 22050
-  (0x8ca / 0x1bb2 / 0x2041); a voice's 8-bit volume = (master 127 + 64) x T[velocity] x T[volume x expression / 127]
-  / 48705 with the curve T at 0x5196, scaling the envelope offsets in the GF1 log scale (offset x v / 255, at least 5;
-  0x4105, 0x429f, 0x4967); channel volume 100 / expression 127 at start and on CC121 (0x4f0f); sustain pedal >= 24
-  (0x4ec7); the envelope always runs (ramp from 5), holds at the end of stage 2 with the sustain mode, note-off ->
-  stage 3 (sustain mode) / untouched (envelope without it) / stage 5's rate to 5 (no envelope, fast release; 0x4488..);
-  vibrato: GF1 timer 2 (count 187 = 45.29 Hz) ticks a triangle LFO, quarter = 45289 / (4 x (rate x 2334 + 5000) / 100)
-  ticks, deviation (2^(depth / 252) - 1) / 2 of the pitch (table 0x5216), sweep (sweep - n) / sweep, restarted by
-  pitch bend; the modulation wheel sets depth value x 30 / 128 + 2 at rate 200 (0x3933 / 0x3802 / 0x36de); tremolo
-  only at the sustain point: a looping volume ramp of +-((depth + 1) >> 4) 8-bit steps around the sustain level at
-  the rate's LFO frequency (0x3acc / 0x48c2). Not modelled: the FC register's integer rounding of the vibrato, a ramp
-  in progress when the volume changes (the port rescales the level), RPN bend range (fixed 2, the driver's default),
-  the voice playing out its sample after the envelope's end (silent: level 5).
+  (0x8ca / 0x1bb2 / 0x2041); the voices emulate the GF1 registers as the driver programs them. Pitch: the note's
+  frequency in mHz from the table 0x5326 (or the patch's scale note / factor interpolated in it, 0x3c97), the sample
+  whose low..high holds it (the last of a run; none -> no note, 0x4034), FC = ((f << 9 + root / 2) / root << 9 + r / 2)
+  / r with r = (22050 << 9 + rate / 2) / rate, 32-bit integers (0x3c49 / 0x2b47), played as FC / 512 samples a frame;
+  pitch bend multiplies FC by a factor >> 10 and re-writes the sounding notes (0x4c87 / 0x35e7): range 2, set by data
+  entry (CC6, at most 24) while RPN 101 / 100 are 0 / 0 (their start values, never reset; 0x4dc0). Volume: a voice's
+  8-bit volume = (master 127 + 64) x T[velocity] x T[volume x expression / 127, kept 1..127] / 48705 with the curve T at
+  0x5196, scaling the envelope offsets in the GF1 log scale (offset x v / 255, at least 5; 0x4105, 0x429f, 0x4967);
+  channel volume 100 / expression 127 at start and on CC121 (0x4f0f); sustain pedal >= 24 (0x4ec7). Envelope: ramps
+  from 5, each ramp's end interrupt starts the next stage (0x4787); holds at the end of stage 2 with the sustain mode;
+  after stage 5 the level stays and the sample's loop is switched off - it plays on to its end (0x4804; the drum
+  patches, envelope without sustain at 246, sound their whole sample); note-off -> stage 3 (sustain mode) / untouched
+  (envelope without it) / stage 5's rate to 5 and the loop off (no envelope; fast release: the rate only; 0x4488..). A
+  volume change (CC7 / CC11, 0x3260) stops the running ramp, puts its progress (level - start) / (target - start) on the
+  stage's new start..target and ramps there from the current level at rate 0x43 (down always, up only until stage 3),
+  then the stage goes on at its own rate. Vibrato: GF1 timer 2 (count 187 = 45.29 Hz) ticks a triangle LFO, quarter =
+  45289 / (4 x (rate x 2334 + 5000) / 100) ticks, peak deviation ((ratio x FC >> 10) - FC) >> 1 FC units (ratio
+  2^(depth / 252) x 1024 in table 0x5216), each tick writing FC + dev x n / quarter, the sweep (sweep - n) / sweep,
+  restarted by pitch bend; the modulation wheel sets depth value x 30 / 128 + 2 at rate 200 (0x3933 / 0x3802 / 0x36de);
+  tremolo only at the sustain point: a looping volume ramp of +-((depth + 1) >> 4) 8-bit steps around the sustain level
+  at the rate's LFO frequency (0x3acc / 0x48c2). GF1 hardware INFERRED (as DOSBox's emulation): the ramp rate byte's
+  6-bit increment every 1 / 8 / 64 / 512 frames on the 12-bit volume, a ramp stopping at its bound, the 12-bit
+  volume-to-amplitude curve.
 
 ## Instant Action - "Trials of Grievance" (screen 7, FUN_00029680)
 Background entry 8. Videos: friendly clan emblem (13,205), enemy (483,329) - clans WIAWOLF, WIAJF,

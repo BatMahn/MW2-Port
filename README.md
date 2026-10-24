@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-20)
+## Status (2026-10-23, v0.4.12)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 
@@ -12,17 +12,21 @@ a Linux tarball, a Fedora RPM and a Windows zip.
   Hall of Honor, the roster and both clans' Archives. The pilot-name easter-egg mechs (Elemental, Tarantula, Battle
   Master IIC) are unlocked everywhere at their real tonnage.
 - **Simulation:** every mission, with AI, mission logic, combat, heat, movement, jump jets, HUD, autopilot and
-  path-driven dropships / convoys. Locked missiles home on the target's centre; destroyed buildings stay destroyed.
+  path-driven dropships / convoys; dropships and gunships fly at their original heights. Locked missiles home on the
+  target's centre; destroyed buildings stay destroyed.
 - **Look:** chosen in Combat Variables with two settings. RENDERER: ENHANCED (the default: 3Dfx look + PowerVR fog), DOS,
   3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE or RENDITION (the Titanium disc's Rendition Verite renderer; needs the Titanium files). TEXTURES: ORIGINAL (each renderer's own textures, sky and
-  ground) or TITANIUM (with the Titanium disc's files, its own models and lighting).
+  ground) or TITANIUM (with the Titanium disc's files, its own models and lighting). Each look follows its own edition's
+  code: the DOS look's cockpit and HUD match DOSBox pixel for pixel; the 3D looks draw, filter and light their textures
+  as their editions did (the Rendition look from the code only - no hardware to compare with).
 - **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
-  MT-32 emulator or Gravis UltraSound patches.
-- **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling.
+  MT-32 emulator or Gravis UltraSound patches (the GUS synth follows the original ULTRA.MDI driver).
+- **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
+  every view control as in the original.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 240 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 250 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build

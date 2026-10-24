@@ -128,11 +128,16 @@ int tex_decode(const uint8_t *d, size_t len, int enc, texture *t)
     if (!n || n * 2 > len - hdr) return -1;
     t->rgba = malloc(n * sizeof *t->rgba);
     if (!t->rgba) return -1;
+    if (enc == TEX_3DFX_555 || enc == TEX_3DFX_4444) {   /* (the other reading, see tex.h; none if out of memory) */
+        t->alt = malloc(n * sizeof *t->alt);
+        t->alt4444 = enc == TEX_3DFX_555;
+    }
     for (y = 0; y < t->h; y++) {
         for (x = 0; x < t->w; x++) {
             size_t src = enc == TEX_PVR ? twiddle((unsigned)x, (unsigned)y) : (size_t)y * (size_t)t->w + (size_t)x;
             unsigned p = rd16(d + hdr + src * 2);
             uint32_t c;
+            if (t->alt) t->a1555 += (int)(p >> 15);
             switch (enc) {
             case TEX_ATI:
                 c = pack(x5((p >> 10) & 31), x5((p >> 5) & 31), x5(p & 31), (p >> 15) ? 255 : 0);
@@ -150,6 +155,9 @@ int tex_decode(const uint8_t *d, size_t len, int enc, texture *t)
                 break;
             }
             t->rgba[(size_t)y * (size_t)t->w + (size_t)x] = c;
+            if (t->alt) t->alt[(size_t)y * (size_t)t->w + (size_t)x] = enc == TEX_3DFX_555
+                ? pack(x4((p >> 8) & 15), x4((p >> 4) & 15), x4(p & 15), x4((p >> 12) & 15))
+                : pack(x5((p >> 10) & 31), x5((p >> 5) & 31), x5(p & 31), 255);
         }
     }
     (void)i;
@@ -159,5 +167,6 @@ int tex_decode(const uint8_t *d, size_t len, int enc, texture *t)
 void tex_free(texture *t)
 {
     free(t->rgba);
-    t->rgba = NULL;
+    free(t->alt);
+    t->rgba = t->alt = NULL;
 }

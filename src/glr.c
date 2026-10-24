@@ -42,6 +42,14 @@ typedef struct {
     float   nrm[3], v0[3];   /* kinds 1 / 2: the polygon's normal and corner 0 in the model's frame (game coordinates) */
 } glr_tipoly;
 
+/* A bank-1 polygon of a texture with two readings (texture.alt), for the 3Dfx / S3 texture cache (glr_view.tex_cache,
+ * tex_cache_decide): its corners in GL coordinates, the engine's normal (the stored one negated, 0x10042140), its
+ * object's bounding sphere */
+typedef struct {
+    float   c[WTB_MAX_POLY_VERTS][3], nrm[3], sph[4];
+    uint8_t n, slot, apoly, cls, has_nrm;
+} glr_fpoly;
+
 typedef struct {
     GLuint  vao, vbo;
     GLuint  tbo;       /* the DOS look: vbo as a buffer texture (R32F), so a Gouraud fragment can read its whole polygon */
@@ -50,12 +58,15 @@ typedef struct {
                         * colour (a palette shade), 3 kind 2: the colour, drawn only with its textures off) */
     GLint   batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
     GLsizei batch_count[GLR_BATCHES];
+    GLsizei batch_acount[GLR_SLOTS];    /* of a slot's count: its alpha-flag polygons, last (the ARGB4444 reading, tex_a) */
     GLsizei vertex_count;
     float      *tic;       /* vertex_count x 4: what tic_vbo holds */
     float      *tipn;      /* vertex_count x 6: the GL position and the normal the lights use (lit polygons) */
     float      *tistat;    /* vertex_count x 3: the static lights' colour (lit polygons) */
     glr_tipoly *tip;
     int         tip_n, tic_static_ok, tic_dyn;
+    glr_fpoly  *fp;        /* tex_cache_decide's polygons */
+    int         fp_n;
     float       tic_key[24];   /* the static lights tistat was made with */
 } glr_layer;
 
@@ -71,6 +82,14 @@ struct glr {
     int    tex_w[GLR_SLOTS * 4], tex_h[GLR_SLOTS * 4], has_tex[GLR_SLOTS * 4];
     const texture *tex_src[GLR_SLOTS * 4];  /* skip re-uploading the same texture */
     const texture *slot_frame[GLR_SLOTS];   /* glr_slot_frame: the current frame of an animated slot (NULL: the slot's own) */
+    /* the 3Dfx / S3 textures (texture.alt): a bank-1 slot's ARGB4444 reading for its polygons with the alpha flag (types
+     * 8-11; tex[] holds the ARGB1555 one) - the engines read a texture by the flag of the polygon that uploads it (3Dfx
+     * 0x10066a30, S3 0x10010170). A slot drawn both ways keeps, in the engines, whichever came first (3Dfx 0x10066e70
+     * finds the texture by its data; S3 0x1000fff0): glr_view.tex_cache, tex_cache_decide, texture.upfmt */
+    GLuint tex_a[GLR_SLOTS];
+    const texture *tex_asrc[GLR_SLOTS];
+    const uint32_t *tex_buf[GLR_SLOTS];     /* the reading in tex[] (rgba or alt) */
+    int    has_a[GLR_SLOTS];
     texture *const *ti_slots;               /* glr_set_titanium (the caller's array), NULL off */
     int    ti_camo[8];
     texture *const *ti_bank0;               /* glr_set_titanium_extra: the Titanium bank-0 bitmaps (billboards) */
@@ -333,8 +352,8 @@ static const char *FS =
     "noperspective in vec2 v_gs;\n"
     "noperspective in float v_tivf;\n"
     "uniform float u_alpha; uniform int u_mga_lod;\n"
-    /* the ATi Rage edition (glr_view.ati_tex): a bank-1 textured polygon's bits in -v_texsel above its texture switch
-     * class (set_layer): 4 affine, 8 no alpha mask, 16 colour types 5-11 */
+    /* the 3D engines' texturing per colour type (glr_view.ati_tex, bits 1 / 2 / 4): a bank-1 textured polygon's bits in
+     * -v_texsel above its texture switch class (set_layer): 4 affine, 8 no alpha mask, 16 colour types 5-11 */
     "noperspective in vec2 v_uvl; uniform int u_ati;\n"
     /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), z 1 = per vertex
      * (v_tivf, RENDITION) else per pixel, w the camera's factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
@@ -511,13 +530,16 @@ static const char *FS =
      * object class (-v_texsel: 1 OBJECT, 2 TERRAIN) is switched off is drawn in its texture's average colour (v_color) */
     "  if (u_textured != 0 && u_mono.a <= 0.0 && (v_texsel >= 0 || ((-v_texsel) & u_notex) == 0)) {\n"
     "    vec4 t; int af = u_ati != 0 && v_texsel < 0 ? -v_texsel : 0;\n"
-    /* ATi (0x1002dcb0): an affine polygon - q = 1 at every vertex (0x1002def4 / 0x1002df03) or C3D_ERS_TMAP_PERSP_COR 0
-     * (0x100686b0) - takes its texel uv screen-linear; DISPLAY DETAIL low (u_ati 2: 0x1018a84c = 1) every type 5-11 */
-    "    vec2 uv = (af & 4) != 0 || (u_ati == 2 && (af & 16) != 0) ? v_uvl : v_uv;\n"
+    /* (u_ati bit 1) an affine polygon - q = 1 at every vertex (3Dfx 0x1002c880 / S3 0x1001da40 / Matrox 0x1005104c: oow
+     * 1.0; ATi 0x1002def4 / 0x1002df03) or C3D_ERS_TMAP_PERSP_COR 0 (ATi 0x100686b0) - takes its texel uv screen-linear;
+     * (bit 2) DISPLAY DETAIL low (3Dfx 0x1024e224 / S3 0x10061fc4 / Matrox 0x100adecc / ATi 0x1018a84c = 1) every type 5-11 */
+    "    vec2 uv = ((u_ati & 1) != 0 && (af & 4) != 0) || ((u_ati & 2) != 0 && (af & 16) != 0) ? v_uvl : v_uv;\n"
     "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
     "    else t = texture(u_tex, uv / u_texsize);\n"
-    /* ATi types 5-7: C3D_ERS_TMAP_TEXOP none - the alpha-0 texels drawn in their own colour, not masked */
-    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && (af & 8) == 0) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
+    /* (u_ati bit 4) types 5-7 and the sky / ground fills drawn without the alpha flag: no alpha test / key - the alpha-0
+     * texels in their own colour (ATi C3D_ERS_TMAP_TEXOP none; 3Dfx 0x10067240 / 0x100674c0 blend only with flag 2;
+     * Matrox 0x100624a0 keys only with it, 0x1006256a) */
+    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && ((af & 8) == 0 || (u_ati & 4) == 0)) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
     /* an untextured polygon's palette colour toward the fade's target palette (its index + 1 in v_texsel) */
     "  else if (u_pfade > 0.0 && v_texsel > 0 && v_bb == 0) base = mix(base, texture(u_ptab, vec2((float(v_texsel - 1) + 0.5) / 256.0, 0.5)).rgb, u_pfade);\n"
     "  float n = length(v_normal);\n"
@@ -604,6 +626,7 @@ glr *glr_create(void)
         }
     }
     glGenTextures(GLR_SLOTS * 4, r->tex);
+    glGenTextures(GLR_SLOTS, r->tex_a);
     glGenVertexArrays(1, &r->env_vao);
     glGenBuffers(1, &r->env_vbo);
     glGenTextures(2, r->env_tex);
@@ -670,6 +693,7 @@ void glr_destroy(glr *r)
 {
     if (!r) return;
     glDeleteTextures(GLR_SLOTS * 4, r->tex);
+    glDeleteTextures(GLR_SLOTS, r->tex_a);
     glDeleteTextures(2, r->env_tex);
     glDeleteTextures(1, &r->dos_tex);
     glDeleteTextures(1, &r->ptab_tex);
@@ -691,7 +715,7 @@ void glr_destroy(glr *r)
             glDeleteTextures(1, &r->layer[l].tbo);
             glDeleteBuffers(1, &r->layer[l].sph_vbo);
             glDeleteBuffers(1, &r->layer[l].tic_vbo);
-            free(r->layer[l].tic); free(r->layer[l].tipn); free(r->layer[l].tistat); free(r->layer[l].tip);
+            free(r->layer[l].tic); free(r->layer[l].tipn); free(r->layer[l].tistat); free(r->layer[l].tip); free(r->layer[l].fp);
             glDeleteVertexArrays(1, &r->layer[l].vao);
         }
     }
@@ -704,29 +728,49 @@ static float aval[GLR_SLOTS][3];
 void glr_flush_textures(glr *r)
 {
     memset(asrc, 0, sizeof asrc);
-    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); memset(r->spr_src, 0, sizeof r->spr_src); memset(r->slot_frame, 0, sizeof r->slot_frame); }
+    if (r) { memset(r->tex_src, 0, sizeof r->tex_src); memset(r->tex_w, 0, sizeof r->tex_w); memset(r->spr_src, 0, sizeof r->spr_src); memset(r->slot_frame, 0, sizeof r->slot_frame);
+             memset(r->tex_asrc, 0, sizeof r->tex_asrc); memset(r->has_a, 0, sizeof r->has_a); }
 }
 
 static int g_billboards;   /* TEST ONLY: colour type 3 billboards in the last static (world) layer */
 
 static void upload_texture(glr *r, int slot, const texture *t);
+static void upload_alpha_reading(glr *r, int slot, const texture *t);
 void glr_slot_frame(glr *r, int slot, const texture *t)
 {
     if (!r || slot < 0 || slot >= GLR_SLOTS || r->slot_frame[slot] == t) return;
     r->slot_frame[slot] = t;
     if (t && r->has_tex[slot]) upload_texture(r, slot, t);   /* a slot the layers draw with */
+    if (t && r->has_a[slot]) upload_alpha_reading(r, slot, t);
+}
+
+/* a 3Dfx / S3 bank-1 slot's ARGB4444 reading (tex_a; texture.alt) for its polygons with the alpha flag */
+static void upload_alpha_reading(glr *r, int slot, const texture *t)
+{
+    r->has_a[slot] = t && t->alt;
+    if (!r->has_a[slot] || r->tex_asrc[slot] == t) return;
+    r->tex_asrc[slot] = t;
+    glBindTexture(GL_TEXTURE_2D, r->tex_a[slot]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->alt4444 ? t->alt : t->rgba);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
 static void upload_texture(glr *r, int slot, const texture *t)
 {
+    /* a 3Dfx / S3 bank-1 texture: tex[] its ARGB1555 reading, for the polygons without the alpha flag (texture.alt) */
+    const uint32_t *px = !t ? NULL : slot < GLR_SLOTS && t->alt && !t->alt4444 ? t->alt : t->rgba;
     r->has_tex[slot] = t != NULL;
-    if (!t || (r->tex_src[slot] == t && r->tex_w[slot] == t->w)) return;
+    if (!t || (r->tex_src[slot] == t && r->tex_w[slot] == t->w && (slot >= GLR_SLOTS || r->tex_buf[slot] == px))) return;
     r->tex_src[slot] = t;
+    if (slot < GLR_SLOTS) r->tex_buf[slot] = px;
     r->tex_w[slot] = t->w;
     r->tex_h[slot] = t->h;
     glBindTexture(GL_TEXTURE_2D, r->tex[slot]);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
     glGenerateMipmap(GL_TEXTURE_2D);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
@@ -856,12 +900,17 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                      texture *const slots[GLR_SLOTS], int camo, int clan, int bounds)
 {
     const int ti_world_normals = getenv("MW2_TEST_TI_WORLDN") != NULL;   /* TEST ONLY: turn them as the 3D editions do */
+    const int test_lit8 = getenv("MW2_TEST_LIT_8") != NULL;   /* TEST ONLY: colour type 8 lit (the port before) */
     glr_layer *L = &r->layer[li];
     size_t cap = 0, n = 0, *count, *pos;
     float *buf = NULL, *sph = NULL, *tic = NULL, *tipn = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     glr_tipoly *tip = NULL;
-    int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0, pit_o = -1;
+    glr_fpoly *fp = NULL;
+    int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0, pit_o = -1, apoly, fp_n = 0, fp_cap = 0;
+    size_t acount[GLR_SLOTS], apos[GLR_SLOTS];
 
+    memset(acount, 0, sizeof acount);
+    memset(apos, 0, sizeof apos);
     for (pi = 0; pi < m->part_count; pi++) {
         const wtb_model *pm = r->ti_slots && m->parts[pi].ti_model ? m->parts[pi].ti_model : &m->parts[pi].model;
         const wtb_object *o;
@@ -883,7 +932,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     for (pass = 0; pass < 2; pass++) {
         if (pass == 1) {
             size_t acc = 0;
-            for (b = 0; b < GLR_BATCHES; b++) { pos[b] = acc; acc += count[b]; }
+            for (b = 0; b < GLR_BATCHES; b++) { pos[b] = acc; acc += count[b]; if (b < GLR_SLOTS) apos[b] = acc - acount[b]; }
             if (li == 1) r->pit_n = 0;
         }
         for (pi = 0; pi < m->part_count; pi++) {
@@ -926,8 +975,14 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
                 /* the 3D editions' colour words 0x8000-0xb000 (engine 0x10026e80) are textured polygons of slot 0x100 + the
-                 * low byte (0x1002c880; bank 1, the surface slots) - 0xb000 unlit (light 0x80000000) - not the type 3
-                 * billboard: the scrub records' ground patches (TNW1SCR1 0xbc38 V1_PLAIN, RUSTSCR1 / SABLSCR1 0xbc39) */
+                 * low byte (0x1002c880; bank 1, the surface slots) - not the type 3 billboard: the scrub records' ground
+                 * patches (TNW1SCR1 0xbc38 V1_PLAIN, RUSTSCR1 / SABLSCR1 0xbc39). Unlit (edge code + 512 below): 0xb000
+                 * (light 0x80000000) and 0x8000 (light 0xf with the perspective argument 0: 0x1002c880 lights a polygon only
+                 * when that argument is set or the light is 0..14, never 0x80000000 - colour 255 otherwise); the same
+                 * rule in the S3 (0x1001da40: 0x1001dd34..0x1001dd68), ATi (0x1002dcb0: 0x1002dfa1..0x1002dfd0) and
+                 * Matrox (0x1005104c: 0x10051417..0x10051473) engines; PowerVR's colour classifier (0x100619a0) gives
+                 * 0x8000 / 0xb000 the unlit material too. Type 7 with light 0xf would be unlit as well (not PowerVR):
+                 * no 3D archive has one (the DOS archive's 0x7fxx are DOS-only; DOS lights every 5-7, MW2.EXE 0x38ae3) */
                 const int hi_card = model->extended && !ti && (q->color & 0x8000) != 0;
                 if (((q->color >> 12) & 7) == 3 && !hi_card && !part->shadow) {
                     /* colour type 3 (0x3240 ...): a billboard of bank-0 bitmap (w >> 4) & 0xff (engine 0x10026fc7 ->
@@ -1051,7 +1106,11 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 /* colour slot 0xf0: a plain palette colour (colour >> 8), never textured - the cockpit frames' (repr 4) and
                  * many low-detail polygons use it with every kind of material, never with the textured hull material
                  * (0x98); the mission maps' own texture in slot 0xf0 (a clan crest) is not meant for them */
-                if (pass == 0) { count[batch] += (size_t)(q->n - 2) * 3; continue; }
+                /* a bank-1 polygon with the alpha flag (types 8-11, 0x10026e80): at the batch's end (acount), drawn with
+                 * the slot's ARGB4444 reading (tex_a) */
+                apoly = batch < GLR_SLOTS && model->extended && !ti && ((q->color >> 12) & 15) >= 8 && ((q->color >> 12) & 15) <= 11;
+                if (pass == 0) { count[batch] += (size_t)(q->n - 2) * 3; if (apoly) acount[batch] += (size_t)(q->n - 2) * 3; continue; }
+                if (apoly) { size_t sw = pos[batch]; pos[batch] = apos[batch]; apos[batch] = sw; }   /* (swapped back below) */
                 v0 = &o->verts[q->idx[0]]; v1 = &o->verts[q->idx[1]]; v2 = &o->verts[q->idx[2]];
                 if (r->dos && !model->extended && q->n > 3) {   /* DOS: the normal's corners (dos_normal_corners) */
                     int na, nb, nc;
@@ -1257,7 +1316,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                              * 0x1002bc60 -> 0x10068830 (C3D_ERS_TMAP_PERSP_COR 3), 0 for 7, 8 -> 0x100686b0 (PERSP_COR 0);
                              * types 6 / 10 set 0x1018a84c around the call, which gives every vertex q = 1 (0x1002de4c ->
                              * 0x1002def4); the 6th (alpha) 1 for types 8-11 -> C3D_ERS_TMAP_TEXOP 3 (alpha mask), else 0
-                             * (none). Bits above the switch class (only the ATi look reads them, the shader's u_ati): 4
+                             * (none). Bits above the switch class (the 3D looks read them: the shader's u_ati): 4
                              * affine, 8 no alpha mask, 16 a type 5-11 polygon */
                             const int ty = (q->color >> 12) & 15;
                             if (ty >= 5 && ty <= 11)
@@ -1273,7 +1332,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         /* the wireframe's edges: this corner (0-2) + 3 x the polygon's own edges in this fan triangle
                          * (bit 0: corner 1 - 2, always; bit 1: corner 2 - 0 when it closes the polygon; bit 2: corner 0 - 1
                          * when it starts it), so the triangulation's diagonals are not drawn (DOS draws polygon outlines) */
-                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && (q->color >> 12) == 0xb) ? 512 : 0) + 2048 * dnib + (pit_o >= 0 ? 65536 * (pit_o + 1) : 0));   /* (+ 512: unlit; + 65536 x (1 + n): the DOS cockpit set's polygon n) */
+                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && ((q->color >> 12) == 0xb || ((q->color >> 12) == 0x8 && !test_lit8))) ? 512 : 0) + 2048 * dnib + (pit_o >= 0 ? 65536 * (pit_o + 1) : 0));   /* (+ 512: unlit; + 65536 x (1 + n): the DOS cockpit set's polygon n) */
                         for (c = 0; c < 3; c++) {
                             if (f[c] < mn[c]) mn[c] = f[c];
                             if (f[c] > mx[c]) mx[c] = f[c];
@@ -1282,12 +1341,47 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         n++;
                     }
                 }
+                if (batch < GLR_SLOTS && model->extended && !ti && slots[batch]->alt && q->n <= WTB_MAX_POLY_VERTS) {
+                    /* (the texture cache's polygons: tex_cache_decide) */
+                    glr_fpoly *g;
+                    if (fp_n == fp_cap) { g = realloc(fp, (size_t)(fp_cap = fp_cap ? 2 * fp_cap : 256) * sizeof *fp); if (!g) goto no_fp; fp = g; }
+                    g = &fp[fp_n++];
+                    g->n = (uint8_t)q->n; g->slot = (uint8_t)batch; g->apoly = (uint8_t)apoly; g->cls = (uint8_t)notex_cls;
+                    for (j = 0; j < q->n; j++) {   /* (the fan's corners, as ti_corner_vertex) */
+                        size_t vi = j == 0 ? pfirst : j <= q->n - 2 ? pfirst + 3 * (size_t)(j - 1) + 1 : pfirst + 3 * (size_t)(q->n - 3) + 2;
+                        memcpy(g->c[j], buf + vi * FLOATS_PER_VERTEX, 3 * sizeof(float));
+                    }
+                    memcpy(g->sph, psph, sizeof psph);
+                    g->has_nrm = 1;
+                    if (q->has_normal) {   /* the stored normal negated (0x10042140), turned as the part, GL z negated */
+                        const float nx = -q->normal[0], ny = -q->normal[1], nz = -q->normal[2];
+                        if (part->has_rot) {
+                            const float *R = part->rot;
+                            g->nrm[0] = R[0] * nx + R[1] * ny + R[2] * nz;
+                            g->nrm[1] = R[3] * nx + R[4] * ny + R[5] * nz;
+                            g->nrm[2] = -(R[6] * nx + R[7] * ny + R[8] * nz);
+                        } else {
+                            float cy = cosf(part->yaw * 3.14159265f / 180.0f), sy = sinf(part->yaw * 3.14159265f / 180.0f);
+                            g->nrm[0] = cy * nx + sy * nz;
+                            g->nrm[1] = ny;
+                            g->nrm[2] = -(-sy * nx + cy * nz);
+                        }
+                    } else {   /* none: the winding's (msim eng_poly_normal), in GL coordinates the corners' own cross */
+                        float u[3], w2[3];
+                        for (j = 0; j < 3; j++) { u[j] = g->c[1][j] - g->c[0][j]; w2[j] = g->c[2][j] - g->c[0][j]; }
+                        g->nrm[0] = u[1] * w2[2] - u[2] * w2[1]; g->nrm[1] = u[2] * w2[0] - u[0] * w2[2]; g->nrm[2] = u[0] * w2[1] - u[1] * w2[0];
+                        g->has_nrm = g->nrm[0] != 0 || g->nrm[1] != 0 || g->nrm[2] != 0;
+                    }
+                }
+                no_fp:
+                if (apoly) { size_t sw = pos[batch]; pos[batch] = apos[batch]; apos[batch] = sw; }
             }
         }
     }
     for (b = 0; b < GLR_BATCHES; b++) {
         L->batch_count[b] = (GLsizei)count[b];
-        L->batch_first[b] = (GLint)(pos[b] - count[b]);
+        L->batch_first[b] = (GLint)(pos[b] + (b < GLR_SLOTS ? acount[b] : 0) - count[b]);
+        if (b < GLR_SLOTS) L->batch_acount[b] = (GLsizei)acount[b];
     }
     if (bounds && n > 0) {
         for (a = 0; a < 3; a++) r->center[a] = (mn[a] + mx[a]) / 2;
@@ -1320,14 +1414,17 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *tic), tic, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(7);
     glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
-    free(L->tic); free(L->tipn); free(L->tistat); free(L->tip);
+    free(L->tic); free(L->tipn); free(L->tistat); free(L->tip); free(L->fp);
     L->tic = tic; L->tipn = tipn; L->tistat = NULL; L->tip = tip; L->tip_n = tip_n;
+    L->fp = fp; L->fp_n = fp_n; fp = NULL;
     L->tic_static_ok = 0; L->tic_dyn = 1;
     tic = tipn = NULL; tip = NULL;
     glBindVertexArray(0);
     L->vertex_count = (GLsizei)n;
     for (b = 0; b < GLR_SLOTS; b++)
         if (L->batch_count[b] > 0) upload_texture(r, b, r->slot_frame[b] && slots[b] ? r->slot_frame[b] : slots[b]);
+    for (b = 0; b < GLR_SLOTS; b++)
+        if (L->batch_acount[b] > 0) upload_alpha_reading(r, b, r->slot_frame[b] && slots[b] ? r->slot_frame[b] : slots[b]);
     for (b = 0; b < GLR_SLOTS; b++)
         if (L->batch_count[GLR_B0 + b] > 0) upload_texture(r, GLR_SLOTS + b, r->bank0 ? r->bank0[b] : NULL);
     for (b = 0; b < GLR_SLOTS; b++)
@@ -1338,7 +1435,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         g_billboards = 0;
         for (b = 0; b < GLR_SLOTS; b++) g_billboards += (int)L->batch_count[GLR_B0 + b] / 6;
     }
-    free(buf); free(sph); free(count); free(pos); free(tic); free(tipn); free(tip);
+    free(buf); free(sph); free(count); free(pos); free(tic); free(tipn); free(tip); free(fp);
     return 0;
 }
 
@@ -1974,6 +2071,86 @@ static void dos_pit_ranks(const glr *r, const int64_t R[3][3], const float eye_g
     for (k = 0; k < nl; k++) ranks[id[k]] = k;
 }
 
+/* 3Dfx: an alpha-flag polygon on this texture reads mw2.mip (0x1002c880 -> 0x100669f0): the engine fills the file at its
+ * first run (0x1002cfd0 -> 0x10066c70) with every 128 x 128 CEL of ids 1..0x51b, as ARGB4444 (0x10066b90 sets the flag
+ * 0x10265710) - its own cache entry (key = the mw2.mip index entry, 0x10066a30) */
+static int tex_mip(const glr_view *v, const texture *t)
+{
+    return v->tex_cache == 1 && t && t->w == 128 && t->h == 128 && t->cel >= 1 && t->cel < 0x51c;
+}
+
+/* The 3Dfx / S3 texture cache (glr_view.tex_cache): a texture not yet in it (upfmt 0) takes the reading of the first
+ * polygon drawn with it. The engines draw a frame's polygons farthest first - each one that is front-facing ((corner 0 -
+ * eye) . normal < 0, 0x1002b9b0), not wholly outside a screen edge or the near / far planes, its object not culled by
+ * the view distance (0x1002fba0) - keyed by its deepest corner (0x1002b9b0: the node flag word is always 0x8000, so
+ * never the mean / nearest keys) and sorted by 0x10029ff0. So among the texture's visible polygons in this frame the one
+ * with the deepest corner decides: flag 2 (types 8-11) ARGB4444, else ARGB1555 (0x10066e70 -> 0x10066a30; S3
+ * 0x10010170 -> 0x1000fb20). A 3Dfx alpha polygon on a mw2.mip texture is not in this entry (tex_mip). Textures switched
+ * off (Combat Variables) are not drawn by 0x1002c880: no upload */
+static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], const float mvp[16], const float eye[3])
+{
+    float key[GLR_SLOTS];
+    int8_t ap[GLR_SLOTS];
+    int li, i, s, k, c, any = 0;
+    const int notex = (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0);
+    for (s = 0; s < GLR_SLOTS; s++) {
+        texture *t = (texture *)r->tex_src[s];
+        ap[s] = -1;
+        key[s] = -1e30f;
+        if (!t || !t->alt || t->upfmt) continue;
+        /* one cache entry per CEL (the key is its data, 0x10066e70): slots with the same CEL (0x100 / 0x104 ...) share it */
+        for (k = 0; k < GLR_SLOTS && t->cel > 0; k++)
+            if (r->tex_src[k] && r->tex_src[k]->cel == t->cel && r->tex_src[k]->alt && r->tex_src[k]->upfmt) { t->upfmt = r->tex_src[k]->upfmt; break; }
+        if (!t->upfmt) any = 1;
+    }
+    if (!any) return;
+    for (li = 0; li < GLR_LAYERS; li++) {
+        const glr_layer *L = &r->layer[li];
+        if (v->solo && li == 0) continue;
+        for (i = 0; i < L->fp_n; i++) {
+            const glr_fpoly *g = &L->fp[i];
+            const texture *t = r->tex_src[g->slot];
+            float d = -1e30f, cz[WTB_MAX_POLY_VERTS], clip[WTB_MAX_POLY_VERTS][4];
+            int out;
+            if (!t || !t->alt || t->upfmt || (g->cls & notex) || L->batch_count[g->slot] <= 0) continue;
+            if (g->apoly && tex_mip(v, t)) continue;
+            if (g->has_nrm && (g->c[0][0] - eye[0]) * g->nrm[0] + (g->c[0][1] - eye[1]) * g->nrm[1] + (g->c[0][2] - eye[2]) * g->nrm[2] >= 0) continue;
+            if (v->far_cull > 0 && g->sph[3] > 0) {   /* (the shader's view-distance cull) */
+                float sc[3];
+                for (c = 0; c < 3; c++) sc[c] = view[c] * g->sph[0] + view[4 + c] * g->sph[1] + view[8 + c] * g->sph[2] + view[12 + c];
+                if (sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2] > (v->far_cull + g->sph[3]) * (v->far_cull + g->sph[3]) || -sc[2] - g->sph[3] > v->far_cull) continue;
+            }
+            for (k = 0; k < g->n; k++) {
+                cz[k] = -(view[2] * g->c[k][0] + view[6] * g->c[k][1] + view[10] * g->c[k][2] + view[14]);
+                for (c = 0; c < 4; c++) clip[k][c] = mvp[c] * g->c[k][0] + mvp[4 + c] * g->c[k][1] + mvp[8 + c] * g->c[k][2] + mvp[12 + c];
+                if (cz[k] > d) d = cz[k];
+            }
+            out = 0x7f;   /* the sides every corner is outside of */
+            for (k = 0; k < g->n; k++) {
+                const float *q = clip[k];
+                out &= (q[0] < -q[3] ? 1 : 0) | (q[0] > q[3] ? 2 : 0) | (q[1] < -q[3] ? 4 : 0) | (q[1] > q[3] ? 8 : 0) | (q[2] < -q[3] ? 16 : 0)
+                     | (v->far_cull > 0 && cz[k] > v->far_cull ? 32 : 0);
+            }
+            if (out) continue;
+            /* (equal keys - an object drawn twice in place, S_BFLAGQ type 7 / S_BFLAGB type 9 at TRNJAREA / TRNWAREA: the
+             * order the quicksort leaves them in depends on the whole frame's list - ASSUMED the copy without the flag) */
+            if (d > key[g->slot] || (d == key[g->slot] && !g->apoly)) { key[g->slot] = d; ap[g->slot] = (int8_t)g->apoly; }
+        }
+    }
+    for (s = 0; s < GLR_SLOTS; s++)   /* (the slots of one CEL: its deepest polygon) */
+        for (k = s + 1; k < GLR_SLOTS && r->tex_src[s] && r->tex_src[s]->cel > 0; k++)
+            if (r->tex_src[k] && r->tex_src[k]->cel == r->tex_src[s]->cel && ap[k] >= 0
+                && (ap[s] < 0 || key[k] > key[s] || (key[k] == key[s] && !ap[k]))) { key[s] = key[k]; ap[s] = ap[k]; }
+    for (s = 0; s < GLR_SLOTS; s++)   /* (the shared result: the first slot of each CEL carries it, the scan above) */
+        for (k = 0; k < s && r->tex_src[s] && r->tex_src[s]->cel > 0; k++)
+            if (r->tex_src[k] && r->tex_src[k]->cel == r->tex_src[s]->cel && ap[k] >= 0) { key[s] = key[k]; ap[s] = ap[k]; break; }
+    for (s = 0; s < GLR_SLOTS; s++)
+        if (ap[s] >= 0 && r->tex_src[s] && !r->tex_src[s]->upfmt) {
+            ((texture *)r->tex_src[s])->upfmt = ap[s] ? 2 : 1;
+            if (getenv("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, r->tex_src[s]->cel, ap[s] ? "4444" : "1555", key[s]);   /* TEST hook */
+        }
+}
+
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
 {
     float proj[16], view[16], mvp[16], eye[3], L[3], ll, dist;
@@ -2112,7 +2289,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             }
         }
         /* the sky and ground fills draw without the alpha mask in the ATi look (ATi 0x1002e690 / 0x1002e7a0 -> 0x1002bc60
-         * alpha argument 0 -> 0x10068830 C3D_ERS_TMAP_TEXOP none): the ATi bit 8 on vertices 0-35 (u_ati only) */
+         * alpha argument 0 -> 0x10068830 C3D_ERS_TMAP_TEXOP none; 3Dfx 0x1002d460 / 0x1002d590 -> 0x1002d760 with alpha 0, so
+         * 0x100674c0 sets no blend): bit 8 on vertices 0-35 (read with u_ati bit 4) */
         for (q = 0; q < 36; q++) env[q * FLOATS_PER_VERTEX + 11] = -8.0f;
         {   /* the PowerVR fog veil (0x1005ED90): a plane at y 55555.55, world-fixed, here +-64e6 around the eye (vertices 36-41) */
             float vx[4] = {cx - 64e6f, cx + 64e6f, cx + 64e6f, cx - 64e6f}, vz[4] = {cz - 64e6f, cz - 64e6f, cz + 64e6f, cz + 64e6f};
@@ -2359,6 +2537,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     }
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(r->u_tilit, v->ti_light && !r->dos ? 1 : 0);   /* Titanium: the objects' lights (0x1002ecaa) */
+    if (v->tex_cache && !r->dos && !r->ti_slots && v->ortho_w <= 0) tex_cache_decide(r, v, view, mvp, eye);
     for (int li = 0; li < GLR_LAYERS; li++) {
     const glr_layer *L = &r->layer[li];
     if (r->ti_slots && !r->dos) ti_colours(r, li, v, view, eye);   /* the Titanium per-vertex colours */
@@ -2382,7 +2561,35 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         } else {
             glUniform1i(r->u_textured, 0);
         }
-        glDrawArrays(GL_TRIANGLES, L->batch_first[s], L->batch_count[s]);
+        {   /* 3Dfx / S3 (texture.alt): the polygons without the alpha flag in tex[] (ARGB1555), the alpha-flag ones (acount,
+             * last) in tex_a (ARGB4444) - or, with the texture cache (tex_cache_decide), both in the reading the cache holds
+             * (a 3Dfx alpha polygon on a mw2.mip texture: ARGB4444) */
+            const texture *T = s < GLR_SLOTS ? r->tex_src[s] : NULL;
+            const int dec = T && T->alt && v->tex_cache && !r->ti_slots ? T->upfmt : 0;
+            const GLsizei na = s < GLR_SLOTS ? L->batch_count[s] - L->batch_acount[s] : L->batch_count[s];
+            const int use_a0 = dec == 2, use_a1 = s < GLR_SLOTS && L->batch_acount[s] > 0 && (dec != 1 || tex_mip(v, T));
+            if ((use_a0 || use_a1) && !(r->has_a[s] && r->tex_asrc[s] == T)) upload_alpha_reading(r, s, T);
+            if (s < GLR_SLOTS && (use_a0 || (use_a1 && r->has_a[s]) || dec)) {
+                if (na > 0) {
+                    if (use_a0 && r->has_a[s]) {
+                        glBindTexture(GL_TEXTURE_2D, r->tex_a[s]);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+                    }
+                    glDrawArrays(GL_TRIANGLES, L->batch_first[s], na);
+                }
+                /* S3: an alpha-flag polygon on an ARGB1555 surface blends by the texel's bit 15 (0x100107a0: alpha state
+                 * 0x13 = 0x80000 by the polygon's flag, not the surface's format - the texture's alpha, INFERRED from the
+                 * ViRGE command bits) - none set: nothing drawn (otherwise drawn whole, the bit not modelled). 3Dfx: drawn
+                 * whole, 90 % opaque (0x10067240: guAlphaSource(1), vertex alpha 230.4 - the blend not modelled) */
+                if (L->batch_acount[s] > 0 && !(v->tex_cache == 2 && dec == 1 && T->a1555 == 0)) {
+                    glBindTexture(GL_TEXTURE_2D, use_a1 && r->has_a[s] ? r->tex_a[s] : r->tex[s]);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+                    glDrawArrays(GL_TRIANGLES, L->batch_first[s] + na, L->batch_acount[s]);
+                }
+            } else glDrawArrays(GL_TRIANGLES, L->batch_first[s], L->batch_count[s]);
+        }
     }
     for (s = 0; s < GLR_SLOTS; s++) {   /* the Titanium models' textures */
         if (L->batch_count[GLR_TI + s] <= 0) continue;

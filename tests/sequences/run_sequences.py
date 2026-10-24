@@ -132,7 +132,7 @@ def install_dir(name, mech):
 
 def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), env=None, mech='timbrwlf/tbr00std',
         mission='YELLSCN1', shots=(), dump='/0.25', nostart=False, size=None, edition='enhanced', files=None, dos_look=False,
-        look3dfx=False, lookati=False):
+        look3dfx=False, lookati=False, look=None):
     """One headless mission run of `secs` autopilot seconds (1/30 s frames). throttle -9 / twist -999: the keys drive
     them; keys: [(t, 'key')] presses; hold: [(t0, t1, 'key')]; shots: [(t, 'label')] -> Result.shots[label] = ppm path"""
     os.makedirs(os.path.join(OUT, name), exist_ok=True)
@@ -174,6 +174,10 @@ def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), en
     if look3dfx:   # RENDERER = 3DFX: the 3Dfx archive's own textures (portcfg_edition: textures = models, kind 3dfx)
         cmd = [GLVIEW, os.path.join(GAME, '3d', 'models.prj'), os.path.join(GAME, '3d', 'models.prj'), '3dfx', '@', mission]
         e['MW2_EDITION'] = '3dfx'
+    if look in ('s3', 'pvr', 'mga'):   # RENDERER = S3 VIRGE / POWERVR / MATROX MYSTIQUE: the 3Dfx models, the edition's textures and sky file
+        cmd = [GLVIEW, os.path.join(GAME, '3d', 'models.prj'), os.path.join(GAME, '3d', look, 'MW2.PRJ'), look, '@', mission]
+        e['MW2_EDITION'] = look
+        e['MW2_SKYGND'] = os.path.join(GAME, '3d', look, 'skygnd.par')
     if lookati:   # RENDERER = ATI RAGE: the ATi archive for models, data and textures, its own sky file, no fog (portcfg_edition)
         cmd = [GLVIEW, os.path.join(GAME, '3d', 'textures.prj'), os.path.join(GAME, '3d', 'textures.prj'), 'ati', '@', mission]
         e['MW2_EDITION'] = 'ati'
@@ -5841,18 +5845,19 @@ def shell_customize_ammo_bins(c):
       'DELETE WEAPON: the type\'s later weapons number down', str(crit))
 
 
-def _gf1_patch(path, vib=(0, 0, 0), trem=(0, 0), sustain=200, modes=0x65):
-    """a GF1 patch (GF1PATCH110) with one 16-bit looped 440 Hz sine sample: envelope rates 63 to the sustain level,
-    vibrato (sweep, rate, depth), tremolo (rate, depth)"""
+def _gf1_patch(path, vib=(0, 0, 0), trem=(0, 0), sustain=200, modes=0x65, rates=None, offs=None, rate=44100, n=44100,
+               hz=440, root=440000):
+    """a GF1 patch (GF1PATCH110) with one 16-bit looped (whole sample) sine sample, by default 440 Hz at 44100 for 1 s
+    with root 440 Hz: envelope rates 63 to the sustain level (or rates / offs), vibrato (sweep, rate, depth), tremolo
+    (rate, depth)"""
     import struct
-    rate, n = 44100, 44100
-    data = b''.join(struct.pack('<h', int(20000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n))
+    data = b''.join(struct.pack('<h', int(20000 * math.sin(2 * math.pi * hz * i / rate))) for i in range(n))
     hdr = b'GF1PATCH110\0ID#000002\0' + b'\0' * 60 + bytes([1, 0, 0]) + struct.pack('<HHI', 1, 127, len(data)) + b'\0' * 36
     ins = struct.pack('<H', 0) + b'test'.ljust(16, b'\0') + struct.pack('<I', len(data) + 96) + bytes([1]) + b'\0' * 40
     lay = bytes([0, 0]) + struct.pack('<I', len(data) + 96) + bytes([1]) + b'\0' * 40
     smp = b'sine'.ljust(7, b'\0') + bytes([0]) + struct.pack('<III', len(data), 0, len(data)) + struct.pack('<H', rate)
-    smp += struct.pack('<III', 8176, 12543854, 440000) + struct.pack('<h', 0) + bytes([7])
-    smp += bytes([63, 63, 63, 63, 63, 63]) + bytes([sustain, sustain, sustain, 0, 0, 0])
+    smp += struct.pack('<III', 8176, 12543854, root) + struct.pack('<h', 0) + bytes([7])
+    smp += bytes(rates or [63, 63, 63, 63, 63, 63]) + bytes(offs or [sustain, sustain, sustain, 0, 0, 0])
     smp += bytes([0, trem[0], trem[1], vib[0], vib[1], vib[2], modes]) + struct.pack('<hH', 60, 1024) + b'\0' * 36
     assert len(hdr) == 129 and len(ins) == 63 and len(lay) == 47 and len(smp) == 96
     with open(path, 'wb') as f:
@@ -6344,6 +6349,325 @@ def ati_detail_low_affine(c):
     n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), below)
     c(n > 15000, 'DISPLAY DETAIL low: the type 5 terrain drawn affine', '%d pixels differ below the horizon' % n)
     c.note('detail low: %d pixels differ from types 5 / 9 / 11 perspective-correct' % n)
+
+
+# ---------------------------------------------------------------- the 3D engines' texturing per colour type (other looks)
+
+@sequence
+def look3d_affine_types(c):
+    """RENDERERs 3DFX, S3 VIRGE, MATROX MYSTIQUE and the enhanced look (the 3Dfx engine's rules) draw colour types 6 / 7 /
+    8 / 10 affine, as ATI RAGE: 3Dfx 0x10026e80 -> 0x1002c880 with the 4th argument 0 (types 7, 8) or 0x1024e224 set
+    around the call (6, 10) puts oow = 1.0 in every vertex; S3 0x1001da40 (0x1001dc70) and Matrox 0x1005104c (0x1005133e)
+    the same. MAROSCN1's fire card (type 8) changes shape against every polygon perspective-correct (MW2_TEST_ATI_TEX=0);
+    PowerVR (SGL, perspective-correct in hardware) does not change"""
+    fire = (0.60, 0.31, 0.74, 0.60)
+    for tag, kw in (('3dfx', {'look3dfx': True}), ('s3', {'look': 's3'}), ('mga', {'look': 'mga'}), ('enh', {}),
+                    ('pvr', {'look': 'pvr'})):
+        a = c.run('_' + tag, secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')],
+                  env={'MW2_TEST_SKY_STILL': '1'}, **kw)
+        b = c.run('_' + tag + '0', secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')],
+                  env={'MW2_TEST_SKY_STILL': '1', 'MW2_TEST_ATI_TEX': '0'}, **kw)
+        n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), fire)
+        if tag == 'pvr':
+            c(n == 0, 'PowerVR: every polygon perspective-correct', '%d pixels differ' % n)
+        else:
+            c(n > 1000, tag + ': the fire card drawn affine', '%d pixels differ in the fire card\'s box' % n)
+        c.note('%s: %d fire-card pixels differ from the perspective-correct one' % (tag, n))
+
+
+@sequence
+def look3d_detail_low_affine(c):
+    """RENDERER 3DFX with DISPLAY DETAIL low: 0x10065390 -> 0x1002a8d0 sets 0x1024e224 = 1 (S3 0x1002d9a0 -> 0x100476b0:
+    0x10061fc4; Matrox 0x1001715d: 0x100adecc), so 0x1002c880 gives every textured polygon oow = 1 - the type 5 terrain
+    affine too. Against the same run with types 5 / 9 / 11 kept perspective-correct (MW2_TEST_ATI_TEX=1): the YELL hills
+    differ"""
+    snd = bytearray(open(os.path.join(GTEST, 'MW2SND.CFG'), 'rb').read())
+    snd[0x1c:0x20] = b'\0\0\0\0'
+    f = {'MW2SND.CFG': bytes(snd)}
+    below = (0.0, 0.45, 1.0, 1.0)
+    a = c.run('_low', secs=1.5, throttle=0, twist=0, mission='YELLSCN1', nostart=True, shots=[(1, 'v')], look3dfx=True, files=f)
+    b = c.run('_low1', secs=1.5, throttle=0, twist=0, mission='YELLSCN1', nostart=True, shots=[(1, 'v')], look3dfx=True,
+              files=f, env={'MW2_TEST_ATI_TEX': '1'})
+    n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), below)
+    c(n > 15000, 'DISPLAY DETAIL low: the type 5 terrain drawn affine', '%d pixels differ below the horizon' % n)
+    c.note('3dfx detail low: %d pixels differ from types 5 / 9 / 11 perspective-correct' % n)
+
+
+@sequence
+def enhanced_ground_unmasked(c):
+    """The enhanced look (ATi textures, the 3Dfx engine's rules): the sky and ground fills (3Dfx 0x1002d460 / 0x1002d590 ->
+    0x1002d760 with alpha argument 0) and types 5-7 have no alpha test - only the alpha flag (types 8-11) sets a blend
+    (0x10067240 / 0x100674c0). RUSTGROU and TEALGROU are all alpha 0 in the ATi archive: the port had drawn no RUST /
+    TEAL ground in the enhanced look. MW2_TEST_ATI_TEX=0: the port before"""
+    gnd = (0.40, 0.70, 0.60, 0.80)   # RUST: the flat ground between the cockpit struts
+    a = c.run('_RUST', secs=1.5, throttle=0, twist=0, mission='RUSTSCN1', nostart=True, shots=[(1, 'v')])
+    b = c.run('_RUST0', secs=1.5, throttle=0, twist=0, mission='RUSTSCN1', nostart=True, shots=[(1, 'v')],
+              env={'MW2_TEST_ATI_TEX': '0'})
+    ha, hb = ati_hf(a.shots.get('v'), gnd), ati_hf(b.shots.get('v'), gnd)
+    c(ha > 2.0 and 0 <= hb < 1.0, 'RUSTSCN1: the ground drawn textured, not dropped by the alpha test',
+      'ground high-frequency %.2f (masked: %.2f)' % (ha, hb))
+    # TEAL (a dark texture): the ground left of the fire card is TEALGROU's teal, not the clear colour's grey
+    left = (0.02, 0.52, 0.20, 0.70)
+    a = c.run('_TEAL', secs=1.5, throttle=0, twist=0, mission='TEALSCN1', nostart=True, shots=[(1, 'v')])
+    b = c.run('_TEAL0', secs=1.5, throttle=0, twist=0, mission='TEALSCN1', nostart=True, shots=[(1, 'v')],
+              env={'MW2_TEST_ATI_TEX': '0'})
+    n = ati_diff_px(a.shots.get('v'), b.shots.get('v'), left)
+    tot = int(0.18 * 640) * int(0.18 * 400)
+    teal = count_px(a.shots.get('v'), lambda R, G, B: (G > R + 8) & (B > R + 8), left)
+    c(n > 0.8 * tot and teal > 0.6 * tot, 'TEALSCN1: the ground drawn textured (teal), not the grey behind it',
+      '%d of %d pixels differ, %d teal' % (n, tot, teal))
+    c.note('RUST ground hf %.2f / masked %.2f; TEAL ground %d / %d px differ, %d teal' % (ha, hb, n, tot, teal))
+
+
+@sequence
+def look3d_type8_unlit(c):
+    """Colour type 8 (0x8000: the fire / smoke / jet cards) is unlit in every 3D engine: 0x10026e80 passes light 0xf with
+    the perspective argument 0, and 0x1002c880 lights a polygon only when that argument is set or the light is 0..14
+    (colour 255 otherwise); type 11 passes 0x80000000 (unlit). S3 0x1001dd34, ATi 0x1002dfa1, Matrox 0x10051417 alike;
+    PowerVR's classifier 0x100619a0 gives 0x8000 / 0xb000 the unlit material. MAROSCN1's fire card drawn at full
+    brightness: brighter than lit (MW2_TEST_LIT_8, the port before) in the enhanced and PowerVR looks"""
+    fire = (0.60, 0.31, 0.74, 0.60)
+
+    def lum(path):
+        if not (path and os.path.exists(path)):
+            return -1.0
+        import numpy as np
+        w, h, d = ppm(path)
+        A = np.frombuffer(d, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.float64)
+        A = A[int(fire[1] * h):int(fire[3] * h), int(fire[0] * w):int(fire[2] * w)]
+        return float(A.sum(2).mean())
+    for tag, kw in (('enh', {}), ('pvr', {'look': 'pvr'})):
+        a = c.run('_' + tag, secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')],
+                  env={'MW2_TEST_SKY_STILL': '1'}, **kw)
+        b = c.run('_' + tag + 'L', secs=1.5, throttle=0, twist=0, mission='MAROSCN1', nostart=True, shots=[(1, 'v')],
+                  env={'MW2_TEST_SKY_STILL': '1', 'MW2_TEST_LIT_8': '1'}, **kw)
+        la, lb = lum(a.shots.get('v')), lum(b.shots.get('v'))
+        c(lb > 0 and la > lb + 5, tag + ': the fire card unlit (full brightness)', 'mean %.1f, lit %.1f' % (la, lb))
+        c.note('%s fire card mean %.1f (lit: %.1f)' % (tag, la, lb))
+
+
+@sequence
+def look3dfx_alpha_reading(c):
+    """RENDERERs 3DFX and S3 VIRGE read a texture by the drawing polygon's alpha flag: ARGB4444 for types 8-11 (3Dfx
+    0x10067240: 0x10265710 = flag 2 -> 0x10066e70 -> 0x10066a30: Glide format 0xc, else 0xb; its mw2.mip cache, used only
+    for alpha polygons (0x100669f0), holds the A9FIR fire frames as format 0xc, bits unchanged; S3 0x100107a0 ->
+    0x10010170: S3DTK_TEXARGB4444 / 1555). TEALSCN1's fire card (type 8, 0x8f9x, A9FIR frames) had been read as RGB555:
+    a blue square around the flames. No such blue left"""
+    box = (100 / 640.0, 120 / 400.0, 300 / 640.0, 330 / 400.0)
+    for tag, kw in (('3dfx', {'look3dfx': True}), ('s3', {'look': 's3'})):
+        r = c.run('_' + tag, secs=1.5, throttle=0, twist=0, mission='TEALSCN1', nostart=True, shots=[(1, 'v')], **kw)
+        n = count_px(r.shots.get('v'), lambda R, G, B: (B > 100) & (R < 40) & (G < 40), box)
+        c(0 <= n < 200, tag + ': the fire card without its RGB555 blue square', '%d blue pixels (RGB555: ~15600)' % n)
+        c.note('%s: %d blue pixels in the fire card\'s box' % (tag, n))
+
+@sequence
+def dos_hud_windows_sweep(c):
+    """the DOS look's HUD in the engine's own windows at 640 x 480 and 1024 x 768 (agent DH, after dos_hud_instrument_windows):
+    the selected weapon framed as its whole CPIT window (corners (x, y)-(x + w - 1, y + h - 1); 0x10006450), the text at the
+    window's (0.07, 0.13) (DOS 0x96ac0); the damage outline centred in window 2 (0x1001b230 / DOS 0x2f190), drawn whole
+    first, the damaged regions over it; the target viewer's frame in window 13, the name at window 14's corner, the range
+    inset (0.01, 0.01) one font line down, formatted as Watcom's %2.2f (17 digits, half to even: Nav Epsilon 1075 m ->
+    "1.08k", in green); the radar's VFX ellipse in colour 2, cone lines in colour 1, label at (0, 0.04), the out-of-range
+    nav target as RTGTOFF ("+") on the rim; heat / dH/dT bars from windows 19 / 20 (0x1001c250 / DOS 0x30fc0); the
+    throttle bar from window 17 with (0.119, 0.554) (frame, zero line, fill); the rear view box in window 2 with its label
+    at top + 2; the message text at (0.01 W, (bar - font) / 2). DOSBox YELLSCN1 (-VG=VESA480.DLL for 640 x 480):
+    docs/reference/dos_hud_yell_{640,1024}_{nav,target,throttle,rearview,message}.png"""
+    from PIL import Image
+    import numpy as np
+
+    def cmp(tag, k, shot, ref, boxes, tol=None):
+        path = shot
+        if not c(path and os.path.exists(path), '%s %s picture' % (tag, ref)):
+            return
+        B = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_hud_yell_%s_%s.png' % (tag, ref))).convert('RGB')).astype(np.int32)
+        w, h, px = ppm(path)
+        A = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+        for name, b in boxes.items():
+            x0, y0, x1, y1 = (int(round(v * k)) for v in b)
+            a, bb = A[y0:y1, x0:x1], B[y0:y1, x0:x1]
+            hud = ((a.max(2) - a.min(2)) > 60) | ((bb.max(2) - bb.min(2)) > 60)
+            bad = int(((a != bb).any(2) & hud).sum())
+            lim = (tol or {}).get(name, 0)
+            c(hud.sum() > 20 and bad <= lim, '%s %s: the %s as DOSBox' % (tag, ref, name), '%d of %d HUD pixels differ' % (bad, hud.sum()))
+
+    for size, tag, k in (('640x480', '640', 0.625), ('1024x768', '1024', 1.0)):
+        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
+        common = {'weapon list': (680, 50, 1000, 160), 'damage outline': (826, 558, 993, 688), 'heat bars': (340, 680, 670, 725),
+                  'throttle bar': (995, 535, 1024, 760), 'kph': (870, 715, 960, 745)}
+        # the radar: a dropship blip the port shows (the DOSBox capture's wall-clock start is later) and the 640 x 480 cone's
+        # right end (1 px, DOS's own tables) are allowed
+        rad = {'radar': (10, 10, 275, 270)}
+        cmp(tag, k, r.shots.get('nav'), 'nav', dict(common, **dict(rad, **{'target viewer, nav': (20, 550, 330, 740)})), {'radar': 8})
+        cmp(tag, k, r.shots.get('target'), 'target', dict(common, **dict(rad, **{'target viewer text': (20, 692, 330, 740)})), {'radar': 8})
+        r = c.run('_thr' + tag, secs=12, nostart=True, mech=None, size=size, dos_look=True, keys=[(9.0, '5')], shots=[(11.5, 'v')])
+        cmp(tag, k, r.shots.get('v'), 'throttle', {'throttle bar at 5': (995, 535, 1024, 760)})
+        r = c.run('_vp' + tag, secs=13, throttle=0, nostart=True, mech=None, size=size, dos_look=True, env={'MW2_VOICE_TEXT': '1'},
+                  keys=[(8.5, 'l'), (9.5, 'l'), (10.5, 'F7')], shots=[(9.2, 'msg'), (12.0, 'vp')])
+        cmp(tag, k, r.shots.get('vp'), 'rearview', {'rear view frame and label': (826, 558, 993, 600), 'frame bottom': (826, 680, 993, 688)})
+        if tag == '1024':   # (640 x 480: DOS shows the bar's first 29 of MSGBAR6's 30 rows, the text 1 px higher - not traced)
+            cmp(tag, k, r.shots.get('msg'), 'message', {'message text': (0, 12, 400, 34)})
+
+def _gus_render(d, name, events, secs):
+    """an XMIDI of [(delay ticks, bytes)] through xmiplay with the patches in d/MIDI -> mono samples at 44100"""
+    import wave
+    import numpy as np
+    xp = os.path.join(d, name + '.xmi')
+    open(xp, 'wb').write(_xmi(events))
+    out = os.path.join(d, name + '.wav')
+    subprocess.run([os.path.join(REPO, 'xmiplay'), xp, '-', d, out, str(secs)], capture_output=True, timeout=120)
+    w = wave.open(out)
+    a = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(float).reshape(-1, 2)
+    return a[:, 0] + a[:, 1]
+
+
+def _gus_cycles(x):
+    """(time, frequency) of each cycle from the rising zero crossings, interpolated"""
+    import numpy as np
+    z = np.nonzero((x[:-1] <= 0) & (x[1:] > 0))[0]
+    t = (z + (-x[z]) / (x[z + 1] - x[z])) / 44100.0
+    return t[1:], 1.0 / np.diff(t)
+
+
+@sequence
+def gus_driver_pitch_fc(c):
+    """the GUS music's pitch as ULTRA.MDI programs the GF1 (src/gusmid.c): FC = ((f << 9 + root / 2) / root << 9 + r / 2)
+    / r, r = (22050 << 9 + rate / 2) / rate (0x3c49, 0x2b47), integers - a 440 Hz sine at 5600 Hz with root 440 Hz:
+    r = 2016, FC = 130 -> 439.90 Hz; the vibrato (depth 84) adds ((1290 x 130 >> 10) - 130) >> 1 = 16 FC units at
+    the peak (146 / 130, not 2^(4/12) / 2), in whole FC steps held for a timer tick each (0x3812). Pitch bend (0x4c87 ->
+    0x35e7): range 2 to start, FC x factor >> 10 re-written to the sounding note: +8191 -> 1148 / 1024 (493.3 Hz);
+    data entry 12 with RPN 0 / 0 (their start values) -> 2047 / 1024 (879.6 Hz) from the next bend; RPN 101 = 127 then
+    data entry is ignored; -8192 with 12 -> 2^20 / 2048 = 512 (220 Hz)"""
+    import numpy as np
+    d = os.path.join(OUT, c.name)
+    os.makedirs(os.path.join(d, 'MIDI'), exist_ok=True)
+    _gf1_patch(os.path.join(d, 'MIDI', 'vib.pat'), vib=(0, 50, 84), rate=5600, n=5600)
+    _gf1_patch(os.path.join(d, 'MIDI', 'plain.pat'))
+    with open(os.path.join(d, 'MIDI', 'ULTRAMID.INI'), 'w') as f:
+        f.write('0, 0, 0, 0, 0, vib\n1, 1, 1, 1, 1, plain\n')
+    f0 = 440 * (130 / 512 * 22050) / 5600
+    x = _gus_render(d, 'vib', [(0, b'\xc0\x00'), (0, b'\x90\x45\x7f' + _vlq(600))], 4)
+    tm, fr = _gus_cycles(x)
+    sel = (tm > 0.5) & (tm < 3.5)
+    r = fr[sel] / f0 * 130
+    near = np.abs(r - np.round(r)) < 0.2
+    hi, lo = np.percentile(fr[sel], 99) / f0, np.percentile(fr[sel], 1) / f0   # (a stray cycle's interpolation left out)
+    c(abs(hi - 146 / 130) < 0.003, 'vibrato peak FC 130 + 16 (x 1.1231; the exact 2^(4/12) / 2 would be x 1.1300)', '%.4f' % hi)
+    c(abs(lo - 114 / 130) < 0.003, 'vibrato trough FC 130 - 16', '%.4f' % lo)
+    c(near.mean() > 0.75, 'the pitch in whole FC units (130 + n) - the GF1 register steps', '%.0f %% of the cycles' % (100 * near.mean()))
+    # bend: re-written to the sounding note; the range set by data entry with RPN 0 / 0
+    big = b'\xe0\x7f\x7f'
+    ev = [(0, b'\xc0\x01'), (0, b'\x90\x45\x7f' + _vlq(700)),
+          (60, big),                                   # 0.5 s: +2 semitones -> 1148
+          (60, b'\xb0\x06\x0c'),                       # 1.0 s: range 12 (not applied until the next bend)
+          (60, big),                                   # 1.5 s: -> 2047
+          (60, b'\xb0\x65\x7f'), (0, b'\xb0\x06\x02'),   # 2.0 s: RPN null, data entry ignored
+          (60, big),                                   # 2.5 s: still 2047
+          (60, b'\xe0\x00\x00')]                       # 3.0 s: -12 -> 512
+    x = _gus_render(d, 'bend', ev, 4)
+    tm, fr = _gus_cycles(x)
+    at = lambda a, b: np.median(fr[(tm > a) & (tm < b)])
+    want = [(0.1, 0.45, 440.0), (0.6, 0.95, 440 * 1148 / 1024), (1.1, 1.45, 440 * 1148 / 1024), (1.6, 1.95, 440 * 2047 / 1024),
+            (2.6, 2.95, 440 * 2047 / 1024), (3.1, 3.45, 220.0)]
+    got = [at(a, b) for a, b, _ in want]
+    c(all(abs(g / w - 1) < 0.002 for g, (_, _, w) in zip(got, want)),
+      'bend: 440, +2 (1148 / 1024), range 12 from the next bend (2047 / 1024), RPN null ignored, -12 (512)',
+      ' '.join('%.1f' % g for g in got))
+
+
+@sequence
+def gus_driver_ramp_playout(c):
+    """ULTRA.MDI's volume ramps (src/gusmid.c): a volume change (CC7, 0x3260) on a note held at its sustain point ramps
+    from the current level to the new one at rate 0x43 (3/8 of a 12-bit step a GF1 frame: level 233 -> 195 takes
+    38 x 16 / 0.375 / 22050 = 74 ms) instead of jumping; during the attack the new level is put at the same fraction of
+    the stage's new start..target (no jump at the change); after the envelope's last stage the level stays and the
+    sample's loop is switched off (0x4804): it plays on to its end - a drum patch (envelope, no sustain, levels 246) sounds
+    its whole sample, a looped 1 s sample plays once more to its end and stops"""
+    import numpy as np
+    d = os.path.join(OUT, c.name)
+    os.makedirs(os.path.join(d, 'MIDI'), exist_ok=True)
+    _gf1_patch(os.path.join(d, 'MIDI', 'hold.pat'), sustain=240)
+    _gf1_patch(os.path.join(d, 'MIDI', 'att.pat'), sustain=240, rates=[0x41, 63, 63, 63, 63, 63])   # 1/8 a frame: 1.32 s
+    _gf1_patch(os.path.join(d, 'MIDI', 'drum.pat'), offs=[246] * 6, modes=0x41, n=22050)   # 0.5 s, no loop / sustain
+    _gf1_patch(os.path.join(d, 'MIDI', 'loop.pat'), offs=[246] * 6, modes=0x45)            # 1 s looped, no sustain
+    with open(os.path.join(d, 'MIDI', 'ULTRAMID.INI'), 'w') as f:
+        f.write('0, 0, 0, 0, 0, hold\n1, 1, 1, 1, 1, att\n2, 2, 2, 2, 2, drum\n3, 3, 3, 3, 3, loop\n')
+    gf1 = lambda v: (256 + (int(v) & 255)) * 2.0 ** (int(v) >> 8)
+    v11 = lambda cv: 191 * 255 * {100: 248, 30: 208}[cv] // 48705
+    L0, L1 = 240 * v11(100) // 255, 240 * v11(30) // 255
+    pk = lambda x, t, w=0.003: np.abs(x[int(t * 44100):int((t + w) * 44100)]).max()
+    x = _gus_render(d, 'hold', [(0, b'\xc0\x00'), (0, b'\x90\x45\x7f' + _vlq(400)), (120, b'\xb0\x07\x1e')], 2)
+    a0 = pk(x, 0.9)
+    dur = (L0 - L1) * 16 / 0.375 / 22050
+    mid = pk(x, 1.0 + dur / 2 - 0.0015) / a0
+    end = pk(x, 1.0 + dur + 0.05) / a0
+    want_mid = gf1(L0 * 16 - 0.375 * 22050 * dur / 2) / gf1(L0 * 16)
+    c((L0, L1) == (233, 195), 'levels 233 -> 195 (volume 100 -> 30 through the curve)', '%d %d' % (L0, L1))
+    c(abs(mid / want_mid - 1) < 0.15, 'half way through the 0x43 ramp (%.0f ms)' % (dur * 500), '%.3f want %.3f' % (mid, want_mid))
+    c(abs(end / (gf1(L1 * 16) / gf1(L0 * 16)) - 1) < 0.1, 'then at the new level', '%.3f' % end)
+    # at 1 s the attack is at 2836 (80 + 22050 / 8): 2836 / 3728 -> 779 / 1024 of 5..195 = 150 (8-bit), from 177 down at
+    # 0x43 (53 ms), then on up at the stage's rate to 195
+    x = _gus_render(d, 'att', [(0, b'\xc0\x01'), (0, b'\x90\x45\x7f' + _vlq(400)), (120, b'\xb0\x07\x1e')], 2)
+    before, after, low = pk(x, 1.0 - 0.004), pk(x, 1.0 + 0.001), pk(x, 1.0 + 0.052)
+    c(abs(after / before - 1) < 0.15, 'a volume change in the attack: no jump', '%.3f (rescaled at once: 0.30)' % (after / before))
+    c(abs(low / before / (gf1(150 * 16) / gf1(2836)) - 1) < 0.15, 'down to 150 at 0x43', '%.3f want %.3f' % (low / before, gf1(150 * 16) / gf1(2836)))
+    c(abs(pk(x, 1.6) / before / (gf1(195 * 16) / gf1(2836)) - 1) < 0.1, 'then on to the stage\'s new level 195', '%.3f' % (pk(x, 1.6) / before))
+    for name, prog, secs, want in (('drum', 2, 2, 0.5), ('loop', 3, 3, 1.0)):
+        x = _gus_render(d, name, [(0, bytes([0xc0, prog])), (0, b'\x90\x45\x7f' + _vlq(240))], secs)
+        nz = np.nonzero(np.abs(x) > 50)[0]
+        last = nz.max() / 44100 if len(nz) else 0
+        c(abs(last - want) < 0.02, '%s: the sample played to its end after the envelope (%.1f s)' % (name, want), '%.3f s' % last)
+
+
+@sequence
+def look3d_texcache_first_poly(c):
+    """RENDERERs 3DFX and S3 VIRGE keep one reading per texture: the texture cache is keyed by the texture's data (3Dfx
+    0x10066e70: entry +8 = the texel pointer; S3 0x1000fff0) and the reading is made by the first polygon that draws it
+    (the alpha flag: ARGB4444, else ARGB1555 - 0x10066a30 / 0x10010170); a frame's polygons are drawn farthest first (key
+    the deepest corner, 0x1002b9b0; quicksort 0x10029ff0). The Wolf training's scrub patches (TNW1SCR1 0xbc38: slot 0x138
+    V1_PLAIN with the alpha flag) reach 134 m in the first frame, the training mech stands at 45 m: V1_PLAIN is ARGB4444
+    for the whole mission, the mechs' plain parts orange-brown (the dark grey RGB555 read as 4-bit fields) - the original's
+    look. The Jade Falcon training (no alpha polygon on 0x138) keeps ARGB1555. Before: each polygon its own flag's reading
+    (docs/reference/look3d_texcache_tnw1_{3dfx,s3}_{before,after}.png)"""
+    box = (300 / 640.0, 180 / 400.0, 352 / 640.0, 250 / 400.0)
+    orange = lambda R, G, B: (R > G + 25) & (G > B) & (R > 80)
+    for tag, kw in (('3dfx', {'look3dfx': True}), ('s3', {'look': 's3'})):
+        n = {}
+        for sub, env in (('', {}), ('_own', {'MW2_TEST_NO_TEXCACHE': '1'})):
+            env['MW2_TEST_SKY_STILL'] = '1'
+            r = c.run('_' + tag + sub, secs=2, nostart=True, mission='TNW1SCN1', env=env, shots=[(1.8, 'v')], **kw)
+            n[sub] = count_px(r.shots.get('v'), orange, box)
+            if not sub:
+                c('TEXCACHE slot=0x138 cel=1352 fmt=4444' in r.out, tag + ': V1_PLAIN held as ARGB4444 (a scrub patch drawn first)')
+        c(n[''] > 150, tag + ': the training mech\'s plain parts in the ARGB4444 reading', '%d orange-brown pixels' % n[''])
+        c(0 <= n['_own'] < 30, tag + ': (each polygon its own reading: dark)', '%d orange-brown pixels' % n['_own'])
+        c.note('%s: %d orange-brown pixels on the training mech (each polygon its own reading: %d)' % (tag, n[''], n['_own']))
+    r = c.run('_tnj', secs=2, nostart=True, mission='TNJ1SCN1', look3dfx=True)
+    c('TEXCACHE slot=0x138 cel=1352 fmt=1555' in r.out, 'TNJ1: V1_PLAIN as ARGB1555 (no alpha polygon draws it)')
+
+@sequence
+def look3d_texcache_tie_s3_reload(c):
+    """the texture cache (look3d_texcache_first_poly): S_BFLAGQ (type 7) and S_BFLAGB (type 9) are one flag drawn twice in
+    place (TRNJAREA objects 2 / 1, slot 0x122): equal keys, whose order after the quicksort depends on the whole frame's
+    list (a transcription of 0x10029ff0 on random frames: 50 / 50) - ASSUMED the copy without the flag first: ARGB1555, the
+    flag as before (picture identical). S3: a PALG slot reload (light amplification on: 0xb5 ticks later 0x1003ec50 ->
+    0x1003ec90 -> 0x1000f870, which snapshots the use counter) makes 0x10010170 upload every texture again in its next
+    polygon's format - V1_PLAIN decided anew; the 3Dfx list is reset only at the mission's start (0x10066570)"""
+    from PIL import Image, ImageChops
+    pics = {}
+    for sub, env in (('', {}), ('_own', {'MW2_TEST_NO_TEXCACHE': '1'})):
+        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0'})
+        r = c.run('_flag' + sub, secs=1, nostart=True, mission='TNJ1SCN1', look3dfx=True, env=env, shots=[(0.8, 'v')])
+        pics[sub] = r.shots.get('v')
+        if not sub:
+            c('TEXCACHE slot=0x122 cel=1354 fmt=1555' in r.out, 'the flag (equal keys): ARGB1555')
+    if c(all(p and os.path.exists(p) for p in pics.values()), 'flag pictures'):
+        bb = ImageChops.difference(Image.open(pics['']).convert('RGB'), Image.open(pics['_own']).convert('RGB')).getbbox()
+        c(bb is None, 'the flag as before', 'differs in %s' % (bb,))
+    for tag, kw, want in (('s3', {'look': 's3'}, 2), ('3dfx', {'look3dfx': True}, 1)):
+        r = c.run('_amp_' + tag, secs=4, nostart=True, mission='TNW1SCN1', keys=[(1.0, 'l')], **kw)
+        k = sum(1 for l in r.out.splitlines() if l.startswith('TEXCACHE slot=0x138'))
+        c('PALSLOT' in r.out and k == want, '%s: V1_PLAIN decided %d time(s) around the light amplification reload' % (tag, want), '%d' % k)
 
 def main():
     global GLVIEW, VERBOSE
