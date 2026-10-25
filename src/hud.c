@@ -17,8 +17,11 @@
 
 #include "shp.h"
 
+#define HUD_RING (1u << 20)   /* bytes: 65536 HUD vertices */
+
 struct hud_s {
     GLuint prog, vao, vbo, lvbo;   /* lvbo: hud_lines batches */
+    size_t ring_at;                /* vbo: a ring of HUD_RING bytes the draws are written along (hud_put) */
     GLint  u_tex, u_tint, u_textured, u_smooth, u_sharp, u_flash;
     float  flash[4];       /* the palette flash: every HUD colour mixed toward rgb by a (hud_set_flash) */
     uint8_t pal[256][3];
@@ -73,7 +76,7 @@ hud *hud_create(prj_archive *a)
     glGenBuffers(1, &h->vbo);
     glBindVertexArray(h->vao);
     glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 24, NULL, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, HUD_RING, NULL, GL_STREAM_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
     glEnableVertexAttribArray(1);
@@ -296,15 +299,31 @@ void hud_begin(hud *h, int w, int hp)
     h->n = hp > 768 ? (float)hp / 768.0f : 1.0f;
 }
 
+/* one draw's vertices (x, y, u, v) written to the ring's next free part and drawn from there. Each HUD draw used to
+ * rewrite the start of one small buffer, so every draw had to wait for the GPU to finish the one before (macOS: the
+ * HUD took over 100 ms a frame); the ring is refilled (orphaned) when full, and its parts are written unsynchronised */
+static void hud_put(hud *h, const float *v, int nv, GLenum mode)
+{
+    size_t bytes = (size_t)nv * 4 * sizeof(float);
+    void *p;
+    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
+    if (bytes > HUD_RING) return;
+    if (h->ring_at + bytes > HUD_RING) { glBufferData(GL_ARRAY_BUFFER, HUD_RING, NULL, GL_STREAM_DRAW); h->ring_at = 0; }
+    p = glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)h->ring_at, (GLsizeiptr)bytes,
+                         GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+    if (p) { memcpy(p, v, bytes); glUnmapBuffer(GL_ARRAY_BUFFER); }
+    else glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)h->ring_at, (GLsizeiptr)bytes, v);
+    glDrawArrays(mode, (GLint)(h->ring_at / (4 * sizeof(float))), nv);
+    h->ring_at += bytes;
+}
+
 /* screen-pixel quad (top-left origin) */
 static void quad_px(hud *h, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1)
 {
     float X0 = x0 / (float)h->vw * 2.0f - 1.0f, X1 = x1 / (float)h->vw * 2.0f - 1.0f;
     float Y0 = 1.0f - y0 / (float)h->vh * 2.0f, Y1 = 1.0f - y1 / (float)h->vh * 2.0f;
     float v[24] = {X0, Y0, u0, v0, X1, Y0, u1, v0, X1, Y1, u1, v1, X0, Y0, u0, v0, X1, Y1, u1, v1, X0, Y1, u0, v1};
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof v, v);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    hud_put(h, v, 6, GL_TRIANGLES);
 }
 static float sx_(const hud *h, float x) { return floorf(h->ox + x * h->k + 0.5f); }
 static float sy_(const hud *h, float y) { return floorf(y * h->ky + 0.5f); }
@@ -324,9 +343,7 @@ static void quad(hud *h, float x0, float y0, float x1, float y1, float u0, float
     float X0 = (ox + x0 * k) / (float)h->vw * 2.0f - 1.0f, X1 = (ox + x1 * k) / (float)h->vw * 2.0f - 1.0f;
     float Y0 = 1.0f - y0 * ky / (float)h->vh * 2.0f, Y1 = 1.0f - y1 * ky / (float)h->vh * 2.0f;
     float v[24] = {X0, Y0, u0, v0, X1, Y0, u1, v0, X1, Y1, u1, v1, X0, Y0, u0, v0, X1, Y1, u1, v1, X0, Y1, u0, v1};
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof v, v);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    hud_put(h, v, 6, GL_TRIANGLES);
 }
 
 /* Bind a sprite. Its texture is the Scale3x upscale of the art (sprite_upload): drawn at 1:1 it is sampled at each 3x3
@@ -453,8 +470,7 @@ void hud_poly(hud *h, const float *xy, int n, const float rgba[4])
             v[k * 4 + 1] = 1.0f - xy[idx[k] * 2 + 1] * h->ky / (float)h->vh * 2.0f;
             v[k * 4 + 2] = v[k * 4 + 3] = 0;
         }
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof v, v);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
+        hud_put(h, v, 3, GL_TRIANGLES);
     }
 }
 
@@ -672,23 +688,13 @@ void hud_lines(hud *h, const float *seg, int n, float wpx, const float rgba[4])
         m++;
     }
     if (m) {   /* one upload and one draw for the lot (a draw per line stalled on the shared buffer) */
-        GLint cur = 0;
         glUniform1i(h->u_textured, 0);
         glUniform1i(h->u_smooth, 0);
         glUniform4fv(h->u_tint, 1, rgba);
-        if (!h->lvbo) {
-            glGenBuffers(1, &h->lvbo);
+        {   /* through the ring, in parts that fit it */
+            int done = 0, per = (int)(HUD_RING / (24 * sizeof(float)));
+            while (done < m) { int k = m - done < per ? m - done : per; hud_put(h, v + (size_t)done * 24, k * 6, GL_TRIANGLES); done += k; }
         }
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &cur);
-        glBindBuffer(GL_ARRAY_BUFFER, h->lvbo);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)m * 24 * sizeof *v), v, GL_STREAM_DRAW);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
-        glDrawArrays(GL_TRIANGLES, 0, m * 6);
-        glBindBuffer(GL_ARRAY_BUFFER, h->vbo);   /* back to the shared quad buffer */
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
-        (void)cur;
     }
     free(v);
 }
@@ -711,9 +717,7 @@ void hud_line(hud *h, float x0, float y0, float x1, float y1, float wpx, const f
     glUniform1i(h->u_textured, 0);
     glUniform1i(h->u_smooth, 0);
     glUniform4fv(h->u_tint, 1, rgba);
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof v, v);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    hud_put(h, v, 6, GL_TRIANGLES);
 }
 
 void hud_circle(hud *h, float cx, float cy, float r, float wpx, const float rgba[4])

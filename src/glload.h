@@ -28,6 +28,8 @@
     X(glBlitFramebuffer, PFNGLBLITFRAMEBUFFERPROC) \
     X(glBufferData, PFNGLBUFFERDATAPROC) \
     X(glBufferSubData, PFNGLBUFFERSUBDATAPROC) \
+    X(glMapBufferRange, PFNGLMAPBUFFERRANGEPROC) \
+    X(glUnmapBuffer, PFNGLUNMAPBUFFERPROC) \
     X(glCheckFramebufferStatus, PFNGLCHECKFRAMEBUFFERSTATUSPROC) \
     X(glCompileShader, PFNGLCOMPILESHADERPROC) \
     X(glCreateProgram, PFNGLCREATEPROGRAMPROC) \
@@ -83,6 +85,8 @@ MW2GL_FUNCS
 #define glBlitFramebuffer mw2gl_glBlitFramebuffer
 #define glBufferData mw2gl_glBufferData
 #define glBufferSubData mw2gl_glBufferSubData
+#define glMapBufferRange mw2gl_glMapBufferRange
+#define glUnmapBuffer mw2gl_glUnmapBuffer
 #define glCheckFramebufferStatus mw2gl_glCheckFramebufferStatus
 #define glCompileShader mw2gl_glCompileShader
 #define glCreateProgram mw2gl_glCreateProgram

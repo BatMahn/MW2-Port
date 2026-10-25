@@ -102,6 +102,7 @@ struct glr {
     GLint  u_mono, u_mvp, u_view, u_light, u_ambient, u_fog_density, u_fog_color, u_texsize, u_tex, u_textured, u_unlit, u_wire, u_shadow;
     /* the DOS edition */
     int    dos;
+    int    prog_dos;                        /* r->prog is the DOS look's variant (glr_use_variant) */
     GLuint nul_buf, nul_tbo;                /* a 1-texel R32F buffer texture: unit 3 never left empty (macOS GL falls back
                                              * to a slow path for a shader whose samplerBuffer has nothing loadable bound) */
     GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
@@ -233,6 +234,7 @@ static const char *VS =
      * half a pixel more on the right and below than GL's centre rule. So the polygon (its fan, every triangle) is drawn
      * 2 px larger on screen - each vertex pushed out along its two edges' outward normals (miter, at most 8 px) - and the
      * fragment keeps exactly the DOS span's pixels (dos_gouraud); polygons crossing the near plane are left as they are */
+    "#if DOS_LOOK\n"
     "  if (u_dos != 0 && int(a_color.r + 0.5) == 3 && a_texsel > 0.5 && e < 256) {\n"
     "    int s = int(a_texsel + 0.5) - 1, rel = gl_VertexID - s, t = rel / 3, cn = rel - 3 * t;\n"
     "    vec2 Q[18]; int n = 0; bool ok = true; vec2 h = 0.5 * u_vp;\n"
@@ -260,6 +262,7 @@ static const char *VS =
 
     "    }\n"
     "  }\n"
+    "#endif\n"
     /* the DOS cockpit set: painted over everything, in the DOS draw order (MW2.EXE 0x3cea0 / 0x3d040: its list sorted
      * by each polygon's key, the farthest first, and drawn in turn) - a later polygon nearer in depth; one the original
      * leaves out (wholly behind the eye or off the window, 0x3e1de) is not drawn */
@@ -279,6 +282,7 @@ static const char *VS =
      * not the pixel's depth in cm. The polygon's corners from this layer's buffer: its fan triangles back to the one that
      * starts it (edge bit 4) and on to the one that closes it (bit 2); -1 (the pixel depth) for a vertex not found there */
     "  v_dkey = -1.0;\n"
+    "#if DOS_LOOK\n"
     "  if (u_dos != 0) {\n"
     "    int vid = gl_VertexID, t = vid / 3, k, c;\n"
     "    if (abs(texelFetch(u_dos_vtx, vid * 13).r - a_pos.x) + abs(texelFetch(u_dos_vtx, vid * 13 + 2).r - a_pos.z) < 0.01) {\n"
@@ -292,6 +296,7 @@ static const char *VS =
     "      v_dkey = km;\n"
     "    }\n"
     "  }\n"
+    "#endif\n"
     "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
     "  { float vz = max(-v_viewpos.z, 1.0); v_tivf = 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, vz / u_tifog.y) : 1.0) * u_tifog.w; }\n"
     "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(floor(a_texsel + 0.5)); v_sph = a_sphere;\n"
@@ -393,6 +398,7 @@ static const char *FS =
      * vertices as 0x3dfb7 about the viewport's centre and walks the chains to its row; the pixels GL covers outside
      * the DOS span take its end. dos_shading=smooth (not the original): the colours blended at c + 0.25 - the
      * dither's mean - within the polygon's own shades */
+    "#if DOS_LOOK\n"
     "vec4 dos_gclip(int i) { int b = i * 13; return u_mvp * vec4(texelFetch(u_dos_vtx, b).r, texelFetch(u_dos_vtx, b + 1).r, texelFetch(u_dos_vtx, b + 2).r, 1.0); }\n"
     "float dos_gshade(int i, float g) { int b = i * 13; return texelFetch(u_dos_vtx, b + 7).r + texelFetch(u_dos_vtx, b + 6).r * g; }\n"
     "int dos_q(float p) { return (int(trunc(p * 4.0)) + 2) >> 2; }\n"   /* 0x3dfb7: quarter pixels, + 2 >> 2 */
@@ -452,6 +458,7 @@ static const char *FS =
     "  if (exact) return dos_colour(float(((val + (((k + r) & 1) == 0 ? 0x7fffu : 0u)) >> 16) & 0xffu));\n"
     "  return dos_colour(floor(cc + (((k + r) & 1) == 0 ? 32767.0 / 65536.0 : 0.0)));\n"
     "}\n"
+    "#endif\n"
     "void main() {\n"
     /* the wireframe (image enhancement): only the polygons' own edges, 1 px - corner k's barycentric is the distance
      * to the edge opposite it (bit 0: corner 0's, bit 1: corner 1's, bit 2: corner 2's) */
@@ -497,6 +504,7 @@ static const char *FS =
     "    }\n"
     "    o_color = vec4(dos_colour(idx), 1.0); return;\n"
     "  }\n"
+    "#if DOS_LOOK\n"
     "  if (u_dos != 0) {\n"
     "    int kind = int(v_color.r + 0.5); float base = floor(v_color.g + 0.5), C = floor(v_color.b + 0.5);\n"
     "    if (kind == 0) { o_color = vec4(dos_colour(base), 1.0); return; }\n"
@@ -524,6 +532,7 @@ static const char *FS =
     "    float si = lev >= 15.0 ? ti : floor(texture(u_dos_tab, vec2((ti + 0.5) / 256.0, (lev + 0.5) / 17.0)).r * 255.0 + 0.5);\n"
     "    o_color = vec4(dos_colour(si), 1.0); return;\n"
     "  }\n"
+    "#endif\n"
     /* a Titanium colour kind 2 polygon (mercsw 0x1001b466 / 0x10053280): drawn only as the kind 1 shade its object's
      * texture switch makes it (its class in -v_texsel switched off, 0x1001b47a..0x1001b4f3) - or as an outline (above) */
     "  if (v_ticm == 3 && ((-v_texsel) & u_notex) == 0) discard;\n"
@@ -571,11 +580,18 @@ static const char *FS =
     "  o_color = vec4(lit + (u_fog_color - lit) * ff, u_blend != 0 ? ta * u_alpha : u_alpha);\n"
     "}\n";
 
-static GLuint compile(GLenum type, const char *src)
+static GLuint compile(GLenum type, const char *src, int dos)
 {
     GLuint s = glCreateShader(type);
     GLint ok = 0;
-    glShaderSource(s, 1, &src, NULL);
+    /* "#version" first, then DOS_LOOK: the DOS look's own shader code (Gouraud fill, projection, fog key) is compiled
+     * only into its program - the other looks' program carries none of it (its loops, arrays and buffer reads) */
+    const char *nl = strchr(src, '\n'), *part[3];
+    GLint len[3];
+    part[0] = src; len[0] = (GLint)(nl - src + 1);
+    part[1] = dos ? "#define DOS_LOOK 1\n" : "#define DOS_LOOK 0\n"; len[1] = (GLint)strlen(part[1]);
+    part[2] = nl + 1; len[2] = (GLint)strlen(nl + 1);
+    glShaderSource(s, 3, part, len);
     glCompileShader(s);
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -588,53 +604,36 @@ static GLuint compile(GLenum type, const char *src)
     return s;
 }
 
-glr *glr_create(void)
+static GLuint glr_link(int dos)
 {
-    glr *r = calloc(1, sizeof *r);
-    GLuint vs, fs;
+    GLuint vs = compile(GL_VERTEX_SHADER, VS, dos), fs = compile(GL_FRAGMENT_SHADER, FS, dos), prog;
     GLint ok = 0;
-    if (!r) return NULL;
-    vs = compile(GL_VERTEX_SHADER, VS);
-    fs = compile(GL_FRAGMENT_SHADER, FS);
-    if (!vs || !fs) { free(r); return NULL; }
-    r->prog = glCreateProgram();
-    glAttachShader(r->prog, vs);
-    glAttachShader(r->prog, fs);
-    glLinkProgram(r->prog);
+    if (!vs || !fs) { if (vs) glDeleteShader(vs); if (fs) glDeleteShader(fs); return 0; }
+    prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
     glDeleteShader(vs);
     glDeleteShader(fs);
-    glGetProgramiv(r->prog, GL_LINK_STATUS, &ok);
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[2048];
-        glGetProgramInfoLog(r->prog, sizeof log, NULL, log);
+        glGetProgramInfoLog(prog, sizeof log, NULL, log);
         fprintf(stderr, "glr: link failed:\n%s\n", log);
-        glDeleteProgram(r->prog);
-        free(r);
-        return NULL;
+        glDeleteProgram(prog);
+        return 0;
     }
+    return prog;
+}
+
+/* the uniforms' locations in r->prog (-1: not in this variant - glUniform ignores it) */
+static void glr_locate(glr *r)
+{
 #define U(name) r->name = glGetUniformLocation(r->prog, #name)
     U(u_point); U(u_lpos);
     U(u_mvp); U(u_view); U(u_light); U(u_ambient); U(u_fog_density); U(u_fog_color);
     U(u_texsize); U(u_tex); U(u_textured); U(u_mono);
 #undef U
-    {
-        int l;
-        for (l = 0; l < GLR_LAYERS; l++) {
-            glGenVertexArrays(1, &r->layer[l].vao);
-            glGenBuffers(1, &r->layer[l].vbo);
-            glGenTextures(1, &r->layer[l].tbo);
-            glGenBuffers(1, &r->layer[l].sph_vbo);
-            glGenBuffers(1, &r->layer[l].tic_vbo);
-        }
-    }
-    glGenTextures(GLR_SLOTS * 4, r->tex);
-    glGenTextures(GLR_SLOTS, r->tex_a);
-    glGenVertexArrays(1, &r->env_vao);
-    glGenBuffers(1, &r->env_vbo);
-    glGenTextures(2, r->env_tex);
-    glGenVertexArrays(1, &r->spr_vao);
-    glGenBuffers(1, &r->spr_vbo);
-    glGenTextures(64, r->spr_tex);
     r->u_far = glGetUniformLocation(r->prog, "u_far");
     r->u_vp = glGetUniformLocation(r->prog, "u_vp");
     r->u_tint = glGetUniformLocation(r->prog, "u_tint");
@@ -643,8 +642,6 @@ glr *glr_create(void)
     r->u_pfade = glGetUniformLocation(r->prog, "u_pfade");
     r->u_ptab = glGetUniformLocation(r->prog, "u_ptab");
     r->u_notex = glGetUniformLocation(r->prog, "u_notex");
-    glVertexAttrib4f(6, 0, 0, 0, 0);   /* the sky, ground and sprites: no sphere, never culled */
-    glVertexAttrib4f(7, 0, 0, 0, 0);   /* nor a Titanium CPU colour */
     r->u_unlit = glGetUniformLocation(r->prog, "u_unlit");
     r->u_wire = glGetUniformLocation(r->prog, "u_wire");
     r->u_shadow = glGetUniformLocation(r->prog, "u_shadow");
@@ -683,6 +680,45 @@ glr *glr_create(void)
 #undef U
     r->u_blend = glGetUniformLocation(r->prog, "u_blend");
     r->u_ati = glGetUniformLocation(r->prog, "u_ati");
+}
+
+/* the program for the look: the DOS look's variant (DOS_LOOK 1) or the others' (glr_set_dos switches) */
+static void glr_use_variant(glr *r, int dos)
+{
+    GLuint p;
+    if (r->prog && r->prog_dos == dos) return;
+    if (!(p = glr_link(dos))) return;   /* (keeps the old program) */
+    if (r->prog) glDeleteProgram(r->prog);
+    r->prog = p; r->prog_dos = dos;
+    glr_locate(r);
+}
+
+glr *glr_create(void)
+{
+    glr *r = calloc(1, sizeof *r);
+    if (!r) return NULL;
+    glr_use_variant(r, 0);
+    if (!r->prog) { free(r); return NULL; }
+    {
+        int l;
+        for (l = 0; l < GLR_LAYERS; l++) {
+            glGenVertexArrays(1, &r->layer[l].vao);
+            glGenBuffers(1, &r->layer[l].vbo);
+            glGenTextures(1, &r->layer[l].tbo);
+            glGenBuffers(1, &r->layer[l].sph_vbo);
+            glGenBuffers(1, &r->layer[l].tic_vbo);
+        }
+    }
+    glGenTextures(GLR_SLOTS * 4, r->tex);
+    glGenTextures(GLR_SLOTS, r->tex_a);
+    glGenVertexArrays(1, &r->env_vao);
+    glGenBuffers(1, &r->env_vbo);
+    glGenTextures(2, r->env_tex);
+    glGenVertexArrays(1, &r->spr_vao);
+    glGenBuffers(1, &r->spr_vbo);
+    glGenTextures(64, r->spr_tex);
+    glVertexAttrib4f(6, 0, 0, 0, 0);   /* the sky, ground and sprites: no sphere, never culled */
+    glVertexAttrib4f(7, 0, 0, 0, 0);   /* nor a Titanium CPU colour */
     glGenVertexArrays(1, &r->dome_vao);
     glGenBuffers(1, &r->dome_vbo);
     glGenTextures(GLR_SLOTS, r->dome_tex);
@@ -1913,6 +1949,7 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
     uint8_t (*img)[256][4] = r->dos_img;
     int x, y;
     r->dos = pal != NULL;
+    glr_use_variant(r, r->dos);
     if (!pal) return;
     for (y = 0; y < 16; y++)
         for (x = 0; x < 256; x++) { uint8_t v = luma ? luma[y * 256 + x] : (uint8_t)x; img[y][x][0] = img[y][x][1] = img[y][x][2] = v; img[y][x][3] = 255; }

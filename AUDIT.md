@@ -218,3 +218,7 @@ Result: the rule conditions match. The engine has no "attacked from beyond range
 - 2026-10-23: merged build - make check ALL PASSED, suite 252 / 0 failed, Windows build OK.
 - 2026-10-24 (user: <20 fps on M4 Pro, log 'GLD_TEXTURE_INDEX_BUFFER is unloadable'): u_dos_vtx (samplerBuffer, unit 3) read in the vertex shader since v0.4.12 but only bound in the DOS look; a 1-texel R32F placeholder buffer texture now always on unit 3, layer TBO set up on unit 3 (never unit 0).
 - 2026-10-24: build - make check ALL PASSED, suite 252 / 0 failed, Windows build OK.
+- 2026-10-24 (user: v0.4.14 no change on the Mac): llvmpipe Titanium TAUPSCN1 per-frame cost equal v21e / v22a / now (no CPU regression visible here). DOS-look shader code behind DOS_LOOK (two program variants, glr_use_variant on glr_set_dos); MW2_PERF=1/2 frame-time readout in glview.
+- 2026-10-24: build - make check ALL PASSED, suite 252 / 0 failed, Windows build OK.
+- 2026-10-24 (user MW2_PERF=2 on M4 Pro, 3024x1964: world ~1 ms, 'HUD etc' 134 ms after start-up): hud.c drew every quad / triangle by glBufferSubData at offset 0 of one 96-byte VBO (~1,300 draws a frame, TAUPSCN1) - Apple GL serialises each on the GPU. Now hud_put: a 1 MB ring, glMapBufferRange unsynchronised, orphaned when full; hud_lines through it too. glload.h: glMapBufferRange / glUnmapBuffer.
+- 2026-10-24: build - make check ALL PASSED, suite 252 / 0 failed (host slower: v23a itself 1.7x), Windows build OK.

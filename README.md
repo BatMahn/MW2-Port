@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-24, v0.4.14)
+## Status (2026-10-24, v0.4.15)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 

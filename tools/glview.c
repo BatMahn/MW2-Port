@@ -2574,6 +2574,52 @@ static float     g_twist_limit = 90.0f;   /* MGEO +0x14 (16.16 deg): 90 most mec
 
 static int   g_auto_on, g_auto_fire, g_auto_cockpit, g_auto_jet;
 static float g_auto_secs, g_auto_throttle, g_auto_twist, g_auto_elapsed;
+/* MW2_PERF=1 (a diagnostic for slow machines): every 2 s the frame rate and where the frame's time went - before the
+ * world draw (events, simulation), the world draw's CPU, the rest (HUD, cockpit), the buffer swap (on most drivers the
+ * wait for the GPU); MW2_PERF=2 also waits for the GPU after the world draw (its GPU time then shows in "world") */
+static int    g_perf = -1;
+static double g_perf_t[5], g_perf_sum[4], g_perf_max, g_perf_t0;
+static int    g_perf_n;
+static double perf_now(void) { return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); }
+static void perf_frame_start(void)
+{
+    if (g_perf < 0) g_perf = getenv("MW2_PERF") ? atoi(getenv("MW2_PERF")) : 0;
+    if (g_perf <= 0) return;
+    g_perf_t[4] = perf_now();
+}
+static void perf_mark(int k)
+{
+    if (g_perf <= 0) return;
+    if (k == 1 && g_perf >= 2) glFinish();
+    g_perf_t[k] = perf_now();
+}
+static void perf_report(int w, int h)
+{
+    double now, fr;
+    if (g_perf <= 0) return;
+    if (g_perf_t0 == 0) {
+        g_perf_t0 = g_perf_t[4];
+        printf("perf: GL %s / %s / %s, drawable %d x %d\n", (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
+               (const char *)glGetString(GL_VERSION), w, h);
+    }
+    g_perf_sum[0] += g_perf_t[0] - g_perf_t[4];
+    g_perf_sum[1] += g_perf_t[1] - g_perf_t[0];
+    g_perf_sum[2] += g_perf_t[2] - g_perf_t[1];
+    g_perf_sum[3] += g_perf_t[3] - g_perf_t[2];
+    fr = g_perf_t[3] - g_perf_t[4];
+    if (fr > g_perf_max) g_perf_max = fr;
+    g_perf_n++;
+    now = perf_now();
+    if (now - g_perf_t0 >= 2.0 && g_perf_n > 0) {
+        double n = g_perf_n;
+        printf("perf: %.1f fps (%d x %d), ms per frame: before world %.2f, world %.2f, HUD etc %.2f, swap %.2f, worst frame %.1f\n",
+               n / (now - g_perf_t0), w, h, 1000 * g_perf_sum[0] / n, 1000 * g_perf_sum[1] / n, 1000 * g_perf_sum[2] / n,
+               1000 * g_perf_sum[3] / n, 1000 * g_perf_max);
+        fflush(stdout);
+        memset(g_perf_sum, 0, sizeof g_perf_sum); g_perf_max = 0; g_perf_n = 0; g_perf_t0 = now;
+    }
+}
+
 static float g_auto_dt = 1.0f / 30.0f;   /* the autopilot's frame time (TEST ONLY: MW2_TEST_FPS=N runs 1/N s frames) */
 static char  g_auto_out[256];
 
@@ -5092,6 +5138,7 @@ int main(int argc, char **argv)
     while (running) {
         SDL_Event e;
         int reload = 0;
+        perf_frame_start();
         if (g_drop_tex) {   /* hold the drop screen until 2 s after launch (user choice; was 5 s); the mission waits. Then
                              * as the original: the mission's CD track starts and the drop screen fades to black over 0.86 s
                              * before the first mission frame (DOSBox YELLSCN1 / TNJ1SCN1: the music from the start of the
@@ -7164,7 +7211,9 @@ int main(int argc, char **argv)
         world_fade(r);
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
         if (g_world) scene_anim(r);
+        perf_mark(0);
         glr_draw(r, &v, w, h);
+        perf_mark(1);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
             int st = pp->destroyed ? 4 : pp->shutdown ? 3 : (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) ? 1 : 2;
@@ -8410,7 +8459,10 @@ int main(int argc, char **argv)
                    combat_health(&g_sim.player_unit), g_sim.player_unit.destroyed ? "destroyed" : "alive");
             running = 0;
         }
+        perf_mark(2);
         SDL_GL_SwapWindow(win);
+        perf_mark(3);
+        perf_report(w, h);
         if (g_world && g_sim_ok && g_pl_ok && g_pilot)
             snprintf(title, sizeof title, "MW2 - %s  %3.0f km/h  twist %+3.0f  armour %d  heat %.0f%s  target %s%s", mission,
                      (double)(g_pl_speed * 0.036f), (double)g_pl.twist, combat_health(&g_sim.player_unit),

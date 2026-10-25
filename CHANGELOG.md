@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.15 (2026-10-24)
+
+- **macOS frame rate (found with the new readout)**: the HUD was taking over 100 ms a frame on a Mac once the cockpit
+  powered up. It makes about 1,300 small draws a frame, and each one rewrote the same small buffer, so every draw waited
+  for the GPU to finish the one before. Apple's OpenGL enforces that wait strictly; Linux and Windows drivers mostly hide
+  it. The HUD now writes each draw to a fresh part of a larger buffer. Also, the DOS look's extra shader work is now
+  compiled only into the DOS look's shader. No visual change.
+- **Performance readout**: start the game with `MW2_PERF=1` to print the frame rate and where each frame's time goes
+  (simulation, world draw, HUD, buffer swap), plus the GL driver and drawing size, every 2 seconds. `MW2_PERF=2` also
+  times the GPU's world draw.
+
 ## v0.4.14 (2026-10-24)
 
 - **macOS frame rate**: since v0.4.12 the renderer could drop to under 20 fps on Macs (Terminal showed "UNSUPPORTED ...
