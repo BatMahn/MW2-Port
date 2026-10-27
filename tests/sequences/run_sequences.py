@@ -7090,6 +7090,38 @@ def hud_bar_smoothing(c):
     c(one >= 10 and bad == 0 and full > 0 and all(s['jetbar'] == min(full, (full + 1) * s['jetsm'] // 0x712) for s in js),
       '3Dfx: jets s += (fuel - s) >> 1 a frame (whole units), bar s x (length + 1) / 0x712', '%d one-step pairs, %d off, full %d' % (one, bad, full))
 
+@sequence
+def reticle_not_ready(c):
+    """the reticle while the selected weapon is not ready (user report: the lock reticle while the LRMs reload): engine
+    0x10022710 (DOS 0x29360) draws RCLINOP whenever the selected slot's state (+8) is not 1 (ready) - firing its volley
+    or recycling - and the lock colours (RCLPLOC / RCLGLOC) only for a ready guided weapon. The lock itself (0x10044560)
+    runs on regardless: RCLGLOC again the moment the weapon is ready. Chain fire moves the selection on at the trigger's
+    release (0x10043f80). DOSBox YELLSCN1 (Mad Dog, ML_r6_*): locked red cross-hair; the volley and, cycled back to the
+    reloading LRM, its whole reload show the plain yellow ring; ready again (~14 s): red at once. Setup as missile_lock"""
+    cyc = [(2 + 0.4 * i, 2.1 + 0.4 * i, 'enter') for i in range(7)]
+    back = [(12.6 + 0.4 * i, 12.7 + 0.4 * i, 'enter') for i in range(9)]   # the 10 weapons round from the other LRM to it
+    r = c.run(secs=29, env={'MW2_KILL_ACTOR': '0,9999', 'MW2_TEST_TARGET': '0', 'MW2_TEST_STANDOFF': 16000, 'MW2_TEST_HOLD_ACTOR': '0'},
+              hold=cyc + [(11, 11.6, 'space')] + back, dump='/0.1')
+    s0 = r.at(10.8)
+    lrm = s0['sel']
+    c(0 <= lrm < len(s0['w']) and s0['w'][lrm][0] == 0 and s0['lock'] & 0x80 and s0['rcl'] == 5,
+      'LRM selected, ready and locked: RCLGLOC', 'sel %d lock 0x%x rcl %d' % (lrm, s0['lock'], s0['rcl']))
+    s1 = r.at(11.4)
+    c(s1['sel'] == lrm and s1['w'][lrm][1] != 1 and s1['rcl'] == 0, 'firing its volley (state != 1): RCLINOP',
+      'sel %d state %d rcl %d' % (s1['sel'], s1['w'][lrm][1], s1['rcl']))
+    s2 = r.at(12.2)
+    c(s2['sel'] != lrm and s2['rcl'] == 5, 'released: chain fire selects the other (ready) LRM - still locked, RCLGLOC',
+      'sel %d rcl %d' % (s2['sel'], s2['rcl']))
+    rel = [x for x in r.span(16.6, 25.5)]
+    bad = [(x['t'], x['sel'], x['rcl']) for x in rel if x['sel'] != lrm or x['w'][lrm][1] == 1 or x['rcl'] != 0]
+    c(rel and not bad, 'cycled back to the reloading LRM: RCLINOP all through the reload, no lock colours',
+      '%d dumps, first bad %s' % (len(rel), bad[:1]))
+    c(all(x['lock'] & 0x80 for x in r.span(18.5, 25.5)), 'the lock re-acquired meanwhile (cycling past the lasers dropped it;'
+      ' 0x10044560 is not gated by readiness) - and still RCLINOP')
+    rdy = next((x for x in r.states if x['t'] > 16.6 and x['sel'] == lrm and x['w'][lrm][1] == 1), None)
+    c(rdy is not None and rdy['rcl'] == 5 and 24.5 < rdy['t'] < 28, 'reloaded (~13.9 s refire after the volley): RCLGLOC at once',
+      't %.2f rcl %d' % (rdy['t'], rdy['rcl']) if rdy else 'never ready')
+
 
 def main():
     global GLVIEW, VERBOSE
@@ -7143,5 +7175,6 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
 
 

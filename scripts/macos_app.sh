@@ -38,6 +38,8 @@ case "$SDL" in
       echo "bundled $SDL3 (for sdl2-compat)"
     fi ;;
 esac
+VERSION=${GITHUB_REF_NAME#v}   # the release tag (CI), else 1.0.0
+[ -n "$VERSION" ] || VERSION=1.0.0
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -47,7 +49,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>org.mw2port.mw2</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>mw2port</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

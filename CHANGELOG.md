@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.0 (2026-10-27)
+
+- **Version 1.0.** The port now covers the whole original game - both campaigns, Instant Action, the shell, every
+  renderer look (DOS, ENHANCED, 3DFX, S3, MATROX, ATI, RENDITION, Titanium textures), CD, Gravis and MT-32
+  music - checked against the original code and DOSBox throughout. What is left is listed in KNOWN_ISSUES.md: a few
+  details of the S3 and Rendition renderers that need the original hardware to check.
+- Version numbers: the macOS app and the Windows program now report the release version (was 0.1 / 0.4).
+
+## v0.4.17 (2026-10-26)
+
+- **Missile reticle while reloading** (player report, checked in DOSBox): while the selected launcher fires its volley or
+  reloads, the reticle is the plain yellow ring with no lock colours, as in the original. The lock keeps building
+  underneath, so the red cross-hair returns the moment the launcher is ready. Releasing the trigger still moves to the
+  group's next weapon, as before.
+
 ## v0.4.16 (2026-10-26)
 
 - **DOS-look HUD now matches the original pixel for pixel** (the old "won't fix" items): the nav marker and target

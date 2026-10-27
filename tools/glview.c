@@ -270,6 +270,7 @@ static int       g_feet_to_torso;
 static float     g_twist_dem, g_pitch_dem;   /* the torso demands c[2] / c[6] (the sinks'); g_pl.twist / g_pitch are the servos' values c[3] / c[7] */
 static float     g_twist_srv = 1e9f, g_pitch_srv = 1e9f;   /* the servos' values as the servo step last left them */
 static hud      *g_hud;
+static int g_rcl = -1;   /* the reticle sprite chosen last frame (state dump): -1 RETICLE, else the g_hs_rcl index */
 static hud_sprite g_hs_rcl[6], g_hs_rcl_dos[6], g_hs_reticle_dos, g_hs_tgt_dos[3];   /* the DOS (base set) reticle and brackets */   /* RCLINOP RCLLOCK RCLNOLK RCLPLOC RCLTGT RCLGLOC */
 static hud_sprite g_hs_compass, g_hs_reticle, g_hs_damage, g_hs_dmg_lvl[4];
 static hud_sprite g_hs_cmpmk[4], g_hs_altmk[2];   /* CMPMKR1-4, ALTMKR1-2 */
@@ -4824,6 +4825,7 @@ static void test_dump(const char *tag)
     }
     /* the walk-cycle keys: the player's and MW2_KILL_ACTOR's actor's (a destroyed mech keeps its pose: standing_wreck_frozen) */
     printf(" pkey=%.3f aheld=%d bracket=%d zoom=%.2f dhdt=%d", (double)g_pl_t, g_pl_anim_held, g_bracket, (double)g_zoom, (int)g_dhdt_s);
+    printf(" rcl=%d", g_rcl);   /* the reticle drawn: -1 RETICLE, 0 RCLINOP 1 RCLLOCK 2 RCLNOLK 3 RCLPLOC 4 RCLTGT 5 RCLGLOC */
     printf(" heatbar=%d heats=%d heatx=%d thrbar=%d jetbar=%d", (int)g_heat_p, (int)g_heat_s, (int)g_heat_x, (int)g_thr_p, (int)g_jet_p);
     printf(" jetsm=%d", (int)g_jet_s);
     {   /* the navs' visited flags 0x20 (g_nav_seen), bit n = nav n */
@@ -7805,6 +7807,7 @@ int main(int argc, char **argv)
                  * RCLNOLK; the rest: RCLTGT on target, else RETICLE. On target = the selected target within the weapon's
                  * range window and 3 degrees of the aim */
                 const hud_sprite *rs = &g_hs_reticle;
+                g_rcl = -1;
                 /* the DOS look (default): the base-set sprites at the DOS pixel size - the original at 1024 x 768 drew
                  * them 1:1 (the bracket 23 px, measured 21); MW2_HUD_3D=1 keeps the 3D editions' 640 / 1024 set */
                 int dos = getenv("MW2_HUD_BASE") && g_hs_reticle_dos.tex;   /* tests: the 320 x 200 set at the DOS size */
@@ -7833,14 +7836,18 @@ int main(int argc, char **argv)
                     }
                     {
                         const hud_sprite *R = dos ? g_hs_rcl_dos : g_hs_rcl;
-                        /* RCLINOP (the yellow ring) is "inoperative": the weapon destroyed or out of ammunition - not
-                         * recycling (DOS / Win95 footage: the normal reticle between shots) */
-                        int inop = cw->ammo == 0 || (cw->location >= 0 && cw->location < 8 && g_sim.player_unit.loc_gone[cw->location]);
+                        /* RCLINOP (the plain yellow ring): the selected weapon not ready - slot state +8 != 1 (0x10022710;
+                         * DOS 0x29360 the same test): recycling, firing its volley, destroyed or out of ammunition. No lock
+                         * colours then, though the lock (0x10044560, not gated by readiness) runs on: RCLGLOC at once when
+                         * the weapon is ready again. DOSBox YELLSCN1 (ML_r6_*): the LRM's volley and its whole reload show
+                         * RCLINOP; the chain-fire step on the release moves the selection to the next weapon */
+                        int inop = cw->state != CW_READY || cw->ammo == 0 || (cw->location >= 0 && cw->location < 8 && g_sim.player_unit.loc_gone[cw->location]);
                         if (inop) rs = &R[0];
                         else if (msim_weapon_guided(wid)) rs = (g_sim.player_lock & 0x80) ? &R[5] : (g_sim.player_lock & 0x8000) ? &R[3] : &R[2];
                         else if (kind == 3) rs = on ? &R[1] : &R[2];
                         else if (on) rs = &R[4];
                         else if (dos) rs = &g_hs_reticle_dos;
+                        g_rcl = rs >= R && rs < R + 6 ? (int)(rs - R) : -1;
                     }
                 } else if (dos) rs = &g_hs_reticle_dos;
                 /* only from the cockpit camera: the HUD pass (0x1001e5f2 -> 0x10022230) draws it while DAT_1024e674 is set,
