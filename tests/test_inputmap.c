@@ -16,6 +16,8 @@ static void parse_str(inputmap *m, const char *gk, const char *in)
 static void put(const char *path, const char *text) { FILE *f = fopen(path, "wb"); fputs(text, f); fclose(f); }
 #define CHK(x) do { if (!(x)) { printf("FAIL %s\n", #x); fails++; } } while (0)
 static int fails;
+static char g_std_dir[1100];   /* im_load_std's opener for the tests: the files of one folder, any case */
+static FILE *open_in_dir(const char *rel) { char o[2048]; return dp_resolve_in(g_std_dir, rel, o, sizeof o) == 0 ? fopen(o, "rb") : NULL; }
 int main(int argc, char **argv){ inputmap m; char a[1100], b[1100]; snprintf(a, sizeof a, "%s/GAMEKEY.MAP", argc > 1 ? argv[1] : "."); snprintf(b, sizeof b, "%s/INPUT.MAP", argc > 1 ? argv[1] : "."); im_load(&m, a, b); printf("binds %d rules %d\n",m.nbinds,m.nrules);
  CHK(im_action(&m,"NEXT_TARGET",SDLK_t,0)); CHK(!im_action(&m,"NEXT_TARGET",SDLK_t,KMOD_LCTRL)); CHK(im_action(&m,"RESET_TARGETTING",SDLK_t,KMOD_LCTRL));
  CHK(im_action(&m,"ALL_PT_MENU",SDLK_F1,KMOD_RCTRL)); CHK(im_action(&m,"PREV_NAVPOINT",SDLK_n,KMOD_LSHIFT)); CHK(im_action(&m,"EXIT_SIM",SDLK_q,KMOD_LCTRL));
@@ -88,5 +90,66 @@ int main(int argc, char **argv){ inputmap m; char a[1100], b[1100]; snprintf(a, 
    CHK(g.have_gamekey && g.have_input && g.nbinds == 1 && g.nrules == 1 && im_action(&g, "TOGGLE_AUTOPILOT", SDLK_p, 0));
    ks[SDL_SCANCODE_W] = 1; CHK(im_held(&g, "throttle_plus", ks)); memset(ks, 0, sizeof ks);
    chmod(p1, 0644); chmod(p2, 0644); remove(p1); remove(p2); rmdir(sub); rmdir(cd); rmdir(d);
+ }
+ {   /* the drivers the conditions name, first mention first (MW2.EXE 0x476a0), any case kept once */
+   inputmap g;
+   parse_str(&g, NULL, "throttle_plus {\n+ Keyboard W\n}\nweapon_fire {\n+ joystick Button1\n}\nweapon_cycle {\n+ keyboard Q\n+ MOUSE LeftBtn\n}\n");
+   CHK(g.ndrv == 3 && strcmp(g.drv[0], "Keyboard") == 0 && strcmp(g.drv[1], "joystick") == 0 && strcmp(g.drv[2], "MOUSE") == 0);
+ }
+ {   /* GIDDI\<driver>.STD (MW2.EXE 0x483b0) from the install: read for the drivers INPUT.MAP loads (KEYBOARD.STD: none
+      * shipped; a name without a GIDDI\<name>.DLL: not loaded), in their order, at most 5 drivers - the shipped ones bind
+      * the menu controls */
+   inputmap g;
+   int n;
+   snprintf(g_std_dir, sizeof g_std_dir, "%s", argc > 1 ? argv[1] : ".");
+   parse_str(&g, NULL, "throttle_plus {\n+ keyboard W\n}\nweapon_fire {\n+ joystick Button1\n+ bogus Button1\n}\nweapon_cycle {\n+ mouse RightBtn\n}\n");
+   n = im_load_std(&g, open_in_dir);
+   CHK(n == 2); CHK(g.nrules == 3 + 4 + 4); CHK(g.have_input == 1);
+   CHK(strcmp(g.rules[3].name, "menu_item") == 0 && g.rules[3].c[0].device == 1 && g.rules[3].c[0].code == 101);   /* JOYSTICK.STD first */
+   CHK(strcmp(g.rules[9].name, "menu_enter") == 0 && g.rules[9].c[0].device == 2 && g.rules[9].c[0].code == SDL_BUTTON_LEFT);   /* then MOUSE.STD */
+   parse_str(&g, NULL, "a {\n}\n");   /* (an unknown control: nothing read, no driver) */
+   CHK(g.ndrv == 0 && im_load_std(&g, open_in_dir) == 0);
+   parse_str(&g, NULL, "weapon_fire {\n+ keyboard A\n+ fltstck Trigger\n+ joystick Button1\n+ mouse LeftBtn\n+ msjstick Trigger\n+ tmaster Trigger\n}\n");
+   CHK(im_load_std(&g, open_in_dir) == 4);   /* keyboard, fltstck, joystick, mouse, msjstick loaded: TMASTER the sixth */
+ }
+ {   /* a player's own .std (any case of the name, in the install folder): an unknown control ends that file only; a driver
+      * a .std names is loaded and its .std read in turn */
+   char d[256], gd[300], p1[400], p2[400], p3[400];
+   inputmap g;
+   snprintf(d, sizeof d, "/tmp/test_inputmap_std_%d", (int)getpid()); snprintf(gd, sizeof gd, "%s/giddi", d);
+   mkdir(d, 0755); mkdir(gd, 0755);
+   snprintf(p1, sizeof p1, "%s/Keyboard.dll", gd); put(p1, "x");
+   snprintf(p2, sizeof p2, "%s/keyboard.std", gd); put(p2, "menu_abort {\r\n\t+ keyboard\tJ\r\n}\r\nnot_a_control {\n}\nmenu_enter {\n+ keyboard K\n}\n");
+   snprintf(p3, sizeof p3, "%s/MOUSE.DLL", gd); put(p3, "x");
+   snprintf(g_std_dir, sizeof g_std_dir, "%s", d);
+   parse_str(&g, NULL, "throttle_plus {\n+ keyboard W\n}\n");
+   CHK(im_load_std(&g, open_in_dir) == 1); CHK(g.nrules == 2 && strcmp(g.rules[1].name, "menu_abort") == 0);
+   remove(p2); put(p2, "menu_enter {\n+ mouse LeftBtn\n}\n");
+   snprintf(p2, sizeof p2, "%s/mouse.std", gd); put(p2, "menu_abort {\n+ keyboard J\n}\n");
+   parse_str(&g, NULL, "throttle_plus {\n+ keyboard W\n}\n");
+   CHK(im_load_std(&g, open_in_dir) == 2); CHK(g.ndrv == 2 && g.nrules == 3 && strcmp(g.rules[2].name, "menu_abort") == 0);
+   remove(p2); snprintf(p2, sizeof p2, "%s/keyboard.std", gd); remove(p2); remove(p1); remove(p3); rmdir(gd); rmdir(d);
+ }
+ {   /* the menu controls (DOS 0x17cd0 / DLL 0x10065a70): menu_enter / menu_abort on the press only; menu_item past 1/8
+      * of the travel after 91 ticks, menu_value after 45; the mouse axis recentred by the reset */
+   inputmap g;
+   int pe = 0, pa = 0;
+   parse_str(&g, NULL, "menu_enter {\n+ keyboard J\n}\nmenu_abort {\n+ keyboard K\n}\nmenu_item {\n+ mouse Up/Down\n}\nmenu_value {\n+ mouse Left/Right\n}\n");
+   memset(ks, 0, sizeof ks);
+   CHK(im_menu_key(&g, ks, 1, 0, &pe, &pa) == 0);
+   ks[SDL_SCANCODE_J] = 1; CHK(im_menu_key(&g, ks, 1, 0, &pe, &pa) == SDLK_RETURN); CHK(im_menu_key(&g, ks, 1, 500, &pe, &pa) == 0);
+   ks[SDL_SCANCODE_J] = 0; CHK(im_menu_key(&g, ks, 1, 0, &pe, &pa) == 0);
+   ks[SDL_SCANCODE_K] = 1; CHK(im_menu_key(&g, ks, 0, 0, &pe, &pa) == 0); CHK(im_menu_key(&g, ks, 1, 0, &pe, &pa) == 0);   /* held as it opened */
+   ks[SDL_SCANCODE_K] = 0; im_menu_key(&g, ks, 1, 0, &pe, &pa); ks[SDL_SCANCODE_K] = 1; CHK(im_menu_key(&g, ks, 1, 0, &pe, &pa) == SDLK_ESCAPE);
+   ks[SDL_SCANCODE_K] = 0; im_menu_key(&g, ks, 1, 0, &pe, &pa);
+   g_im_dev.mouse_y = -100;   /* -0.195 */
+   CHK(im_menu_key(&g, ks, 1, 91, &pe, &pa) == 0); CHK(im_menu_key(&g, ks, 1, 92, &pe, &pa) == SDLK_UP);
+   g_im_dev.mouse_y = 100; CHK(im_menu_key(&g, ks, 1, 92, &pe, &pa) == SDLK_DOWN);
+   g_im_dev.mouse_y = 64; CHK(im_menu_key(&g, ks, 1, 92, &pe, &pa) == 0);   /* 0.125: not past */
+   g_im_dev.mouse_y = 0; g_im_dev.mouse_x = -100;
+   CHK(im_menu_key(&g, ks, 1, 45, &pe, &pa) == 0); CHK(im_menu_key(&g, ks, 1, 46, &pe, &pa) == SDLK_LEFT);
+   g_im_dev.mouse_x = 100; CHK(im_menu_key(&g, ks, 1, 46, &pe, &pa) == SDLK_SPACE); CHK(im_menu_key(&g, ks, 0, 46, &pe, &pa) == 0);
+   g_im_dev.mouse_y = 200; im_menu_recentre(&g, "menu_value"); CHK(g_im_dev.mouse_x == 0 && g_im_dev.mouse_y == 200);
+   im_menu_recentre(&g, "menu_item"); CHK(g_im_dev.mouse_y == 0);
  }
  printf("inputmap: %d bindings, %d control rules, %s\n", m.nbinds, m.nrules, fails ? "FAILED" : "all checks passed"); return fails != 0;}

@@ -6495,18 +6495,17 @@ def dos_hud_windows_sweep(c):
                   keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
         common = {'weapon list': (680, 50, 1000, 160), 'damage outline': (826, 558, 993, 688), 'heat bars': (340, 680, 670, 725),
                   'throttle bar': (995, 535, 1024, 760), 'kph': (870, 715, 960, 745)}
-        # the radar: a dropship blip the port shows (the DOSBox capture's wall-clock start is later) and the 640 x 480 cone's
-        # right end (1 px, DOS's own tables) are allowed
+        # the radar: the Wolf Dropship's 2 x 2 blip the port still shows at 10 s (it moves; the DOSBox capture's clock is
+        # later) is allowed - the cone and the rest exact (dos_radar_integers)
         rad = {'radar': (10, 10, 275, 270)}
-        cmp(tag, k, r.shots.get('nav'), 'nav', dict(common, **dict(rad, **{'target viewer, nav': (20, 550, 330, 740)})), {'radar': 8})
-        cmp(tag, k, r.shots.get('target'), 'target', dict(common, **dict(rad, **{'target viewer text': (20, 692, 330, 740)})), {'radar': 8})
+        cmp(tag, k, r.shots.get('nav'), 'nav', dict(common, **dict(rad, **{'target viewer, nav': (20, 550, 330, 740)})), {'radar': 4})
+        cmp(tag, k, r.shots.get('target'), 'target', dict(common, **dict(rad, **{'target viewer text': (20, 692, 330, 740)})), {'radar': 4})
         r = c.run('_thr' + tag, secs=12, nostart=True, mech=None, size=size, dos_look=True, keys=[(9.0, '5')], shots=[(11.5, 'v')])
         cmp(tag, k, r.shots.get('v'), 'throttle', {'throttle bar at 5': (995, 535, 1024, 760)})
         r = c.run('_vp' + tag, secs=13, throttle=0, nostart=True, mech=None, size=size, dos_look=True, env={'MW2_VOICE_TEXT': '1'},
                   keys=[(8.5, 'l'), (9.5, 'l'), (10.5, 'F7')], shots=[(9.2, 'msg'), (12.0, 'vp')])
         cmp(tag, k, r.shots.get('vp'), 'rearview', {'rear view frame and label': (826, 558, 993, 600), 'frame bottom': (826, 680, 993, 688)})
-        if tag == '1024':   # (640 x 480: DOS shows the bar's first 29 of MSGBAR6's 30 rows, the text 1 px higher - not traced)
-            cmp(tag, k, r.shots.get('msg'), 'message', {'message text': (0, 12, 400, 34)})
+        cmp(tag, k, r.shots.get('msg'), 'message', {'message text': (0, 12, 400, 34)})   # (both sizes: dos_message_bar_window)
 
 def _gus_render(d, name, events, secs):
     """an XMIDI of [(delay ticks, bytes)] through xmiplay with the patches in d/MIDI -> mono samples at 44100"""
@@ -6650,13 +6649,14 @@ def look3d_texcache_tie_s3_reload(c):
     """the texture cache (look3d_texcache_first_poly): S_BFLAGQ (type 7) and S_BFLAGB (type 9) are one flag drawn twice in
     place (TRNJAREA objects 2 / 1, slot 0x122): equal keys, whose order after the quicksort depends on the whole frame's
     list (a transcription of 0x10029ff0 on random frames: 50 / 50) - ASSUMED the copy without the flag first: ARGB1555, the
-    flag as before (picture identical). S3: a PALG slot reload (light amplification on: 0xb5 ticks later 0x1003ec50 ->
+    flag as before (picture identical, compared with the 0.5 alpha test: MW2_TEST_NO_ALPHA_BLEND - look3dfx_alpha_blend
+    draws the type 9 copy over the other). S3: a PALG slot reload (light amplification on: 0xb5 ticks later 0x1003ec50 ->
     0x1003ec90 -> 0x1000f870, which snapshots the use counter) makes 0x10010170 upload every texture again in its next
     polygon's format - V1_PLAIN decided anew; the 3Dfx list is reset only at the mission's start (0x10066570)"""
     from PIL import Image, ImageChops
     pics = {}
     for sub, env in (('', {}), ('_own', {'MW2_TEST_NO_TEXCACHE': '1'})):
-        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0'})
+        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0', 'MW2_TEST_NO_ALPHA_BLEND': '1'})
         r = c.run('_flag' + sub, secs=1, nostart=True, mission='TNJ1SCN1', look3dfx=True, env=env, shots=[(0.8, 'v')])
         pics[sub] = r.shots.get('v')
         if not sub:
@@ -6752,6 +6752,343 @@ def cockpit_controls_current_config(c):
     v = visit('10,440')   # ABORT
     c(v and v[0] == 'cc: current "Custom Config #2" devices joystick keyboard', 'kept as the current configuration', str(v[:1]))
 
+
+
+def _dos_ref(name):
+    from PIL import Image
+    import numpy as np
+    return np.array(Image.open(os.path.join(REPO, 'docs', 'reference', name)).convert('RGB')).astype(np.int32)
+
+
+def _ppm_arr(path):
+    import numpy as np
+    w, h, px = ppm(path)
+    return np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3).astype(np.int32)
+
+
+def _hud_diff(a, b, box):
+    x0, y0, x1, y1 = box
+    A, B = a[y0:y1, x0:x1], b[y0:y1, x0:x1]
+    hud = ((A.max(2) - A.min(2)) > 60) | ((B.max(2) - B.min(2)) > 60)
+    return int(((A != B).any(2) & hud).sum()), int(hud.sum())
+
+
+@sequence
+def dos_hud_marker_projection(c):
+    """the DOS look's nav marker and target bracket through MW2.EXE's integer projection (agent HD; dispatcher 0x29470):
+    the point through 0x3f320 - d = round(point) - round(eye), rows x mantissas >> 27 rounded, ((c << s) / z + 2) >> 2,
+    y = (y1 - y0) - (q + centre): one row above the 3D vertices' - the nav's own NAVP point (0x4f518 -> 0x35e20, not the
+    ground), a mech's corners TGTGP1-4 at (x -+ q, y -+ q), q = ((zoom x half width) x radius >> 8) / z >> 6 (0x298c0),
+    out of view TGTOFF at 0x14020 / 0x14240's edge point. DOSBox YELLSCN1 n / e (docs/reference/dos_hud_yell_{640,1024}_
+    {nav,target}.png): the nav marker at the right edge and the Firemoth's bracket to the pixel at both sizes (before:
+    the nav 1 px high - 2 with the integers but the ground's height - and the bracket 22 px wide for 21)"""
+    for size, tag, nav_box, tgt_box in (('640x480', '640', (590, 200, 640, 280), (590, 200, 640, 280)),
+                                         ('1024x768', '1024', (940, 320, 1024, 450), (940, 320, 1024, 450))):
+        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
+        for shot, box in (('nav', nav_box), ('target', tgt_box)):
+            path = r.shots.get(shot)
+            if not c(path and os.path.exists(path), '%s %s picture' % (tag, shot)):
+                continue
+            bad, n = _hud_diff(_ppm_arr(path), _dos_ref('dos_hud_yell_%s_%s.png' % (tag, shot)), box)
+            c(n > 100 and bad == 0, '%s: the %s marker as DOSBox' % (tag, 'nav' if shot == 'nav' else 'target bracket'),
+              '%d of %d HUD pixels differ' % (bad, n))
+        c(r.at(10.0).get('bracket') == 3 and r.at(11.8).get('bracket') == 1, tag + ': the nav marker, then the mech bracket, in view',
+          '%s / %s' % (r.at(10.0).get('bracket'), r.at(11.8).get('bracket')))
+
+
+@sequence
+def dos_radar_integers(c):
+    """the DOS look's radar in MW2.EXE's integers (agent HD): the blips through the radar's own view (0x11950 -> 0x12c20,
+    0x13130) - straight down from the player's EYE object (unit +0x44), yaw the legs' heading, rows from the sine table x
+    0x2000 / (aspect >> 3), x = ((R0.d >> 27) << 3) / (range / W) + 2 >> 2 from W >> 1, y = (H - 1) - (... + H >> 1); in
+    range by 0x14530; the cone ends by 0x14670 -> 0x147c0 (the arctangent table 0x3a9e5, built by 0x3aa92). DOSBox
+    YELLSCN1, x three times ("R: 2.0km"; docs/reference/dos_hud_yell_{640,1024}_radar2k.png): the three navs and the
+    enemies to the pixel at both sizes (the port's float rule: Nav Alpha 2 px low at 640 x 480, the blips 1 px off; the
+    scale 122 px a km, DOS W / range); the 1 km radar at rest with its cone exact (the 640 x 480 cone end - "1 px off" -
+    is the circle drawn over the line's end, as DOS). Allowed: the Wolf Dropship's blip (it moves; the DOSBox clock)."""
+    for size, tag, k, drop in (('640x480', '640', 175, (78, 112, 100, 140)), ('1024x768', '1024', 280, (125, 185, 155, 215))):
+        r = c.run('_' + tag, secs=11.7, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  keys=[(9.0, 'x'), (9.5, 'x'), (10.0, 'x')], shots=[(11.5, 'r')])
+        path = r.shots.get('r')
+        if not c(path and os.path.exists(path), tag + ' picture'):
+            continue
+        A, B = _ppm_arr(path), _dos_ref('dos_hud_yell_%s_radar2k.png' % tag)
+        x0, y0, x1, y1 = drop
+        A[y0:y1, x0:x1] = B[y0:y1, x0:x1]   # (the dropship)
+        bad, n = _hud_diff(A, B, (0, int(k * 0.17), k, k))
+        c(n > 400 and bad == 0, tag + ' "R: 2.0km": every nav / enemy blip, ring and cone pixel as DOSBox', '%d of %d differ' % (bad, n))
+    for tag, size in (('640', '640x480'), ('1024', '1024x768')):
+        r = c.run('_rest' + tag, secs=11.9, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  keys=[(10.5, 'e')], shots=[(11.8, 'target')])
+        path = r.shots.get('target')
+        if c(path and os.path.exists(path), tag + ' rest picture'):
+            k = 175 if tag == '640' else 280
+            bad, n = _hud_diff(_ppm_arr(path), _dos_ref('dos_hud_yell_%s_target.png' % tag), (0, 0, k, k))
+            c(n > 600 and bad == 0, tag + ' 1 km radar at rest (cone, ring, the out-of-range target on the rim) as DOSBox',
+              '%d of %d differ' % (bad, n))
+
+
+@sequence
+def dos_radar_dropship(c):
+    """the Wolf Dropship early in YELLSCN1 (agent HD): DOSBox 1024 x 768 / 640 x 480 shows it on the radar from the first
+    HUD frame - a friendly thing blip (RGPF) just behind the player, then moving out across the ring and gone - and the
+    port the same, on the same track (DOSBox (138, 127) .. (150, 219) .. (137, 256) at 1024 x 768; the start point 1-2 px
+    from the port's - the dropship's own start position, not the radar)"""
+    r = c.run(secs=13, throttle=0, nostart=True, mech=None, dos_look=True, env={'MW2_RADAR_LOG': '1'})
+    th = {int(float(t)): int(n) for t, n in re.findall(r'^RADAR t=([\d.]+) units \d+ things (\d+)', r.out, re.M)}
+    c(all(th.get(t, 0) >= 1 for t in (1, 3, 5, 7, 9)), 'the dropship on the radar through the first 10 s', str(th))
+    c(th.get(12, 1) == 0, 'gone once it is past the ring (DOSBox: after (137, 256))', str(th))
+    # its waiting blip (agent HB): a thing's radar point is its object's world bounding centre (0x100257a0 / DOS 0x367f0:
+    # object +0x34, the vertex box's middle placed), not the model's origin - DOSBox 2 x 2 blip from (87, 79) at 640 x 480,
+    # (138, 127) at 1024 x 768 (DOSBox frame series); the port's origin had put it one pixel high: (87, 78) / (137, 126)
+    for size, want in (('640x480', (87, 79)), ('1024x768', (138, 127))):
+        w = c.run('_' + size, secs=3.2, throttle=0, nostart=True, mech=None, size=size, dos_look=True, env={'MW2_RADAR_LOG': '1'})
+        pts = [(int(n), int(x), int(y)) for n, x, y in re.findall(r'^RADARTHING now=(\d+) (\d+) (\d+)', w.out, re.M)]
+        at = [(x, y) for n, x, y in pts if 2900 <= n <= 3100]
+        c(bool(at) and all(p == want for p in at), size + ': the waiting blip where DOSBox has it %s' % (want,), str(at[:3]))
+
+
+@sequence
+def dos_message_bar_window(c):
+    """the DOS look's message line in its window (agent HD; MW2.EXE 0x10f00): the screen window scaled about its centre
+    to the bar's VFX bounds ((w - 1) << 16 | (h - 1): MSGBAR6 0x27f001d, MSGBARK 0x3ff0030) by 0x13860 -> 0x137a0, moved
+    to the top, the bar drawn at its corner and clipped to it, the text (y1 - y0 + 1 - font) / 2 down: 640 x 480 rows
+    0-28 and columns 0-637 of the bar, text at y 7; 1024 x 768 rows 0-48, columns 0-1022 (DOSBox YELLSCN1 l,
+    docs/reference/dos_hud_yell_{640,1024}_message.png; the port had drawn all 30 rows, the text 1 px low)"""
+    for size, tag, rows, cols in (('640x480', '640', 29, 638), ('1024x768', '1024', 49, 1023)):
+        r = c.run('_' + tag, secs=10, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+                  env={'MW2_VOICE_TEXT': '1'}, keys=[(8.5, 'l')], shots=[(9.2, 'msg')])
+        path = r.shots.get('msg')
+        if not c(path and os.path.exists(path), tag + ' picture'):
+            continue
+        A, B = _ppm_arr(path), _dos_ref('dos_hud_yell_%s_message.png' % tag)
+        same = (A[:rows, :cols] == B[:rows, :cols]).all(2)
+        c(same.all(), tag + ': the bar and its text as DOSBox', '%d of %d pixels differ' % ((~same).sum(), same.size))
+        grey = lambda p: abs(int(p[0]) - int(p[1])) < 3 and abs(int(p[1]) - int(p[2])) < 3 and p[0] > 40
+        c(not grey(A[rows, 300]) and not grey(A[10, A.shape[1] - 1]), tag + ': nothing of the bar below row %d or right of column %d' % (rows - 1, cols - 1),
+          '%s %s' % (A[rows, 300], A[10, A.shape[1] - 1]))
+    # the 3D looks keep the stretched bar (30 rows at 640 x 480)
+    r = c.run('_3dfx', secs=1.2, throttle=0, nostart=True, mech=None, size='640x480', look3dfx=True,
+              env={'MW2_TEST_MSG': 'x'}, shots=[(1.0, 'm')])
+    path = r.shots.get('m')
+    if c(path and os.path.exists(path), '3Dfx picture'):
+        A = _ppm_arr(path)
+        c(abs(int(A[29, 300, 0]) - int(A[29, 300, 2])) < 3 and A[29, 300, 0] > 20, '3Dfx look: the bar still 30 rows', str(A[29, 300]))
+
+
+@sequence
+def dos_dhdt_integers(c):
+    """the DOS look's dH/dT input (agent HD; MW2.EXE 0x311f0): x = (controller +0x94 - +0x9c x frame ticks) >> 6 - the
+    frame's heat gain less its dissipation in 16.16, floored, not held at 0 - smoothed s += (x - s) >> 4 (0x49cf0, shift 4
+    at 0x96878); the 3D editions truncate the net change to whole units first (0x1001c4a0). A cool mech at rest: DOS s
+    settles at about -(dissipation x ticks x 1024) (the bar blue, and slower to rise), the 3Dfx look 0; firing: both up"""
+    d = c.run('_dos', secs=8, throttle=0, nostart=True, mech=None, dos_look=True)
+    e = c.run('_3dfx', secs=8, throttle=0, nostart=True, mech=None, look3dfx=True)
+    sd, se = d.at(7.5).get('dhdt'), e.at(7.5).get('dhdt')
+    c(isinstance(sd, int) and -400 < sd < -20, 'DOS look at rest: s below 0 (the dissipation, unfloored)', str(sd))
+    c(se == 0, '3Dfx look at rest: s 0 (whole units)', str(se))
+    f = c.run('_fire', secs=3, throttle=0, fire=1, nostart=True, mech=None, dos_look=True)
+    c(f.at(1.0).get('dhdt', 0) > 0x300, 'DOS look firing everything: past full scale', str(f.at(1.0).get('dhdt')))
+@sequence
+def look3dfx_alpha_blend(c):
+    """RENDERER 3DFX blends its alpha polygons instead of alpha-testing them (3Dfx MW2.DLL 0x10067240, flag 2: colour
+    types 8-11 and the bank-0 billboards): grAlphaBlendFunction(SRC_ALPHA, ONE_MINUS_SRC_ALPHA), the alpha test left at
+    Glide's ALWAYS; on an ARGB4444 cache entry (0x10066e70 +0x434 = 1) grAlphaCombine(SCALE_OTHER, TEXTURE_ALPHA, CONSTANT,
+    TEXTURE) - the texel's alpha squared; on an ARGB1555 one guAlphaSource(ITERATED) with every vertex alpha 230.4 - the
+    whole polygon 90 % opaque. No depth buffer (no grDepthBufferMode): farthest first, so the port draws them after
+    everything else, sorted by the deepest corner, depth writes off. TEALSCN1's fire card (A9FIR, a mw2.mip CEL: 4444)
+    fades at its edges, nothing outside it changes; TNJ1's flag S_BFLAGB (type 9, slot 0x122 held as ARGB1555 -
+    look3d_texcache_tie_s3_reload) is now drawn over its type 7 copy S_BFLAGQ (the whole CEL, 90 %, where the type 7 copy
+    shows only rows 61-63); the scrub billboards' 4-bit alpha squared. MW2_TEST_NO_ALPHA_BLEND: the 0.5 test, as before"""
+    import numpy as np
+    box = (100 / 640.0, 120 / 400.0, 300 / 640.0, 330 / 400.0)
+    orange = lambda R, G, B: (R > 150) & (R > B + 60)
+    pic, n = {}, {}
+    for sub, env in (('', {}), ('_test', {'MW2_TEST_NO_ALPHA_BLEND': '1'})):
+        env['MW2_TEST_SKY_STILL'] = '1'
+        r = c.run('_teal' + sub, secs=1.5, throttle=0, twist=0, mission='TEALSCN1', nostart=True, shots=[(1, 'v')], look3dfx=True, env=env)
+        pic[sub] = r.shots.get('v')
+        n[sub] = count_px(pic[sub], orange, box)
+    if c(all(p and os.path.exists(p) for p in pic.values()), 'fire pictures'):
+        w, h, a = ppm(pic[''])
+        _, _, b = ppm(pic['_test'])
+        d = np.abs(np.frombuffer(a, np.uint8).reshape(h, w, 3).astype(int) - np.frombuffer(b, np.uint8).reshape(h, w, 3).astype(int)).max(2)
+        ys, xs = np.nonzero(d)
+        inside = len(xs) > 0 and xs.min() >= box[0] * w and xs.max() < box[2] * w and ys.min() >= box[1] * h and ys.max() < box[3] * h
+        c(inside, 'TEAL: only the fire card changes', '%d pixels in (%s)' % (len(xs), (xs.min(), ys.min(), xs.max(), ys.max()) if len(xs) else '-'))
+    c(0 < n[''] < 0.85 * n['_test'], 'TEAL: the fire card blended by its alpha squared - fewer flame pixels than the 0.5 test',
+      '%d (test: %d)' % (n[''], n['_test']))
+    c.note('TEAL fire: %d flame pixels blended, %d with the 0.5 test' % (n[''], n['_test']))
+    fbox = (310 / 640.0, 115 / 400.0, 345 / 640.0, 145 / 400.0)
+    pic = {}
+    for sub, env in (('', {}), ('_test', {'MW2_TEST_NO_ALPHA_BLEND': '1'})):
+        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0'})
+        r = c.run('_flag' + sub, secs=1, nostart=True, mission='TNJ1SCN1', look3dfx=True, env=env, shots=[(0.8, 'v')])
+        pic[sub] = r.shots.get('v')
+        if not sub:
+            c('TEXCACHE slot=0x122 cel=1354 fmt=1555' in r.out, 'the flag held as ARGB1555')
+    if c(all(p and os.path.exists(p) for p in pic.values()), 'flag pictures'):
+        w, h, a = ppm(pic[''])
+        _, _, b = ppm(pic['_test'])
+        A = np.frombuffer(a, np.uint8).reshape(h, w, 3).astype(int)[int(fbox[1] * h):int(fbox[3] * h), int(fbox[0] * w):int(fbox[2] * w)]
+        B = np.frombuffer(b, np.uint8).reshape(h, w, 3).astype(int)[int(fbox[1] * h):int(fbox[3] * h), int(fbox[0] * w):int(fbox[2] * w)]
+        k = int((np.abs(A - B).max(2) > 8).sum())
+        c(k > 20, 'TNJ1: the type 9 flag drawn over its type 7 copy (90 %)', '%d pixels changed in the flag box' % k)
+    r = c.run('_scrub', secs=1.5, mission='TNJ1SCN1', nostart=True, shots=[(1, 'v')], look3dfx=True, env={'MW2_TEST_SKY_STILL': '1'})
+    q = c.run('_scrub_test', secs=1.5, mission='TNJ1SCN1', nostart=True, shots=[(1, 'v')], look3dfx=True,
+              env={'MW2_TEST_SKY_STILL': '1', 'MW2_TEST_NO_ALPHA_BLEND': '1'})
+    p1, p2 = r.shots.get('v'), q.shots.get('v')
+    if c(p1 and p2 and os.path.exists(p1) and os.path.exists(p2), 'scrub pictures'):
+        w, h, a = ppm(p1)
+        _, _, b = ppm(p2)
+        A = np.frombuffer(a, np.uint8).reshape(h, w, 3).astype(int)
+        B = np.frombuffer(b, np.uint8).reshape(h, w, 3).astype(int)
+        k = int((np.abs(A - B).max(2) > 0).sum())
+        c(0 < k < 0.05 * w * h, 'TNJ1: the scrub billboards\' soft edges (alpha squared) - a few pixels change', '%d pixels' % k)
+
+
+
+_install_dir_plain = install_dir
+_GIDDI_RUNS = set()   # runs whose install folder gets an (empty) giddi folder for their own files
+
+
+def install_dir(name, mech):
+    d = _install_dir_plain(name, mech)
+    if name in _GIDDI_RUNS:
+        os.makedirs(os.path.join(d, 'giddi'))
+    return d
+
+
+@sequence
+def controls_driver_std_menu(c):
+    """the sim's per-driver map files (MW2.EXE 0x483b0): after INPUT.MAP, giddi\\<driver>.std is read for each driver
+    INPUT.MAP loaded (found like the other control files: the install folder, then the disc, any case). The shipped ones
+    bind the menu controls (menu_enter / menu_abort / menu_item / menu_value) to their device; here a player's own
+    keyboard.std (lower case, in the install folder) gives the MAIN MENU menu_enter = J and menu_abort = K - the press
+    only (a held J opens one page, it does not go on to confirm Abort Mission). Without it (the shipped files: no
+    KEYBOARD.STD) J and K do nothing in the menu"""
+    std = b'# Menu system controls\r\nmenu_enter {\r\n\t+ keyboard\tJ\r\n}\r\nmenu_abort {\r\n\t+ keyboard\tK\r\n}\r\n'
+    _GIDDI_RUNS.add(c.name)
+    keys = [(UP, '0'), (10, 'esc')]
+    hold = [(11, 12.5, 'j'), (13.5, 13.8, 'k'), (14.5, 14.8, 'k')]
+    cd = {'MW2_CD_DIR': os.path.join(GTEST, 'cd')}   # the disc (GIDDI\\KEYBOARD.DLL), as the launcher passes it
+    r = c.run(secs=16, files={'giddi/keyboard.std': std}, keys=keys, hold=hold, env=cd)
+    c('controls: 1 driver map file(s)' in r.out, 'giddi/keyboard.std read after INPUT.MAP', (re.findall(r'controls: .*', r.out) or ['-'])[-1])
+    c(r.at(10.5)['menu'] == 1, 'Esc opens the MAIN MENU', 'menu %d' % r.at(10.5)['menu'])
+    c(r.at(12.4)['menu'] == 2, 'held J (menu_enter): Enter once - Abort Mission opens, not confirmed', 'menu %d' % r.at(12.4)['menu'])
+    c(r.tag('over') is None, 'the mission is not aborted')
+    c(r.at(14.2)['menu'] == 1 and r.at(15.2)['menu'] == 0, 'K (menu_abort) goes back a page each press',
+      'menu %d, %d' % (r.at(14.2)['menu'], r.at(15.2)['menu']))
+    r = c.run('_none', secs=16, keys=keys, hold=hold, env=cd)
+    c('driver map file' not in r.out, 'the shipped files: no .std read (no KEYBOARD.STD)')
+    c(r.at(12.4)['menu'] == 1 and r.at(15.2)['menu'] == 1, 'J and K do nothing in the menu without it',
+      'menu %d, %d' % (r.at(12.4)['menu'], r.at(15.2)['menu']))
+
+
+
+@sequence
+def cockpit_controls_name_typing(c):
+    """Cockpit Controls: the configuration's name under "Current Config:" (MW2SHELL table 0x7a9b4, item at (20,286) 150 px
+    wide, click handler FUN_0001e350 - a copy of the shell's line editor): a press on it edits the name in place with a
+    '_' cursor; 0x20..0x7f except '~' (the font's glyphs), under 62 characters and under 150 px with the cursor (each
+    character on its own: "I" still fits after "G" did not); Backspace; Enter / Esc (the text kept either way) / a left
+    press (it does nothing else) end. Saved with the configuration: Save Custom 1 keeps a typed name (CONFIG01.CPC),
+    ACCEPT CONFIG AND EXIT writes it to CONFIG00.CPC. DOSBox (docs/reference/dos_cockpit_name_typing.png, _width.png):
+    3 x Backspace, "Mike~{|}" -> "Default ConMike{|}_"; then A..Z0..9 -> "Default ConMike{|}ABCDEFI_" """
+    from PIL import Image
+    import numpy as np
+    shell = os.path.join(REPO, 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    os.makedirs(os.path.join(OUT, c.name), exist_ok=True)
+    gd, cfg = _shell_game(c)
+    ref = os.path.join(REPO, 'docs', 'reference')
+
+    def run(name, events):
+        out = os.path.join(OUT, c.name, name + '.ppm')
+        if os.path.exists(out):
+            os.remove(out)
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
+                  'MW2_SHELL_MENU': '2', 'MW2_MENU_COCKPIT': '1', 'MW2_CC_EDITOR': '1', 'MW2_CC_CLICKS': '',
+                  'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'menu.ppm'), 'MW2_CC_SHOT': out, 'MW2_CC_EVENTS': events})
+        p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
+        log = p.stdout.decode('latin-1')
+        with open(os.path.join(OUT, c.name, 'log.txt'), 'a') as f:
+            f.write('--- %s\n%s' % (events, log))
+        return log, out
+
+    def differ(out, refn):   # the name's rows of the left column, the DOS pointer (on the name) left out
+        if not os.path.exists(out):
+            return -1
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
+        d = np.abs(a - b).max(2) > 6
+        d[285:315, 38:66] = False
+        return int(d[270:300, 0:172].sum())
+
+    typing = 'l40,290;kbackspace;kbackspace;kbackspace;tMike~{|}'
+    log, out = run('typing', typing)
+    n = differ(out, 'dos_cockpit_name_typing.png')
+    c(n == 0, '"Default ConMike{|}_" matches DOSBox (cursor, ~ refused)', '%d px differ' % n)
+    typing += ';tABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    log, out = run('width', typing)
+    n = differ(out, 'dos_cockpit_name_width.png')
+    c(n == 0, '"Default ConMike{|}ABCDEFI_" matches DOSBox (150 px limit)', '%d px differ' % n)
+    log, out = run('save', typing + ';kenter;l40,290;ta;kesc;r;tb;l400,300;l10,385;l10,440')
+    name = 'Default ConMike{|}ABCDEFI'
+    c("cc: name '%s'" % name in log and 'cc: accepted "%s"' % name in log, 'Enter / Esc / a press keep the typed name', log[-300:])
+    cpc = [open(os.path.join(gd, 'GIDDI', f), 'rb').read()[:64].split(b'\0')[0].decode('latin-1')
+           if os.path.exists(os.path.join(gd, 'GIDDI', f)) else None for f in ('CONFIG00.CPC', 'CONFIG01.CPC')]
+    c(cpc == [name, name], 'saved as typed: Save Custom 1 (not renamed) and ACCEPT CONFIG AND EXIT (CONFIG00)', str(cpc))
+
+
+@sequence
+def hud_bar_smoothing(c):
+    """the heat, throttle and jets bars smoothed per frame (agent HB): {s, x, shift 1} filters (DOS 0x96858 / 0x96864 /
+    0x9687c, 3Dfx 0x1024c818 / 0x1024c828 / 0x1024c848) stepped s += (x - s) >> 1 on each draw (DOS 0x49cf0, 3Dfx
+    0x1003ba60), the port at the agreed 30 fps. Heat (DOS 0x310b0 / 3Dfx 0x1001c350): the DOS look in 16.16 (x = 16.16
+    heat x length / 100, shown s >> 16), the 3D looks in whole pixels (x = trunc(heat) x length / 100) - so a rising 3Dfx
+    bar stops a pixel short (x - s = 1 >> 1 = 0). Throttle (DOS 0x31300 / 3Dfx 0x1001c5b0) in 16.16; jets (DOS 0x31480 /
+    3Dfx 0x1001c750) on the whole fuel units (the port had drawn the heat bar raw and eased the others by its own rates)"""
+    for look in ('dos_look', 'look3dfx'):
+        tag = 'DOS' if look == 'dos_look' else '3Dfx'
+        r = c.run('_heat_' + tag, secs=3, throttle=0, fire=1, nostart=True, mech=None, size='1024x768', dump='/0.0333', **{look: True})
+        st = [s for s in r.states if 'heats' in s]
+        one = bad = 0
+        for a, b in zip(st, st[1:]):   # (the frame's x is set before its step: b's)
+            s1 = a['heats'] + ((b['heatx'] - a['heats']) >> 1)
+            s2 = s1 + ((b['heatx'] - s1) >> 1)
+            one += b['heats'] == s1 and s1 != a['heats']
+            bad += b['heats'] not in (a['heats'], s1, s2)
+        c(one >= 10 and bad == 0, tag + ': heat s += (x - s) >> 1 a frame', '%d one-step pairs, %d off' % (one, bad))
+        sh = 16 if tag == 'DOS' else 0
+        c(all(s['heatbar'] == s['heats'] >> sh for s in st), tag + ': heat bar length = s' + (' >> 16' if sh else ''))
+        lag = any(s['heatbar'] < (s['heatx'] >> sh) - 2 for s in st)
+        c(lag, tag + ': the bar lags a rising heat')
+        if tag == '3Dfx':
+            short = max((sum(1 for _ in g) for k, g in __import__('itertools').groupby(st, key=lambda s: s['heatx'] - s['heats'] == 1) if k), default=0)
+            c(short >= 4, '3Dfx: a rising bar stays a pixel short (x - s = 1 >> 1 = 0)', 'longest run %d frames' % short)
+        t = c.run('_thr_' + tag, secs=2, throttle=-9, keys=[(1, '0')], nostart=True, mech=None, size='1024x768', dump='/0.0333', **{look: True})
+        v = [s['thrbar'] for s in t.span(1.0, 1.9)]
+        fin = t.at(1.9)['thrbar']
+        gaps = [fin - x for x in v if x < fin]
+        c(fin > 100 and len(gaps) >= 3 and all(g2 <= g1 // 2 + 1 for g1, g2 in zip(gaps, gaps[1:])) and gaps[0] > 10,
+          tag + ': throttle bar halves its gap a frame', 'final %d, gaps %s' % (fin, gaps))
+    j = c.run('_jets', secs=4, mech='summoner/smn00std', hold=[(1, 2.5, 'j')], nostart=True, size='1024x768', dump='/0.0333', look3dfx=True)
+    js = j.span(0.9, 3.5)
+    one = bad = 0
+    for a, b in zip(js, js[1:]):
+        x = int(b['fuel'])   # (the dump prints the float fuel rounded: within 1)
+        s1 = a['jetsm'] + ((x - a['jetsm']) >> 1)
+        s2 = s1 + ((x - s1) >> 1)
+        one += abs(b['jetsm'] - s1) <= 1 and abs(s1 - a['jetsm']) > 2
+        bad += min(abs(b['jetsm'] - v) for v in (a['jetsm'], s1, s2)) > 1
+    full = j.at(0.9)['jetbar']
+    c(one >= 10 and bad == 0 and full > 0 and all(s['jetbar'] == min(full, (full + 1) * s['jetsm'] // 0x712) for s in js),
+      '3Dfx: jets s += (fuel - s) >> 1 a frame (whole units), bar s x (length + 1) / 0x712', '%d one-step pairs, %d off, full %d' % (one, bad, full))
 
 
 def main():

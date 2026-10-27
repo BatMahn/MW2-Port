@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.16 (2026-10-26)
+
+- **DOS-look HUD now matches the original pixel for pixel** (the old "won't fix" items): the nav marker and target
+  bracket use the original's integer projection; radar blips and the radar's edge use its own top-down view (Nav Alpha
+  was 2 px low at the 2 km range); the message bar is clipped exactly as DOS clips it at 640x480 and 1024x768; the
+  dH/dT bar reads the original's net heat value; the Wolf Dropship's blip in the first mission sits where DOS puts it.
+- **Heat, throttle and jets bars** are smoothed as in the original (each bar moves half the remaining way per frame);
+  the heat bar was drawn raw before.
+- **Targets, radar and missiles aim at a building's or vehicle's centre**, not its model origin, as the original does.
+- **3DFX look**: fire, smoke, flag and other see-through polygons are blended as the 3Dfx card drew them (softer edges,
+  drawn farthest first) instead of cut out.
+- **Cockpit Controls**: you can type the configuration's name (as in DOS: up to 61 characters, Backspace, Enter / Esc).
+- **Joystick / mouse menu files**: the GIDDI\<driver>.STD files are read as the original reads them, so a stick or
+  mouse set up there can work the in-mission menu.
+
 ## v0.4.15 (2026-10-24)
 
 - **macOS frame rate (found with the new readout)**: the HUD was taking over 100 ms a frame on a Mac once the cockpit

@@ -95,6 +95,8 @@ typedef struct {
                                    * 0x24f90: from 66 up, 66-80 or with a sequence pending) */
     int           warn_latch;     /* engine DAT_1024bfd0: the warning was given; cleared below 65 after 724 ticks */
     float         warn_ticks, heat_mark, last_ticks;   /* ticks since the warning; heat after the last tick; last tick's length */
+    float         dhdt_net;       /* the frames' gain - dissipation x ticks (DOS dH/dT input 0x311f0: controller +0x94 -
+                                   * +0x9c x ticks, before the heat is held at 0), summed until the HUD takes it */
     int           auto_shutdown;  /* one tick: the sequence shut the mech down (message 0xd "Shutting down") */
     int           restarted;      /* one tick: the heat restart (state 3 -> 0): the start-up lock runs again (msim.c) */
     int           human;          /* a human pilot: edge-triggered fire, no range check (0x100437a0) */

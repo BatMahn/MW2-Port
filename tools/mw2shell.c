@@ -3883,6 +3883,26 @@ static void cc_present(SDL_Renderer *rd, SDL_Texture *tx)
 }
 static void cc_text(int x, int y, const char *t, int col) { draw_text(&g_fthin, x, y, t, (const uint8_t (*)[3])g_bg.pal, col); }
 
+/* The configuration's name (page 2, under "Current Config:"): a text item at (20,286), 150 px wide (table 0x7a9b4 record
+ * 0x7c484: x 0x14, the next line, width 0x96, the click handler FUN_0001e350 on the left or right press, page loop
+ * FUN_00021020). A press on it edits the name in place (DAT_0008d13c, 64 bytes) - a copy of the shell's line editor
+ * (as 0x2a910 / FUN_0001e080): drawn in the item's font and colour with a '_' cursor after it (0x735c8); a character
+ * 0x20..0x7f other than '~' that the font has (0x26870) is added while the name is under 62 characters (0x3e) and its
+ * width with the cursor stays under the item's 150 px (each character on its own: a narrow one can still fit after a
+ * wide one did not); Backspace takes the last off; Enter or Esc (the edited text kept either way) or a left press ends -
+ * the press does nothing else. The loop is modal (the logo clip runs). The name is saved with the configuration (Save
+ * Custom n: CONFIGnn.CPC, renamed only from "Default Config" / "Custom Config #.."; ACCEPT CONFIG AND EXIT: CONFIG00.CPC).
+ * DOSBox: docs/reference/dos_cockpit_name_typing.png (the cursor, '~' refused, the width limit, Esc keeping the text). */
+static int cc_name_char(const char *buf, int c)   /* FUN_0001e350 0x1e5e0: may c be added? */
+{
+    char t[80];
+    size_t n = strlen(buf);
+    if (c < 0x20 || c >= 0x80 || c == '~' || n == 0x3e) return 0;
+    t[0] = (char)c; t[1] = 0;
+    if (c != ' ' && text_width(&g_fthin, t) <= 0) return 0;   /* the font has no such glyph */
+    snprintf(t, sizeof t, "%s%c_", buf, c);
+    return text_width(&g_fthin, t) < 150;
+}
 static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config *cfg)
 {
     static const char *LEVEL[4] = {"Primary Controls", "Secondary Controls", "Tertiary Controls", "Quaternary Controls"};
@@ -3890,7 +3910,9 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
     static const char *MODL[5] = {"--", "Ctrl", "Alt", "--", "Shft"};
     int done = 0, level = 0, shown = 2, sel = -1, half = 0, scroll = 0, k, f = 0;
     int white = -1, grey = cc_colour(154, 154, 154), red = cc_colour(255, 16, 24);
-    char msg[64] = "";
+    char msg[64] = "", nbuf[64] = "";
+    int naming = 0, text_on = 0;   /* the name being typed (FUN_0001e350) */
+    const char *script = headless ? getenv("MW2_CC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
     while (!done) {
         SDL_Event e;
         const cc_device *d = &g_ccdev[shown];
@@ -3901,7 +3923,8 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         cc_text(0, 275, "Current Config:", grey);
         { static const char *const SLOT[5] = {"Default", "Custom 1", "Custom 2", "Custom 3", "Custom 4"};   /* 0x7a9a0 */
           cc_text(90, 275, SLOT[g_ccslot >= 0 && g_ccslot <= 4 ? g_ccslot : 0], grey); }
-        cc_text(20, 286, cfg->name, white);
+        if (naming) { char t[80]; snprintf(t, sizeof t, "%s_", nbuf); cc_text(20, 286, t, white); }
+        else cc_text(20, 286, cfg->name, white);
         cc_text(0, 308, "RESET DEFAULTS", white);
         for (k = 0; k < 4; k++) { char t[24]; snprintf(t, sizeof t, "Load Custom %d", k + 1); cc_text(0, 330 + 11 * k, t, white);
                                   snprintf(t, sizeof t, "Save Custom %d", k + 1); cc_text(0, 385 + 11 * k, t, white); }
@@ -3935,18 +3958,51 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         }
         if (msg[0]) cc_text(176, 470, msg, red);
         f++;
-        if (headless) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } button = SDL_BUTTON_LEFT; }
-        else while (SDL_PollEvent(&e)) {
+        if (!headless && naming != text_on) { text_on = naming; if (text_on) SDL_StartTextInput(); else SDL_StopTextInput(); }   /* port */
+        if (script) {   /* TEST ONLY: the events done - the frame as it stands to MW2_CC_SHOT */
+            const char *q = script;
+            while (*q == ';' || *q == ' ') q++;
+            if (!*q && f >= 2) {
+                FILE *o = getenv("MW2_CC_SHOT") ? fopen(getenv("MW2_CC_SHOT"), "wb") : NULL;
+                if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
+                done = 1;
+            }
+        }
+        if (headless && !script) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } button = SDL_BUTTON_LEFT; }
+        else while (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { done = 1; break; }
+            if (naming) {   /* the line editor: nothing else reacts */
+                int end = 0;
+                if (e.type == SDL_TEXTINPUT) {
+                    const char *q;
+                    for (q = e.text.text; *q; q++)
+                        if (cc_name_char(nbuf, (unsigned char)*q)) { size_t n = strlen(nbuf); nbuf[n] = *q; nbuf[n + 1] = 0; }
+                } else if (e.type == SDL_KEYDOWN) {
+                    SDL_Keycode kc = e.key.keysym.sym;
+                    if (kc == SDLK_BACKSPACE && nbuf[0]) nbuf[strlen(nbuf) - 1] = 0;
+                    else if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER || kc == SDLK_ESCAPE) end = 1;
+                } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) end = 1;
+                if (end) {
+                    snprintf(cfg->name, sizeof cfg->name, "%s", nbuf);
+                    naming = 0;
+                    if (script) printf("cc: name '%s'\n", cfg->name);   /* TEST ONLY */
+                }
+                if (script) break;
+                continue;
+            }
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) done = 1;
             if (e.type == SDL_MOUSEWHEEL) wheel = e.wheel.y;
             if (e.type == SDL_MOUSEBUTTONDOWN) { mx = e.button.x; my = e.button.y; button = e.button.button; }
+            if (script) break;
         }
         if (wheel && mx < 0) { scroll -= wheel * 3; if (scroll < 0) scroll = 0; if (scroll > d->nbutton - 10) scroll = d->nbutton > 10 ? d->nbutton - 10 : 0; }
         if (mx >= 0) {
             int row = (my - 132) / 11;
             msg[0] = 0;
-            if (mx < 172) {
+            if (mx >= 20 && mx < 20 + 150 && my >= 286 && my < 297 && (button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT)) {
+                naming = 1;   /* FUN_0001e350: the name edited in place */
+                snprintf(nbuf, sizeof nbuf, "%s", cfg->name);
+            } else if (mx < 172) {
                 if (my >= 132 && my < 132 + 11 * CC_DEVICES) { shown = row; scroll = 0; }
                 else if (my >= 308 && my < 319) { cc_merge_defaults(cfg, giddi_dir(), g_ccsel); g_ccslot = 0; }   /* FUN_00020c10 */
                 else if (my >= 330 && my < 374) {   /* FUN_00020a40: the slot first, then its file if there (else nothing) */
@@ -3993,6 +4049,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         }
         cc_present(rd, tx);
     }
+    if (text_on) SDL_StopTextInput();
 }
 
 static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)

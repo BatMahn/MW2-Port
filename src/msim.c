@@ -835,9 +835,12 @@ static void group_assign(msim *s, int table, int leader, int who)
  * (a thing: its box's centre - the engine's object +0x34 is its world bounding centre, 0x10029c10) and the reference
  * range 0x10013450 gives it: a nav point its radius (at least 100 cm), a unit or a thing 100 m. 0: gone (a destroyed
  * unit or thing, or none) */
-/* a thing's point (engine 0x100257a0, from the target update 0x1001d2d0 and the guidance 0x10045910): its object's
- * world position - the node's +0x60..+0x68, the model's origin (not its box centre); 0: no such thing, destroyed
- * (flag 4) or hidden */
+/* a thing's point (engine 0x100257a0 / DOS 0x367f0, from the radar 0x10003960 / DOS 0x11cce, the target update
+ * 0x1001d2d0 and the guidance 0x10045910): its OBJ entry's object (+0x1c, 0x101be5fc / DOS 0x101e90 +0x1c: set for every
+ * object loaded, freed only while hidden, 0x10025310 -> 0x10025730) gives its world bounding centre +0x34..+0x3c - the
+ * local vertex box's middle (0x10029060) through the node's placement (0x10029c10); only without an object the node's
+ * +0x60..+0x68 (0x1000f7e0 / DOS 0x1df60), the model's origin. (The port had taken the origin: YELLSCN1's Wolf Dropship
+ * waited 1-2 px from DOS's blip on the radar.) 0: no such thing, destroyed (flag 4) or hidden */
 static int thing_point(const msim *s, int b, float p[3])
 {
     const mech3d_part *pp;
@@ -846,6 +849,26 @@ static int thing_point(const msim *s, int b, float p[3])
     pp = &s->world->parts[s->bld[b].intact];
     if (pp->hidden) return 0;
     p[0] = (float)pp->pos[0]; p[1] = (float)pp->pos[1]; p[2] = (float)pp->pos[2];
+    if (pp->model.object_count > 0 && pp->model.objects[0].vert_count > 0) {
+        const wtb_object *o = &pp->model.objects[0];
+        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+        float c[3];
+        int v, j;
+        for (v = 0; v < o->vert_count; v++) {
+            const float q[3] = {(float)o->verts[v].x, (float)o->verts[v].y, (float)o->verts[v].z};
+            for (j = 0; j < 3; j++) { if (q[j] < mn[j]) mn[j] = q[j]; if (q[j] > mx[j]) mx[j] = q[j]; }
+        }
+        for (j = 0; j < 3; j++) c[j] = (mn[j] + mx[j]) * 0.5f;
+        if (pp->has_rot) {   /* (as part_vertex) */
+            const float *R = pp->rot;
+            for (j = 0; j < 3; j++) p[j] = R[j * 3] * c[0] + R[j * 3 + 1] * c[1] + R[j * 3 + 2] * c[2] + (float)pp->pos[j];
+        } else {
+            const float cy = cosf(pp->yaw * 3.14159265f / 180.0f), sy = sinf(pp->yaw * 3.14159265f / 180.0f);
+            p[0] = cy * c[0] + sy * c[2] + (float)pp->pos[0];
+            p[1] = c[1] + (float)pp->pos[1];
+            p[2] = -sy * c[0] + cy * c[2] + (float)pp->pos[2];
+        }
+    }
     return 1;
 }
 int msim_thing_point(const msim *s, int b, float p[3]) { return thing_point(s, b, p); }

@@ -47,6 +47,7 @@ typedef struct {
  * object's bounding sphere */
 typedef struct {
     float   c[WTB_MAX_POLY_VERTS][3], nrm[3], sph[4];
+    int     first;     /* its first fan vertex in the layer's vbo (3 (n - 2) vertices: glr_view.alpha_blend's pass) */
     uint8_t n, slot, apoly, cls, has_nrm;
 } glr_fpoly;
 
@@ -128,6 +129,12 @@ struct glr {
     int    dome_n, dome_first[GLR_SLOTS], dome_count[GLR_SLOTS], dome_has[GLR_SLOTS];
     int   *dome_pfirst, *dome_pcount, *dome_pslot, dome_np;   /* per polygon, in the record's order */
     uint8_t dos_img[17][256][4];
+    /* the last DOS frame's projection integers (glr_dos_project): rows x mantissas (2.29 x 16 bits), shifts, the eye
+     * (GL coordinates), the view's size; dos_ok once a DOS frame was drawn */
+    int64_t dos_R[3][3];
+    int     dos_sh[2], dos_vw, dos_vh, dos_ok;
+    uint32_t dos_zhw;   /* zoom (16.16) x the half width: the view's +0x94 (MW2.EXE 0x3ef30) */
+    float   dos_eye[3];
     /* sprites (weapon effects) */
     GLuint spr_vao, spr_vbo;
     glr_particle *par;                      /* glr_set_particles */
@@ -550,7 +557,9 @@ static const char *FS =
     /* (u_ati bit 4) types 5-7 and the sky / ground fills drawn without the alpha flag: no alpha test / key - the alpha-0
      * texels in their own colour (ATi C3D_ERS_TMAP_TEXOP none; 3Dfx 0x10067240 / 0x100674c0 blend only with flag 2;
      * Matrox 0x100624a0 keys only with it, 0x1006256a) */
-    "    if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && ((af & 8) == 0 || (u_ati & 4) == 0)) discard; base = t.rgb * u_tint; ta = t.a; tinted = u_tinton != 0; }\n"
+    /* u_blend 2 / 3 (glr_view.alpha_blend, 3Dfx 0x10067240): 2 an ARGB4444 cache entry, the texel's alpha squared
+     * (grAlphaCombine(3, 4, 1, 1, 0)); 3 an ARGB1555 entry, the vertex alpha alone (u_alpha 230.4 / 255) */
+    "    if (u_blend == 3) {} else if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && ((af & 8) == 0 || (u_ati & 4) == 0)) discard; base = t.rgb * u_tint; ta = u_blend == 2 ? t.a * t.a : u_blend == 3 ? 1.0 : t.a; tinted = u_tinton != 0; }\n"
     /* an untextured polygon's palette colour toward the fade's target palette (its index + 1 in v_texsel) */
     "  else if (u_pfade > 0.0 && v_texsel > 0 && v_bb == 0) base = mix(base, texture(u_ptab, vec2((float(v_texsel - 1) + 0.5) / 256.0, 0.5)).rgb, u_pfade);\n"
     "  float n = length(v_normal);\n"
@@ -1399,6 +1408,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     if (fp_n == fp_cap) { g = realloc(fp, (size_t)(fp_cap = fp_cap ? 2 * fp_cap : 256) * sizeof *fp); if (!g) goto no_fp; fp = g; }
                     g = &fp[fp_n++];
                     g->n = (uint8_t)q->n; g->slot = (uint8_t)batch; g->apoly = (uint8_t)apoly; g->cls = (uint8_t)notex_cls;
+                    g->first = (int)pfirst;
                     for (j = 0; j < q->n; j++) {   /* (the fan's corners, as ti_corner_vertex) */
                         size_t vi = j == 0 ? pfirst : j <= q->n - 2 ? pfirst + 3 * (size_t)(j - 1) + 1 : pfirst + 3 * (size_t)(q->n - 3) + 2;
                         memcpy(g->c[j], buf + vi * FLOATS_PER_VERTEX, 3 * sizeof(float));
@@ -1964,6 +1974,7 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
 
 void glr_draw(glr *r, const glr_view *v, int w, int h) { glr_draw_rect(r, v, 0, 0, w, h); }
 
+
 /* Draw into the window rectangle x, y (from the bottom left), w x h: a cockpit viewport (rear / down view). */
 /* The DOS cockpit set's draw order (MW2.EXE): each polygon facing the eye (0x3e1de; glview culls the same way) has its
  * corners turned into the camera's integers (as dos_gvtx_w: round(W) - round(E), the matrix rows, >> 27 rounded); one
@@ -2032,6 +2043,69 @@ static int32_t dos_sin(int32_t a)
     return (u3 & 0x2000000u) ? -v : v;
 }
 static int32_t dos_cos(int32_t a) { return dos_sin(a + 0x5a0000); }
+/* MW2.EXE's arctangent (0x3a9e5): its 257-entry table (DAT_000fe5dc, built at start-up by 0x3aa92: atan(i / 256) x
+ * 3754936.210460003 through the x87, chopped; entry 256 = 45 degrees) interpolated by the quotient's low 16 bits */
+static const int32_t DOS_ATAN[257] = {
+    0, 14667, 29334, 44001, 58666, 73329, 87990, 102648,
+    117303, 131955, 146602, 161245, 175883, 190516, 205143, 219764,
+    234378, 248985, 263585, 278176, 292759, 307333, 321898, 336454,
+    350999, 365533, 380057, 394569, 409070, 423558, 438033, 452496,
+    466945, 481380, 495800, 510206, 524597, 538973, 553332, 567676,
+    582002, 596312, 610604, 624878, 639134, 653372, 667590, 681790,
+    695969, 710129, 724268, 738386, 752483, 766559, 780613, 794645,
+    808654, 822640, 836604, 850543, 864459, 878351, 892219, 906061,
+    919879, 933671, 947437, 961178, 974892, 988580, 1002241, 1015874,
+    1029481, 1043059, 1056610, 1070133, 1083627, 1097092, 1110528, 1123935,
+    1137313, 1150661, 1163979, 1177266, 1190524, 1203750, 1216946, 1230111,
+    1243244, 1256346, 1269416, 1282455, 1295461, 1308435, 1321376, 1334285,
+    1347160, 1360003, 1372813, 1385589, 1398332, 1411041, 1423716, 1436357,
+    1448964, 1461537, 1474075, 1486579, 1499048, 1511482, 1523881, 1536245,
+    1548574, 1560868, 1573126, 1585349, 1597536, 1609687, 1621802, 1633882,
+    1645925, 1657933, 1669904, 1681839, 1693737, 1705599, 1717425, 1729214,
+    1740967, 1752683, 1764362, 1776004, 1787609, 1799178, 1810710, 1822205,
+    1833662, 1845083, 1856467, 1867813, 1879123, 1890395, 1901630, 1912828,
+    1923989, 1935113, 1946199, 1957249, 1968261, 1979235, 1990173, 2001073,
+    2011937, 2022763, 2033551, 2044303, 2055017, 2065695, 2076335, 2086938,
+    2097504, 2108033, 2118525, 2128980, 2139399, 2149780, 2160124, 2170432,
+    2180703, 2190937, 2201134, 2211295, 2221419, 2231506, 2241557, 2251572,
+    2261550, 2271492, 2281398, 2291267, 2301100, 2310897, 2320659, 2330384,
+    2340073, 2349727, 2359345, 2368927, 2378473, 2387984, 2397460, 2406900,
+    2416305, 2425675, 2435009, 2444309, 2453574, 2462803, 2471998, 2481159,
+    2490284, 2499376, 2508432, 2517455, 2526443, 2535397, 2544317, 2553203,
+    2562055, 2570873, 2579657, 2588408, 2597126, 2605810, 2614461, 2623079,
+    2631663, 2640215, 2648733, 2657219, 2665672, 2674093, 2682481, 2690837,
+    2699160, 2707452, 2715711, 2723938, 2732134, 2740297, 2748429, 2756530,
+    2764599, 2772637, 2780644, 2788619, 2796564, 2804478, 2812360, 2820213,
+    2828035, 2835826, 2843587, 2851318, 2859018, 2866689, 2874330, 2881941,
+    2889522, 2897074, 2904597, 2912090, 2919554, 2926989, 2934394, 2941771, 2949120,
+};
+/* 0x3a9e5(a, b): the angle of (b, a) - a the sine side - in 16.16 degrees: |a| / |b| (the smaller over the larger) as
+ * (n << 24) / d, table entry (q >> 16) + its slope x (q & 0xffff) >> 16 rounded; 90 - it when |a| > |b|, 180 - it when
+ * b < 0, negated when a < 0; |a| == |b|: 45 */
+static int32_t dos_atan2(int32_t a, int32_t b)
+{
+    uint32_t n = (uint32_t)(a < 0 ? -(int64_t)a : a), d = (uint32_t)(b < 0 ? -(int64_t)b : b), t;
+    int fl = (a < 0 ? 1 : 0) | (b < 0 ? 2 : 0);
+    int32_t r;
+    if (n >= d) {
+        if (n == d) { r = 0x2d0000; goto sign; }
+        t = n; n = d; d = t; fl |= 4;
+    }
+    if (n == 0) r = 0;
+    else {
+        uint32_t q = (uint32_t)(((uint64_t)n << 24) / d), i = q >> 16, f = q & 0xffff;
+        uint32_t l = f * (uint32_t)(DOS_ATAN[i + 1] - DOS_ATAN[i]);
+        r = DOS_ATAN[i] + (int32_t)(l >> 16) + (int32_t)((l >> 15) & 1);
+    }
+sign:
+    if (fl & 4) r = 0x5a0000 - r;
+    if (fl & 2) r = 0xb40000 - r;
+    if (fl & 1) r = -r;
+    return r;
+}
+int32_t glr_dos_sin(int32_t a) { return dos_sin(a); }
+int32_t glr_dos_cos(int32_t a) { return dos_cos(a); }
+int32_t glr_dos_atan2(int32_t a, int32_t b) { return dos_atan2(a, b); }
 static void dos_cam_rows(float yaw_deg, float pitch_deg, int64_t rows[3][3])
 {
     int32_t a = (int32_t)lrint(-(double)pitch_deg * 65536.0), b = (int32_t)lrint((double)yaw_deg * 65536.0), m[9];
@@ -2057,6 +2131,36 @@ static int64_t dos_round16(int64_t v) { return (v >> 16) + ((v >> 15) & 1); }
 
 static int64_t dos_rdiv(int64_t n, int64_t d) { int64_t q = (n < 0 ? -n : n) / (d < 0 ? -d : d); return (n < 0) != (d < 0) ? -q : q; }
 static int dos_pq64(int64_t c, int s, int64_t z) { return (int)((dos_rdiv(c * ((int64_t)1 << s), z) + 2) >> 2); }
+
+/* MW2.EXE 0x3f320: a point through the last DOS frame's projection integers (the HUD's markers: the target bracket
+ * 0x298c0 / 0x29a30 and the nav marker 0x29470 by way of 0x29860). d = round(W) - round(E) (whole cm), each camera row
+ * (zoom mantissas folded in, 0x3ece0) >> 27 rounded (shrd + adc); z <= the view's near x 4 (DAT_0014feb0 = +0x3c x 4,
+ * +0x3c = (zoom x half width >> 17) + 1 from 0x3ef30) counts as behind and is projected at |z| (0 -> 1); x = ((x << xs)
+ * / z + 2 >> 2) + the centre (x0 + x1 + 1) >> 1, y = (y1 - y0) - (((y << ys) / z + 2 >> 2) + (y0 + y1 + 1) >> 1) -
+ * one row above the 3D vertices' 0x3dfb7 (centre - q). Returns 1 in front and inside the view (x0..x1, y0..y1), 0 if
+ * not, -1 without a DOS frame. p: GL coordinates (as the vertices); z: the camera z (quarter cm) */
+void glr_dos_view(const glr *r, uint32_t *zhw, int *w, int *h) { *zhw = r->dos_zhw; *w = r->dos_vw; *h = r->dos_vh; }
+int glr_dos_project(const glr *r, const float p[3], int *sx, int *sy, int *sz)
+{
+    int64_t d[3], c[3];
+    int k, z, beh;
+    const int cx = r->dos_vw >> 1, cy = r->dos_vh >> 1, near4 = (int)(((r->dos_zhw >> 17) + 1) * 4);
+    if (!r->dos_ok) return -1;
+    d[0] = (int64_t)floor((double)p[0] + 0.5) - (int64_t)floor((double)r->dos_eye[0] + 0.5);
+    d[1] = (int64_t)floor((double)p[1] + 0.5) - (int64_t)floor((double)r->dos_eye[1] + 0.5);
+    d[2] = (int64_t)floor(-(double)p[2] + 0.5) - (int64_t)floor(-(double)r->dos_eye[2] + 0.5);
+    for (k = 0; k < 3; k++) {
+        int64_t t = r->dos_R[k][0] * d[0] + r->dos_R[k][1] * d[1] + r->dos_R[k][2] * d[2];
+        c[k] = (int32_t)((t >> 27) + ((t >> 26) & 1));
+    }
+    z = (int)c[2];
+    if (sz) *sz = z;
+    beh = z <= near4;
+    if (beh) z = z < 0 ? -z : z == 0 ? 1 : z;
+    *sx = cx + dos_pq64(c[0], r->dos_sh[0], z);
+    *sy = (r->dos_vh - 1) - (dos_pq64(c[1], r->dos_sh[1], z) + cy);
+    return !beh && *sx >= 0 && *sx <= r->dos_vw - 1 && *sy >= 0 && *sy <= r->dos_vh - 1;
+}
 static void dos_qsort(int *id, int *key, int lo, int hi)   /* 0x3cea0, element by element */
 {
     while (hi > lo) {
@@ -2188,8 +2292,13 @@ static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], co
                      | (v->far_cull > 0 && cz[k] > v->far_cull ? 32 : 0);
             }
             if (out) continue;
-            /* (equal keys - an object drawn twice in place, S_BFLAGQ type 7 / S_BFLAGB type 9 at TRNJAREA / TRNWAREA: the
-             * order the quicksort leaves them in depends on the whole frame's list - ASSUMED the copy without the flag) */
+            /* (equal keys - an object drawn twice in place, S_BFLAGQ type 7 / S_BFLAGB type 9 at TRNJAREA / TRNWAREA, OBJs
+             * 2 / 1 at the same offset with the same corners (Q's texels rows 61-63, B's the whole CEL): 0x1002a080 puts
+             * both in one list (a polygon each, or with node flag 0x100 the object by its centre depth from 0x1002fba0,
+             * expanded in place by 0x1002a170), sorted by 0x10029ff0 - a first-element-pivot quicksort that leaves equal
+             * keys in either order, about half the time each whatever their rank in the list; the flags are not in view
+             * at the start, so the frame that first shows them, and the pick, depend on the route played - ASSUMED the
+             * copy without the flag) */
             if (d > key[g->slot] || (d == key[g->slot] && !g->apoly)) { key[g->slot] = d; ap[g->slot] = (int8_t)g->apoly; }
         }
     }
@@ -2205,6 +2314,102 @@ static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], co
             ((texture *)r->tex_src[s])->upfmt = ap[s] ? 2 : 1;
             if (getenv("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, r->tex_src[s]->cel, ap[s] ? "4444" : "1555", key[s]);   /* TEST hook */
         }
+}
+
+/* glr_view.alpha_blend (3Dfx 0x10067240): binds the texture slot s's alpha-flag polygons draw with - the reading the
+ * cache holds (tex_cache_decide; a mw2.mip CEL: ARGB4444) - and returns their u_blend: 2 an ARGB4444 entry (+0x434 = 1:
+ * grAlphaCombine(3, 4, 1, 1, 0), the texel's alpha squared), 3 an ARGB1555 one (guAlphaSource(1): the vertex alpha
+ * 230.4 / 255 over the whole polygon) */
+static int alpha_bind(glr *r, const glr_view *v, int s, GLenum minf, GLenum magf)
+{
+    const texture *T = r->tex_src[s];
+    const int dec = T && T->alt && v->tex_cache && !r->ti_slots ? T->upfmt : 0;
+    const int a4 = (dec != 1 || tex_mip(v, T)) && r->has_a[s];
+    glBindTexture(GL_TEXTURE_2D, a4 ? r->tex_a[s] : r->tex[s]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+    glUniform2f(r->u_texsize, (float)r->tex_w[s], (float)r->tex_h[s]);
+    return a4 || !(T && T->alt) ? 2 : 3;
+}
+
+/* a layer whose alpha-flag polygons are all in its fp list (alpha_pass draws them; otherwise its slot loop, unsorted) */
+static int alpha_deferred(const glr_layer *L)
+{
+    long a = 0, f = 0;
+    int s, i;
+    for (s = 0; s < GLR_SLOTS; s++) a += L->batch_acount[s];
+    if (a == 0) return 0;
+    for (i = 0; i < L->fp_n; i++) if (L->fp[i].apoly) f += 3 * (L->fp[i].n - 2);
+    return a == f;
+}
+
+typedef struct { float key; int li, i; } glr_akey;
+static int akey_cmp(const void *a, const void *b)
+{
+    const glr_akey *x = a, *y = b;
+    return x->key > y->key ? -1 : x->key < y->key ? 1 : x->li != y->li ? x->li - y->li : x->i - y->i;
+}
+
+/* glr_view.alpha_blend: the alpha-flag polygons (types 8-11) after everything else. The 3Dfx engine has no depth buffer
+ * (MW2.DLL never calls grDepthBufferMode: Glide's default, off) and draws a frame's polygons farthest first (0x1002b9b0
+ * key = the deepest corner, quicksort 0x10029ff0): each blended polygon goes over whatever is farther and under what is
+ * nearer. Here: depth test on (what is nearer stays in front; LEQUAL, so a copy drawn in place over an opaque one - the
+ * TRNJAREA / TRNWAREA flag, S_BFLAGB type 9 over S_BFLAGQ type 7 - blends over it as when the engine draws it second),
+ * depth writes off, the blended ones sorted by the same key (equal keys: emission order - the engine's quicksort leaves
+ * them in an order the whole list decides), back-facing ones skipped as 0x1002b9b0 skips them ((corner 0 - eye) .
+ * normal >= 0) */
+static void alpha_pass(glr *r, const glr_view *v, const float view[16], const float eye[3], const int defer[GLR_LAYERS], GLenum minf, GLenum magf)
+{
+    static glr_akey *ak;
+    static int cap;
+    static const float off0[4] = {0, 0, 0, 0};
+    int n = 0, li, i, k, cur_li = -1, cur_s = -1;
+    for (li = 0; li < GLR_LAYERS; li++) {
+        const glr_layer *L = &r->layer[li];
+        if (!defer[li] || (v->solo && li == 0)) continue;
+        for (i = 0; i < L->fp_n; i++) {
+            const glr_fpoly *g = &L->fp[i];
+            float d = -1e30f;
+            if (!g->apoly || L->batch_count[g->slot] <= 0) continue;
+            if (g->has_nrm && (g->c[0][0] - eye[0]) * g->nrm[0] + (g->c[0][1] - eye[1]) * g->nrm[1] + (g->c[0][2] - eye[2]) * g->nrm[2] >= 0) continue;
+            for (k = 0; k < g->n; k++) {
+                const float cz = -(view[2] * g->c[k][0] + view[6] * g->c[k][1] + view[10] * g->c[k][2] + view[14]);
+                if (cz > d) d = cz;
+            }
+            if (n == cap) {
+                glr_akey *nk = realloc(ak, (size_t)(cap = cap ? 2 * cap : 256) * sizeof *ak);
+                if (!nk) { cap = n; break; }
+                ak = nk;
+            }
+            ak[n].key = d; ak[n].li = li; ak[n].i = i; n++;
+        }
+    }
+    if (n <= 0) return;
+    qsort(ak, (size_t)n, sizeof *ak, akey_cmp);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glUniform1i(r->u_textured, 1);
+    for (k = 0; k < n; k++) {
+        const glr_fpoly *g = &r->layer[ak[k].li].fp[ak[k].i];
+        if (ak[k].li != cur_li) {
+            cur_li = ak[k].li;
+            glBindVertexArray(r->layer[cur_li].vao);
+            glUniform4fv(r->u_mono, 1, cur_li == 1 ? v->mono : off0);
+        }
+        if (g->slot != cur_s) {
+            const int mode = alpha_bind(r, v, cur_s = g->slot, minf, magf);
+            glUniform1i(r->u_blend, mode);
+            glUniform1f(r->u_alpha, mode == 3 ? 230.4f / 255.0f : 1.0f);
+        }
+        glDrawArrays(GL_TRIANGLES, g->first, 3 * (g->n - 2));
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glUniform1i(r->u_blend, 0);
+    glUniform1f(r->u_alpha, 1.0f);
 }
 
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
@@ -2585,6 +2790,10 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glUniform3f(r->u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));
             glUniform3f(r->u_dos_rz, (float)((double)R[2][0] / 134217728.0), (float)((double)R[2][1] / 134217728.0), (float)((double)R[2][2] / 134217728.0));
             glUniform2i(r->u_dos_ps, sh2[0], sh2[1]);
+            memcpy(r->dos_R, R, sizeof r->dos_R);   /* (glr_dos_project: the HUD's markers through the same integers) */
+            r->dos_sh[0] = sh2[0]; r->dos_sh[1] = sh2[1]; r->dos_vw = w; r->dos_vh = h; r->dos_ok = 1;
+            r->dos_zhw = (uint32_t)((uint64_t)zoom * hw);
+            memcpy(r->dos_eye, eye, sizeof r->dos_eye);
             if (r->pit_n > 0) {   /* the cockpit set's draw order */
                 int rk[GLR_PIT_MAX];
                 dos_pit_ranks(r, (const int64_t (*)[3])R, eye, w, h, sh2, rk);
@@ -2596,6 +2805,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(r->u_tilit, v->ti_light && !r->dos ? 1 : 0);   /* Titanium: the objects' lights (0x1002ecaa) */
     if (v->tex_cache && !r->dos && !r->ti_slots && v->ortho_w <= 0) tex_cache_decide(r, v, view, mvp, eye);
+    int ablend = v->alpha_blend && !r->dos && !r->ti_slots && !v->wire, adefer[GLR_LAYERS];
+    for (int li = 0; li < GLR_LAYERS; li++) adefer[li] = ablend && alpha_deferred(&r->layer[li]);
     for (int li = 0; li < GLR_LAYERS; li++) {
     const glr_layer *L = &r->layer[li];
     if (r->ti_slots && !r->dos) ti_colours(r, li, v, view, eye);   /* the Titanium per-vertex colours */
@@ -2627,7 +2838,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             const GLsizei na = s < GLR_SLOTS ? L->batch_count[s] - L->batch_acount[s] : L->batch_count[s];
             const int use_a0 = dec == 2, use_a1 = s < GLR_SLOTS && L->batch_acount[s] > 0 && (dec != 1 || tex_mip(v, T));
             if ((use_a0 || use_a1) && !(r->has_a[s] && r->tex_asrc[s] == T)) upload_alpha_reading(r, s, T);
-            if (s < GLR_SLOTS && (use_a0 || (use_a1 && r->has_a[s]) || dec)) {
+            if (s < GLR_SLOTS && (use_a0 || (use_a1 && r->has_a[s]) || dec || (ablend && L->batch_acount[s] > 0))) {
                 if (na > 0) {
                     if (use_a0 && r->has_a[s]) {
                         glBindTexture(GL_TEXTURE_2D, r->tex_a[s]);
@@ -2639,8 +2850,15 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 /* S3: an alpha-flag polygon on an ARGB1555 surface blends by the texel's bit 15 (0x100107a0: alpha state
                  * 0x13 = 0x80000 by the polygon's flag, not the surface's format - the texture's alpha, INFERRED from the
                  * ViRGE command bits) - none set: nothing drawn (otherwise drawn whole, the bit not modelled). 3Dfx: drawn
-                 * whole, 90 % opaque (0x10067240: guAlphaSource(1), vertex alpha 230.4 - the blend not modelled) */
-                if (L->batch_acount[s] > 0 && !(v->tex_cache == 2 && dec == 1 && T->a1555 == 0)) {
+                 * whole, 90 % opaque (0x10067240: guAlphaSource(1), vertex alpha 230.4; glr_view.alpha_blend - drawn after
+                 * everything else, alpha_pass, or here blended when the layer's fp list lacks some) */
+                if (L->batch_acount[s] > 0 && ablend && !adefer[li]) {
+                    const int mode = alpha_bind(r, v, s, minf, magf);
+                    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE);
+                    glUniform1i(r->u_blend, mode); glUniform1f(r->u_alpha, mode == 3 ? 230.4f / 255.0f : 1.0f);
+                    glDrawArrays(GL_TRIANGLES, L->batch_first[s] + na, L->batch_acount[s]);
+                    glDisable(GL_BLEND); glDepthMask(GL_TRUE); glUniform1i(r->u_blend, 0); glUniform1f(r->u_alpha, 1.0f);
+                } else if (L->batch_acount[s] > 0 && !ablend && !(v->tex_cache == 2 && dec == 1 && T->a1555 == 0)) {
                     glBindTexture(GL_TEXTURE_2D, use_a1 && r->has_a[s] ? r->tex_a[s] : r->tex[s]);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
@@ -2670,7 +2888,9 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
         glUniform2f(r->u_texsize, (float)r->tex_w[GLR_SLOTS + s], (float)r->tex_h[GLR_SLOTS + s]);
         glUniform1i(r->u_textured, 1);
-        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glUniform1i(r->u_blend, 1); }
+        /* (glr_view.alpha_blend: their ARGB4444 cache entry - flag 2 at the miss, 0x10066e70 +0x434 - blends by the
+         * texel's alpha squared; the 3Dfx billboards' 4-bit alpha has every level, soft edges) */
+        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glUniform1i(r->u_blend, ablend ? 2 : 1); }
         glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_B0 + s], L->batch_count[GLR_B0 + s]);
         if (blend) { glDisable(GL_BLEND); glUniform1i(r->u_blend, 0); }
     }
@@ -2716,6 +2936,7 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         glDisable(GL_BLEND);
     }
     }
+    if (ablend) alpha_pass(r, v, view, eye, adefer, minf, magf);
     glBindVertexArray(0);
     glUniform1i(r->u_dos, 0);
     { static const float off0[4] = {0, 0, 0, 0}; glUniform4fv(r->u_mono, 1, off0); }

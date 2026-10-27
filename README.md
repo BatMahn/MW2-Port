@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-24, v0.4.15)
+## Status (2026-10-26, v0.4.16)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 
@@ -26,7 +26,7 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 252 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 261 of them) and
 `make sweep` (every mission's objectives).
 
 ## Build

@@ -44,12 +44,15 @@ static im_devstate g_im_dev;
 #define IM_MAX_COND 8   /* conditions in a block: the sim takes 8 (0x47ed0, "chord too big" past them) */
 typedef struct { char name[40]; int ncond; im_cond c[IM_MAX_COND]; } im_rule;
 typedef struct { char action[40]; SDL_Keycode key; int ctrl, alt, shift; } im_bind;
+#define IM_MAX_DRV 16   /* device names kept in the order the conditions name them (the sim loads at most 5, see im_load_std) */
 typedef struct {
     im_rule rules[IM_MAX_RULES];
     int     nrules;
     im_bind binds[IM_MAX_BINDS];
     int     nbinds;
     int     have_gamekey, have_input;
+    char    drv[IM_MAX_DRV][16];   /* the drivers the conditions name, first mention first (MW2.EXE 0x476a0) */
+    int     ndrv;
 } inputmap;
 
 /* INPUT.MAP keyboard key names: GIDDI\KEYBOARD.DLL's list, in its order - entry i is DOS scan code i + 1 (the sim looks a
@@ -270,6 +273,11 @@ static void im_parse_input(inputmap *m, FILE *f)
             if (r->ncond >= IM_MAX_COND) { fprintf(stderr, "INPUT.MAP line %d: chord too big - the rest is ignored\n", lineno); r = NULL; break; }
             k = &r->c[r->ncond++];
             k->sign = a[0] == '-' ? -1 : 1;
+            {   /* the driver: looked up / loaded as the condition names it (0x47ed0 -> 0x476a0) */
+                int q;
+                for (q = 0; q < m->ndrv && strcasecmp(m->drv[q], b) != 0; q++) ;
+                if (q == m->ndrv && m->ndrv < IM_MAX_DRV) snprintf(m->drv[m->ndrv++], sizeof m->drv[0], "%.15s", b);
+            }
             k->device = strcasecmp(b, "keyboard") == 0 ? 0 : strcasecmp(b, "mouse") == 0 ? 2 :
                         (strcasecmp(b, "joystick") == 0 || strcasecmp(b, "fltstck") == 0 || strcasecmp(b, "msjstick") == 0 ||
                          strcasecmp(b, "tmaster") == 0) ? 1 : 3;
@@ -303,6 +311,31 @@ static int im_load(inputmap *m, const char *gamekey, const char *input)
     if (gamekey && (f = fopen(gamekey, "rb"))) { im_parse_gamekey(m, f); fclose(f); }
     if (input && (f = fopen(input, "rb"))) { im_parse_input(m, f); fclose(f); }
     return m->have_gamekey && m->have_input ? 0 : -1;
+}
+
+/* The drivers' own map files (MW2.EXE 0x483b0, right after input.map is read): for each driver loaded so far - in the
+ * order the conditions first named it, a driver counting only when giddi\<name>.dll loads, at most 5 (0x476a0: "4 <
+ * count" refuses a sixth) - "giddi\<name>.std" (0x92e88 "giddi" + "\" + name + 0x93168 ".std") is read the way
+ * input.map is (0x48090: its blocks join the others; an unknown control ends that file's reading); a missing one is
+ * skipped. A driver a .std names is loaded then and its own .std read in turn (the loop runs to the growing count).
+ * The shipped ones (FLTSTCK, JOYSTICK, MOUSE, MSJSTICK, TMASTER; no KEYBOARD.STD) bind the menu controls to the
+ * device: menu_item = Up/Down, menu_value = Left/Right, menu_enter / menu_abort = two buttons (see im_menu_key).
+ * open(rel) opens a file by its DOS path ("GIDDI\\JOYSTICK.STD", any case) or returns NULL. Returns the files read. */
+static int im_load_std(inputmap *m, FILE *(*open)(const char *rel))
+{
+    int i, loaded = 0, nread = 0, have = m->have_input;
+    for (i = 0; i < m->ndrv && loaded < 5; i++) {
+        char rel[64];
+        FILE *f;
+        snprintf(rel, sizeof rel, "GIDDI\\%s.DLL", m->drv[i]);
+        if (!(f = open(rel))) continue;   /* the driver does not load: not in the table */
+        fclose(f);
+        loaded++;
+        snprintf(rel, sizeof rel, "GIDDI\\%s.STD", m->drv[i]);
+        if ((f = open(rel))) { im_parse_input(m, f); fclose(f); nread++; }
+    }
+    m->have_input = have;
+    return nread;
 }
 
 /* any INPUT.MAP condition on device d (2 = the mouse) */
@@ -448,6 +481,53 @@ static int im_held(const inputmap *m, const char *control, const Uint8 *ks)
         if (ok) return 1;
     }
     return 0;
+}
+
+/* The menu controls (the menu's key reader with the open menu's flag bit 0 set - the MAIN MENU, flags 0x11: DOS MW2.EXE
+ * 0x17cd0, MW2.DLL 0x10065a70), when no key was typed: menu_enter gives Enter, else menu_abort Esc (both type-2
+ * controls: on the press only, 0x48970 keeps the last state); else, once the menu's timer passed 91 ticks (0x5b),
+ * menu_item past an eighth of its travel (-0x2000 / 0x2000 of 0x10000) gives Up / Down (0x96 / 0x97, the DLL's 0xc6 /
+ * 0xc7: the previous / next item); else, past 45 ticks (0x2d), menu_value Left / Space (0x99 / 0x20: the value down /
+ * up). ticks: the menu timer (the 182 Hz real-time count, 0x61eb3 / 0x1003db83) since its last reset; *prev_enter /
+ * *prev_abort: the buttons' last state (updated here; call it every frame, the menu open or not, open = 0 when closed).
+ * The caller resets the timer and recentres the menu axes (menu_item_reset / menu_value_reset) on a key. The axes:
+ * the sum of the stick and mouse blocks whose other conditions hold. (The 3Dfx DLL compares its float control value,
+ * -1..1, with -8192.0 / 8192.0 - the DOS integer limits - so there the axes never move the menu; the port takes DOS's.) */
+static SDL_Keycode im_menu_key(const inputmap *m, const Uint8 *ks, int open, int ticks, int *prev_enter, int *prev_abort)
+{
+    int en = im_held(m, "menu_enter", ks), ab = im_held(m, "menu_abort", ks);
+    int en_press = en && !*prev_enter, ab_press = ab && !*prev_abort;
+    float v;
+    *prev_enter = en; *prev_abort = ab;
+    if (!open) return 0;
+    if (en_press) return SDLK_RETURN;
+    if (ab_press) return SDLK_ESCAPE;
+    if (ticks > 0x5b) {
+        v = im_axis(m, "menu_item", ks, 1, NULL) + im_axis(m, "menu_item", ks, 2, NULL);
+        if (v < -0.125f) return SDLK_UP;
+        if (v > 0.125f) return SDLK_DOWN;
+    }
+    if (ticks > 0x2d) {
+        v = im_axis(m, "menu_value", ks, 1, NULL) + im_axis(m, "menu_value", ks, 2, NULL);
+        if (v < -0.125f) return SDLK_LEFT;
+        if (v > 0.125f) return SDLK_SPACE;
+    }
+    return 0;
+}
+/* menu_item_reset / menu_value_reset (set by the menu after each key, or a block of their own): the control's input
+ * recentred by its driver (0x48970 -> the driver's entry +0x10: MOUSE.DLL 0x10260 puts the pointer back in the middle of
+ * the axis; JOYSTICK.DLL 0x102d0 does nothing - a stick reads where it is) */
+static void im_menu_recentre(const inputmap *m, const char *control)
+{
+    int i, k;
+    for (i = 0; i < m->nrules; i++) {
+        if (strcmp(m->rules[i].name, control) != 0) continue;
+        for (k = 0; k < m->rules[i].ncond; k++) {
+            const im_cond *c = &m->rules[i].c[k];
+            if (c->device == 2 && c->code == 100) g_im_dev.mouse_x = 0;
+            if (c->device == 2 && c->code == 101) g_im_dev.mouse_y = 0;
+        }
+    }
 }
 
 #endif

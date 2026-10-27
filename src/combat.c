@@ -230,6 +230,7 @@ void combat_tick(combat_unit *u, float dt)
     /* engine 0x10015f50 */
     if (u->no_heat) { u->heat = 0; u->heat_mark = 0; return; }   /* Combat Variables: heat tracking off */
     net = (u->heat - u->heat_mark) - u->sink_per_tick * (u->shutdown ? 2.0f : 1.0f) * ticks;   /* this frame's gain */
+    u->dhdt_net += (u->heat - u->heat_mark) - u->sink_per_tick * ticks;   /* (DOS 0x311f0: +0x9c x ticks, not doubled) */
     u->heat = u->heat_mark + net;
     if (u->heat < 0) u->heat = 0;
     u->seq_ticks += ticks;
