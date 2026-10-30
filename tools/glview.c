@@ -5848,6 +5848,18 @@ int main(int argc, char **argv)
                 }
                 dt *= speed;
             }
+            if (g_auto_on && getenv("MW2_TEST_HITCH")) {   /* TEST ONLY: "every_s,ms[,jitter_ms]" - one long frame of ms every
+                                                            * every_s seconds, other frames 1/N s +- a random jitter */
+                static float hacc;
+                static unsigned hr = 12345u;
+                float every = 0, ms = 0, jit = 0;
+                sscanf(getenv("MW2_TEST_HITCH"), "%f,%f,%f", &every, &ms, &jit);
+                hr = hr * 1103515245u + 12345u;
+                if (jit > 0) dt += ((float)((hr >> 8) & 0xffff) / 65535.0f * 2.0f - 1.0f) * jit / 1000.0f;
+                if (dt < 0.001f) dt = 0.001f;
+                hacc += dt;
+                if (every > 0 && hacc >= every) { hacc = 0; dt = ms / 1000.0f; }
+            }
             if (g_im_ok) {   /* the menu controls (GIDDI\<driver>.STD, or INPUT.MAP): keys for the MAIN MENU (im_menu_key) */
                 const Uint8 *mks = test_ks();   /* TEST hook: + MW2_HOLD */
                 SDL_Keycode mk;

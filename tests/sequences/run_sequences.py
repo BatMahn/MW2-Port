@@ -7123,6 +7123,63 @@ def reticle_not_ready(c):
       't %.2f rcl %d' % (rdy['t'], rdy['rcl']) if rdy else 'never ready')
 
 
+@sequence
+def airborne_wreck_stops_at_wall(c):
+    """a unit destroyed in the air (state 4, off the ground) still moves through 0x1000b5e0: refused, 0x10019310 takes
+    0x10019ae1 -> 0x1000c4d0 before the position write (0x10019fa0) - the wreck stays where it was and +0x10d bit 0 stops
+    its physics for good. Player report (v1.0.0): enemies falling through geometry - the port had flown wrecks with no move
+    test (and asked the ground at the feet), so one killed in the air passed through buildings and hillsides. GOLDSCN1:
+    the Mad Dog (actor 5) put 10 m up, 145 m south of the player, carrying 30 m/s north toward the temple S_BTMPLE (its
+    front face at z ~15540, normal (0, 0.37, -0.93)), destroyed at once: it must stop in front of the face, not come to
+    rest inside the temple (z 17090, y 0 before)"""
+    r = c.run(secs=5, mission='GOLDSCN1', nostart=True, dump='/0.1',
+              env={'MW2_START': '25088,27000', 'MW2_START_HEADING': '180', 'MW2_TEST_PASSIVE': '1',
+                   'MW2_TEST_DROP': '2:5:-14500:1000:0:3000', 'MW2_TEST_KILL_ALL': '2:0'})
+    d = next((s for s in r.states if s.get('a_dead') == 1 and s['t'] >= 2.0), None)
+    c(d is not None and d['a_y'] > 900, 'the Mad Dog destroyed in the air', str(d and d['a_y']))
+    if not d:
+        return
+    moved = [s for s in r.span(2.0, 3.0)]
+    c(moved and moved[-1]['a_z'] > d['a_z'] + 1500, 'flies on toward the temple', str(moved and moved[-1]['a_z']))
+    end = r.span(3.6, 5.0)
+    c(end and all(s['a_z'] < 15541 - 100 for s in end), 'stops in front of the temple face (not inside it)', str(end and end[-1]['a_z']))
+    c(end and len(set((s['a_x'], s['a_z'], s['a_y']) for s in end)) == 1, 'frozen where the move was refused',
+      str(sorted(set((s['a_x'], s['a_z'], s['a_y']) for s in end))[:3]))
+    c(end and end[-1]['a_y'] > 100, 'held where it hit (0x1000c4d0 returns before the position write), not set down inside',
+      str(end and end[-1]['a_y']))
+
+
+@sequence
+def scaled_hill_ground_follows_mesh(c):
+    """the ground of a type 5 object takes each polygon's normal from its vertices as built - with the OBJ scale - not the
+    file's stored normal: the model loader recomputes them all (0x10042140 -> 0x100298c0 -> 0x10029210, 0x10030410
+    -(P2-P1)x(P3-P2)) and 0x1000fff0 / 0x1000cf80 use that. Player report (v1.0.0, Silent Thunder): player and enemies sink
+    into and fall through the hills - PINKMTN2's hills are scaled (y x 2, x z x 2) and the port had taken the 3Dfx
+    archive's stored (unscaled) normals, so the slope was halved / doubled and past a 10 m step the ground was lost (y 0
+    inside the hill). PINKSCN1: the player walks east along z 520 m over the TLAMTNWA hill at (1329, 489) m (scale 1 2 1,
+    yaw 23): the feet must stay on the drawn surface (heights of its polygons along the line, from the vertices) - before:
+    14.5 m at x 1340 m where the hill is 28.8 m, then the ground lost at x ~1370 m and the mech inside the hill at y 0"""
+    prof = {124500: 36, 125000: 101, 125500: 167, 126000: 232, 126500: 297, 127000: 363, 127500: 428, 128000: 493,
+            128500: 659, 129000: 856, 129500: 1035, 130000: 1214, 130500: 1393, 131000: 1572, 131500: 1751, 132000: 1930,
+            132500: 2109, 133000: 2358, 133500: 2617, 134000: 2877, 134500: 3137, 135000: 3396}
+    xs = sorted(prof)
+
+    def drawn(x):
+        for a, b in zip(xs, xs[1:]):
+            if a <= x <= b:
+                return prof[a] + (prof[b] - prof[a]) * (x - a) / (b - a)
+        return None
+    r = c.run(secs=12, throttle=1, twist=0, mission='PINKSCN1', nostart=True, dump='/0.25',
+              env={'MW2_START': '120000,52000', 'MW2_START_HEADING': '90', 'MW2_TEST_FALLSIM': '1', 'MW2_TEST_PASSIVE': '1'})
+    on = [s for s in r.states if drawn(s['x']) is not None and abs(s['z'] - 52000) < 100]
+    c(len(on) >= 10, 'walked up the hill along z 520 m', str(len(on)))
+    bad = [(s['t'], s['x'], s['y'], round(drawn(s['x']))) for s in on if abs(s['y'] - drawn(s['x'])) > 100]
+    c(not bad, 'the feet on the drawn hill (within 1 m) all the way up', str(bad[:4]))
+    c(r.last.get('y', 0) > 2500, 'still on the hill at the end (not fallen inside it)', str(r.last.get('y')))
+    c('FALLSIM' not in r.out, 'never under the hill surface (MW2_TEST_FALLSIM)',
+      next((l for l in r.out.splitlines() if l.startswith('FALLSIM')), ''))
+
+
 def main():
     global GLVIEW, VERBOSE
     ap = argparse.ArgumentParser()

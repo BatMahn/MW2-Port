@@ -10,6 +10,7 @@ static unsigned rnd_ms(unsigned *x);
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "bwd.h"
 
@@ -1384,6 +1385,7 @@ static void unit_messages(msim *s)
 }
 
 static void collision_lods(msim *s);
+static int test_floor(const msim *s, float x, float z, float *lo, float *hi);
 void msim_step(msim *s, int32_t dt_ms)
 {
     if (dt_ms <= 0) return;   /* a sub-millisecond frame: its time is carried to the next one (glview sim_ms) */
@@ -1399,6 +1401,30 @@ void msim_step(msim *s, int32_t dt_ms)
         combat_jets(&s->player_unit, 0, dt, &s->rng);
     }
     combat_step(s, dt);
+    if (getenv("MW2_TEST_FALLSIM")) {   /* TEST ONLY: units (the player -1, wrecks too) under every type 5 surface at their x, z,
+                                         * every 0.25 s: "FALLSIM t= unit= skel [WRECK] x= z= y= vy= ground= floor=lo..hi" */
+        static int32_t fl_t = -100000;
+        int q, d4;
+        if (s->now - fl_t >= 250) {
+            fl_t = s->now;
+            for (q = -1; q < s->actor_count; q++) {
+                const combat_unit *u = q < 0 ? &s->player_unit : &s->units[q];
+                float x = q < 0 ? s->player[0] : (float)s->actors[q].mech.origin[0], z = q < 0 ? s->player[2] : (float)s->actors[q].mech.origin[2];
+                float lo = 0, hi = 0, l2, h2;
+                int nf = 0;
+                if (q >= 0 && (!s->armed[q] || fixed_unit(&s->actors[q]))) continue;
+                for (d4 = 0; d4 < 5; d4++)   /* (and 3 cm round it: a point in a quadtree seam has no polygon) */
+                    if (test_floor(s, x + (d4 == 1 ? 3.0f : d4 == 2 ? -3.0f : 0.0f), z + (d4 == 3 ? 3.0f : d4 == 4 ? -3.0f : 0.0f), &l2, &h2)) {
+                        if (!nf || l2 < lo) lo = l2;
+                        if (!nf || h2 > hi) hi = h2;
+                        nf++;
+                    }
+                if (nf && u->y < lo - 300.0f)
+                    fprintf(stderr, "FALLSIM t=%.2f unit=%d %s%s x=%.0f z=%.0f y=%.0f vy=%.2f ground=%.0f floor=%.0f..%.0f\n", s->now / 1000.0, q,
+                            q < 0 ? s->player_skel : s->actors[q].skel, u->destroyed ? " WRECK" : "", x, z, u->y, u->vy, u->ground, lo, hi);
+            }
+        }
+    }
     wrecks(s, dt_ms);
     blow_offs(s);   /* locations destroyed since the last step: their parts fly */
     debris_step(s, (float)dt_ms * 0.182f);
@@ -1488,13 +1514,28 @@ void msim_step(msim *s, int32_t dt_ms)
         if (s->armed[i] && s->units[i].destroyed && !fixed_unit(ac) && s->units[i].y > s->units[i].ground + 1.0f) {
             /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 on the ground
              * (object +0x78) - it stops dead; killed in the air it flies on at its velocity (no drive, LAB_1001aae9), falls
-             * and freezes on touching down (0x1000c4d0 sets +0x78) */
+             * and freezes on touching down (0x1000c4d0 sets +0x78). Its move is the ordinary one (0x1000b5e0: the 3D segment
+             * centre to centre with the frame's (v + a t / 2) t fall, against the collision list): refused - a wall, a
+             * roof, a hillside, a sphere - state 4 takes 0x10019ae1 -> 0x1000c4d0 before the position is written
+             * (0x10019fa0): it stays where it was and +0x10d bit 0 stops its physics for good (0x10019310 returns at once).
+             * The ground is asked at its new CENTRE (0x10019d8b -> 0x10010080, as for a live unit). The port had moved the
+             * wreck with no move test and asked the ground at its feet: an enemy killed in the air flew through buildings
+             * and hillsides and came to rest inside them (player report "enemies falling through geometry") */
             float h = ac->mech.heading * 3.14159265f / 180.0f, v = m->speed, a = s->across ? s->across[i] : 0.0f;   /* the one velocity */
-            ac->mech.origin[0] = (int32_t)lrintf((float)ac->mech.origin[0] + (sinf(h) * v + cosf(h) * a) * dt);
-            ac->mech.origin[2] = (int32_t)lrintf((float)ac->mech.origin[2] + (cosf(h) * v - sinf(h) * a) * dt);
-            s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y);
-            combat_jets(&s->units[i], 0, dt, &s->rng);
-            if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0; }
+            float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], ch = s->centre_h ? s->centre_h[i] : 550.0f;
+            float nx = x0 + (sinf(h) * v + cosf(h) * a) * dt, nz = z0 + (cosf(h) * v - sinf(h) * a) * dt;
+            float dy = combat_jets_dy(&s->units[i], 0, dt);
+            if (!msim_can_move(s, x0, z0, nx, nz, s->units[i].y, dy, ch, s->radius ? s->radius[i] : 450.0f)) {
+                m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0;
+                s->units[i].vy = 0;
+                s->units[i].ground = s->units[i].y;   /* frozen where it was (+0x10d): never moved again */
+            } else {
+                ac->mech.origin[0] = (int32_t)lrintf(nx);
+                ac->mech.origin[2] = (int32_t)lrintf(nz);
+                s->units[i].ground = msim_ground(s, nx, nz, s->units[i].y + dy + ch);
+                combat_jets(&s->units[i], 0, dt, &s->rng);
+                if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0; }
+            }
             ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
         if (!s->armed[i] || s->units[i].destroyed) continue;
@@ -3486,36 +3527,75 @@ static terrain_t *terrain_build(const mech3d *w, const int *seq, int nseq)
  * 0x1000d1f0), 1 the box (0x1000d520 / 0x1000d310 / none), 2 and 7 the faces (0x1000d6b0 / 0x1000d7b0 / none), 4 nothing
  * (0x1000d580 / 0x1000d590), 5 the polygon terrain through a quadtree (0x1000d640 / 0x1000d680 -> 0x1000ccf0 /
  * 0x1000d690 -> 0x1000cf80), 3, 6, 8, 9 the bounding sphere (no entries: 0x100107b0). A face is the polygon with the
- * engine's normal (the stored one negated, 0x10042140; the winding normal negated when there is none) and its first
- * vertex. */
+ * engine's normal (from its vertices as built, 0x10029210 - see eng_poly_normal) and its first vertex. */
 typedef struct cpoly { float v[WTB_MAX_POLY_VERTS][3]; int n; float nrm[3]; float mn[3], mx[3]; } cpoly_t;
 typedef struct qnode { float r[6]; int ch[4]; int np, p0; } qnode_t;   /* r: x0 x1 y0 y1 z0 z1; np > 0: a leaf */
 typedef struct cobj { int part, type, moving; float box[6], sph[4], lsph[4]; int p0, np, root; } cobj_t;
 
-/* the engine's normal of polygon pg of part wp (world), 0 when degenerate */
+/* the engine's face normal through three model vertices (0x10030410): -((P2 - P1) x (P3 - P2)), normalised; returns the
+ * cross product's length as an int (ftol: the x87's 0x80000000 from 2^31 up), *ok 0 when it is 0 (left unchanged) */
+static int eng_cross(const wtb_vertex *P1, const wtb_vertex *P2, const wtb_vertex *P3, float n[3], int *ok)
+{
+    float a[3] = {(float)P2->x - (float)P1->x, (float)P2->y - (float)P1->y, (float)P2->z - (float)P1->z};
+    float b[3] = {(float)P3->x - (float)P2->x, (float)P3->y - (float)P2->y, (float)P3->z - (float)P2->z}, l;
+    n[0] = -(a[1] * b[2] - a[2] * b[1]); n[1] = -(a[2] * b[0] - a[0] * b[2]); n[2] = -(a[0] * b[1] - a[1] * b[0]);
+    l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    *ok = l > 0.0f;
+    if (!*ok) return 0;
+    n[0] /= l; n[1] /= l; n[2] /= l;
+    return l < 2147483648.0f ? (int)l : INT_MIN;
+}
+
+/* the engine's normal of polygon pg of part wp (world), 0 when degenerate. The model loader stores the file's normals
+ * (negated, 0x10042140) but then recomputes every polygon's normal from its vertices - as built, i.e. with the OBJ scale
+ * (0x10042140 -> 0x100298c0 -> 0x10029210 per polygon, overwriting +0x08 and +0x14): a triangle through its three
+ * vertices (0x10030410); a larger polygon from its longest edge (edges idx[0]-idx[n-1], idx[n-1]-idx[n-2] ... idx[1]-idx[0],
+ * the first longest) and its other vertices from the last: the first whose cross product is at least 17 long (ftol),
+ * else the longest one; an edge shorter than 1e-7 (0x102476f8) leaves (1, 0, 0). The ground (0x1000fff0), the quadtree's
+ * "normal y above 0" (0x1000cf80) and the face tests use it. The 3Dfx archive's stored normals are those of the unscaled
+ * model (PINKMTN2's hills, y x 2 / x z x 2: their slope halved or doubled) and some differ anyway (PINKMTN1 TLAMTFSA) */
 static int eng_poly_normal(const mech3d_part *wp, const wtb_poly *pg, float nw[3])
 {
     const wtb_object *o = &wp->model.objects[0];
-    int j;
-    if (pg->has_normal) {
-        wtb_vertex nv;
-        float zero[3], one[3];
-        memset(&nv, 0, sizeof nv);
-        part_vertex(wp, &nv, zero);
-        nv.x = (int32_t)lrintf(-pg->normal[0] * 4096.0f); nv.y = (int32_t)lrintf(-pg->normal[1] * 4096.0f); nv.z = (int32_t)lrintf(-pg->normal[2] * 4096.0f);
-        part_vertex(wp, &nv, one);
-        for (j = 0; j < 3; j++) nw[j] = (one[j] - zero[j]) / 4096.0f;
-        return 1;
+    float n[3] = {1.0f, 0.0f, 0.0f};
+    int j, cnt = pg->n > WTB_MAX_POLY_VERTS ? WTB_MAX_POLY_VERTS : pg->n;
+    for (j = 0; j < cnt; j++) if (pg->idx[j] >= o->vert_count) return 0;
+    if (cnt < 3) return 0;
+    if (cnt == 3) {
+        int ok;
+        eng_cross(&o->verts[pg->idx[0]], &o->verts[pg->idx[1]], &o->verts[pg->idx[2]], n, &ok);
+        if (!ok) return 0;   /* (the engine divides by 0) */
     } else {
-        float A[3], B[3], C[3], u[3], v[3], l;
-        part_vertex(wp, &o->verts[pg->idx[0]], A); part_vertex(wp, &o->verts[pg->idx[1]], B); part_vertex(wp, &o->verts[pg->idx[2]], C);
-        for (j = 0; j < 3; j++) { u[j] = B[j] - A[j]; v[j] = C[j] - A[j]; }
-        nw[0] = -(u[1] * v[2] - u[2] * v[1]); nw[1] = -(u[2] * v[0] - u[0] * v[2]); nw[2] = -(u[0] * v[1] - u[1] * v[0]);
-        l = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]);
-        if (l < 1e-6f) return 0;
-        for (j = 0; j < 3; j++) nw[j] /= l;
-        return 1;
+        const wtb_vertex *prev, *cur = &o->verts[pg->idx[0]], *e0 = NULL, *e1 = NULL;
+        float best = 0.0f;
+        int k, i0 = -1, i1 = -1, kbest = -1;
+        for (k = cnt - 1; k >= 0; k--) {
+            float d[3], l;
+            int ip = k == cnt - 1 ? 0 : k + 1;
+            prev = cur; cur = &o->verts[pg->idx[k]];
+            d[0] = (float)prev->x - (float)cur->x; d[1] = (float)prev->y - (float)cur->y; d[2] = (float)prev->z - (float)cur->z;
+            l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (best < l) { best = l; e0 = cur; e1 = prev; i0 = k; i1 = ip; }
+        }
+        if (best >= 1e-7f && e0 && e1) {
+            for (k = cnt - 1; k >= 0; k--) {
+                float m[3];
+                int len, ok;
+                if (k == i0 || k == i1 || pg->idx[k] == pg->idx[i0] || pg->idx[k] == pg->idx[i1]) continue;
+                len = eng_cross(e0, e1, &o->verts[pg->idx[k]], m, &ok);
+                if (kbest < len && ok) { memcpy(n, m, sizeof n); kbest = len; }
+                if (len >= 0x11) break;
+            }
+        }
     }
+    if (wp->has_rot) {   /* the object's turn (part_vertex without the offset) */
+        const float *R = wp->rot;
+        for (j = 0; j < 3; j++) nw[j] = R[3 * j] * n[0] + R[3 * j + 1] * n[1] + R[3 * j + 2] * n[2];
+    } else {
+        float c = cosf(wp->yaw * 3.14159265f / 180.0f), sn = sinf(wp->yaw * 3.14159265f / 180.0f);
+        nw[0] = c * n[0] + sn * n[2]; nw[1] = n[1]; nw[2] = -sn * n[0] + c * n[2];
+    }
+    return 1;
 }
 
 /* a part's polygons as engine faces (world vertices, normal, extent) */
@@ -4528,6 +4608,26 @@ float msim_ground_n(const msim *s, float x, float z, float y, float *nout)
     if (win > -3.4e38f) { if (nout) memcpy(nout, nwin, sizeof UP); return win; }
     if (below > -3.4e38f) { if (nout) memcpy(nout, nbelow, sizeof UP); return below; }
     return 0.0f;
+}
+
+/* TEST ONLY (MW2_TEST_FALLSIM): the lowest and highest type 5 surface at (x, z) (holes / seams left out); 0 when none */
+static int test_floor(const msim *s, float x, float z, float *lo, float *hi)
+{
+    const terrain_t *t = s ? (const terrain_t *)s->terrain : NULL;
+    int cand[4096], nc, k, n = 0;
+    *lo = 3.4e38f; *hi = -3.4e38f;
+    if (!t || !t->co) return 0;
+    nc = clist_near(s, x, z, x, z, cand, 4096);
+    for (k = 0; k < nc; k++) {
+        const cobj_t *c = &t->co[cand[k]];
+        const float *pn = NULL;
+        float h;
+        if (c->type != 5 || c->moving || !qt_ground(t, c->root, x, z, &h, &pn) || !pn) continue;
+        if (h < *lo) *lo = h;
+        if (h > *hi) *hi = h;
+        n++;
+    }
+    return n;
 }
 
 static void part_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3]);

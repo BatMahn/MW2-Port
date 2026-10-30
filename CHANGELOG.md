@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.1 (2026-10-29)
+
+- **Falling through hills fixed** (player report, Silent Thunder): on maps whose hills are stretched versions of a
+  model (Silent Thunder, Umber Wall, the PROV mission and the training missions) the ground under you used the
+  unstretched hill's slope, so you and the enemies sank into and fell through the hills. The ground now follows the
+  drawn hills, as in the original (checked in DOSBox). The DOS look was not affected.
+- **Mechs destroyed in mid-air** no longer fly through buildings and hillsides: as in the original, a falling wreck
+  that hits a wall stops there (player report: enemies falling through geometry).
+
 ## v1.0.0 (2026-10-27)
 
 - **Version 1.0.** The port now covers the whole original game - both campaigns, Instant Action, the shell, every
