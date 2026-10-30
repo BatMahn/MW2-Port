@@ -82,6 +82,28 @@ int main(int argc, char **argv)
     snprintf(b, sizeof b, "%s/gone", base);
     CHECK(!portcfg_game_in(b, out, sizeof out), "a missing folder refused");
 
+    {   /* the 3D looks need 3d/models.prj (player report v1.0.1: no 3d/ folder drew bare grey geometry): without it only
+         * the DOS look (no3d, ENHANCED / 3DFX / ATI refused); with it the 3D looks again */
+        portcfg c;
+        char m[PORTCFG_PATH], t[PORTCFG_PATH], k[PORTCFG_PATH], s2[PORTCFG_PATH], f2[PORTCFG_PATH];
+        FILE *fp;
+        snprintf(b, sizeof b, "%s/g3/install/MW2.PRJ", base); mk(base, "g3/install");
+        if ((fp = fopen(b, "w"))) fclose(fp);
+        snprintf(b, sizeof b, "%s/g3", base);
+        portcfg_defaults(&c);
+        CHECK(portcfg_resolve(&c, NULL, b) == 0, "g3 resolved (game %s)", c.game);
+        CHECK(c.no3d, "no 3d/: no3d 1 (models %s)", c.models);
+        CHECK(portcfg_edition(&c, PORTCFG_ED_ENHANCED, m, t, k, s2, f2) != 0 && portcfg_edition(&c, PORTCFG_ED_3DFX, m, t, k, s2, f2) != 0
+              && portcfg_edition(&c, PORTCFG_ED_ATI, m, t, k, s2, f2) != 0, "no 3d/: the 3D looks refused");
+        CHECK(portcfg_edition(&c, PORTCFG_ED_DOS, m, t, k, s2, f2) == 0 && strcmp(k, "dos") == 0, "no 3d/: the DOS look");
+        mk(base, "g3/3d");
+        snprintf(b, sizeof b, "%s/g3/3d/models.prj", base); if ((fp = fopen(b, "w"))) fclose(fp);
+        snprintf(b, sizeof b, "%s/g3/3d/textures.prj", base); if ((fp = fopen(b, "w"))) fclose(fp);
+        snprintf(b, sizeof b, "%s/g3", base);
+        portcfg_defaults(&c); portcfg_resolve(&c, NULL, b);
+        CHECK(!c.no3d && portcfg_edition(&c, PORTCFG_ED_ENHANCED, m, t, k, s2, f2) == 0, "with 3d/: no3d 0, ENHANCED (models %s)", c.models);
+    }
+
     if (argc <= 1) { char cmd[600]; if (chdir("/") == 0) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", base); if (system(cmd) != 0) printf("(could not remove %s)\n", base); } }
     printf("test_gamefolder: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

@@ -225,6 +225,14 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
         }
     }
     if (!c->textures[0]) snprintf(c->textures, sizeof c->textures, "%s", c->models);
+    {   /* the 3D archives present: a models archive that isn't the DOS one (the fallback above, or models= naming it) */
+        char d[PORTCFG_PATH] = "";
+        if (!c->install[0] || !find_ci(c->install, "MW2.PRJ", d, sizeof d)) {
+            snprintf(p, sizeof p, "%s/MECH2", c->cd);
+            if (!c->cd[0] || (!find_ci(p, "MW2.PRJ", d, sizeof d) && !find_ci(c->cd, "MW2.PRJ", d, sizeof d))) d[0] = 0;
+        }
+        c->no3d = !(c->models[0] && strcmp(c->models, d) != 0);
+    }
     (void)errno;
     return c->install[0] ? 0 : -1;
 }
@@ -240,6 +248,9 @@ int portcfg_edition(const portcfg *c, int ed, char *models, char *textures, char
     /* the enhanced mix: the 3Dfx archive's models and data, the ATi archive's textures (the best-kept copy), the 3Dfx sky
      * file, the PowerVR fog */
     cp(models, c->models); cp(textures, c->textures); cp(kind, c->textures_ati ? "ati" : "3dfx"); cp(sky, c->skygnd); cp(fog, c->skygnd_fog);
+    /* without the 3D editions' archives (no 3d/ folder) only the DOS look: the DOS archive drawn by a 3D look is bare
+     * untextured geometry with no sky or ground (player report v1.0.1) */
+    if (c->no3d && ed != PORTCFG_ED_DOS && ed != PORTCFG_ED_S3 && ed != PORTCFG_ED_MGA && ed != PORTCFG_ED_PVR) return -1;
     if (ed == PORTCFG_ED_ENHANCED) return 0;
     /* RENDITION (the Titanium plugin zredline.dll): the enhanced mix's archives for the models, data and the texture names
      * the Titanium archive lacks; available with the Titanium folder only */

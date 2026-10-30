@@ -893,6 +893,10 @@ static void edition_files(void)
     char kind[PORTCFG_PATH], m[PORTCFG_PATH], t[PORTCFG_PATH], s[PORTCFG_PATH], f[PORTCFG_PATH];
     g_edf.ed = g_cfg.renderer;
     if (portcfg_edition(&g_cfg, g_edf.ed, m, t, kind, s, f) != 0) g_edf.ed = PORTCFG_ED_ENHANCED;
+    if (portcfg_edition(&g_cfg, g_edf.ed, m, t, kind, s, f) != 0) {   /* no 3d/ folder: the DOS look (portcfg no3d) */
+        g_edf.ed = PORTCFG_ED_DOS;
+        printf("look: the 3D looks need the 3d/ folder (models.prj, textures.prj) in the game folder - using the DOS look\n");
+    }
     g_edf.tx = portcfg_texset_for(&g_cfg, g_edf.ed, g_cfg.texset);   /* (RENDITION: TITANIUM always) */
     if (portcfg_look(&g_cfg, g_edf.ed, g_edf.tx, g_edf.models, g_edf.textures, kind, g_edf.sky, g_edf.fog) != 0) {
         g_edf.tx = PORTCFG_TX_ORIGINAL;
@@ -3533,7 +3537,11 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
                 else if (k == 7) snprintf(vals[k], sizeof vals[k], "%s", sel[7] == 0 ? "320x200" : sel[7] == 1 ? "640x480" : sel[7] == 2 ? "1024x768" : res);
                 else if (k == 8) snprintf(vals[k], sizeof vals[k], "%s", aa);
-                else if (k == 12) snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.renderer >= 0 && pc.renderer < PORTCFG_ED_COUNT ? pc.renderer : 0]);
+                else if (k == 12) {   /* without the 3d/ folder the DOS look is used whatever is chosen: said here */
+                    if (g_cfg.no3d && (pc.renderer == PORTCFG_ED_ENHANCED || pc.renderer == PORTCFG_ED_3DFX || pc.renderer == PORTCFG_ED_ATI || pc.renderer == PORTCFG_ED_RENDITION))
+                        snprintf(vals[k], sizeof vals[k], "DOS - NO 3D FOLDER");
+                    else snprintf(vals[k], sizeof vals[k], "%s", ED_TEXT[pc.renderer >= 0 && pc.renderer < PORTCFG_ED_COUNT ? pc.renderer : 0]);
+                }
                 else if (k == 13) snprintf(vals[k], sizeof vals[k], "%s", TX_TEXT[portcfg_texset_for(&g_cfg, pc.renderer, pc.texset) == PORTCFG_TX_TITANIUM ? 1 : 0]);
                 else snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "ON" : "OFF");
                 lines[k] = vals[k]; ly[k] = ROW_Y[k] + 1; lx[k] = 393;

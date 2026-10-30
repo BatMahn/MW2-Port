@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.2 (2026-10-30)
+
+- **Missing `3d/` folder** (player report: grey sky and ground, untextured models): without the 3D editions' files
+  the game now uses the DOS renderer, which draws the DOS data properly, and COMBAT VARIABLES shows RENDERER as
+  "DOS - NO 3D FOLDER". Copy `gamedata/3d/` from the repository into your game folder for the 3D renderers
+  (FOLDER_SETUP.md).
+
 ## v1.0.1 (2026-10-29)
 
 - **Falling through hills fixed** (player report, Silent Thunder): on maps whose hills are stretched versions of a

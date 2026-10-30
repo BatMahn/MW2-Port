@@ -53,6 +53,8 @@ typedef struct {
     char skygnd_fog[PORTCFG_PATH];   /* the PowerVR edition's skygnd.par (the fog densities): 3d/skygnd_pvr.par */
     char titanium[PORTCFG_PATH];     /* the Titanium edition's folder (MW2.PRJ + SKYGND.PAR of its 16-bit build) */
     int  textures_ati;
+    int  no3d;                /* (portcfg_resolve) the 3D editions' archives are missing (no 3d/models.prj, models= not naming one):
+                               * without them only the DOS look can be drawn - the DOS archive's models have no 3D textures */
     int  renderer;            /* PORTCFG_ED_*: how the simulation is drawn (Combat Variables RENDERER) */
     int  texset;              /* PORTCFG_TX_*: the texture set (Combat Variables TEXTURES) */
     int  system_shortcuts;    /* 0 block (default): the system's shortcuts off while playing (macOS); 1 allow */

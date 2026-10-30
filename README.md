@@ -94,6 +94,11 @@ the S3 / PowerVR / Matrox editions' archives and settings (s3/, pvr/, mga/, ati/
 game uses the DOS models only. These files are Activision's (see "Licences"); they are here only so owners of the game
 can rebuild a working setup.
 
+**The 3D renderers need the `3d/` folder** (`gamedata/3d/` from this repository, copied into your game folder - see
+[FOLDER_SETUP.md](FOLDER_SETUP.md)). Without it the game uses the DOS renderer whatever is chosen, and COMBAT VARIABLES
+shows RENDERER as "DOS - NO 3D FOLDER". (Before v1.0.2 a 3D renderer without it drew grey sky and ground and untextured
+models.)
+
 ### The Titanium textures (optional, from your own disc)
 If you own *MechWarrior 2: 31st Century Combat - Titanium Edition* (1998), the game can also use its textures, sky dome
 (clouds, mountains, sun and moon), ground, fog, lights, models and missile smoke. Copy these files from the disc's
