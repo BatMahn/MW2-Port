@@ -44,6 +44,8 @@ Older cards such as the GeForce 6 / 7 series (e.g. the 7600) and Radeon X1000 se
 it. On Windows, install the card maker's driver: Windows' basic display driver has no OpenGL 3.3. A grey sky and ground
 with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
 
+An OpenGL 2.1 renderer for those older cards is something I plan to look at later; no promises on timing.
+
 ## Build
 Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
 
