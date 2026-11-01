@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-27, v1.0.0)
+## Status (2026-10-30, v1.0.2)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 
@@ -26,8 +26,23 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 262 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 264 of them) and
 `make sweep` (every mission's objectives).
+
+## System requirements
+
+The game draws with **OpenGL 3.3**, so it needs a graphics card and driver that support it:
+
+| Vendor | Minimum |
+|---|---|
+| NVIDIA | GeForce 8 series (8600 / 8800, 2007) or newer |
+| AMD / ATI | Radeon HD 2000 series (HD 2400 / 2600 / 2900, 2007) or newer |
+| Intel | Windows: HD Graphics 2500 / 4000 (Ivy Bridge, 3rd-gen Core, 2012) or newer. Linux (Mesa): Sandy Bridge (2nd-gen Core, 2011) or newer |
+| Apple | Any Mac that runs a supported macOS (Apple's OpenGL 4.1) |
+
+Older cards such as the GeForce 6 / 7 series (e.g. the 7600) and Radeon X1000 series stop at OpenGL 2.1 and can't run
+it. On Windows, install the card maker's driver: Windows' basic display driver has no OpenGL 3.3. A grey sky and ground
+with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
 
 ## Build
 Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
@@ -341,8 +356,8 @@ Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2
 must stay together. Then either put your `MW2-game` folder next to `mw2.exe`, put it in your user folder
 (`C:\Users\<you>\MW2-game`), drag the folder onto `mw2.exe` once, or just start `mw2.exe` and choose the folder when
 it asks - it is remembered in
-`%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with OpenGL 3.3 (any GPU from about 2010 on, with the
-vendor's driver installed rather than Windows' basic display driver).
+`%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with OpenGL 3.3 (see "System requirements"), with the
+vendor's driver installed rather than Windows' basic display driver.
 
 The exe isn't code-signed, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then
 **Run anyway**.
