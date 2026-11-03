@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.0 (unreleased)
+## v1.1.0 (2026-11-03)
 
 - **SDL3.** The port now uses SDL3 (3.2.0 or newer) instead of SDL2 for its window, input and sound; OpenGL 3.3 is still
   the renderer. The game looks, sounds and plays the same (all checks and picture comparisons identical).
