@@ -7349,6 +7349,206 @@ def star_time_limit_one_second_early(c):
         c(10.9 <= o['now'] / 1000.0 <= 11.15, 'at 11 s (limit - 1), not 12', 'now %s' % o['now'])
 
 
+# ---- the port's movie looks (mw2port.cfg videos= / video_fit=; a port presentation option, not original behaviour)
+def _movie(d, name, cfg, out=None, frame=300, extra=None):
+    """agent VF: a cinematic decoded headless (TEST ONLY MW2_SHELL_MOVIE): its 640x480 frame, the source frame and, with
+    out='WxH', the window's picture (MW2_SHELL_MOVIE_SHOT) and the geometry log line; returns (frame, raw, shot, log)"""
+    from PIL import Image
+    import numpy as np
+    os.makedirs(d, exist_ok=True)
+    cfgp = os.path.join(d, 'movie.cfg')
+    with open(cfgp, 'w') as f:
+        f.write(''.join('%s=%s\n' % kv for kv in cfg.items()))
+    tag = '_'.join(str(v).replace(':', '') for v in cfg.values()) + '_' + str(out)
+    f640, raw, win = (os.path.join(d, '%s_%s.ppm' % (k, tag)) for k in ('frame', 'raw', 'win'))
+    e = dict(os.environ, **HEADLESS, MW2_CONFIG=cfgp, MW2_SHELL_MOVIE=name, MW2_SHELL_MOVIE_FRAME=str(frame),
+             MW2_SHELL_SHOT=f640, MW2_SHELL_MOVIE_RAW=raw, MW2_SHELL_MOVIE_LOG='1')
+    if out:
+        e.update(MW2_SHELL_MOVIE_OUT=out, MW2_SHELL_MOVIE_SHOT=win)
+    e.update(extra or {})
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    for p in (f640, raw, win):
+        if os.path.exists(p):
+            os.remove(p)
+    r = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120)
+    log = [l for l in r.stderr.splitlines() if l.startswith('movie: ')]
+    ld = lambda p: np.array(Image.open(p).convert('RGB')).astype(int) if os.path.exists(p) else None
+    return ld(f640), ld(raw), ld(win), (log[-1] if log else '')
+
+
+def _movie_rect(fit, w, h):
+    """the 4:3 picture in a w x h window (4:3: inside, fill: covering, stretch: the window), as movie_fit_rect"""
+    if fit == 'stretch':
+        return 0, 0, w, h
+    by_h = (w * 3 < h * 4) if fit == 'fill' else (w * 3 > h * 4)
+    dw, dh = (h * 4 / 3.0, h) if by_h else (w, w * 3 / 4.0)
+    dw, dh = max(1, int(dw + 0.5)), max(1, int(dh + 0.5))
+    return (w - dw) // 2, (h - dh) // 2, dw, dh
+
+
+@sequence
+def shell_movie_original(c):
+    """agent VF: the movie looks' default (videos=original, video_fit=4:3 - also with no setting) is the playback as it
+    was: the 640x480 frame is the source frame scaled by x*320/640, y*200/480 (play_cinematic's loop, unchanged - its
+    MINTRO frame 300 was checked byte-identical to the base build's), and a window shows it whole-pixel scaled and
+    centred (the renderer's 640x480 integer-scale presentation); every look leaves the 640x480 frame alone"""
+    import numpy as np
+    d = os.path.join(OUT, c.name)
+    base = None
+    for cfg in ({}, {'videos': 'original', 'video_fit': '4:3'}):
+        fr, raw, win, log = _movie(d, 'MINTRO', cfg, '1920x1080')
+        if fr is None or raw is None or win is None:
+            c(False, 'captured %s' % cfg)
+            return
+        ys = (np.arange(480) * 200) // 480
+        xs = (np.arange(640) * 320) // 640
+        c(np.array_equal(fr, raw[ys][:, xs]), 'the 640x480 frame = the source scaled as before %s' % cfg)
+        c('look frame640' in log and 'picture 320,60 1280x960' in log, 'the window: the 640x480 frame at 2x, centred %s' % cfg, log)
+        exp = np.zeros((1080, 1920, 3), int)
+        exp[60:1020, 320:1600] = np.kron(fr, np.ones((2, 2, 1), int))
+        c(np.array_equal(win, exp), 'the window picture = the frame whole-pixel scaled %s' % cfg)
+        base = fr
+    for look in ('smooth', 'scanlines', 'crt', 'crt_curved'):
+        fr, _, _, _ = _movie(d, 'MINTRO', {'videos': look})
+        c(fr is not None and np.array_equal(fr, base), '%s: the 640x480 frame unchanged' % look)
+
+
+@sequence
+def shell_movie_looks(c):
+    """agent VF: each movie look (smooth / scanlines / crt / crt_curved, src/vidfx.c) draws MINTRO at the window's pixel
+    size - a 1920x1080 window, 4:3: the picture 1440x1080 at x 240, black bars - differing from the plain pixels (the
+    source scaled to 1440x1080 nearest) but the same picture (mean brightness within 35 %); the curved CRT's corners
+    black; the bands drawn on 1 thread or several are the same pixels; the 640x480 menu-art clips (AWORGSTR) keep the
+    original frame whatever the look"""
+    import numpy as np
+    d = os.path.join(OUT, c.name)
+    _, raw, _, _ = _movie(d, 'MINTRO', {})
+    if raw is None:
+        c(False, 'source frame')
+        return
+    ys = (np.arange(1080) * 200) // 1080
+    xs = (np.arange(1440) * 320) // 1440
+    plain = raw[ys][:, xs]
+    for look in ('smooth', 'scanlines', 'crt', 'crt_curved'):
+        _, _, win, log = _movie(d, 'MINTRO', {'videos': look}, '1920x1080')
+        if win is None:
+            c(False, '%s: captured' % look, log)
+            continue
+        c(win.shape == (1080, 1920, 3), '%s: 1920x1080' % look, str(win.shape))
+        c('picture 240,0 1440x1080' in log and 'look ' + look in log, '%s: the 4:3 picture in the window' % look, log)
+        c(win[:, :240].max() == 0 and win[:, 1680:].max() == 0, '%s: black bars' % look)
+        pic = win[:, 240:1680]
+        diff = np.abs(pic - plain).mean()
+        c(diff > 1.0, '%s: differs from the plain pixels' % look, 'mean abs diff %.2f' % diff)
+        m0, m1 = plain.mean(), pic.mean()
+        c(abs(m1 - m0) < 0.35 * m0, '%s: the same picture (brightness)' % look, '%.1f vs %.1f' % (m1, m0))
+        if look == 'scanlines':   # dark gaps between the lines: rows' brightness swings within each source line
+            rows = pic.mean((1, 2))
+            c(rows.std() > 0.15 * rows.mean(), 'scanlines: line structure', 'row std %.1f mean %.1f' % (rows.std(), rows.mean()))
+        if look == 'crt_curved':
+            c(pic[:4, :4].max() == 0 and pic[-4:, -4:].max() == 0, 'curved: the corners black')
+            _, _, w1, _ = _movie(d, 'MINTRO', {'videos': look}, '1920x1080', extra={'MW2_SHELL_MOVIE_THREADS': '1'})
+            _, _, w4, _ = _movie(d, 'MINTRO', {'videos': look}, '1920x1080', extra={'MW2_SHELL_MOVIE_THREADS': '5'})
+            c(w1 is not None and w4 is not None and np.array_equal(w1, win) and np.array_equal(w4, win), 'curved: 1 / 5 / the default bands the same')
+    fr0, _, _, _ = _movie(d, 'AWORGSTR', {}, frame=5)
+    fr1, _, _, log = _movie(d, 'AWORGSTR', {'videos': 'crt', 'video_fit': 'stretch'}, '1920x1080', frame=5)
+    c(fr0 is not None and fr1 is not None and np.array_equal(fr0, fr1) and 'look frame640' in log, 'AWORGSTR (640x480 menu art): the original frame', log)
+
+
+@sequence
+def shell_movie_fit(c):
+    """agent VF: the movie fits' geometry (video_fit=, movie_fit_rect): 4:3 the largest 4:3 picture inside the window,
+    fill the smallest covering it (centred, the rows outside not drawn), stretch the window - for 1920x1080, 3840x2160,
+    3600x2260, 1280x960 and a portrait 1080x1920; ORIGINAL with fill / stretch: the source's own pixels in blocks at
+    those sizes (nearest), exactly"""
+    import numpy as np
+    import re
+    d = os.path.join(OUT, c.name)
+    for w, h in ((1920, 1080), (3840, 2160), (3600, 2260), (1280, 960), (1080, 1920)):
+        for fit in ('4:3', 'fill', 'stretch'):
+            _, _, win, log = _movie(d, 'MINTRO', {'videos': 'scanlines', 'video_fit': fit}, '%dx%d' % (w, h))
+            x, y, dw, dh = _movie_rect(fit, w, h)
+            m = re.search(r'picture (-?\d+),(-?\d+) (\d+)x(\d+) rows (\d+)-(\d+)', log)
+            got = tuple(int(v) for v in m.groups()) if m else None
+            want = (x, y, dw, dh, max(0, -y), min(dh, h - y))
+            c(got == want, '%dx%d %s: picture and rows' % (w, h, fit), '%s want %s' % (got, want))
+            if win is not None and fit == '4:3' and (x > 0 or y > 0):
+                bars = win[:, :x] if x > 0 else win[:y]
+                c(bars.max() == 0, '%dx%d 4:3: black bars' % (w, h))
+            if win is not None and fit != '4:3':
+                c(win[0].max() > 0 or win[-1].max() > 0 or win[:, 0].max() > 0, '%dx%d %s: no bars (the edge rows / columns drawn)' % (w, h, fit))
+    for fit in ('fill', 'stretch'):
+        _, raw, win, log = _movie(d, 'MINTRO', {'videos': 'original', 'video_fit': fit}, '1920x1080')
+        if raw is None or win is None:
+            c(False, 'original %s captured' % fit)
+            continue
+        x, y, dw, dh = _movie_rect(fit, 1920, 1080)
+        ys = ((np.arange(1080) - y) * 200) // dh
+        xs = ((np.arange(1920) - x) * 320) // dw
+        c(np.array_equal(win, raw[ys][:, xs]), 'original %s: the source in blocks' % fit, log)
+
+
+@sequence
+def shell_movie_settings(c):
+    """agent VF: the movie settings in Combat Variables (TEST ONLY MW2_CV_EVENTS): OBJECT DENSITY's right part (x 495 on)
+    cycles FMV ORIGINAL / SMOOTH / SCANLINES / CRT / CURVED CRT, CHUNKY EXPLOSIONS' right part FMV 4:3 / FILL / STRETCH,
+    saved as mw2port.cfg videos= / video_fit= and read back (shown on the screen); the rows' left part still toggles the
+    original's OBJECT DENSITY / CHUNKY EXPLOSIONS (MW2SND.CFG +0x20 / +0x24)"""
+    import numpy as np
+    from PIL import Image
+    import struct
+    d = os.path.join(OUT, c.name)
+    mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    g = os.path.join(d, 'game')
+    if os.path.isdir(g):
+        shutil.rmtree(g)
+    os.makedirs(g)
+    for f in os.listdir(mech2):   # links to MECH2, but our own copies of the files Combat Variables writes
+        if f.upper() in ('MW2SND.CFG', 'MW2DIF.CFG'):
+            shutil.copy(os.path.join(mech2, f), os.path.join(g, f))
+        else:
+            os.symlink(os.path.join(mech2, f), os.path.join(g, f))
+    cfg, shot = os.path.join(d, 'x.cfg'), os.path.join(d, 'cv.ppm')
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+
+    def cv(events):
+        e = dict(os.environ, **HEADLESS, MW2_CONFIG=cfg, MW2_BITMAP_TEXT='1', MW2_SHELL_CV='1', MW2_SHELL_SHOT=shot)
+        if events is not None:
+            e['MW2_CV_EVENTS'] = events
+        subprocess.run([shell, g], env=e, capture_output=True, timeout=120)
+        vals = {}
+        if os.path.exists(cfg):
+            for l in open(cfg):
+                if '=' in l:
+                    k, v = l.strip().split('=', 1)
+                    vals[k] = v
+        return vals, np.array(Image.open(shot).convert('RGB')).astype(int)
+
+    def snd():
+        b = open(os.path.join(g, 'MW2SND.CFG'), 'rb').read()
+        return struct.unpack('<i', b[0x20:0x24])[0], struct.unpack('<i', b[0x24:0x28])[0]
+
+    if os.path.exists(cfg):
+        os.remove(cfg)
+    s0 = snd()
+    _, img0 = cv(None)
+    v, _ = cv('l 520,338;l 520,338;l 520,358')
+    c(v.get('videos') == 'scanlines' and v.get('video_fit') == 'fill', 'two look clicks, one fit click saved', str(v))
+    c(snd() == s0, 'the right parts leave OBJECT DENSITY / CHUNKY EXPLOSIONS alone', '%s -> %s' % (s0, snd()))
+    _, img1 = cv(None)
+    area = (slice(330, 372), slice(495, 634))
+    c(np.abs(img1[area] - img0[area]).max() > 0, 'the saved setting read back and shown')
+    c(np.array_equal(img1[:, :495], img0[:, :495]), 'the rest of the screen unchanged')
+    v, _ = cv('l 520,338;l 520,338;l 520,338;l 520,358;l 520,358')
+    c(v.get('videos') == 'original' and v.get('video_fit') == '4:3', 'the cycles wrap (5 looks, 3 fits)', str(v))
+    _, img2 = cv(None)
+    c(np.array_equal(img2, img0), 'back to the defaults: the screen as at first')
+    cv('l 400,338;l 400,358')
+    s1 = snd()
+    c(s1[0] == (0 if s0[0] else 1) and s1[1] == (0 if s0[1] else 1), 'the left parts toggle the original rows', '%s -> %s' % (s0, s1))
+
+
 def main():
     global GLVIEW, VERBOSE
     ap = argparse.ArgumentParser()

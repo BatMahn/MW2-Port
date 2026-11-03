@@ -38,6 +38,13 @@
  *   system_shortcuts=block | allow   (macOS: block, the default, turns the system's keyboard shortcuts - Mission
  *                          Control's Ctrl+arrows, Cmd+Tab, Spotlight - off while a mission is played with the window in
  *                          front (not in the MAIN MENU or paused); allow leaves them on. Other systems: no effect)
+ *   videos=original | smooth | scanlines | crt | crt_curved   (the full-screen movies' look - the 320x200 cinematics:
+ *                          intro, landings, endings. original, the default: the movie's own pixels, exactly as before;
+ *                          the others are a port presentation option (src/vidfx.c), drawn at the window's real pixel
+ *                          size: Mitchell-Netravali smoothing, scanlines, a CRT (glow + aperture grille), a curved CRT)
+ *   video_fit=4:3 | fill | stretch   (those movies' shape: 4:3, the default, the whole picture at 4:3 with black bars;
+ *                          fill: 4:3 kept, the window filled (the picture's edges cropped); stretch: the window filled,
+ *                          the picture stretched)
  * The game folder is found on first run (the command line, the current folder, next to the executable - in a macOS
  * bundle: next to the .app -, one level up, ~/MW2-game; else the shell asks with the system's folder picker) and
  * remembered. */
@@ -65,8 +72,15 @@ typedef struct {
     int  dos_sky_smooth;      /* dos_shading= (dos_sky=): 0 dithered (default, the original), 1 smooth (the DOS renderer's
                                * Gouraud polygons and haze band blended) */
     int  gpu;                 /* gpu=: PORTCFG_GPU_* (the values of rb.h's RB_GPU_*) */
+    int  videos;              /* videos=: PORTCFG_VID_* (the full-screen movies' look; original by default) */
+    int  video_fit;           /* video_fit=: PORTCFG_FIT_* (their shape in the window; 4:3 by default) */
 } portcfg;
 enum { PORTCFG_GPU_AUTO, PORTCFG_GPU_D3D12, PORTCFG_GPU_VULKAN };
+/* the movie looks, in vidfx.h's order (VIDFX_*), and the fit modes */
+enum { PORTCFG_VID_ORIGINAL, PORTCFG_VID_SMOOTH, PORTCFG_VID_SCANLINES, PORTCFG_VID_CRT, PORTCFG_VID_CRT_CURVED, PORTCFG_VID_COUNT };
+extern const char *const PORTCFG_VID_NAME[PORTCFG_VID_COUNT];   /* "original", "smooth", "scanlines", "crt", "crt_curved" */
+enum { PORTCFG_FIT_43, PORTCFG_FIT_FILL, PORTCFG_FIT_STRETCH, PORTCFG_FIT_COUNT };
+extern const char *const PORTCFG_FIT_NAME[PORTCFG_FIT_COUNT];   /* "4:3", "fill", "stretch" */
 /* RENDITION: the Titanium edition's own renderer plugin for the Rendition Verite (plugin/zredline.dll, loaded by mercsw.dll):
  * the enhanced mix's archives beside the Titanium archive, whose textures, sky dome, ground and fog it always draws */
 enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA,

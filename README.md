@@ -401,6 +401,27 @@ than 4:3: radar, altitude tape and target display on the left; weapons, damage d
 right. The compass, reticle and heat bars stay centred. *original* keeps the whole HUD in the 4:3 middle, as the original
 game drew it. At 4:3 the two are identical.
 
+### Movie Options
+
+The full-screen movies - the intro, the clan landings and the endings (the 320x200 cinematics) - can be shown in a
+different look. In the shell: Combat Variables, the two rows right of OBJECT DENSITY and CHUNKY EXPLOSIONS (each click
+the next choice; the next movie uses it); or in mw2port.cfg:
+
+- `videos=original|smooth|scanlines|crt|crt_curved` - **FMV ORIGINAL** (the default) is the original's plain pixels,
+  exactly as before. **SMOOTH** filters the picture (Mitchell-Netravali). **SCANLINES** draws each movie line as a
+  narrow beam with dark gaps between. **CRT** adds a glow and an aperture grille (brighter lines bloom wider).
+  **CURVED CRT** bends the picture like a tube's face, with soft black edges.
+- `video_fit=4:3|fill|stretch` - **FMV 4:3** (the default) shows the whole picture at 4:3 with black bars; **FILL**
+  keeps 4:3 and fills the window, cropping the picture's top and bottom (or sides); **STRETCH** fills the window and
+  stretches the picture.
+
+The looks other than ORIGINAL (and ORIGINAL with FILL / STRETCH) draw the movie at the window's real pixel size,
+Retina / 4K included, so the scanlines and the grille are sharp. They are a port presentation option, not the original
+game's behaviour. The work is done on the CPU over all its cores; if a slow computer can't keep up at a very high
+resolution, the picture is drawn smaller for the rest of that movie and scaled up by the GPU. The small clips inside the
+menu screens (and the registration and briefing-room clips, which are menu artwork) always stay as they are. Any key or
+click skips a movie, as before.
+
 ### macOS: the app is not signed
 
 The app (built here or downloaded from a GitHub release) is only ad-hoc signed, not signed with an Apple Developer ID or

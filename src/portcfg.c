@@ -86,6 +86,13 @@ int portcfg_load(const char *unused, portcfg *c)
         else if (strcmp(line, "hud_layout") == 0) c->hud_original = strcmp(v, "original") == 0;
         else if (strcmp(line, "dos_shading") == 0 || strcmp(line, "dos_sky") == 0) c->dos_sky_smooth = strcmp(v, "smooth") == 0;   /* (dos_sky=: its older name) */
         else if (strcmp(line, "gpu") == 0) c->gpu = strcmp(v, "d3d12") == 0 ? PORTCFG_GPU_D3D12 : strcmp(v, "vulkan") == 0 ? PORTCFG_GPU_VULKAN : PORTCFG_GPU_AUTO;
+        else if (strcmp(line, "videos") == 0) {
+            int k;
+            for (k = 0; k < PORTCFG_VID_COUNT; k++) if (strcmp(v, PORTCFG_VID_NAME[k]) == 0) c->videos = k;
+        } else if (strcmp(line, "video_fit") == 0) {
+            int k;
+            for (k = 0; k < PORTCFG_FIT_COUNT; k++) if (strcmp(v, PORTCFG_FIT_NAME[k]) == 0) c->video_fit = k;
+        }
         else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
         else if (strcmp(line, "renderer") == 0 || strcmp(line, "edition") == 0) {   /* (edition=: the old single look) */
             int e;
@@ -125,6 +132,8 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "hud_layout=%s\n", c->hud_original ? "original" : "wide");
     fprintf(f, "dos_shading=%s\n", c->dos_sky_smooth ? "smooth" : "dithered");
     fprintf(f, "gpu=%s\n", c->gpu == PORTCFG_GPU_D3D12 ? "d3d12" : c->gpu == PORTCFG_GPU_VULKAN ? "vulkan" : "auto");
+    fprintf(f, "videos=%s\n", PORTCFG_VID_NAME[c->videos > 0 && c->videos < PORTCFG_VID_COUNT ? c->videos : PORTCFG_VID_ORIGINAL]);
+    fprintf(f, "video_fit=%s\n", PORTCFG_FIT_NAME[c->video_fit > 0 && c->video_fit < PORTCFG_FIT_COUNT ? c->video_fit : PORTCFG_FIT_43]);
     fclose(f);
     return 0;
 }
@@ -241,6 +250,8 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
 
 const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT] = {"enhanced", "dos", "3dfx", "ati", "s3", "pvr", "mga", "rendition"};
 const char *const PORTCFG_TX_NAME[PORTCFG_TX_COUNT] = {"original", "titanium"};
+const char *const PORTCFG_VID_NAME[PORTCFG_VID_COUNT] = {"original", "smooth", "scanlines", "crt", "crt_curved"};
+const char *const PORTCFG_FIT_NAME[PORTCFG_FIT_COUNT] = {"4:3", "fill", "stretch"};
 
 static void cp(char *dst, const char *src) { snprintf(dst, PORTCFG_PATH, "%s", src ? src : ""); }
 

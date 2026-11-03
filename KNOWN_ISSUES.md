@@ -12,8 +12,8 @@ What is still open in the port as of 2026-10-26. Technical detail, engine addres
 
 ## Other
 - **Graphics interfaces** - the game draws through SDL3's GPU API (Direct3D 12 / Vulkan on Windows, Vulkan on Linux,
-  Metal on macOS). Vulkan is tested (Mesa's software driver, the test suite's pictures); Direct3D 12 and Metal are built
-  but not yet run on real hardware - report anything that looks different from Vulkan. Cards without Direct3D 12 or
+  Metal on macOS). Vulkan is tested (Mesa's software driver, the test suite's pictures) and Metal runs on Apple Silicon; Direct3D 12 is
+  built but not yet run on real hardware - report anything that looks different from Vulkan. Cards without Direct3D 12 or
   Vulkan (older than the GeForce GTX 600 / Radeon HD 7700 / Intel Haswell) can't run it; an OpenGL 2.1 renderer for those
   PCs is planned (the renderer's interface, src/rb.h, is kept small for it).
 - **macOS downloads** - the app isn't notarised: run `xattr -dr com.apple.quarantine "MechWarrior 2.app"` once (README).

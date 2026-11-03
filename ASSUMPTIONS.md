@@ -1054,6 +1054,7 @@ confirmed in MW2's own code (or plain robustness fixes) were taken. Rejected lea
 | Star time limit | out of time when limit <= now_s - star start, with the start -1 in single play (only network games set it): one second before the limit. Objectives "Time Remaining" = (limit - 1) - now | **engine** 0x1000a9b0, 0x1003f97e, 0x1000acd0 (DAT_1024ffcc); **DOS** 0x16e80, 0x4d10e, 0x31d65; test star_time_limit_one_second_early |
 | SDL3 platform layer | window, input, audio stream and shell presentation on SDL3 (3.2.0+); OpenGL 3.3 renderer unchanged; pictures and state identical to the SDL2 build in side-by-side runs | port (2026-11-02); suite + comparisons |
 | Renderer API (port) | SDL_GPU: D3D12/Vulkan (Windows), Vulkan (Linux), Metal (macOS); GL's depth (0..1 window z), Y, vertex-index and level-0 sampling conventions reproduced in the shaders / sampler | GL vs Vulkan A/B on Mesa: DOS look 1 px, 3D looks <=1.5% (AA off: one-pixel shallow depth crossings, +-1-2 filtering); suite 270/0 |
+| Full-screen movie looks (port presentation option, not original behaviour) | videos=original (default) shows the 320x200 cinematics exactly as before (640x480 nearest frame, whole-pixel presented); smooth / scanlines / crt / crt_curved (src/vidfx.c, from the Mercs fork) and video_fit=4:3 / fill / stretch draw MINTRO / MxxLAND / MEND / MEND2 at the window's real pixel size; 640x480 / menu-art clips (AxxRGSTR, AxxBRIEF, in-screen clips) never filtered; Combat Variables FMV entries right of OBJECT DENSITY / CHUNKY EXPLOSIONS | port option (user request 2026-11-03); Original frame byte-identical to the previous build; tests shell_movie_original / _looks / _fit / _settings |
 
 ## Open items (as of 2026-11-02)
 
@@ -1069,7 +1070,7 @@ Everything earlier on this list was closed in sessions 14-15 (see §22-§25); wh
   need `xattr -dr com.apple.quarantine` (README).
 
 ### Low (left over from the passes, each stated in its row)
-- SDL_GPU renderer: Direct3D 12 and Metal built (DXIL validated, MSL generated) but not yet run on hardware; Vulkan checked on Mesa lavapipe only. Legacy OpenGL 2.1 backend planned (docs/RENDERER.md).
+- SDL_GPU renderer: Metal confirmed on the user's M4 Pro (2026-11-03); Direct3D 12 built (DXIL validated) but not yet run on hardware; Vulkan checked on Mesa lavapipe only. Legacy OpenGL 2.1 backend planned (docs/RENDERER.md).
 - Mercenaries-fork leads not yet traced for MW2: missing-bitmap type-5 polygons skipped (Mercs 3Dfx 0x100142b0); accelerated fog evaluated before near clipping (Mercs TRA1 wedges); WTBO distance LOD selection (Mercs DOS 0x6304c).
 - Falling through geometry (player report v1.0.0): fixed - airborne wrecks ("Airborne wreck move") and live player and enemies on scaled type-5 hills ("Terrain / face normals": PINK / PROV hills, training mountains, UMBE). The engine-faithful ways to end up under type-5 terrain remain: one-sided shells (HUSK S_1CAVRN, RICO TL1CTCHS), overhangs (0x1000cf80 first polygon: BROW/JACK mesas, CALI, TABB) and the 1 cm quadtree seam (0x1000c640; a walk exactly along a hill's centre line).
 - AQUASCN1 (done 2026-10-21: "AI trigger / weapons in turn", "H T A L scale and order", "AI fire line: units in the way",

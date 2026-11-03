@@ -35,6 +35,7 @@
 #include "sfx.h"
 #include "shelldb.h"
 #include "smk.h"
+#include "vidfx.h"
 
 #define W 640
 #define H 480
@@ -654,15 +655,183 @@ static void shell_sound_stop(int index) { if (index > 0 && index <= 160 && g_sfx
 /* the Mech Lab's chassis voices, in the lab's chassis order (0x8367c + 0x10; -1 none) */
 static const int LAB_VOICE[18] = {0x55, 0x59, 0x58, 0x5c, 0x5e, 0x5a, 0x57, 0x5d, 0x5f, 0x60, 0x56, 0x61, 0x5b, 0x62, 0x53, 0x54, -1, 0x63};
 
-/* ---- full-screen cinematic (320x200 scaled to 640x480) ---- */
+/* ---- the port's movie looks (mw2port.cfg videos= / video_fit=, Combat Variables' FMV rows) - a PORT PRESENTATION OPTION,
+ * not the original's behaviour: the original shows its 320x200 cinematics in plain pixels, which ORIGINAL with the 4:3
+ * fit keeps exactly (the 640x480 frame below, unchanged). The other looks (src/vidfx.c, from the Mercenaries fork of this
+ * port) and the FILL / STRETCH fits draw the movie at the window's real pixel size (the window asks for high pixel
+ * density: Retina / 4K pixels) - scanlines and the CRT's aperture grille need real pixels, not an upscaled 640x480.
+ * Only the full-screen cinematics (a source of at most 320x200: MINTRO, MWOLAND / MJFLAND, MEND / MEND2) take them; the
+ * 640x480 registration clip (AxxRGSTR) and the briefing-room clip (AxxBRIEF) are menu art handing over to a menu screen,
+ * and every clip inside a menu screen is drawn into the 640x480 art: those stay as they are. The picture is 4:3 (as the
+ * 640x480 frame shows it): 4:3 the largest 4:3 box in the window (black bars), FILL the smallest covering it (cropped),
+ * STRETCH the whole window. */
+typedef struct { int x, y, w, h; } movie_rect;
+static movie_rect movie_fit_rect(int fit, int w, int h)
+{
+    movie_rect d;
+    double dw = w, dh = h;
+    if (fit != PORTCFG_FIT_STRETCH) {
+        /* 4:3: limited by the narrower side; FILL: by the wider one */
+        int by_height = fit == PORTCFG_FIT_FILL ? (double)w * 3.0 < (double)h * 4.0 : (double)w * 3.0 > (double)h * 4.0;
+        if (by_height) { dh = h; dw = (double)h * 4.0 / 3.0; } else { dw = w; dh = (double)w * 3.0 / 4.0; }
+    }
+    d.w = (int)lround(dw); d.h = (int)lround(dh);
+    if (d.w < 1) d.w = 1;
+    if (d.h < 1) d.h = 1;
+    d.x = (w - d.w) / 2; d.y = (h - d.h) / 2;
+    return d;
+}
+/* the movie's look and fit for this clip (-1: the original 640x480 frame) */
+static int movie_look(const smk *s, int *fit)
+{
+    int look = g_cfg.videos > 0 && g_cfg.videos < PORTCFG_VID_COUNT ? g_cfg.videos : PORTCFG_VID_ORIGINAL;
+    *fit = g_cfg.video_fit > 0 && g_cfg.video_fit < PORTCFG_FIT_COUNT ? g_cfg.video_fit : PORTCFG_FIT_43;
+    if (smk_width(s) > 320 || smk_height(s) > 200) return -1;   /* menu-art clips: as before */
+    if (look == PORTCFG_VID_ORIGINAL && *fit == PORTCFG_FIT_43) return -1;   /* the default: exactly as before */
+    return look;   /* (PORTCFG_VID_* = VIDFX_*) */
+}
+/* output rows y0 .. y1-1 of the prepared frame into out (row y0 first), in bands on the CPU's cores (SDL threads; the
+ * calling thread draws the first band) */
+typedef struct { vidfx *v; uint8_t *out; int pitch, y0, y1, r; } movie_band;
+static int SDLCALL movie_band_run(void *p) { movie_band *b = p; b->r = vidfx_rows(b->v, b->out, b->pitch, b->y0, b->y1); return b->r; }
+static int movie_rows(vidfx *v, uint8_t *out, int pitch, int y0, int y1)
+{
+    enum { MAXB = 16 };
+    movie_band b[MAXB];
+    SDL_Thread *th[MAXB];
+    int n = SDL_GetNumLogicalCPUCores(), i, r = 0;
+    if (getenv("MW2_SHELL_MOVIE_THREADS")) n = atoi(getenv("MW2_SHELL_MOVIE_THREADS"));   /* TEST ONLY: the band count */
+    n = n < 1 ? 1 : n > MAXB ? MAXB : n;
+    if (y1 - y0 < 64 * n) n = (y1 - y0) / 64 > 0 ? (y1 - y0) / 64 : 1;
+    for (i = 0; i < n; i++) {
+        int a = y0 + (int)((long long)(y1 - y0) * i / n), z = y0 + (int)((long long)(y1 - y0) * (i + 1) / n);
+        b[i].v = v; b[i].out = out + (size_t)(a - y0) * (size_t)pitch; b[i].pitch = pitch; b[i].y0 = a; b[i].y1 = z; b[i].r = 0;
+        th[i] = i ? SDL_CreateThread(movie_band_run, "movie", &b[i]) : NULL;
+        if (i && !th[i]) movie_band_run(&b[i]);   /* no thread: drawn here */
+    }
+    movie_band_run(&b[0]);
+    for (i = 0; i < n; i++) { if (th[i]) SDL_WaitThread(th[i], NULL); if (b[i].r) r = -1; }
+    return r;
+}
+/* one movie frame in a look, at a w x h window's pixels: *d the fitted picture's place in the window; the picture drawn
+ * at its size times sc (1: the window's pixels; less when the CPU can't keep up, movie_present - the GPU then scales it
+ * up), *iw x *ih; its visible rows ya .. yb-1 (of the ih) into buf (iw wide, row ya first). Returns 0, or -1 (the
+ * picture is smaller than the movie, or no memory: the caller shows the original frame). buf NULL: the sizes only */
+static vidfx *g_vfx;
+static int movie_frame(const smk *s, int look, int fit, int w, int h, double sc, movie_rect *d, int *iw, int *ih, int *ya, int *yb,
+                       uint8_t *buf, int pitch)
+{
+    int sw = smk_width(s), sh = smk_height(s);
+    *d = movie_fit_rect(fit, w, h);
+    *iw = sc < 1.0 ? (int)lround(d->w * sc) : d->w; *ih = sc < 1.0 ? (int)lround(d->h * sc) : d->h;
+    if (*iw < sw) *iw = sw;
+    if (*ih < sh) *ih = sh;
+    /* the rows inside the window (FILL crops): the picture's rows over -d.y .. h - d.y, in the internal size */
+    *ya = d->y < 0 ? (int)((long long)(-d->y) * *ih / d->h) : 0;
+    *yb = d->y + d->h > h ? (int)(((long long)(h - d->y) * *ih + d->h - 1) / d->h) : *ih;
+    if (d->w < sw || d->h < sh || d->w > 8192 || d->h > 8192 || *yb <= *ya) return -1;
+    if (!g_vfx && !(g_vfx = vidfx_new())) return -1;
+    if (!buf) return 0;
+    if (vidfx_prepare(g_vfx, look, smk_pixels(s), sw, sh, smk_palette(s), *iw, *ih) != 0) return -1;
+    return movie_rows(g_vfx, buf, pitch, *ya, *yb);
+}
+/* the frame through the renderer at the output's real pixels: the picture's texture (*mtx, recreated when its size
+ * changes) drawn with the 640x480 logical presentation off, then the presentation restored for the text layer. *sc: the
+ * picture's scale - stepped down (x 3/4, to 1/2 at least) for the rest of the movie when drawing it has taken more than
+ * 60 % of the movie's frame time twice running (a slow CPU at 4K: the GPU scales the smaller picture up, smoothly) */
+typedef struct { double sc; int slow; } movie_pace;
+static int movie_present(SDL_Renderer *rd, const smk *s, int look, int fit, SDL_Texture **mtx, movie_pace *mp)
+{
+    int w = 0, h = 0, iw, ih, ya, yb, pitch, lw = 0, lh = 0, tw = 0, th2 = 0, r;
+    void *px;
+    movie_rect d;
+    SDL_FRect dst;
+    SDL_RendererLogicalPresentation lm = SDL_LOGICAL_PRESENTATION_DISABLED;
+    Uint64 t0;
+    double ms;
+    if (!SDL_GetRenderOutputSize(rd, &w, &h) || w <= 0 || h <= 0) return -1;
+    if (movie_frame(s, look, fit, w, h, mp->sc, &d, &iw, &ih, &ya, &yb, NULL, 0) != 0) return -1;
+    if (*mtx) { float fw, fh; SDL_GetTextureSize(*mtx, &fw, &fh); tw = (int)fw; th2 = (int)fh; }
+    if (!*mtx || tw != iw || th2 != yb - ya) {
+        if (*mtx) SDL_DestroyTexture(*mtx);
+        if (!(*mtx = SDL_CreateTexture(rd, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, iw, yb - ya))) return -1;
+        SDL_SetTextureScaleMode(*mtx, iw == d.w && ih == d.h ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);   /* 1:1, or scaled up */
+    }
+    if (!SDL_LockTexture(*mtx, NULL, &px, &pitch)) return -1;
+    t0 = SDL_GetPerformanceCounter();
+    r = movie_frame(s, look, fit, w, h, mp->sc, &d, &iw, &ih, &ya, &yb, px, pitch);
+    ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+    SDL_UnlockTexture(*mtx);
+    if (r != 0) return -1;
+    if (getenv("MW2_SHELL_MOVIE_LOG"))   /* TEST ONLY */
+        fprintf(stderr, "movie: look %s fit %s window %dx%d picture %d,%d %dx%d drawn %dx%d rows %d-%d: %.1f ms\n", PORTCFG_VID_NAME[look],
+                PORTCFG_FIT_NAME[fit], w, h, d.x, d.y, d.w, d.h, iw, ih, ya, yb, ms);
+    if (ms > 0.6 * smk_frame_ms(s) && mp->sc > 0.5) { if (++mp->slow >= 2) { mp->sc = mp->sc * 0.75 < 0.5 ? 0.5 : mp->sc * 0.75; mp->slow = 0; } }
+    else mp->slow = 0;
+    SDL_GetRenderLogicalPresentation(rd, &lw, &lh, &lm);
+    SDL_SetRenderLogicalPresentation(rd, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    SDL_RenderClear(rd);
+    dst.x = (float)d.x; dst.w = (float)d.w;
+    dst.y = (float)d.y + (float)ya * (float)d.h / (float)ih; dst.h = (float)(yb - ya) * (float)d.h / (float)ih;
+    SDL_RenderTexture(rd, *mtx, NULL, &dst);
+    SDL_SetRenderLogicalPresentation(rd, lw, lh, lm);
+    text_layer_draw(rd);
+    SDL_RenderPresent(rd);
+    return 0;
+}
+/* TEST ONLY (MW2_SHELL_MOVIE_OUT=WxH with MW2_SHELL_MOVIE_SHOT=file.ppm): the frame as a W x H window would show it
+ * (black around the picture; the original look with the 4:3 fit: the 640x480 frame whole-pixel scaled and centred, as
+ * the renderer's logical presentation draws it); MW2_SHELL_MOVIE_LOG: the geometry and the time the look took */
+static void movie_test_shot(const smk *s)
+{
+    const char *o = getenv("MW2_SHELL_MOVIE_OUT"), *shot = getenv("MW2_SHELL_MOVIE_SHOT");
+    int w = 0, h = 0, fit, look = movie_look(s, &fit), ya = 0, yb = 0, y, x, iw, ih;
+    movie_rect d;
+    uint8_t *win, *pic = NULL;
+    Uint64 t0, t1;
+    FILE *f;
+    if (!o || !shot || sscanf(o, "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+    if (!(win = calloc((size_t)w * (size_t)h, 3))) return;
+    t0 = SDL_GetPerformanceCounter();
+    if (look >= 0 && movie_frame(s, look, fit, w, h, 1.0, &d, &iw, &ih, &ya, &yb, NULL, 0) == 0 && (pic = malloc((size_t)d.w * (size_t)(yb - ya) * 3))
+        && movie_frame(s, look, fit, w, h, 1.0, &d, &iw, &ih, &ya, &yb, pic, d.w * 3) == 0) {
+        t1 = SDL_GetPerformanceCounter();
+        for (y = ya; y < yb; y++)
+            for (x = 0; x < d.w; x++)
+                if (d.x + x >= 0 && d.x + x < w) memcpy(win + ((size_t)(d.y + y) * (size_t)w + (size_t)(d.x + x)) * 3, pic + ((size_t)(y - ya) * (size_t)d.w + (size_t)x) * 3, 3);
+    } else {   /* the original 640x480 frame, scaled by whole pixels (SDL_LOGICAL_PRESENTATION_INTEGER_SCALE) */
+        int k = w / W < h / H ? w / W : h / H;
+        if (k < 1) k = 1;
+        look = -1;
+        d.w = W * k; d.h = H * k; d.x = (w - d.w) / 2; d.y = (h - d.h) / 2; ya = 0; yb = d.h;
+        for (y = 0; y < d.h; y++)
+            for (x = 0; x < d.w; x++)
+                if (d.x + x >= 0 && d.x + x < w && d.y + y >= 0 && d.y + y < h)
+                    memcpy(win + ((size_t)(d.y + y) * (size_t)w + (size_t)(d.x + x)) * 3, g_fb + ((size_t)(y / k) * W + (size_t)(x / k)) * 3, 3);
+        t1 = SDL_GetPerformanceCounter();
+    }
+    if (getenv("MW2_SHELL_MOVIE_LOG"))
+        fprintf(stderr, "movie: look %s fit %s window %dx%d picture %d,%d %dx%d rows %d-%d: %.1f ms\n", look < 0 ? "frame640" : PORTCFG_VID_NAME[look],
+                PORTCFG_FIT_NAME[fit], w, h, d.x, d.y, d.w, d.h, ya, yb, (double)(t1 - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+    if ((f = fopen(shot, "wb"))) { fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(win, 1, (size_t)w * (size_t)h * 3, f); fclose(f); }
+    free(pic); free(win);
+}
+
+/* ---- full-screen cinematic (320x200 scaled to 640x480; the port's movie looks above) ---- */
 static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, int headless)
 {
     smk *s = open_smk(name);
     int f, n, last = -1;
     unsigned char *snd = NULL;
     Uint64 t0;
+    int fit, look;
+    SDL_Texture *mtx = NULL;   /* the movie looks' picture */
+    movie_pace mp = {1.0, 0};
+    if (getenv("MW2_SHELL_MOVIE_SCALE")) mp.sc = atof(getenv("MW2_SHELL_MOVIE_SCALE"));   /* TEST ONLY: the picture's starting scale */
     if (!s) return;
+    look = movie_look(s, &fit);
     n = headless ? 3 : smk_frames(s);
+    if (headless && getenv("MW2_SHELL_MOVIE_FRAME")) n = atoi(getenv("MW2_SHELL_MOVIE_FRAME"));   /* TEST ONLY: frames decoded */
     {   /* the clip's sound (audio track 0), mixed as one 8-bit voice; the frames then follow the clock */
         int16_t *a = NULL;
         size_t ns = 0;
@@ -696,8 +865,10 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
             }
         if (!headless) {
             Uint64 now;
-            SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            if (look < 0 || movie_present(rd, s, look, fit, &mtx, &mp) != 0) {   /* (a look: the 640x480 frame if it can't be drawn) */
+                SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
+                SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            }
             while (shell_poll(&e)) if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_QUIT) skip = 1;
             if (skip) break;
             now = SDL_GetTicks() - t0;
@@ -705,6 +876,13 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
         }
     }
     (void)last;
+    if (headless && getenv("MW2_SHELL_MOVIE_SHOT")) movie_test_shot(s);   /* TEST ONLY */
+    if (headless && getenv("MW2_SHELL_MOVIE_RAW")) {   /* TEST ONLY: the source frame (the palette applied) */
+        FILE *o = fopen(getenv("MW2_SHELL_MOVIE_RAW"), "wb");
+        int i2;
+        if (o) { fprintf(o, "P6\n%d %d\n255\n", smk_width(s), smk_height(s)); for (i2 = 0; i2 < smk_width(s) * smk_height(s); i2++) fwrite(smk_palette(s)[smk_pixels(s)[i2]], 1, 3, o); fclose(o); }
+    }
+    if (mtx) SDL_DestroyTexture(mtx);
     if (snd) { sfx_stop_pcm(g_sfx, snd); free(snd); }
     smk_close(s);
 }
@@ -3401,7 +3579,10 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * vesa480 / vesa768) - plus the port's NATIVE choices (the display's resolution, anti-aliasing off / 2X / 4X / 8X); the
  * port's DISPLAY row at y 397 picks desktop / windowed / the display's modes, and its right half (x 515 on) the port's
  * HUD layout - HUD WIDE / HUD ORIGINAL (mw2port.cfg hud_layout=; no room for a row of its own); the TEXTURES row's
- * right part (x 495 on) the port's DOS shading - DOS DITHERED / DOS SMOOTH (mw2port.cfg dos_shading=, the DOS renderer only) */
+ * right part (x 495 on) the port's DOS shading - DOS DITHERED / DOS SMOOTH (mw2port.cfg dos_shading=, the DOS renderer only);
+ * the OBJECT DENSITY and CHUNKY EXPLOSIONS rows' right parts (x 495 on) the port's movie look - FMV ORIGINAL / SMOOTH /
+ * SCANLINES / CRT / CURVED CRT (mw2port.cfg videos=) - and fit - FMV 4:3 / FILL / STRETCH (video_fit=), each click the next
+ * (play_cinematic's movie looks: a port presentation option) */
 /* the port's GPU interface (mw2port.cfg gpu=, the RESOLUTION row's right half). Windows: the backends SDL's GPU API can
  * run here (1 Direct3D 12, 2 Vulkan), asked once */
 #if defined(_WIN32)
@@ -3455,8 +3636,11 @@ static void wr32(uint8_t *b, int32_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v 
  * DIFFICULTY group (its heading and HEAT TRACKING, y 219-252) is drawn 20 px higher, into the gap under the sliders
  * (the VOICE track ends at y 192), and the DETAIL heading moves up from the OBJECT TEXTURES row to the RENDERER row -
  * every row then 19-20 px apart as the original's, each group headed by its red word. */
+static int gm_script_event(const char **sp, SDL_Event *e);
 static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
+    const char *script = headless ? getenv("MW2_CV_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, all in
+                                                                       * the one headless pass; the settings then saved */
     uint8_t snd[60], dif[8];
     char p[700];
     FILE *f;
@@ -3505,8 +3689,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         else if (pc.mode == 1) snprintf(aa, sizeof aa, "WINDOWED");
         else snprintf(aa, sizeof aa, "%dx%d", pc.w, pc.h);
         if (pc.aa) snprintf(res, sizeof res, "NATIVE %dX AA", pc.aa); else snprintf(res, sizeof res, "NATIVE");
-        if (!headless) {
-            while (shell_poll(&e)) {
+        if (!headless || script) {
+            while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
                  * one the DOS keyboard reads as a character (not a lone Shift / Ctrl / Alt) */
                 if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && !key_is_modifier(e.key.key)) || (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
@@ -3516,6 +3700,9 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         if (x < 375 || x > 633 || y < ROW_Y[i] - 2 || y > ROW_Y[i] + 14) continue;
                         if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
                         else if (i == 1) dif[4] ^= 1;
+                        else if (i == 5 && x >= 495) pc.videos = g_cfg.videos = (pc.videos + 1) % PORTCFG_VID_COUNT;   /* the port's
+                                                                         * movie look (FMV ...; the next movie shows it) */
+                        else if (i == 6 && x >= 495) pc.video_fit = g_cfg.video_fit = (pc.video_fit + 1) % PORTCFG_FIT_COUNT;   /* its fit */
                         else if (i >= 2 && i <= 6) wr32(snd + 0x14 + 4 * (i - 2), !rd32(snd + 0x14 + 4 * (i - 2)));
                         else if (i == 7 && x >= 515) {   /* the port's GPU interface (Windows: Direct3D 12 / Vulkan, those that run here;
                                                           * Linux Vulkan and macOS Metal only - shown greyed) */
@@ -3595,8 +3782,10 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             char vals[14][32];
             tt_item it;
             int k;
-            const char *lines[20];
-            int ly[20], lx[20], gpu_lock;
+            static const char *const FMV_TEXT[PORTCFG_VID_COUNT] = {"FMV ORIGINAL", "FMV SMOOTH", "FMV SCANLINES", "FMV CRT", "FMV CURVED CRT"};
+            static const char *const FIT_TEXT[PORTCFG_FIT_COUNT] = {"FMV 4:3", "FMV FILL", "FMV STRETCH"};
+            const char *lines[22];
+            int ly[22], lx[22], gpu_lock;
             for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
@@ -3617,12 +3806,15 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             lines[17] = pc.hud_original ? "HUD ORIGINAL" : "HUD WIDE"; ly[17] = ROW_Y[8] + 1; lx[17] = 520;   /* the DISPLAY row's right half */
             lines[18] = pc.dos_sky_smooth ? "DOS SMOOTH" : "DOS DITHERED"; ly[18] = ROW_Y[13] + 1; lx[18] = 500;   /* the TEXTURES row's (from 500: the column ends at 633) */
             lines[19] = gpu_backend_text(pc.gpu); ly[19] = ROW_Y[7] + 1; lx[19] = 520;   /* the RESOLUTION row's right half */
+            /* the movie look and fit: OBJECT DENSITY's and CHUNKY EXPLOSIONS' right part (x 495 on, as DOS shading's) */
+            lines[20] = FMV_TEXT[pc.videos >= 0 && pc.videos < PORTCFG_VID_COUNT ? pc.videos : 0]; ly[20] = ROW_Y[5] + 1; lx[20] = 500;
+            lines[21] = FIT_TEXT[pc.video_fit >= 0 && pc.video_fit < PORTCFG_FIT_COUNT ? pc.video_fit : 0]; ly[21] = ROW_Y[6] + 1; lx[21] = 500;
 #if defined(_WIN32)
             gpu_lock = gpu_backends() != 3;   /* only one runs here: nothing to choose */
 #else
             gpu_lock = 1;   /* Linux: Vulkan, macOS: Metal - the only one */
 #endif
-            for (k = 0; k < 20; k++) {
+            for (k = 0; k < 22; k++) {
                 const char *t = lines[k];
                 int grey = (tx_lock && (k == 13 || k == 16)) || (gpu_lock && k == 19);   /* TEXTURES locked / the GPU fixed: greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
@@ -3662,7 +3854,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         SDL_Delay(30);
     }
     smk_close(logo);
-    if (!headless) {
+    if (!headless || getenv("MW2_CV_EVENTS")) {
         snprintf(p, sizeof p, "%s/MW2SND.CFG", g_dir); if ((f = fopen(p, "wb"))) { fwrite(snd, 1, sizeof snd, f); fclose(f); }
         snprintf(p, sizeof p, "%s/MW2DIF.CFG", g_dir); if ((f = fopen(p, "wb"))) { fwrite(dif, 1, sizeof dif, f); fclose(f); }
         portcfg_save(g_dir, &pc);
@@ -5453,7 +5645,8 @@ int main(int argc, char **argv)
     }
     if (!headless) {
         portcfg pc;
-        SDL_WindowFlags wf = SDL_WINDOW_RESIZABLE;
+        SDL_WindowFlags wf = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;   /* real pixels on a Retina display (macOS;
+                                         * Windows / X11 have them anyway): the menus' whole-pixel scale and text, the movie looks */
         SDL_PropertiesID wp = SDL_CreateProperties();
         portcfg_load(g_dir, &pc);
         if (pc.mode == 0) wf |= SDL_WINDOW_FULLSCREEN;   /* native fullscreen (default; SDL3: the desktop's mode); the 640x480 art letterboxed */
@@ -5544,6 +5737,12 @@ int main(int argc, char **argv)
     if (getenv("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_LOADING_SHOT")) { loading_screen(0); running = 0; }   /* tests */
+    if (getenv("MW2_SHELL_MOVIE")) {   /* TEST ONLY: a cinematic decoded headless (MW2_SHELL_MOVIE_FRAME frames), its 640x480
+                                        * frame -> MW2_SHELL_SHOT (and MW2_SHELL_MOVIE_SHOT / _RAW, play_cinematic) */
+        play_cinematic(rd, tx, getenv("MW2_SHELL_MOVIE"), 1);
+        if (shot) { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } }
+        running = 0;
+    }
     /* the opening movie (main 0x36700: "mintro" unless started as "mw2 sim" - the return from a mission) */
     if (running && rd && !shot && !getenv("MW2_NO_INTRO") && !(argc > 1 && strcasecmp(argv[argc - 1], "sim") == 0))
         play_cinematic(rd, tx, "MINTRO", 0);

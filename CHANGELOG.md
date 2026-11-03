@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.1 (unreleased)
+
+- **Movie looks** (a port presentation option): the full-screen movies (intro, landings, endings) can be shown as
+  ORIGINAL (the default, unchanged), SMOOTH, SCANLINES, CRT or CURVED CRT, fitted 4:3 (default), FILL or STRETCH -
+  Combat Variables (the FMV rows right of OBJECT DENSITY / CHUNKY EXPLOSIONS) or `videos=` / `video_fit=` in
+  mw2port.cfg. The filtered looks are drawn at the window's real pixel size (the shell window now uses Retina / high
+  pixel density pixels on macOS). Filters adapted from the Mercenaries fork (src/vidfx.c). README "Movie Options".
+
 ## v1.1.0 (2026-11-03)
 
 - **SDL3.** The port now uses SDL3 (3.2.0 or newer) instead of SDL2 for its window, input and sound; OpenGL 3.3 is still

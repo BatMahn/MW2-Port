@@ -104,6 +104,26 @@ int main(int argc, char **argv)
         CHECK(!c.no3d && portcfg_edition(&c, PORTCFG_ED_ENHANCED, m, t, k, s2, f2) == 0, "with 3d/: no3d 0, ENHANCED (models %s)", c.models);
     }
 
+    {   /* the movie options (videos= / video_fit=): defaults original / 4:3, every value saved and read back, unknown
+         * words leave the default */
+        portcfg c, r;
+        int k, j;
+        FILE *fp;
+        snprintf(b, sizeof b, "%s/movies.cfg", base);
+        setenv("MW2_CONFIG", b, 1);
+        portcfg_defaults(&c);
+        CHECK(c.videos == PORTCFG_VID_ORIGINAL && c.video_fit == PORTCFG_FIT_43, "movie defaults original / 4:3");
+        for (k = 0; k < PORTCFG_VID_COUNT; k++)
+            for (j = 0; j < PORTCFG_FIT_COUNT; j++) {
+                c.videos = k; c.video_fit = j;
+                CHECK(portcfg_save(NULL, &c) == 0 && portcfg_load(NULL, &r) == 0 && r.videos == k && r.video_fit == j,
+                      "videos=%s video_fit=%s round trip (read %d %d)", PORTCFG_VID_NAME[k], PORTCFG_FIT_NAME[j], r.videos, r.video_fit);
+            }
+        if ((fp = fopen(b, "w"))) { fprintf(fp, "videos=vhs\nvideo_fit=zoom\n"); fclose(fp); }
+        CHECK(portcfg_load(NULL, &r) == 0 && r.videos == PORTCFG_VID_ORIGINAL && r.video_fit == PORTCFG_FIT_43, "unknown movie words: the defaults");
+        unsetenv("MW2_CONFIG");
+    }
+
     if (argc <= 1) { char cmd[600]; if (chdir("/") == 0) { snprintf(cmd, sizeof cmd, "rm -rf '%s'", base); if (system(cmd) != 0) printf("(could not remove %s)\n", base); } }
     printf("test_gamefolder: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;

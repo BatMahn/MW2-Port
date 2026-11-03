@@ -157,7 +157,7 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
     {   /* the centre height (MGEO int[0], the record's own name; engine controller +0xcc, 0x100400b0) */
         prj_record mg;
         if (prj_read_named(a, "MGEO", record, &mg) == PRJ_OK) {
-            if (mg.size >= 4) out->centre_h = (int32_t)(mg.data[0] | (mg.data[1] << 8) | (mg.data[2] << 16) | ((uint32_t)mg.data[3] << 24));
+            if (mg.size >= 4) out->centre_h = (int32_t)((uint32_t)mg.data[0] | ((uint32_t)mg.data[1] << 8) | ((uint32_t)mg.data[2] << 16) | ((uint32_t)mg.data[3] << 24));
             prj_record_free(&mg);
         }
     }
