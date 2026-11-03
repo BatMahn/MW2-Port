@@ -3,9 +3,21 @@ CC      ?= cc
 CFLAGS  ?= -std=c99 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wconversion
 LDLIBS  = -lpthread -lm
 UNAME_S := $(shell uname -s)
-SDL2_CONFIG ?= sdl2-config
-# Windows: MSYS2's MINGW64 shell (uname MINGW64_NT-...), or cross-compiling from Linux with
-#   make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ SDL2_CONFIG=/path/to/mingw/bin/sdl2-config
+# SDL3 (3.2.0 or newer) through pkg-config's sdl3 module. SDL3_DIR=<prefix> uses only <prefix>/lib/pkgconfig (an SDL3
+# built into its own prefix, or the MinGW development package); SDL3_CFLAGS / SDL3_LIBS override the flags outright.
+PKG_CONFIG ?= pkg-config
+SDL3_MIN_VERSION = 3.2.0
+ifdef SDL3_DIR
+  SDL3_PKG = PKG_CONFIG_LIBDIR="$(SDL3_DIR)/lib/pkgconfig" PKG_CONFIG_PATH= $(PKG_CONFIG)
+else
+  SDL3_PKG = $(PKG_CONFIG)
+endif
+SDL3_CFLAGS ?= $(shell $(SDL3_PKG) --cflags sdl3 2>/dev/null)
+SDL3_LIBS   ?= $(shell $(SDL3_PKG) --libs sdl3 2>/dev/null)
+SDL3_CHECK   = @$(SDL3_PKG) --exists 'sdl3 >= $(SDL3_MIN_VERSION)' 2>/dev/null || { echo "SDL3 >= $(SDL3_MIN_VERSION) not found by $(PKG_CONFIG) (sdl3.pc): install SDL3's development files, or set SDL3_DIR=<prefix> / PKG_CONFIG_PATH (README, Build)" >&2; exit 1; }
+# Windows: MSYS2's MINGW64 shell (uname MINGW64_NT-...), or cross-compiling from Linux with the SDL3 MinGW development
+# package (SDL3-devel-<version>-mingw.tar.gz):
+#   make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ SDL3_DIR=/path/to/SDL3-<version>/x86_64-w64-mingw32
 ifneq (,$(findstring MINGW,$(UNAME_S)))
   WINDOWS = 1
   ifeq ($(origin CC),default)
@@ -16,10 +28,9 @@ ifeq ($(WINDOWS),1)
   UNAME_S = Windows
   CFLAGS += -include src/wincompat.h
   LDLIBS = -lm
-  GLLIB = -lopengl32
   CXXLIB = -static-libgcc -Wl,-Bstatic -lstdc++ -lpthread -Wl,-Bdynamic   # no libstdc++ / libwinpthread DLLs to ship
   DLLIB =
-  WINSRC = src/wincompat.c src/glload.c
+  WINSRC = src/wincompat.c
   WINLIBS = -lole32 -lshell32   # system DLLs: the folder picker (wincompat.c mw2_pick_folder)
   WINRES = build/mw2res.o
   WINDRES ?= $(patsubst %gcc,%windres,$(CC))
@@ -31,11 +42,9 @@ else
 endif
 ifeq ($(UNAME_S),Linux)
   LDLIBS += -ldl
-  GLLIB = -lGL
   CXXLIB = -lstdc++
 endif
 ifeq ($(UNAME_S),Darwin)
-  GLLIB = -framework OpenGL
   CXXLIB = -lc++
   LDLIBS += -framework CoreFoundation -framework CoreAudio -framework AudioToolbox
 endif
@@ -43,9 +52,6 @@ endif
 LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/mek.c
 BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium test_gamefolder
 GLBIN   = glshot glview mw2shell
-ifeq ($(UNAME_S),Darwin)
-  GLBIN = glview mw2shell          # glshot renders headless through EGL: Linux only
-endif
 
 all: $(BIN)
 
@@ -71,13 +77,16 @@ cdrip: tools/cdrip.c
 	$(CC) $(CFLAGS) $^ -o $@
 
 HDRS = $(wildcard src/*.h tools/*.h)
-GL3D_SRC = src/hud.c src/shp.c src/glr.c src/skygnd.c src/anim.c src/mek.c src/mtbl.c src/msim.c src/fx.c src/combat.c src/ai.c src/mech3d.c src/render.c src/tex.c src/wtb.c src/bwd.c src/prj.c src/datapath.c
+# the renderer: the world (glr.c), the HUD (hud.c) and the render backend on SDL_GPU (rb_gpu.c; the shaders compiled
+# for Vulkan, Direct3D 12 and Metal in rb_shaders.c - generated, checked in: "make shaders" remakes it)
+GL3D_SRC = src/rb_gpu.c src/rb_shaders.c src/hud.c src/shp.c src/glr.c src/skygnd.c src/anim.c src/mek.c src/mtbl.c src/msim.c src/fx.c src/combat.c src/ai.c src/mech3d.c src/render.c src/tex.c src/wtb.c src/bwd.c src/prj.c src/datapath.c
 
 missionsim: tools/missionsim.c src/msim.c src/fx.c src/ai.c src/combat.c src/mtbl.c src/anim.c src/mek.c src/mech3d.c src/wtb.c src/bwd.c src/prj.c src/datapath.c $(HDRS)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc $(filter %.c,$^) -o $@ -lm
 
 glshot: tools/glshot.c $(GL3D_SRC) $(HDRS)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc $(filter %.c,$^) -o $@ -lEGL -lGL -lm
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc $(SDL3_CFLAGS) -DSDL_MAIN_HANDLED $(filter %.c,$^) -o $@ $(SDL3_LIBS) -lm
 
 # the MT-32 emulator (Munt mt32emu, LGPL 2.1+): C++, built into a static library
 CXX ?= c++
@@ -91,16 +100,19 @@ build/libmt32emu.a: $(MT32_OBJ)
 
 # mw2: one executable - the shell, and with --sim the simulation (glview built in, its main renamed)
 mw2: $(WINRES) build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter-out -Dmain=SDL_main,$(shell $(SDL2_CONFIG) --cflags 2>/dev/null)) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(shell $(SDL2_CONFIG) --cflags 2>/dev/null) -o build/mw2shell_one.o
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(SDL3_CFLAGS) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(SDL3_LIBS) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
 
 mw2shell: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(filter %.c,$^) build/libmt32emu.a -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) -lm $(CXXLIB)
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(SDL3_CFLAGS) $(filter %.c,$^) build/libmt32emu.a -o $@ $(SDL3_LIBS) -lm $(CXXLIB)
 
 glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o $@ $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB)
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) -lm -lpthread $(DLLIB)
 
 gl: $(GLBIN)
 
@@ -132,7 +144,8 @@ test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
 test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h src/datapath.c src/datapath.h
-	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools -Isrc $$($(SDL2_CONFIG) --cflags) tests/test_inputmap.c src/datapath.c $$($(SDL2_CONFIG) --libs) -o $@
+	$(SDL3_CHECK)
+	$(CC) -std=c99 -D_DEFAULT_SOURCE -Itools -Isrc $(SDL3_CFLAGS) tests/test_inputmap.c src/datapath.c $(SDL3_LIBS) -o $@
 
 # make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso] [TITANIUM=/path/to/MW2-game/titanium]
 TITANIUM ?= $(MW2)/../MW2-game/titanium
@@ -154,8 +167,14 @@ clean:
 
 .PHONY: all check clean
 
+# the shaders (shaders/*.vert, *.frag) for every backend into src/rb_shaders.c / .h (checked in; needs glslangValidator,
+# spirv-cross and dxc - on PATH or in SHADER_TOOLS=<folder>/bin; see scripts/gen_shaders.py)
+shaders:
+	python3 scripts/gen_shaders.py $(if $(SHADER_TOOLS),--tools $(SHADER_TOOLS))
+.PHONY: shaders
+
 # A self-contained folder to run from anywhere: the launcher, the simulation, the font (found next to the
-# executables), the documentation. Needs SDL2 and OpenGL from the system.
+# executables), the documentation. Needs SDL3 from the system (and a Vulkan driver: the GPU's).
 DIST = dist/mw2port
 dist: mw2
 	rm -rf $(DIST)
@@ -192,6 +211,6 @@ test_sequences: glview
 
 # the same under AddressSanitizer / UBSan (a separate binary, build/glview_asan)
 test_sequences_asan: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
-	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(shell $(SDL2_CONFIG) --cflags --libs 2>/dev/null) $(GLLIB) -lm -lpthread $(DLLIB)
+	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(SDL3_CFLAGS) $(SDL3_LIBS) -lm -lpthread $(DLLIB)
 	ASAN_OPTIONS=detect_leaks=0 SEQ_TIME_SCALE=6 python3 tests/sequences/run_sequences.py --glview build/glview_asan $(SEQ_ARGS)
 .PHONY: test_sequences test_sequences_asan

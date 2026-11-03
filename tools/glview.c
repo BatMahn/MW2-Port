@@ -1,4 +1,4 @@
-/* glview - interactive viewer for the enhanced (3D-edition) look. SDL2 + OpenGL 3.3 core.
+/* glview - interactive viewer for the enhanced (3D-edition) look, and the simulation. SDL3 (its GPU API: rb.h).
  *   glview MODELS.PRJ TEXTURES.PRJ ati|3dfx [RECORD] [MISSION]
  *   RECORD "@" = walk/fly the mission's world (W toggles world <-> mech view)
  *   World view: WASD move, mouse drag look, Q/E down/up, Shift faster
@@ -22,20 +22,17 @@
  * Any window size or aspect ratio; wider screens see more to the sides.
  */
 #if defined(__APPLE__)
-#define GL_SILENCE_DEPRECATION
-#include <OpenGL/gl3.h>
 #include <dlfcn.h>   /* the system-shortcut switch, looked up at run time (syskeys_apply) */
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT ((void *)-2)   /* <dlfcn.h>'s value, hidden under strict POSIX */
 #endif
-#elif defined(_WIN32)
-#include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
-#else
-#define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
-#include <GL/glext.h>
 #endif
-#include <SDL.h>
+#include "rb.h"           /* the render backend (SDL_GPU) */
+#include "rb_shaders.h"
+#include <SDL3/SDL.h>
+#ifndef SDL_MAIN_HANDLED
+#include <SDL3/SDL_main.h>   /* glview on its own; in mw2 the shell has the entry point (built with SDL_MAIN_HANDLED) */
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,7 +141,8 @@ static const char *HB(const char *base)
 }
 static int        g_im_ok, g_im_mouse;   /* g_im_mouse: INPUT.MAP uses the mouse (else the port reads it as MOUSE.MAP does) */
 static int        g_im_menu_mouse;       /* a menu control (menu_item / menu_value ...) reads the mouse: it moves while the menu is up */
-static Uint32     g_mm_timer;            /* the MAIN MENU's timer (0x102653e8): reset on opening and after a control's key */
+static Uint64     g_mm_timer;            /* the MAIN MENU's timer (0x102653e8): reset on opening and after a control's key */
+static SDL_Window *g_text_win;          /* the sim's window: SDL3 text input is per window (TEST hooks read it) */
 static int        g_mm_prev_en, g_mm_prev_ab;   /* menu_enter / menu_abort last state (on the press only) */
 /* a game file by its DOS path for reading, found like the control files: the install folder, then the disc (folders,
  * then an .iso image), any case of the name */
@@ -162,7 +160,7 @@ static FILE *im_open_game_file(const char *rel)
     return f;
 }
 static float      g_eye_pan, g_eye_tilt, g_zoom = 1.0f;   /* pilot_pan / pilot_tilt / zoom_factor (the cockpit view) */
-#define A(name) (g_im_ok && im_action(&g_im, name, k, e.key.keysym.mod))
+#define A(name) (g_im_ok && im_action(&g_im, name, k, e.key.mod))
 /* the port's own development keys in a mission (G free camera, [ ] fog density): only with MW2_DEBUG_KEYS=1 - in play
  * every key belongs to GAMEKEY.MAP / INPUT.MAP (user report 2026-10-23: rebinding to G dropped the piloting) */
 static int dbg_keys(void) { static int v = -1; if (v < 0) v = getenv("MW2_DEBUG_KEYS") && atoi(getenv("MW2_DEBUG_KEYS")) > 0; return v; }
@@ -522,10 +520,9 @@ static void music_start(int track)
     portcfg pc;
     if (track <= 0) return;
     if (!dir || !dir[0]) {   /* run by hand: the configured game folder's music/ */
-        char *bp = SDL_GetBasePath();
+        const char *bp = SDL_GetBasePath();
         portcfg_load(NULL, &pc);
         portcfg_resolve(&pc, bp, NULL);
-        SDL_free(bp);
         dir = pc.music[0] ? pc.music : NULL;
     }
     if (!dir || !g_sfx) return;
@@ -1051,7 +1048,7 @@ static void on_radio(void *user, const char *name)
             int k;
             for (k = 0; queue[0][k] && k < 15; k++) up[k] = (char)toupper((unsigned char)queue[0][k]);
             up[k] = '\0';
-            if (!cd || !cd[0]) { static portcfg pc; static int got; if (!got) { char *bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp); got = 1; } cd = pc.cd; }
+            if (!cd || !cd[0]) { static portcfg pc; static int got; if (!got) { const char *bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); got = 1; } cd = pc.cd; }
             snprintf(path, sizeof path, "%s/KEATING/%s.SFL", cd ? cd : ".", up);
             if ((f = fopen(path, "rb"))) {
                 long n;
@@ -1340,37 +1337,23 @@ static int proj_slot_w(int w)
 /* message + Betty's voice line (message table 0x1024f144: text, voice SNDS index) */
 static void hud_message_v(const char *m, int voice);
 /* ---- the original resolutions (render=320x200 / 640x480 / 1024x768): an off-screen frame, then shown in blocks */
-static GLuint g_lr_fbo[2], g_lr_col[2], g_lr_depth;
+/* g_lr_fbo[0]: the frame (colour and depth), [1]: the 320 x 200 frame (colour) - render targets of the backend */
+static rb_tex g_lr_fbo[2];
+static int g_aa;   /* the anti-aliasing samples chosen (mw2port.cfg aa=; the viewer's M key toggles them) */
 static int g_lr_w, g_lr_h, g_out_w, g_out_h;
 static int lowres_target(int w, int h)
 {
-    int k;
     if (g_lr_fbo[0] && g_lr_w == w && g_lr_h == h) return 0;
-    if (g_lr_fbo[0]) { glDeleteFramebuffers(2, g_lr_fbo); glDeleteTextures(2, g_lr_col); glDeleteRenderbuffers(1, &g_lr_depth); }
-    glGenFramebuffers(2, g_lr_fbo); glGenTextures(2, g_lr_col); glGenRenderbuffers(1, &g_lr_depth);
-    for (k = 0; k < 2; k++) {
-        int tw = k == 0 ? w : 320, th = k == 0 ? h : 200;
-        glBindTexture(GL_TEXTURE_2D, g_lr_col[k]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, tw, th, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glBindFramebuffer(GL_FRAMEBUFFER, g_lr_fbo[k]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_lr_col[k], 0);
-        if (k == 0) {
-            glBindRenderbuffer(GL_RENDERBUFFER, g_lr_depth);
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g_lr_depth);
-        }
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { glBindFramebuffer(GL_FRAMEBUFFER, 0); g_lr_fbo[0] = 0; return -1; }
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (g_lr_fbo[0]) { rb_tex_delete(g_lr_fbo[0]); rb_tex_delete(g_lr_fbo[1]); }
+    g_lr_fbo[0] = rb_target_new(w, h, 1);
+    g_lr_fbo[1] = rb_target_new(320, 200, 0);
     g_lr_w = w; g_lr_h = h;
     return 0;
 }
 static void lowres_present(int ow, int oh)
 {
     int sw = g_render_w == 320 ? 320 : g_lr_w, sh = g_render_w == 320 ? 200 : g_lr_h;
-    GLuint src = g_render_w == 320 ? g_lr_fbo[1] : g_lr_fbo[0];   /* 320 x 200: the frame the HUD was drawn into */
+    rb_tex src = g_render_w == 320 ? g_lr_fbo[1] : g_lr_fbo[0];   /* 320 x 200: the frame the HUD was drawn into */
     int vw, vh, x0, y0, k;
     /* the 4:3 picture, as large as fits; whole multiples of the low-res pixel where they fit (crisp, even blocks) */
     vh = oh; vw = oh * 4 / 3;
@@ -1379,14 +1362,14 @@ static void lowres_present(int ow, int oh)
     if (g_render_w == 320) { if (vh / 240 >= 2) { vh = vh / 240 * 240; vw = vh * 4 / 3; } }   /* 200 lines at 4:3: multiples of 240 */
     else if (k >= 2) { vh = sh * k; vw = sw * k; }   /* whole multiples when at least 2 fit, else the largest 4:3 that fits */
     x0 = (ow - vw) / 2; y0 = (oh - vh) / 2;
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    glViewport(0, 0, ow, oh);
-    glDisable(GL_SCISSOR_TEST);
-    glClearColor(0, 0, 0, 1);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glBlitFramebuffer(0, 0, sw, sh, x0, y0, x0 + vw, y0 + vh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    {
+        static const float black[4] = {0, 0, 0, 1};
+        rb_target(0);
+        rb_viewport(0, 0, ow, oh);
+        rb_scissor(0, 0, 0, 0, 0);
+        rb_clear(black, 1, 0);
+        rb_blit(src, 0, 0, sw, sh, 0, x0, y0, x0 + vw, y0 + vh, 0);
+    }
 }
 /* the inspection's result in the viewer's text line (0x10020e40, DAT_1024c8ac): for 0x16a ticks after an inspection
  * (1, or 3 when inspected before) the line shows what the target holds - a mech its GPS 4th string (unit +0xfe, the
@@ -2671,7 +2654,7 @@ static void perf_frame_start(void)
 static void perf_mark(int k)
 {
     if (g_perf <= 0) return;
-    if (k == 1 && g_perf >= 2) glFinish();
+    if (k == 1 && g_perf >= 2) rb_finish();
     g_perf_t[k] = perf_now();
 }
 static void perf_report(int w, int h)
@@ -2680,8 +2663,7 @@ static void perf_report(int w, int h)
     if (g_perf <= 0) return;
     if (g_perf_t0 == 0) {
         g_perf_t0 = g_perf_t[4];
-        printf("perf: GL %s / %s / %s, drawable %d x %d\n", (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
-               (const char *)glGetString(GL_VERSION), w, h);
+        printf("perf: %s / %s, drawable %d x %d\n", rb_backend_name(), rb_device_name(), w, h);
     }
     g_perf_sum[0] += g_perf_t[0] - g_perf_t[4];
     g_perf_sum[1] += g_perf_t[1] - g_perf_t[0];
@@ -2715,9 +2697,9 @@ static void sim_log(void *u, const char *line)
 /* the drop screen (DOSBox: the simulation's own loading screen): the mission's launch picture (its brief record's SUPS
  * chunk names the disc's LAUNCH\<name>6.SHP, a 640 x 480 shape with its own palette) and LAUNCH6.SHP's "DROP PROCEDURE
  * INITIATED" at (368, 20) in light grey; drawn 4:3 in the window before the mission loads and held 2 s from launch (user choice) */
-static GLuint g_drop_tex, g_drop_texs[5];   /* the picture; with each LAUNCH6 frame 0-4 (0: the text alone) */
+static rb_tex g_drop_tex, g_drop_texs[5];   /* the picture; with each LAUNCH6 frame 0-4 (0: the text alone) */
 static int    g_drop_dos;                  /* the DOS edition: the overlay where the DOS capture has it */
-static Uint32 g_drop_t0;
+static Uint64 g_drop_t0;
 static float  g_drop_level = 1.0f;         /* the drop screen's brightness (its fade-out) */
 static int drop_shp(const char *disc, const char *name, shp_frame *fr, uint8_t pal[256][3])
 {
@@ -2765,8 +2747,8 @@ static void drop_screen_build(prj_archive *ma, const char *mission)
     if (cd && cd[0]) snprintf(disc, sizeof disc, "%s", cd);
     else {   /* the game folder's cd/ beside the models archive */
         portcfg pc;
-        char *bp = SDL_GetBasePath();
-        portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+        const char *bp = SDL_GetBasePath();
+        portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL);
         if (pc.cd[0]) snprintf(disc, sizeof disc, "%s", pc.cd); else return;
     }
     snprintf(nm, sizeof nm, "%s6", sups);
@@ -2809,11 +2791,9 @@ static void drop_screen_build(prj_archive *ma, const char *mission)
                             }
                         shp_frame_free(&sf);
                     }
-                    glGenTextures(1, &g_drop_texs[fr]);
-                    glBindTexture(GL_TEXTURE_2D, g_drop_texs[fr]);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 640, 480, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    g_drop_texs[fr] = rb_tex_new();
+                    rb_tex_image(g_drop_texs[fr], 640, 480, img, 0);
+                    rb_tex_filter(g_drop_texs[fr], RB_LINEAR, RB_LINEAR);
                     free(img);
                 }
                 free(d);
@@ -2822,61 +2802,54 @@ static void drop_screen_build(prj_archive *ma, const char *mission)
         }
     }
     shp_frame_free(&pic);
-    glGenTextures(1, &g_drop_tex);
-    glBindTexture(GL_TEXTURE_2D, g_drop_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 640, 480, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    g_drop_tex = rb_tex_new();
+    rb_tex_image(g_drop_tex, 640, 480, rgba, 0);
+    rb_tex_filter(g_drop_tex, RB_LINEAR, RB_LINEAR);
     free(rgba);
 }
 /* draw the drop screen into the window (4:3, centred) through a framebuffer blit */
 static void drop_screen_draw(SDL_Window *win)
 {
     int w, h, vw, vh;
-    GLuint tex = g_drop_tex;
+    rb_tex tex = g_drop_tex;
     if (!g_drop_tex) return;
     {   /* the AIL timer (330000 us, 0x10007730): the next of the five frames every 330 ms */
         int fr = (int)((SDL_GetTicks() / 330) % 5);
         if (g_drop_texs[fr]) tex = g_drop_texs[fr];
     }
-    SDL_GL_GetDrawableSize(win, &w, &h);
+    SDL_GetWindowSizeInPixels(win, &w, &h);
     vh = h; vw = h * 4 / 3; if (vw > w) { vw = w; vh = w * 3 / 4; }
     {   /* a textured quad (a framebuffer blit into a multisampled window - anti-aliasing on - is not allowed and
-         * left the screen black) */
-        static GLuint prog, vao, vbo;
-        float x0, y0, x1, y1, q[16];
-        if (!prog) {
-            static const char *VS2 = "#version 330 core\nlayout(location=0) in vec2 p; layout(location=1) in vec2 t; out vec2 uv;\n"
-                                     "void main() { uv = t; gl_Position = vec4(p, 0.0, 1.0); }\n";
-            static const char *FS2 = "#version 330 core\nin vec2 uv; uniform sampler2D tex; uniform float k; out vec4 o;\n"
-                                     "void main() { o = vec4(texture(tex, uv).rgb * k, 1.0); }\n";
-            GLuint vs = glCreateShader(GL_VERTEX_SHADER), fs = glCreateShader(GL_FRAGMENT_SHADER);
-            glShaderSource(vs, 1, &VS2, NULL); glCompileShader(vs);
-            glShaderSource(fs, 1, &FS2, NULL); glCompileShader(fs);
-            prog = glCreateProgram(); glAttachShader(prog, vs); glAttachShader(prog, fs); glLinkProgram(prog);
-            glDeleteShader(vs); glDeleteShader(fs);
-            glGenVertexArrays(1, &vao); glGenBuffers(1, &vbo);
-            glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER, sizeof q, NULL, GL_DYNAMIC_DRAW);
-            glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
-            glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
-        }
+         * left the screen black): the HUD's program, the picture x k */
+        static const float black[4] = {0, 0, 0, 1};
+        float x0, y0, x1, y1;
+        rb_hud_draw u;
+        size_t off;
+        float *q;
         x0 = -(float)vw / (float)w; x1 = -x0; y0 = -(float)vh / (float)h; y1 = -y0;
-        q[0] = x0; q[1] = y0; q[2] = 0; q[3] = 1;   q[4] = x1; q[5] = y0; q[6] = 1; q[7] = 1;
-        q[8] = x0; q[9] = y1; q[10] = 0; q[11] = 0; q[12] = x1; q[13] = y1; q[14] = 1; q[15] = 0;
-        glViewport(0, 0, w, h);
-        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-        glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
-        glUseProgram(prog);
-        glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof q, q);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex);
-        glUniform1i(glGetUniformLocation(prog, "tex"), 0);
-        glUniform1f(glGetUniformLocation(prog, "k"), g_drop_level);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        glBindVertexArray(0); glUseProgram(0);
+        q = rb_stream(24 * sizeof *q, &off);
+        {   /* (the strip's two triangles, as a list) */
+            const float qv[4][4] = {{x0, y0, 0, 1}, {x1, y0, 1, 1}, {x0, y1, 0, 0}, {x1, y1, 1, 0}};
+            static const int TRI[6] = {0, 1, 2, 2, 1, 3};
+            int k;
+            for (k = 0; k < 6; k++) memcpy(q + k * 4, qv[TRI[k]], sizeof qv[0]);
+        }
+        rb_frame(w, h);
+        rb_target(0);
+        rb_viewport(0, 0, w, h);
+        rb_scissor(0, 0, 0, 0, 0);
+        rb_clear(black, 1, 1);
+        rb_depth_test(0); rb_blend(RB_BLEND_OFF);
+        memset(&u, 0, sizeof u);
+        u.u_tint[0] = u.u_tint[1] = u.u_tint[2] = g_drop_level; u.u_tint[3] = 1.0f;
+        u.u_textured = 1;
+        rb_program(RB_PROG_HUD);
+        rb_texture(0, tex);
+        rb_vertex(0, RB_STREAM, off);
+        rb_uniforms(0, &u, sizeof u);
+        rb_draw(0, 6);
     }
-    SDL_GL_SwapWindow(win);
+    rb_present();
 }
 /* the target viewer's range (DOS 0x30173, 3Dfx 0x10021150): whole metres (cm / 100, truncated) "%3ldm" up to 1000, then
  * "%2.2fk" km. The 3Dfx edition: (float)m x 0.001f (0x102475d0) through the C library's %f. The DOS edition: m x 0.001
@@ -3518,8 +3491,8 @@ static void mm_load_page(int pg)
         g_mm_v[MV_GROUND] = !(g_view && g_view->flat_ground);
         if (g_mm_ned < 0) {   /* the 3D editions whose files are present (none to switch to in a DOS mission) */
             portcfg pc;
-            char a[PORTCFG_PATH], b[PORTCFG_PATH], c[PORTCFG_PATH], d[PORTCFG_PATH], e[PORTCFG_PATH], *bp = SDL_GetBasePath();
-            portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+            char a[PORTCFG_PATH], b[PORTCFG_PATH], c[PORTCFG_PATH], d[PORTCFG_PATH], e[PORTCFG_PATH]; const char *bp = SDL_GetBasePath();
+            portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL);
             g_mm_ned = 0;
             if (g_tex_kind != 3)
                 for (k = 0; k < PORTCFG_ED_COUNT; k++)
@@ -3529,8 +3502,8 @@ static void mm_load_page(int pg)
         for (k = 0; k < g_mm_ned; k++) if (g_mm_eds[k] == g_edition) g_mm_v[MV_VIDEO] = k;
         if (g_mm_tx_lock < 0) {   /* the Titanium textures: not in a DOS mission, only with the titanium/ folder */
             portcfg pc;
-            char *bp = SDL_GetBasePath();
-            portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+            const char *bp = SDL_GetBasePath();
+            portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL);
             g_mm_tx_lock = g_tex_kind == 3 || !portcfg_texset_ok(&pc, g_edition, PORTCFG_TX_TITANIUM);
         }
         g_mm_v[MV_TEXSET] = g_texset == PORTCFG_TX_TITANIUM && (!g_mm_tx_lock || g_edition == PORTCFG_ED_RENDITION);
@@ -3658,7 +3631,7 @@ static void mm_key(SDL_Keycode k, Uint16 mod)
         else mm_activate(it);
     } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) mm_activate(g_mm_sel);
     else if (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_TAB) {
-        int dir = k == SDLK_UP || (k == SDLK_TAB && (mod & KMOD_SHIFT)) ? -1 : 1, n;
+        int dir = k == SDLK_UP || (k == SDLK_TAB && (mod & SDL_KMOD_SHIFT)) ? -1 : 1, n;
         for (n = 0; n < p->n; n++) {
             g_mm_sel = (g_mm_sel + dir + p->n) % p->n;
             if (p->it[g_mm_sel].type != MI_LABEL && !mm_locked(&p->it[g_mm_sel])) break;
@@ -3781,6 +3754,19 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_fx_ta = ta; g_fx_ati = ati;
             g_ma = ma;
+            if (getenv("MW2_TEST_TIME_LIMIT")) {   /* TEST ONLY: every star's time limit (s) */
+                int tl;
+                for (tl = 0; tl < g_sim.logic.table_count; tl++) g_sim.logic.tables[tl].time_limit = (uint32_t)atoi(getenv("MW2_TEST_TIME_LIMIT"));
+            }
+            if (getenv("MW2_TEST_SNDS_DUMP")) {   /* TEST ONLY: "id:path" - the decoded SNDS record (unsigned 8-bit) */
+                int id = atoi(getenv("MW2_TEST_SNDS_DUMP"));
+                const char *pth = strchr(getenv("MW2_TEST_SNDS_DUMP"), ':');
+                unsigned char *pcm = NULL;
+                int n = sfx_decode(ma, id, &pcm);
+                FILE *df = pth && n > 0 ? fopen(pth + 1, "wb") : NULL;
+                if (df) { fwrite(pcm, 1, (size_t)n, df); fclose(df); }
+                free(pcm);
+            }
         }
         g_sim.player_unit.hold_fire_above = 0;     /* a human pilot fires as they choose */
         g_sim.player_unit.human = 1;               /* edge-triggered fire, no range check (0x100437a0) */
@@ -4125,14 +4111,14 @@ static void edition_look(glr_view *v)
      *   S3    "Filter Textures" on (default): TEX4TPP - bilinear without mips; the sky and ground with mips (M4TPP)
      *   PVR   bilinear by the driver (no filter call in the game); mips taken as nearest
      *   DOS   texel indices, point sampled (glr forces it) */
-    if (g_edition == PORTCFG_ED_3DFX || g_edition == PORTCFG_ED_PVR) { v->tex_min = GL_LINEAR_MIPMAP_NEAREST; v->tex_mag = GL_LINEAR; }
-    else if (g_edition == PORTCFG_ED_ATI) { v->tex_min = GL_NEAREST; v->tex_mag = GL_LINEAR; v->env_min = GL_NEAREST_MIPMAP_NEAREST; v->env_mag = GL_LINEAR; }
-    else if (g_edition == PORTCFG_ED_S3) { v->tex_min = GL_LINEAR; v->tex_mag = GL_LINEAR; v->env_min = GL_LINEAR_MIPMAP_NEAREST; v->env_mag = GL_LINEAR; }
+    if (g_edition == PORTCFG_ED_3DFX || g_edition == PORTCFG_ED_PVR) { v->tex_min = RB_LINEAR_MIPMAP_NEAREST; v->tex_mag = RB_LINEAR; }
+    else if (g_edition == PORTCFG_ED_ATI) { v->tex_min = RB_NEAREST; v->tex_mag = RB_LINEAR; v->env_min = RB_NEAREST_MIPMAP_NEAREST; v->env_mag = RB_LINEAR; }
+    else if (g_edition == PORTCFG_ED_S3) { v->tex_min = RB_LINEAR; v->tex_mag = RB_LINEAR; v->env_min = RB_LINEAR_MIPMAP_NEAREST; v->env_mag = RB_LINEAR; }
     else if (g_edition == PORTCFG_ED_MGA) {
         /* Matrox Mystique (MW2.DLL, Msi95): no filtering at all ("Filter Textures" is a dead option, 0x1005fca0 = ret);
          * the ground alone has mips - 2x2 box levels picked per triangle by view depth (2500 / 5000 / 15000 cm, from
          * MYSTIQUE.PAR: thresholds x MIPmaxZ), the sky one level */
-        v->tex_min = GL_NEAREST; v->tex_mag = GL_NEAREST; v->env_min = GL_NEAREST_MIPMAP_NEAREST; v->env_mag = GL_NEAREST; v->mga_mip = 1;
+        v->tex_min = RB_NEAREST; v->tex_mag = RB_NEAREST; v->env_min = RB_NEAREST_MIPMAP_NEAREST; v->env_mag = RB_NEAREST; v->mga_mip = 1;
     }
     /* (the Titanium edition's own filtering - dx5draw 0x100034a0 D3DFILTER_LINEAR, no mips 0x100056ae - belongs to its
      * renderer plugins: with TEXTURES TITANIUM the chosen renderer's filtering applies.) RENDITION is one of those plugins,
@@ -4144,7 +4130,7 @@ static void edition_look(glr_view *v)
      * fog byte (the vertex's specular alpha, +0x1b) sent with each vertex (VL_SetF / the F of the 0x13001b command,
      * 0x100056d8..0x10005755) and interpolated across the polygon (screen-linear, INFERRED from the Verite's iterated F) */
     if (g_edition == PORTCFG_ED_RENDITION) {
-        v->tex_min = v->tex_mag = v->env_min = v->env_mag = GL_LINEAR;
+        v->tex_min = v->tex_mag = v->env_min = v->env_mag = RB_LINEAR;
         printf("rendition: bilinear without mips, the Titanium fog per vertex, particles unkeyed\n");
     }
     v->ti_fog_vtx = g_edition == PORTCFG_ED_RENDITION;
@@ -4163,11 +4149,12 @@ static void edition_look(glr_view *v)
  * beside the mission's archives, its textures taken by name (common3d.h c3d_ti). Returns 0 if it is open. */
 static int titanium_open(int on)
 {
-    char prj[PORTCFG_PATH], err[256], *bp;
+    char prj[PORTCFG_PATH], err[256];
+    const char *bp;   /* SDL3: owned by SDL, not freed */
     portcfg pc;
     if (!on) { if (c3d_ti) prj_close(c3d_ti); c3d_ti = NULL; return 0; }
     if (c3d_ti) return 0;
-    bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+    bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL);
     if (portcfg_titanium(&pc, prj, NULL) != 0) { fprintf(stderr, "titanium: no Titanium archive (the game folder's titanium/)\n"); return -1; }
     if (!(c3d_ti = prj_open(prj, err, sizeof err))) { fprintf(stderr, "titanium: %s\n", err); return -1; }
     {   /* the folder, for particle.PID beside MW2.PRJ */
@@ -4194,13 +4181,14 @@ static void fx_flush(void)
 static int switch_look(glr *r, glr_view *v, prj_archive *ma, prj_archive **ta, int *ati, const char *mission, int ed, int ts)
 {
     static char mo[PORTCFG_PATH], tx[PORTCFG_PATH], kind[PORTCFG_PATH], sky[PORTCFG_PATH], fog[PORTCFG_PATH];
-    char err[256], *bp;
+    char err[256];
+    const char *bp;
     portcfg pc, raw;
     prj_archive *nt;
     int k;
     if (ed == PORTCFG_ED_RENDITION) ts = PORTCFG_TX_TITANIUM;   /* (the Titanium plugin: its textures only) */
     if (ed == PORTCFG_ED_DOS || g_tex_kind == 3 || (ed == g_edition && ts == g_texset)) return -1;
-    bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL); SDL_free(bp);
+    bp = SDL_GetBasePath(); portcfg_load(NULL, &pc); portcfg_resolve(&pc, bp, NULL);
     if (portcfg_look(&pc, ed, ts, mo, tx, kind, sky, fog) != 0) return -1;
     if (titanium_open(ts == PORTCFG_TX_TITANIUM) != 0) return -1;   /* (the Titanium textures: their archive beside) */
     if (!(nt = prj_open(tx, err, sizeof err))) { fprintf(stderr, "video mode: %s\n", err); titanium_open(g_texset == PORTCFG_TX_TITANIUM); return -1; }
@@ -4621,16 +4609,16 @@ static SDL_Keycode test_keycode(const char *kn, int *mods)
         {"esc", SDLK_ESCAPE}, {"up", SDLK_UP}, {"down", SDLK_DOWN}, {"left", SDLK_LEFT}, {"right", SDLK_RIGHT},
         {"space", SDLK_SPACE}, {"enter", SDLK_RETURN}, {"tab", SDLK_TAB}, {"comma", SDLK_COMMA}, {"period", SDLK_PERIOD},
         {"minus", SDLK_MINUS}, {"equal", SDLK_EQUALS}, {"backslash", SDLK_BACKSLASH}, {"semicolon", SDLK_SEMICOLON},
-        {"quote", SDLK_QUOTE}, {"backquote", SDLK_BACKQUOTE}, {"backspace", SDLK_BACKSPACE}, {"kpenter", SDLK_KP_ENTER},
+        {"quote", SDLK_APOSTROPHE}, {"backquote", SDLK_GRAVE}, {"backspace", SDLK_BACKSPACE}, {"kpenter", SDLK_KP_ENTER},
         {"home", SDLK_HOME}, {"end", SDLK_END}, {"pageup", SDLK_PAGEUP}, {"pagedown", SDLK_PAGEDOWN}, {"delete", SDLK_DELETE},
         {"insert", SDLK_INSERT}, {"numlock", SDLK_NUMLOCKCLEAR}, {"kpdivide", SDLK_KP_DIVIDE}, {"kpmultiply", SDLK_KP_MULTIPLY},
         {"kp5", SDLK_KP_5}, {"kp9", SDLK_KP_9}, {"kp7", SDLK_KP_7}, {"slash", SDLK_SLASH}, {"pause", SDLK_PAUSE}};
     int i;
     *mods = 0;
     for (;;) {
-        if (strncmp(kn, "ctrl+", 5) == 0) { *mods |= KMOD_LCTRL; kn += 5; }
-        else if (strncmp(kn, "shift+", 6) == 0) { *mods |= KMOD_LSHIFT; kn += 6; }
-        else if (strncmp(kn, "alt+", 4) == 0) { *mods |= KMOD_LALT; kn += 4; }
+        if (strncmp(kn, "ctrl+", 5) == 0) { *mods |= SDL_KMOD_LCTRL; kn += 5; }
+        else if (strncmp(kn, "shift+", 6) == 0) { *mods |= SDL_KMOD_LSHIFT; kn += 6; }
+        else if (strncmp(kn, "alt+", 4) == 0) { *mods |= SDL_KMOD_LALT; kn += 4; }
         else break;
     }
     for (i = 0; i < (int)(sizeof T / sizeof T[0]); i++) if (strcmp(kn, T[i].n) == 0) return T[i].k;
@@ -4638,14 +4626,14 @@ static SDL_Keycode test_keycode(const char *kn, int *mods)
     return (SDL_Keycode)(unsigned char)kn[0];
 }
 /* SDL's keyboard state plus the MW2_HOLD keys held now */
-static const Uint8 *test_ks(void)
+static const bool *test_ks(void)
 {
-    static Uint8 ks[SDL_NUM_SCANCODES];
+    static bool ks[SDL_SCANCODE_COUNT];
     const char *q = getenv("MW2_HOLD");
     int n = 0;
-    const Uint8 *real = SDL_GetKeyboardState(&n);
+    const bool *real = SDL_GetKeyboardState(&n);
     if (!q || !g_auto_on) return real;
-    memcpy(ks, real, (size_t)(n < SDL_NUM_SCANCODES ? n : SDL_NUM_SCANCODES));
+    memcpy(ks, real, (size_t)(n < SDL_SCANCODE_COUNT ? n : SDL_SCANCODE_COUNT) * sizeof *ks);
     while (*q) {
         float t0 = 0, t1 = 0;
         char kn[32] = "";
@@ -4653,10 +4641,10 @@ static const Uint8 *test_ks(void)
         SDL_Keycode k;
         if (sscanf(q, "%f-%f:%31[^,]", &t0, &t1, kn) == 3 && g_auto_elapsed >= t0 && g_auto_elapsed < t1) {
             k = test_keycode(kn, &mods);
-            ks[SDL_GetScancodeFromKey(k)] = 1;
-            if (mods & KMOD_LCTRL) ks[SDL_SCANCODE_LCTRL] = 1;
-            if (mods & KMOD_LSHIFT) ks[SDL_SCANCODE_LSHIFT] = 1;
-            if (mods & KMOD_LALT) ks[SDL_SCANCODE_LALT] = 1;
+            ks[SDL_GetScancodeFromKey(k, NULL)] = 1;
+            if (mods & SDL_KMOD_LCTRL) ks[SDL_SCANCODE_LCTRL] = 1;
+            if (mods & SDL_KMOD_LSHIFT) ks[SDL_SCANCODE_LSHIFT] = 1;
+            if (mods & SDL_KMOD_LALT) ks[SDL_SCANCODE_LALT] = 1;
         }
         q = strchr(q, ',');
         if (!q) break;
@@ -4962,8 +4950,7 @@ static void test_frame(int w, int h)
                 d_shot |= 1 << idx;
                 if (px && of) {
                     int y;
-                    glPixelStorei(GL_PACK_ALIGNMENT, 1);   /* tight rows: a width not a multiple of 4 overran px */
-                    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+                    rb_read_rgb(0, 0, w, h, px);   /* (GL's order: the bottom row first) */
                     fprintf(of, "P6\n%d %d\n255\n", w, h);
                     for (y = h - 1; y >= 0; y--) fwrite(px + (size_t)y * (size_t)w * 3, 1, (size_t)w * 3, of);
                 }
@@ -5016,7 +5003,7 @@ static void syskeys_update(int want)
     if (!registered) { atexit(syskeys_restore); registered = 1; }   /* any exit gives them back */
     syskeys_apply(want);
     g_syskeys_off = want;
-    if (getenv("MW2_STATE_DUMP")) printf("SYSKEYS now=%d %s text=%d\n", (int)g_sim.now, want ? "off" : "on", (int)SDL_IsTextInputActive());   /* TEST hook */
+    if (getenv("MW2_STATE_DUMP")) printf("SYSKEYS now=%d %s text=%d\n", (int)g_sim.now, want ? "off" : "on", (int)(g_text_win && SDL_TextInputActive(g_text_win)));   /* TEST hook */
 }
 
 /* the DOS look's radar (MW2.EXE 0x11950 -> 0x12c20): a view looking straight down from above the player's eye object (x,
@@ -5178,12 +5165,27 @@ static int dos_hud_mark(const glr *r, int w, int h, const float wp[3], int isnav
     return 1;
 }
 
+/* SDL3's SDL_CreateWindow has no position: the window centred on the primary display, as SDL2's SDL_WINDOWPOS_CENTERED */
+static SDL_Window *sim_window(int w, int h, SDL_WindowFlags flags)
+{
+    SDL_Window *win;
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "MechWarrior 2");
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64)flags);
+    win = SDL_CreateWindowWithProperties(p);
+    SDL_DestroyProperties(p);
+    return win;
+}
+
 int main(int argc, char **argv)
 {
     char err[256], title[256];
     prj_archive *ma, *ta;
     SDL_Window *win;
-    SDL_GLContext ctx;
     glr *r;
     glr_view v;
     int ati, mi = 0, ni = 0, camo = 0, clan = 0, running = 1, dragging = 0, msaa = 1, w, h, exit_code = 0;
@@ -5197,27 +5199,22 @@ int main(int argc, char **argv)
     g_tex_kind = ati;
     mech3d_dos_hips = ati == 3;   /* the DOS edition's unit placement */
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) fprintf(stderr, "audio unavailable: %s\n", SDL_GetError());
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-#if defined(__APPLE__)
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
-#endif
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    {   /* MW2PORT.CFG (install dir): resolution desktop (native fullscreen, default) / window / WxH; aa samples.
+    if (!SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) fprintf(stderr, "audio unavailable: %s\n", SDL_GetError());
+    {   /* MW2PORT.CFG (install dir): resolution desktop (native fullscreen, default) / window / WxH; aa samples; gpu.
          * Tests (an explicit MW2_SIZE, or the offscreen driver) stay windowed at that size. */
         portcfg pc;
-        int ww = 1280, wh = 720, flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI, aa, tries;
-        const char *drv = getenv("SDL_VIDEODRIVER");
+        int ww = 1280, wh = 720, aa, gpu;
+        char gerr[512];
+        SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+        const char *drv = SDL_GetCurrentVideoDriver();
         int test = getenv("MW2_SIZE") || (drv && strcmp(drv, "offscreen") == 0) || getenv("MW2_AUTOPILOT");
         portcfg_load(getenv("MW2_INSTALL_DIR"), &pc);
         if (getenv("MW2_SIZE")) sscanf(getenv("MW2_SIZE"), "%dx%d", &ww, &wh);   /* e.g. 1024x768 to compare with DOS */
         if (!test) {
-            SDL_DisplayMode dm;
-            if (pc.mode == 0 && SDL_GetDesktopDisplayMode(0, &dm) == 0) { ww = dm.w; wh = dm.h; flags |= SDL_WINDOW_FULLSCREEN_DESKTOP; }
-            else if (pc.mode == 2) { ww = pc.w; wh = pc.h; flags |= SDL_WINDOW_FULLSCREEN; }
+            const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
+            if (pc.mode == 0 && dm) { ww = dm->w; wh = dm->h; flags |= SDL_WINDOW_FULLSCREEN; }   /* SDL3: no fullscreen mode set = the desktop's */
+            else if (pc.mode == 2) { ww = pc.w; wh = pc.h; }   /* exclusive: the mode is set on the window below */
         }
         g_win_w = ww; g_win_h = wh;
         aa = pc.aa;
@@ -5225,24 +5222,37 @@ int main(int argc, char **argv)
         g_cockpit_frame = getenv("MW2_COCKPIT_FRAME") ? atoi(getenv("MW2_COCKPIT_FRAME")) : 0;   /* 0: the engine's (repr 4), -1: none, 1: the old attempt */
         if (getenv("MW2_RENDER")) { g_render_w = g_render_h = 0; sscanf(getenv("MW2_RENDER"), "%dx%d", &g_render_w, &g_render_h); }   /* tests */
         if (g_render_w) aa = 0;   /* the original resolutions: no multisampling (the window is only blitted to) */
-        win = NULL;
-        for (tries = 0; tries < 5 && !win; tries++) {   /* the chosen samples, stepping down if the GPU refuses */
-            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, aa > 0);
-            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, aa);
-            win = SDL_CreateWindow("MechWarrior 2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, g_win_w, g_win_h, (Uint32)flags);
-            if (win && !test && pc.mode == 2) {   /* exclusive fullscreen at the chosen mode */
-                SDL_DisplayMode want = {0}, got;
-                want.w = pc.w; want.h = pc.h;
-                if (SDL_GetClosestDisplayMode(0, &want, &got)) SDL_SetWindowDisplayMode(win, &got);
-            }
-            if (!win) aa = aa > 2 ? aa / 2 : 0;
+        gpu = pc.gpu == PORTCFG_GPU_D3D12 ? RB_GPU_D3D12 : pc.gpu == PORTCFG_GPU_VULKAN ? RB_GPU_VULKAN : RB_GPU_AUTO;
+        win = sim_window(g_win_w, g_win_h, flags);
+        if (win && !test && pc.mode == 2) {   /* exclusive fullscreen at the chosen mode (the closest the display has) */
+            SDL_DisplayMode got;
+            if (SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(win), pc.w, pc.h, 0.0f, true, &got))
+                SDL_SetWindowFullscreenMode(win, &got);
+            SDL_SetWindowFullscreen(win, true);
+            SDL_SyncWindow(win);
         }
-        if (!win) {   /* last resort: windowed, no multisampling */
-            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
-            SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
-            win = SDL_CreateWindow("MechWarrior 2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+        if (!win) win = sim_window(1280, 720, SDL_WINDOW_RESIZABLE);   /* last resort: windowed */
+        /* the GPU device (SDL_GPU: Direct3D 12 / Vulkan on Windows, Vulkan on Linux, Metal on macOS) with the chosen
+         * samples - the window's picture multisampled, stepping down to what the GPU has */
+        if (!win || rb_init(win, gpu, aa, gerr, sizeof gerr) != 0) {
+            /* said on stderr and in a box (the Windows program and the macOS app have no console; tests: no box) */
+            char m[1024];
+            snprintf(m, sizeof m,
+#if defined(_WIN32)
+                     "Could not start Direct3D 12 or Vulkan:\n%s\n\nUpdate your graphics driver and try again.",
+#elif defined(__APPLE__)
+                     "Could not start Metal:\n%s\n\nThis Mac's graphics can't run the game (it needs a Metal GPU and macOS 10.14 or newer).",
+#else
+                     "Could not start Vulkan:\n%s\n\nInstall a Vulkan driver (Mesa: mesa-vulkan-drivers; NVIDIA: the vendor's driver) and the "
+                     "Vulkan loader (libvulkan1 / vulkan-loader); vulkaninfo --summary lists the drivers found.",
+#endif
+                     win ? gerr : SDL_GetError());
+            fprintf(stderr, "MechWarrior 2: %s\n", m);
+            if (!test) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, win);
+            return 1;
         }
         if (!aa) msaa = 0;
+        g_aa = aa;
         g_syskeys_allow = pc.system_shortcuts;
         g_hud_wide = !pc.hud_original;
         if (getenv("MW2_HUD_LAYOUT")) g_hud_wide = strcmp(getenv("MW2_HUD_LAYOUT"), "original") != 0;   /* tests */
@@ -5250,31 +5260,18 @@ int main(int argc, char **argv)
         if (getenv("MW2_DOS_SKY")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SKY"), "smooth") == 0;   /* tests */
         if (getenv("MW2_DOS_SHADING")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SHADING"), "smooth") == 0;   /* tests */
     }
-    if (!win || !(ctx = SDL_GL_CreateContext(win))) {
-        fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError());
-#ifdef _WIN32   /* a GUI program on Windows has no console: say it in a box */
-        { char m[512]; snprintf(m, sizeof m, "Could not start OpenGL 3.3:\n%s\n\nUpdate your graphics driver and try again.", SDL_GetError());
-          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", m, win); }
-#endif
-        return 1;
-    }
-#ifdef _WIN32
-    if (mw2gl_load() != 0) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", "This graphics driver does not provide OpenGL 3.3.\nUpdate your graphics driver and try again.", win);
-        return 1;
-    }
-#endif
-    SDL_GL_SetSwapInterval(1);
-    /* port: no text input in the simulation - SDL2 starts it with the video (SDL_VideoInit) and sdl2-compat on every new
-     * window (FinishWindowCreation), and on macOS active text input passes the keys through the input method
-     * (Cocoa_HandleKeyEvent -> interpretKeyEvents): holding z (zoom) opened the press-and-hold accent picker and the
-     * arrow keys then moved in it. Nothing here reads SDL_TEXTINPUT (the keys come as SDL_KEYDOWN) */
-    SDL_StopTextInput();
-    if (getenv("MW2_STATE_DUMP")) printf("TEXTINPUT active=%d\n", (int)SDL_IsTextInputActive());   /* TEST hook */
-    { int dw0, dh0; SDL_GL_GetDrawableSize(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
+    /* port: no text input in the simulation - SDL2 started it with the video (SDL_VideoInit), and on macOS active text
+     * input passes the keys through the input method (Cocoa_HandleKeyEvent -> interpretKeyEvents): holding z (zoom)
+     * opened the press-and-hold accent picker and the arrow keys then moved in it. SDL3 starts it per window only when
+     * asked (SDL_StartTextInput); stopped here all the same. Nothing here reads SDL_EVENT_TEXT_INPUT (the keys come as
+     * SDL_EVENT_KEY_DOWN) */
+    g_text_win = win;
+    SDL_StopTextInput(win);
+    if (getenv("MW2_STATE_DUMP")) printf("TEXTINPUT active=%d\n", (int)SDL_TextInputActive(win));   /* TEST hook */
+    { int dw0, dh0; SDL_GetWindowSizeInPixels(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
     glr_default_view(&v);
     g_view = &v;
-    if (rec[0] == '@') { g_world = 1; rec = MECHS[0]; SDL_SetRelativeMouseMode(SDL_TRUE); }
+    if (rec[0] == '@') { g_world = 1; rec = MECHS[0]; SDL_SetWindowRelativeMouseMode(win, true); }
     if (!g_world && getenv("MW2_TEST_VIEWER")) {   /* TEST ONLY: the single-mech viewer's orbit "yaw,pitch" (with MW2_AUTOPILOT's
                                                     * seconds and file: a picture of it) */
         float vy = 0, vp = 0, vh = 0;
@@ -5318,8 +5315,12 @@ int main(int argc, char **argv)
                 for (k = 0; k < g_im.rules[i].ncond; k++)
                     if (strncmp(g_im.rules[i].name, "menu_", 5) == 0 && g_im.rules[i].c[k].device == 2) g_im_menu_mouse = 1;
         }
-        if (g_im_ok && im_uses(&g_im, 1) && SDL_InitSubSystem(SDL_INIT_JOYSTICK) == 0 && SDL_NumJoysticks() > 0)
-            g_im_dev.joy = SDL_JoystickOpen(0);   /* the configured stick: the first one SDL finds */
+        if (g_im_ok && im_uses(&g_im, 1) && SDL_InitSubSystem(SDL_INIT_JOYSTICK)) {   /* the configured stick: the first one SDL finds */
+            int nj = 0;
+            SDL_JoystickID *ids = SDL_GetJoysticks(&nj);   /* SDL3: opened by instance id, not by index */
+            if (ids && nj > 0) g_im_dev.joy = SDL_OpenJoystick(ids[0]);
+            SDL_free(ids);
+        }
         printf("controls: %d key commands, %d control rules (%s)\n", g_im.nbinds, g_im.nrules, dir);
     }
     if (getenv("MW2_INSTALL_DIR")) {   /* Combat Variables detail (MW2SND.CFG int32 +0x14 object textures, +0x18 terrain textures,
@@ -5408,18 +5409,19 @@ int main(int argc, char **argv)
                              * before the first mission frame (DOSBox YELLSCN1 / TNJ1SCN1: the music from the start of the
                              * fade). DOS MW2.EXE 0x15d49 -> 0x3eb10(0) -> VFX 0x58e0d(window 0xa46bc, palette, 0x3c): a DDA
                              * fade, every colour linear to its target over 0x3c steps - 60 / 70 Hz retraces = 0.857 s */
-            Uint32 el = SDL_GetTicks() - g_drop_t0;
+            Uint64 el = SDL_GetTicks() - g_drop_t0;
             static int music_on;
             if (el >= 2000 && !music_on) { music_on = 1; if (g_world && g_sim_ok) music_start(g_sim.music_track); }
             if (el < 2000 + 860) {
                 g_drop_level = el <= 2000 ? 1.0f : 1.0f - (float)(el - 2000) / 860.0f;
-                while (SDL_PollEvent(&e)) if (e.type == SDL_QUIT) running = 0;
+                while (SDL_PollEvent(&e)) if (e.type == SDL_EVENT_QUIT) running = 0;
                 drop_screen_draw(win);
                 SDL_Delay(15);
                 continue;
             }
-            glDeleteTextures(1, &g_drop_tex); g_drop_tex = 0;
-            glDeleteTextures(5, g_drop_texs); memset(g_drop_texs, 0, sizeof g_drop_texs);
+            rb_tex_delete(g_drop_tex); g_drop_tex = 0;
+            { int k; for (k = 0; k < 5; k++) rb_tex_delete(g_drop_texs[k]); }
+            memset(g_drop_texs, 0, sizeof g_drop_texs);
         }
         sfx_log_time = g_sim_ok && g_world ? g_sim.now / 1000.0 : -1;   /* TEST ONLY (MW2_SFX_LOG) */
         vq_drain();   /* the voice queue (0x100313d0) */
@@ -5455,7 +5457,7 @@ int main(int argc, char **argv)
                 if (idx == msent && g_auto_elapsed >= at) {
                     SDL_Event me;
                     memset(&me, 0, sizeof me);
-                    me.type = SDL_MOUSEMOTION; me.motion.xrel = dx; me.motion.yrel = dy;
+                    me.type = SDL_EVENT_MOUSE_MOTION; me.motion.xrel = dx; me.motion.yrel = dy;
                     SDL_PushEvent(&me);
                     msent++;
                 }
@@ -5479,13 +5481,13 @@ int main(int argc, char **argv)
                 if (idx == sent && g_auto_elapsed >= at) {
                     SDL_Event ke;
                     memset(&ke, 0, sizeof ke);
-                    ke.type = SDL_KEYDOWN; ke.key.state = SDL_PRESSED;
+                    ke.type = SDL_EVENT_KEY_DOWN; ke.key.down = true;
                     {   /* TEST hook (tests/sequences): named keys incl. f1-f12, ctrl+ / shift+ / alt+ */
                         int mods = 0;
-                        ke.key.keysym.sym = test_keycode(kn, &mods);
-                        ke.key.keysym.mod = (Uint16)mods;
+                        ke.key.key = test_keycode(kn, &mods);
+                        ke.key.mod = (Uint16)mods;
                     }
-                    ke.key.keysym.scancode = SDL_GetScancodeFromKey(ke.key.keysym.sym);
+                    ke.key.scancode = SDL_GetScancodeFromKey(ke.key.key, NULL);
                     SDL_PushEvent(&ke);
                     sent++;
                 }
@@ -5497,39 +5499,45 @@ int main(int argc, char **argv)
         }
         /* the system's shortcuts off while the mission is played in front (see syskeys_update) */
         syskeys_update(g_world && !g_mm_depth && !g_paused && (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)
-                      && !(SDL_GetModState() & KMOD_GUI));   /* Cmd held: the system gets its shortcuts back (Cmd+Tab, Cmd+Shift+4 ...) */
+                      && !(SDL_GetModState() & SDL_KMOD_GUI));   /* Cmd held: the system gets its shortcuts back (Cmd+Tab, Cmd+Shift+4 ...) */
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0;
-            else if ((g_mm_depth || g_paused) && (e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEWHEEL)
-                     && !(e.type == SDL_MOUSEMOTION && g_mm_depth && !g_paused && g_im_menu_mouse)) continue;   /* controls off (0x1003a3c0); the mouse driver still moves for menu controls on it */
-            else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) dragging = 1;
-            else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) dragging = 0;
-            else if (e.type == SDL_MOUSEMOTION && g_world && g_pilot && g_pl_ok) {
+            if (e.type == SDL_EVENT_QUIT) running = 0;
+            else if ((g_mm_depth || g_paused) && (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL)
+                     && !(e.type == SDL_EVENT_MOUSE_MOTION && g_mm_depth && !g_paused && g_im_menu_mouse)) continue;   /* controls off (0x1003a3c0); the mouse driver still moves for menu controls on it */
+            else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) dragging = 1;
+            else if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) dragging = 0;
+            else if (e.type == SDL_EVENT_MOUSE_MOTION && g_world && g_pilot && g_pl_ok) {
                 /* the mouse driver's box (MOUSE.DLL, see im_devstate): a mickey a unit, stopped at the edges; read by the
                  * controls INPUT.MAP gives it (the torso sinks below) - with no mouse in INPUT.MAP the port reads it as
                  * MOUSE.MAP does (torso_pan + Left/Right, torso_tilt - Up/Down) */
-                int x = g_im_dev.mouse_x + e.motion.xrel, y = g_im_dev.mouse_y + e.motion.yrel;
+                /* SDL3 reports relative motion in float units (fractions on macOS / high-resolution mice); the whole
+                 * units go to the box and the remainder carries to the next event, as SDL2's integer xrel did */
+                static float fx, fy;
+                int x, y, ix, iy;
+                fx += e.motion.xrel; fy += e.motion.yrel;
+                ix = (int)fx; iy = (int)fy; fx -= (float)ix; fy -= (float)iy;
+                x = g_im_dev.mouse_x + ix; y = g_im_dev.mouse_y + iy;
                 g_im_dev.mouse_x = x < -512 ? -512 : x > 511 ? 511 : x;
                 g_im_dev.mouse_y = y < -512 ? -512 : y > 511 ? 511 : y;
-            } else if (e.type == SDL_MOUSEMOTION && dragging && v.free_cam) {
+            } else if (e.type == SDL_EVENT_MOUSE_MOTION && dragging && v.free_cam) {
                 v.look_yaw += (float)e.motion.xrel * 0.25f;
                 v.look_pitch -= (float)e.motion.yrel * 0.25f;
                 if (v.look_pitch > 89) v.look_pitch = 89;
                 if (v.look_pitch < -89) v.look_pitch = -89;
-            } else if (e.type == SDL_MOUSEMOTION && dragging) {
+            } else if (e.type == SDL_EVENT_MOUSE_MOTION && dragging) {
                 v.yaw -= (float)e.motion.xrel * 0.4f;
                 v.pitch += (float)e.motion.yrel * 0.3f;
                 if (v.pitch > 85) v.pitch = 85;
                 if (v.pitch < -85) v.pitch = -85;
-            } else if (e.type == SDL_MOUSEWHEEL) {
+            } else if (e.type == SDL_EVENT_MOUSE_WHEEL) {
                 if (v.distance <= 0) v.distance = 3.0f;
                 v.distance *= e.wheel.y > 0 ? 0.9f : 1.1f;
-            } else if (e.type == SDL_KEYDOWN) {
-                SDL_Keycode k = e.key.keysym.sym;
+            } else if (e.type == SDL_EVENT_KEY_DOWN) {
+                SDL_Keycode k = e.key.key;
 #ifdef __APPLE__
-                if (e.key.keysym.mod & KMOD_GUI) continue;   /* Cmd+key belongs to macOS (Cmd+Tab, screenshots), never the game */
+                if (e.key.mod & SDL_KMOD_GUI) continue;   /* Cmd+key belongs to macOS (Cmd+Tab, screenshots), never the game */
 #endif
-                if (g_mm_depth) { mm_key(k, e.key.keysym.mod); continue; }   /* the MAIN MENU has the keys while open */
+                if (g_mm_depth) { mm_key(k, e.key.mod); continue; }   /* the MAIN MENU has the keys while open */
                 if (g_paused) {   /* 0x10009740: paused, the next key (DAT_10159e64, a character) ends the pause; nothing else */
                     if (k != SDLK_LSHIFT && k != SDLK_RSHIFT && k != SDLK_LCTRL && k != SDLK_RCTRL && k != SDLK_LALT && k != SDLK_RALT &&
                         k != SDLK_LGUI && k != SDLK_RGUI && k != SDLK_CAPSLOCK) {
@@ -5792,7 +5800,7 @@ int main(int argc, char **argv)
                         g_eye_pan = g_eye_tilt = 0; g_zoom = 1.0f;
                     }
                 }
-                else if (g_world && dbg_keys() && k == SDLK_g && !(e.key.keysym.mod & (KMOD_CTRL | KMOD_ALT))) { g_pilot = !g_pilot; SDL_SetRelativeMouseMode(g_pilot ? SDL_TRUE : SDL_FALSE); }   /* port: free camera (MW2_DEBUG_KEYS=1 only) */
+                else if (g_world && dbg_keys() && k == SDLK_G && !(e.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT))) { g_pilot = !g_pilot; SDL_SetWindowRelativeMouseMode(win, g_pilot ? true : false); }   /* port: free camera (MW2_DEBUG_KEYS=1 only) */
                 else if (g_world && (A("THROTTLE_STOP") || A("THROTTLE_2") || A("THROTTLE_3") || A("THROTTLE_4") || A("THROTTLE_5") ||
                                      A("THROTTLE_6") || A("THROTTLE_7") || A("THROTTLE_8") || A("THROTTLE_9") || A("THROTTLE_FULL"))) {
                     static const char *const TH[10] = {"THROTTLE_STOP", "THROTTLE_2", "THROTTLE_3", "THROTTLE_4", "THROTTLE_5",
@@ -5807,17 +5815,18 @@ int main(int argc, char **argv)
                     g_reverse = !g_reverse; g_throttle = -g_throttle;
                 }
                 else if (g_world && A("OVERRIDE_SHUTDOWN") && g_sim_ok) combat_override(&g_sim.player_unit);
-                else if ((k == SDLK_f && !g_world) || (k == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
-                    Uint32 fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
-                    SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                else if ((k == SDLK_F && !g_world) || (k == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT))) {
+                    bool fs = (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0;
+                    if (!fs) SDL_SetWindowFullscreenMode(win, NULL);   /* SDL2's FULLSCREEN_DESKTOP: the desktop's mode */
+                    SDL_SetWindowFullscreen(win, !fs);
                 } else if (k == SDLK_TAB && !g_world) { mi = (mi + 1) % COUNT(MECHS); rec = MECHS[mi]; reload = 1; }   /* viewer only: in a mission Tab reloaded it (user 2026-10-21: Cmd+Tab restarted the mission) */
-                else if (k == SDLK_n && !g_world) { ni = (ni + 1) % COUNT(MISSIONS); mission = MISSIONS[ni]; reload = 1; }
-                else if (k == SDLK_c && !g_world) { camo = (camo + 1) % 8; reload = 1; }
-                else if (k == SDLK_i && !g_world) { clan = (clan + 1) % 6; reload = 1; }
-                else if (k == SDLK_b && !g_world) v.bilinear = !v.bilinear;
+                else if (k == SDLK_N && !g_world) { ni = (ni + 1) % COUNT(MISSIONS); mission = MISSIONS[ni]; reload = 1; }
+                else if (k == SDLK_C && !g_world) { camo = (camo + 1) % 8; reload = 1; }
+                else if (k == SDLK_I && !g_world) { clan = (clan + 1) % 6; reload = 1; }
+                else if (k == SDLK_B && !g_world) v.bilinear = !v.bilinear;
                 else if (k == SDLK_SPACE && !g_world) g_walk = !g_walk;
-                else if (k == SDLK_p && !g_world) g_patrol = !g_patrol;
-                else if (k == SDLK_m && !g_world) { msaa = !msaa; if (msaa) glEnable(GL_MULTISAMPLE); else glDisable(GL_MULTISAMPLE); }
+                else if (k == SDLK_P && !g_world) g_patrol = !g_patrol;
+                else if (k == SDLK_M && !g_world) { msaa = !msaa; rb_samples(msaa ? g_aa : 1); }
                 else if (k == SDLK_RIGHTBRACKET && (!g_world || dbg_keys())) v.fog_density = v.fog_density <= 0 ? 0.0001f : v.fog_density * 1.25f;
                 else if (k == SDLK_LEFTBRACKET && (!g_world || dbg_keys())) v.fog_density = v.fog_density < 0.00011f ? 0 : v.fog_density / 1.25f;
             }
@@ -5833,8 +5842,8 @@ int main(int argc, char **argv)
         }
         if (g_world && (g_actors || g_sim_ok)) {   /* (a mission with no units still has its player: PROVSCN1 launched alone) */
             /* actors: animate (walking only while P is on), move along their heading */
-            static Uint32 aprev;
-            Uint32 now = SDL_GetTicks();
+            static Uint64 aprev;
+            Uint64 now = SDL_GetTicks();
             float dt = aprev ? (float)(now - aprev) / 1000.0f : 0;
             if (g_auto_on) dt = g_auto_dt;
             else {   /* the game speed (mw2port.cfg speed=, default 0.85): the original ran slower than real time on its
@@ -5861,7 +5870,7 @@ int main(int argc, char **argv)
                 if (every > 0 && hacc >= every) { hacc = 0; dt = ms / 1000.0f; }
             }
             if (g_im_ok) {   /* the menu controls (GIDDI\<driver>.STD, or INPUT.MAP): keys for the MAIN MENU (im_menu_key) */
-                const Uint8 *mks = test_ks();   /* TEST hook: + MW2_HOLD */
+                const bool *mks = test_ks();   /* TEST hook: + MW2_HOLD */
                 SDL_Keycode mk;
                 if (g_im_menu_mouse) g_im_dev.mouse_buttons = SDL_GetMouseState(NULL, NULL);
                 mk = im_menu_key(&g_im, mks, g_mm_depth > 0, (int)((SDL_GetTicks() - g_mm_timer) * 182u / 1000u), &g_mm_prev_en, &g_mm_prev_ab);
@@ -5946,7 +5955,7 @@ int main(int argc, char **argv)
                  * cm per 1/182 s tick = walk MP x 10.8 km/h; reverse at half; leg turn rate scales
                  * with cos(min(80, speed in km/h)) deg; FEET_TO_TORSO swings the legs at 55 deg/s.
                  * The throttle / torso keys and axes: the analog sinks below; base turn 90 deg/s (0x10247428). */
-                const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+                const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                 /* start-up (engine 0x1001a180 states 0-1): until the player's mech is online (5.97-7.95 s) every tick clears
                  * the throttle and the leg turn - input is discarded, not held - and the weapons stay off */
                 int starting = g_sim_ok && g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP");
@@ -6076,28 +6085,22 @@ int main(int argc, char **argv)
                     if (getenv("MW2_SINK_TRACE")) printf("SINK t=%.3f pan=%.4f tilt=%.4f thr=%.4f twist=%.2f pitch=%.2f dtw=%.2f dpi=%.2f mouse=%d,%d\n", g_sim.now / 1000.0, (double)sp.val, (double)st.val, (double)sth.val,
                                                          (double)g_pl.twist, (double)g_pitch, (double)g_twist_dem, (double)g_pitch_dem, g_im_dev.mouse_x, g_im_dev.mouse_y);   /* tests */
                 }
-                {   /* the torso servo (engine 0x1001a180 end): sound 0x13c is TORSLOOP, a 0.29 s loop - held while the torso
-                     * turns (the twist c[3] more than 2 degrees (0x102473d4) from the demand c[2]), stopped when it stops;
-                     * restarting it every 0.29 s buzzed */
-                    static float prev_twist, still;
+                {   /* the torso servo (engine 0x1001a180 end, 0x1001ad3b..0x1001adb2; DOS MW2.EXE 0x282af..0x2830f): sound
+                     * 0x13c (316, TORSLOOP in the DOS, 3Dfx and ATi archives) is called every tick while, and only while,
+                     * the unit is the player's (+4 == 0x1024ac70 / DOS 0x95870), the view is the cockpit (DAT_1024e678 /
+                     * DOS 0x96ef4) and the twist c[3] is more than 2 degrees from the demand c[2] (0x102473d4 = 2.0, strict
+                     * both sides; DOS 0x20000 in 16.16) - the legs turning alone never play it, nor a twist that keeps up
+                     * with its demand. The port holds the 0.29 s sample looping while that gate is open and stops it
+                     * 0.12 s after it closes or at once out of the cockpit (restarting it every tick buzzed) */
+                    static float still = 1.0f;
                     static unsigned char *loop_pcm;
                     static int loop_len, playing;
-                    static float prev_heading;
-                    static int primed;
-                    float dh = g_pl.heading - prev_heading, rate;
-                    if (!primed) { prev_heading = g_pl.heading; prev_twist = g_pl.twist; dh = 0; primed = 1; }   /* the first frame: no turn (the start heading had played TORSLOOP at t = 0) */
-                    while (dh > 180.0f) dh -= 360.0f;
-                    while (dh < -180.0f) dh += 360.0f;
-                    /* the torso lagging its demand by more than 2 degrees, or twisting, or the legs turning the whole mech
-                     * (ASSUMED: the same gyro loop) */
-                    rate = dt > 0 ? (fabsf(g_pl.twist - prev_twist) + fabsf(dh)) / dt : 0;
-                    if (fabsf(g_twist_dem - g_pl.twist) > 2.0f && rate <= 8.0f) rate = 8.5f;
-                    prev_twist = g_pl.twist; prev_heading = g_pl.heading;
+                    int open = VIEW_IN_COCKPIT && fabsf(g_twist_dem - g_pl.twist) > 2.0f;
                     if (!loop_pcm && g_ma) loop_len = sfx_decode(g_ma, 0x13c, &loop_pcm);
-                    still = rate > 8.0f ? 0 : still + dt;
+                    still = open ? 0 : still + dt;
                     if (g_sfx && loop_pcm && loop_len > 0) {
-                        /* 0x1001ad6d: only in the cockpit view (DAT_1024e678), at the mech, halved (0x1001adb2): 0.4 */
-                        if (rate > 8.0f && !playing && VIEW_IN_COCKPIT) { sfx_play_pcm(g_sfx, loop_pcm, loop_len, 11025, 0.4f, 1); playing = 1; }
+                        /* 0x1001ad6d: at the mech, halved (edx = DAT_1024e678, 0x1001adb2): 0.4 */
+                        if (open && !playing) { sfx_play_pcm(g_sfx, loop_pcm, loop_len, 11025, 0.4f, 1); playing = 1; }
                         else if (playing && (still > 0.12f || !VIEW_IN_COCKPIT)) { sfx_stop_pcm(g_sfx, loop_pcm); playing = 0; }
                     }
                 }
@@ -6279,7 +6282,7 @@ int main(int argc, char **argv)
                 /* the engine's throttle -> speed chain (msim_drive_step: throttle servo T 36.2 ticks, drive servo T 90.5 ticks,
                  * velocity approach 1/45 per tick; 0x1001a180 / 0x100190d0), the throttle signed here (reverse at half) */
                 {   /* the frame's vertical move for the move test (as combat_jets below will make it) */
-                    const Uint8 *ks = test_ks();
+                    const bool *ks = test_ks();
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     if (g_sim_ok) {   /* the no-lift flag (0x100196cc..0x10019711: |+0xc| >= 1e-7 or a directional jet held) */
                         int dj = H("jumpjet_fire_left") || H("jumpjet_fire_right") || H("jumpjet_fire_forward") || H("jumpjet_fire_backward");
@@ -6403,7 +6406,7 @@ int main(int argc, char **argv)
                  * while paused or in a menu, 0x1003a3c0) and 0x1002dc90 passes distance, height and tilt to the orbit
                  * whatever the state; only the pan gives way to the self-turn once the end flag is set (0x1002dc90:
                  * DAT_1024c568 set and DAT_1024e680 clear - e680 is the network game's watch mode) */
-                const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+                const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                 {   /* the "_delta" controls: track_distance (Shift+Z out / Z in), track_height (Ctrl + grey up / down),
                      * eyepoint_pan (Ctrl + grey left / right, and Home / PageUp - the glance keys, which mode 1 does not
                      * read) - shifts 6 / 6 / 4 (control table 0x10256540) */
@@ -6433,7 +6436,7 @@ int main(int argc, char **argv)
                 /* jump jets (hold J): engine physics in combat_jets */
                 g_sim.player_unit.ground = msim_ground(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], g_sim.player_unit.y + g_sim.player_centre_h);   /* 0x10010080 at the centre */
                 {
-                    const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+                    const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
                          * the jets; engine physics 0x10019310, DOS 0x26990): while jetting and the legs are not turning, the
@@ -6592,7 +6595,7 @@ int main(int argc, char **argv)
                 {   /* INPUT.MAP weapon_fire (Space, KeypadEnter) and the left mouse button (port): the selected weapon, or the
                      * current group with group fire on; weapon_fire_group_1..3 (NumLock, keypad /, keypad *); GAMEKEY.MAP
                      * FIRE_WEAPON_GROUP (;) held: the current group */
-                    const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+                    const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     uint32_t mask = 0;
                     int all = g_auto_on && g_auto_fire;
                     g_im_dev.mouse_buttons = SDL_GetMouseState(NULL, NULL);
@@ -6644,7 +6647,7 @@ int main(int argc, char **argv)
                      * group (0x10044440); in chain fire, the selected weapon only - not ready, a click (sound 0x149) and
                      * nothing fires. On the release the selection moves to the next weapon of its fire group (0x10043f80;
                      * stepped in the panel's order, row by row) */
-                    if (H("weapon_fire") || (!g_im_mouse && (g_im_dev.mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)))) {
+                    if (H("weapon_fire") || (!g_im_mouse && (g_im_dev.mouse_buttons & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)))) {
                         if (g_group_fire) mask |= g_groups[g_cur_group] ? g_groups[g_cur_group] : 0xFFFFFFFFu;   /* group: all of it */
                         else if (g_sel_weapon >= 0 && g_sel_weapon < g_sim.player_unit.weapon_count) {
                             const combat_unit *pu2 = &g_sim.player_unit;
@@ -6753,7 +6756,7 @@ int main(int argc, char **argv)
                         v.eye[2] = (float)g_pl.origin[2] + cosf(aim) * 250.0f;
                     }
                     {   /* glance_left / right / up / down held (angles from the engine, below) */
-                        const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+                        const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                         /* about 67 degrees: DOS capture - the targeted enemy at radar bearing 52.6 deg shows 15 deg left of
                          * centre while glancing right (90 deg view); +-5 deg (which blip, the view angle) */
                         /* the engine (0x1002e640) sets pilot pan -70 / +70 for glance left / right and pilot tilt 50 up / 40
@@ -7067,9 +7070,9 @@ int main(int argc, char **argv)
             }
         }
         if (v.free_cam && !(g_world && g_pilot && g_pl_ok)) {   /* fly: ~20 m/s, Shift x5 (1 unit ~ 1 cm) */
-            static Uint32 prev;
-            const Uint8 *ks = test_ks();   /* TEST hook: + MW2_HOLD */
-            Uint32 now = SDL_GetTicks();
+            static Uint64 prev;
+            const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
+            Uint64 now = SDL_GetTicks();
             float dt = prev ? (float)(now - prev) / 1000.0f : 0, sp = 2000.0f * dt * (ks[SDL_SCANCODE_LSHIFT] ? 5.0f : 1.0f);
             float fy = v.look_yaw * 3.14159265f / 180.0f, fx = sinf(fy), fz = cosf(fy);
             prev = now;
@@ -7081,8 +7084,8 @@ int main(int argc, char **argv)
             if (ks[SDL_SCANCODE_Q] && v.eye[1] - sp > 50) v.eye[1] -= sp;
         }
         {   /* sky drift: the engine adds tile_sky*anim_rate per frame; normalised here to 30 fps */
-            static Uint32 last;
-            Uint32 now = SDL_GetTicks();
+            static Uint64 last;
+            Uint64 now = SDL_GetTicks();
             skygnd sg;
             skygnd_defaults(&sg);
             skygnd_lookup(getenv("MW2_SKYGND"), mission, &sg);
@@ -7100,7 +7103,9 @@ int main(int argc, char **argv)
             }
             last = now;
         }
-        SDL_GL_GetDrawableSize(win, &w, &h);   /* real pixels, incl. HiDPI */
+        SDL_GetWindowSizeInPixels(win, &w, &h);   /* real pixels, incl. HiDPI */
+        rb_frame(w, h);   /* the window's picture this frame (its size; drawn into from here on) */
+        rb_target(0);
         g_out_w = w; g_out_h = h;
         g_win_lines = h; g_win_cols = w;
         if (g_render_w && g_world) {
@@ -7108,7 +7113,7 @@ int main(int argc, char **argv)
              * art and layout are made for - then, for 320 x 200, point-sampled down to 320 x 200; the result is shown
              * scaled up in whole blocks to fill 4:3 (non-square pixels at 320 x 200, as a VGA monitor showed them) */
             int dw = g_render_w == 320 ? 640 : g_render_w, dh = g_render_w == 320 ? 480 : g_render_h;
-            if (lowres_target(dw, dh) == 0) { w = dw; h = dh; glBindFramebuffer(GL_FRAMEBUFFER, g_lr_fbo[0]); }
+            if (lowres_target(dw, dh) == 0) { w = dw; h = dh; rb_target(g_lr_fbo[0]); }
         }
         music_poll();
         {   /* TEST ONLY: MW2_TEST_VIDEO=t:look[,t:look] - the GRAPHICS menu's choice at t autopilot seconds; look = a
@@ -7575,7 +7580,7 @@ int main(int argc, char **argv)
                 glr_set_actors(r, &nopit, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
             }
             glr_draw_rect(r, &vv, px, py, pw, ph);
-            glViewport(0, 0, w, h);
+            rb_viewport(0, 0, w, h);
         }
         g_wcam_live = wcam >= 0;
         if (g_world && HUD_VIEW && (g_tgtdisp == 2 || (g_tgtdisp == 1 && g_tex_kind != 3)) && g_layout_n > 13 && g_tgt_sel >= 0 && g_tgt_sel < g_actor_count && !g_hud_off && td_on && g_pow == 2 && !g_snow_show[1]) {
@@ -7633,7 +7638,7 @@ int main(int argc, char **argv)
                 glr_set_actors(r, &nopit, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
             }
             glr_draw_rect(r, &vv, px, py, pw, ph);
-            glViewport(0, 0, w, h);
+            rb_viewport(0, 0, w, h);
         }
         {
         }
@@ -7641,10 +7646,8 @@ int main(int argc, char **argv)
             /* 320 x 200: the 3D picture (and the inset views) point-sampled down to the 320 x 200 frame; the HUD is then
              * drawn into that frame with the original's 320x200 sprite set and font, 1:1, its layout stretched to the
              * frame (320 across, 200 down: the VGA picture the 320x200 art was made for) */
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, g_lr_fbo[0]);
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_lr_fbo[1]);
-            glBlitFramebuffer(0, 0, g_lr_w, g_lr_h, 0, 0, 320, 200, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-            glBindFramebuffer(GL_FRAMEBUFFER, g_lr_fbo[1]);
+            rb_blit(g_lr_fbo[0], 0, 0, g_lr_w, g_lr_h, g_lr_fbo[1], 0, 0, 320, 200, 0);
+            rb_target(g_lr_fbo[1]);
             w = 320; h = 200;
         }
         if (g_hud && g_world && g_sim_ok) {   /* the red palette flash (red_flash): the world, then the HUD's colours */
@@ -8694,7 +8697,8 @@ int main(int argc, char **argv)
                 y += lh + half - 12.0f;   /* the time line h + h/2 below the next row (drawn at y + 12 below) */
                 if ((int32_t)t0->time_limit > 0) {
                     char tr[48];
-                    double left = (double)(int32_t)t0->time_limit - g_sim.now / 1000.0;
+                    /* DOS 0x31d65: (limit + star start) x 182 - clock, the start -1 in single play (mtbl_logic_step) */
+                    double left = (double)(int32_t)t0->time_limit - 1.0 - g_sim.now / 1000.0;
                     if (left < 0) left = 0;
                     snprintf(tr, sizeof tr, "Time Remaining: %02d:%02d:%05.2f", (int)(left / 3600), (int)(left / 60) % 60, fmod(left, 60.0));
                     hud_text(g_hud, 60.0f, y + 12.0f, tr, oblue);
@@ -8772,8 +8776,8 @@ int main(int argc, char **argv)
                 int fw, fh;
                 float blk[4] = {0, 0, 0, 0};
                 blk[3] = 1.0f - level;
-                SDL_GL_GetDrawableSize(win, &fw, &fh);
-                glViewport(0, 0, fw, fh);
+                SDL_GetWindowSizeInPixels(win, &fw, &fh);
+                rb_viewport(0, 0, fw, fh);
                 hud_begin(g_hud, fw, fh);
                 hud_rect(g_hud, hud_left_x(g_hud) - 10.0f, -10.0f, 660.0f - 2.0f * hud_left_x(g_hud), 500.0f, blk);
                 hud_end(g_hud);
@@ -8786,8 +8790,7 @@ int main(int argc, char **argv)
             FILE *of = fopen(g_auto_out, "wb");
             if (px && of) {
                 int y;
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);   /* tight rows: a width not a multiple of 4 overran px */
-                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+                rb_read_rgb(0, 0, w, h, px);   /* (GL's order: the bottom row first) */
                 fprintf(of, "P6\n%d %d\n255\n", w, h);
                 for (y = h - 1; y >= 0; y--) fwrite(px + (size_t)y * (size_t)w * 3, 1, (size_t)w * 3, of);
             }
@@ -8801,7 +8804,7 @@ int main(int argc, char **argv)
             running = 0;
         }
         perf_mark(2);
-        SDL_GL_SwapWindow(win);
+        rb_present();
         g_frame_no++;
         perf_mark(3);
         perf_report(w, h);
@@ -8832,7 +8835,8 @@ int main(int argc, char **argv)
     sfx_destroy(g_sfx);
     glr_destroy(r);
     syskeys_update(0);   /* the system's shortcuts back (atexit too, for the other ways out) */
-    SDL_GL_DeleteContext(ctx);
+    rb_quit();
+    if (g_im_dev.joy) { SDL_CloseJoystick(g_im_dev.joy); g_im_dev.joy = NULL; }
     SDL_DestroyWindow(win);
     SDL_Quit();
     if (g_fx_ta && g_fx_ta != ta) prj_close(g_fx_ta);   /* the mission's first texture archive, after a Video mode change */

@@ -6,7 +6,8 @@
  * the shell's tables (title: FUN_0002a410, hotspot table 0x7e7fc).
  * Headless capture: MW2_SHELL_SHOT=out.ppm MW2_SHELL_FRAMES=n MW2_SHELL_MOUSE=x,y MW2_SHELL_SCREEN=id
  */
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>   /* the platform entry point (Windows: WinMain -> SDL_RunApp -> main, argv in UTF-8) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,24 @@
 
 #define W 640
 #define H 480
+
+static SDL_Renderer *g_rd;   /* the shell's renderer (set in main) */
+/* SDL_PollEvent for the shell's screens. SDL2's renderer turned the window's mouse events into the 640x480 frame's
+ * (RenderSetLogicalSize); SDL3 leaves them in window coordinates, so they are converted here - the same events only
+ * (the window's own: events the tests push carry no window and are already in frame units). SDL3's wheel is a float
+ * (trackpads give fractions): whole notches go on, the rest carries to the next event, as SDL2's integer y did. */
+static bool shell_poll(SDL_Event *e)
+{
+    static float wheel_acc;
+    if (!SDL_PollEvent(e)) return false;
+    if (g_rd) SDL_ConvertEventToRenderCoordinates(g_rd, e);
+    if (e->type == SDL_EVENT_MOUSE_WHEEL) {
+        wheel_acc += e->wheel.y;
+        e->wheel.y = (float)(int)wheel_acc;
+        wheel_acc -= e->wheel.y;
+    }
+    return true;
+}
 
 typedef struct { int x0, y0, x1, y1, lx, ly; const char *label; int next, clan; const char *video; } hotspot;
 /* hotspot labels as the original's tables spell them: '~' first = centred on the label x, else drawn from it
@@ -244,21 +263,26 @@ static void tt_raster(const tt_item *it)   /* headless: into the 640x480 frame *
         }
     free(img);
 }
+/* the physical pixels per 640x480 unit: the output size over the logical size (the smaller ratio - letterboxed); whole
+ * pixels when asked and the renderer scales by whole pixels */
+static float frame_scale(SDL_Renderer *rd, int whole)
+{
+    int ow = 0, oh = 0, lw = 0, lh = 0;
+    float ps = 1.0f;
+    SDL_RendererLogicalPresentation mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_GetRenderOutputSize(rd, &ow, &oh);
+    SDL_GetRenderLogicalPresentation(rd, &lw, &lh, &mode);
+    if (lw > 0 && lh > 0) { float a = (float)ow / (float)lw, b = (float)oh / (float)lh; ps = a < b ? a : b; }
+    if (whole && mode == SDL_LOGICAL_PRESENTATION_INTEGER_SCALE && ps >= 1.0f) ps = floorf(ps);
+    return ps;
+}
 static void tt_draw(SDL_Renderer *rd, const tt_item *it)
 {
-    float sx, sy, ps;
+    float ps = frame_scale(rd, 0);
     int w, h, by, i;
     uint8_t *img;
     uint32_t *rgba;
     SDL_Texture *tex;
-    SDL_RenderGetScale(rd, &sx, &sy);
-    ps = sy > 0 ? sy : 1.0f;
-    {   /* the physical pixels per 640x480 unit: output size over the logical size */
-        int ow, oh, lw, lh;
-        SDL_GetRendererOutputSize(rd, &ow, &oh);
-        SDL_RenderGetLogicalSize(rd, &lw, &lh);
-        if (lw > 0 && lh > 0) { float a = (float)ow / (float)lw, b = (float)oh / (float)lh; ps = a < b ? a : b; }
-    }
     if (!(img = ttext_render(it->t, it->cap * ps, 0.85f, &w, &h, &by))) return;
     if ((rgba = malloc((size_t)w * (size_t)h * 4))) {
         for (i = 0; i < w * h; i++) rgba[i] = (uint32_t)img[i] << 24 | (uint32_t)it->rgb[2] << 16 | (uint32_t)it->rgb[1] << 8 | it->rgb[0];
@@ -266,11 +290,11 @@ static void tt_draw(SDL_Renderer *rd, const tt_item *it)
             SDL_FRect dr;
             SDL_UpdateTexture(tex, NULL, rgba, w * 4);
             SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-            SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+            SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
             dr.w = (float)w / ps; dr.h = (float)h / ps;
             dr.x = it->align ? (float)it->x - dr.w : (float)it->x;
             dr.y = (float)it->y - ((float)by / ps - it->cap);
-            SDL_RenderCopyF(rd, tex, NULL, &dr);
+            SDL_RenderTexture(rd, tex, NULL, &dr);
             SDL_DestroyTexture(tex);
         }
         free(rgba);
@@ -345,7 +369,7 @@ static SDL_Texture *glyph_texture(SDL_Renderer *rd, const text_item *it, int c, 
     if (g->tex) {
         SDL_UpdateTexture(g->tex, NULL, dst, gw * k3 * 4);
         SDL_SetTextureBlendMode(g->tex, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(g->tex, getenv("MW2_TEXT_SMOOTH") ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        SDL_SetTextureScaleMode(g->tex, getenv("MW2_TEXT_SMOOTH") ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
         g->fo = fo; g->c = c; g->remap1 = it->remap1; g->palsum = it->palsum; g->w = gw; g->h = fh;
         g_ngcache++;
     }
@@ -390,13 +414,7 @@ static int vec_text(SDL_Renderer *rd, const text_item *it)
     vec_entry *e = NULL;
     if (!ttext_available() || getenv("MW2_BITMAP_TEXT") || n == 0) return 0;
     for (i = 0; i < n; i++) if ((unsigned char)it->t[i] < 32 || (unsigned char)it->t[i] > 126) return 0;
-    {   /* the physical pixels per 640x480 unit */
-        int ow, oh, lw, lh;
-        SDL_GetRendererOutputSize(rd, &ow, &oh);
-        SDL_RenderGetLogicalSize(rd, &lw, &lh);
-        if (lw > 0 && lh > 0) { float a = (float)ow / (float)lw, b = (float)oh / (float)lh; ps = a < b ? a : b; }
-        if (SDL_RenderGetIntegerScale(rd) && ps >= 1.0f) ps = floorf(ps);
-    }
+    ps = frame_scale(rd, 1);   /* the physical pixels per 640x480 unit */
     /* the ink colour: the most used palette index in the string's glyphs */
     memset(counts, 0, sizeof counts);
     for (i = 0; i < n; i++) {
@@ -438,7 +456,7 @@ static int vec_text(SDL_Renderer *rd, const text_item *it)
             if ((e->tex = SDL_CreateTexture(rd, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h))) {
                 SDL_UpdateTexture(e->tex, NULL, rgba, w * 4);
                 SDL_SetTextureBlendMode(e->tex, SDL_BLENDMODE_BLEND);
-                SDL_SetTextureScaleMode(e->tex, SDL_ScaleModeLinear);
+                SDL_SetTextureScaleMode(e->tex, SDL_SCALEMODE_LINEAR);
             }
             free(rgba);
         }
@@ -451,7 +469,7 @@ static int vec_text(SDL_Renderer *rd, const text_item *it)
     }
     {
         SDL_FRect dr = {(float)it->x + e->dx, (float)it->y + e->dy, (float)e->w / ps, (float)e->h / ps};
-        SDL_RenderCopyF(rd, e->tex, NULL, &dr);
+        SDL_RenderTexture(rd, e->tex, NULL, &dr);
     }
     return 1;
 }
@@ -469,22 +487,25 @@ static void text_layer_draw(SDL_Renderer *rd)
         for (t = it->t; *t; t++) {
             int gw = 4;
             SDL_Texture *tex = glyph_texture(rd, it, (unsigned char)*t & 127, &gw);
-            if (tex) { SDL_FRect dr = {x, (float)it->y, (float)gw, (float)fh}; SDL_RenderCopyF(rd, tex, NULL, &dr); }
+            if (tex) { SDL_FRect dr = {x, (float)it->y, (float)gw, (float)fh}; SDL_RenderTexture(rd, tex, NULL, &dr); }
             x += (float)gw;
         }
     }
     for (i = 0; i < g_ntt; i++) tt_draw(rd, &g_tt[i]);
     if (grab_frames > 0 && --grab_frames == 0 && getenv("MW2_SHELL_GRAB")) {   /* tests: the rendered window, full resolution */
-        int ow, oh;
-        uint8_t *buf;
-        SDL_GetRendererOutputSize(rd, &ow, &oh);
-        if ((buf = malloc((size_t)ow * (size_t)oh * 3))) {
-            if (SDL_RenderReadPixels(rd, NULL, SDL_PIXELFORMAT_RGB24, buf, ow * 3) == 0) {
-                FILE *o = fopen(getenv("MW2_SHELL_GRAB"), "wb");
-                if (o) { fprintf(o, "P6\n%d %d\n255\n", ow, oh); fwrite(buf, 1, (size_t)ow * (size_t)oh * 3, o); fclose(o); }
+        SDL_Surface *got = SDL_RenderReadPixels(rd, NULL);   /* SDL3: the whole output, as a surface */
+        SDL_Surface *rgb = got ? SDL_ConvertSurface(got, SDL_PIXELFORMAT_RGB24) : NULL;
+        if (rgb) {
+            FILE *o = fopen(getenv("MW2_SHELL_GRAB"), "wb");
+            if (o) {
+                int y;
+                fprintf(o, "P6\n%d %d\n255\n", rgb->w, rgb->h);
+                for (y = 0; y < rgb->h; y++) fwrite((const uint8_t *)rgb->pixels + (size_t)y * (size_t)rgb->pitch, 1, (size_t)rgb->w * 3, o);
+                fclose(o);
             }
-            free(buf);
         }
+        SDL_DestroySurface(rgb);
+        SDL_DestroySurface(got);
         exit(0);
     }
 }
@@ -639,7 +660,7 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     smk *s = open_smk(name);
     int f, n, last = -1;
     unsigned char *snd = NULL;
-    Uint32 t0;
+    Uint64 t0;
     if (!s) return;
     n = headless ? 3 : smk_frames(s);
     {   /* the clip's sound (audio track 0), mixed as one 8-bit voice; the frames then follow the clock */
@@ -674,10 +695,10 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
                 memcpy(g_fb + ((size_t)y * W + (size_t)x) * 3, smk_palette(s)[smk_pixels(s)[(size_t)sy * (size_t)sw + (size_t)sx]], 3);
             }
         if (!headless) {
-            Uint32 now;
+            Uint64 now;
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
-            while (SDL_PollEvent(&e)) if (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_QUIT) skip = 1;
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            while (shell_poll(&e)) if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_QUIT) skip = 1;
             if (skip) break;
             now = SDL_GetTicks() - t0;
             if ((double)now < (double)(f + 1) * smk_frame_ms(s)) SDL_Delay((Uint32)((double)(f + 1) * smk_frame_ms(s) - (double)now));
@@ -764,7 +785,7 @@ typedef struct { int scen, mech[2][3], form[2], clan[2], nmech; char loadout[2][
  * the port unlocks all 18 permanently (user request) */
 static ia_state g_ia = {0, {{9, -1, -1}, {5, -1, -1}}, {0, 0}, {0, 1}, 18, {{""}}, {100, 100}, {3, 3}, 0, 0, {""}};
 
-typedef struct { smk *s; int x, y; Uint32 last; int hold, once; char then[16]; } overlay;
+typedef struct { smk *s; int x, y; Uint64 last; int hold, once; char then[16]; } overlay;
 static int g_from_screen = -1;   /* the screen before the current one */
 static int g_ia_ctx = 2;   /* the star the IA screen's MECH LAB / STAR CONFIG buttons opened: 2 friendly, 3 enemy */
 static int g_lab_slot;
@@ -776,10 +797,10 @@ static void ov_set(overlay *o, const char *name, int x, int y)
 }
 static void ov_draw(overlay *o, int headless)
 {
-    Uint32 now;
+    Uint64 now;
     if (!o->s) return;
     now = SDL_GetTicks();
-    if (!o->hold && (headless || now - o->last >= (Uint32)smk_frame_ms(o->s))) {
+    if (!o->hold && (headless || now - o->last >= (Uint64)smk_frame_ms(o->s))) {
         int fr = smk_next(o->s);
         o->last = now;
         if (o->once && fr == 0 && o->then[0]) {   /* the clip ended (it looped back): its follow-on clip (FUN_00039590) */
@@ -953,7 +974,6 @@ static void sim_command(char *line, size_t n, const char *scen, const char *save
     }
 }
 
-static SDL_Renderer *g_rd;   /* the shell's window, for the loading screen */
 static int g_load_clan;      /* the clan whose dropship the loading screen shows */
 static SDL_Texture  *g_tx;
 /* the drop screen (DOSBox capture, the simulation's loading screen): the mission's launch picture - its brief record's
@@ -996,7 +1016,7 @@ static void loading_screen(int clan)
     shp_frame pic, txt;
     uint8_t pal[256][3], tpal[256][3];
     int x, y, have_txt;
-    Uint32 t0;
+    Uint64 t0;
     (void)clan;
     const char *shot = getenv("MW2_LOADING_SHOT");   /* tests: compose, write a PPM, no wait */
     if (getenv("MW2_LOADING_SCENE")) snprintf(g_load_scene, sizeof g_load_scene, "%s", getenv("MW2_LOADING_SCENE"));
@@ -1050,9 +1070,9 @@ static void loading_screen(int clan)
     t0 = SDL_GetTicks();
     while (SDL_GetTicks() - t0 < 2000) {
         SDL_Event e;
-        while (SDL_PollEvent(&e)) if (e.type == SDL_QUIT) return;
+        while (shell_poll(&e)) if (e.type == SDL_EVENT_QUIT) return;
         SDL_UpdateTexture(g_tx, NULL, g_fb, W * 3);
-        SDL_RenderClear(g_rd); SDL_RenderCopy(g_rd, g_tx, NULL, NULL); SDL_RenderPresent(g_rd);
+        SDL_RenderClear(g_rd); SDL_RenderTexture(g_rd, g_tx, NULL, NULL); SDL_RenderPresent(g_rd);
         SDL_Delay(30);
     }
 }
@@ -1131,11 +1151,11 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         SDL_Event e;
         int click = -1;
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) next = -3;
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) next = -3;
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00029680 -> 0x258e0 */
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT)
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT)
                     for (i = 0; i < 25; i++)
                         if (e.button.x >= IA_HS[i].x0 && e.button.x <= IA_HS[i].x1 && e.button.y >= IA_HS[i].y0 && e.button.y <= IA_HS[i].y1) click = i;
             }
@@ -1165,7 +1185,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                         for (i = 0; i < 4; i++) if (i != 2) blit_smk(ov[i].s ? ov[i].s : ov[2].s, ov[i].s ? ov[i].x : 0, ov[i].s ? ov[i].y : 0);
                         blit_smk(ov[2].s, ov[2].x, ov[2].y);
                         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-                        SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); SDL_RenderPresent(rd);
+                        SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); SDL_RenderPresent(rd);
                         SDL_Delay((Uint32)smk_frame_ms(ov[2].s));
                     }
                     smk_rewind(ov[2].s);
@@ -1227,7 +1247,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
             if (f >= frames) next = -2;
         } else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -1357,7 +1377,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
         int enabled[15], click[16][2];
         if (!headless && (editing >= 0) != text_on) {   /* port: text input only while a new pilot's name is typed (see main) */
             text_on = editing >= 0;
-            if (text_on) SDL_StartTextInput(); else SDL_StopTextInput();
+            if (text_on) SDL_StartTextInput(g_win); else SDL_StopTextInput(g_win);
         }
         if (f == 0 && getenv("MW2_SHELL_CLICKS")) {   /* tests: "x,y;x,y;..." clicks on the first frame */
             const char *q = getenv("MW2_SHELL_CLICKS");
@@ -1368,17 +1388,17 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
             }
         }
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (editing >= 0 && e.type == SDL_TEXTINPUT && strlen(edit) + strlen(e.text.text) < 15) strcat(edit, e.text.text);
-                if (menu_opens(&e) && !(editing >= 0 && e.type == SDL_KEYDOWN)) {   /* FUN_00038310 -> 0x258e0 (Esc while a name is typed cancels it) */
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
+                if (editing >= 0 && e.type == SDL_EVENT_TEXT_INPUT && strlen(edit) + strlen(e.text.text) < 15) strcat(edit, e.text.text);
+                if (menu_opens(&e) && !(editing >= 0 && e.type == SDL_EVENT_KEY_DOWN)) {   /* FUN_00038310 -> 0x258e0 (Esc while a name is typed cancels it) */
                     int r = global_menu(rd, tx, headless, *mx, *my);
                     if (r != -1) next = r;
                     continue;
                 }
-                if (e.type == SDL_KEYDOWN) {
-                    SDL_Keycode k = e.key.keysym.sym;
+                if (e.type == SDL_EVENT_KEY_DOWN) {
+                    SDL_Keycode k = e.key.key;
                     if (editing >= 0) {
                         if (k == SDLK_BACKSPACE && edit[0]) edit[strlen(edit) - 1] = 0;
                         else if (k == SDLK_ESCAPE) editing = -1;
@@ -1400,7 +1420,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                         }
                     }
                 }
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && editing < 0 && nclick < 16) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT && editing < 0 && nclick < 16) {
                     click[nclick][0] = e.button.x; click[nclick][1] = e.button.y; nclick++;
                 }
             }
@@ -1510,11 +1530,11 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
         if (headless) { if (f >= frames) { next = -2; } }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
-    if (!headless) { if (text_on) SDL_StopTextInput(); shell_sound_stop(0x51); }   /* 0x387a0: the sound object is freed on leaving */
+    if (!headless) { if (text_on) SDL_StopTextInput(g_win); shell_sound_stop(0x51); }   /* 0x387a0: the sound object is freed on leaving */
     return next;
 }
 
@@ -2382,7 +2402,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
             if (sscanf(cs, "%d,%d", &x2, &y2) == 2) {
                 SDL_Event ev2;
                 memset(&ev2, 0, sizeof ev2);
-                ev2.type = SDL_MOUSEBUTTONDOWN; ev2.button.button = SDL_BUTTON_LEFT; ev2.button.x = x2; ev2.button.y = y2;
+                ev2.type = SDL_EVENT_MOUSE_BUTTON_DOWN; ev2.button.button = SDL_BUTTON_LEFT; ev2.button.x = x2; ev2.button.y = y2;
                 SDL_PushEvent(&ev2);
             }
             cs = strchr(cs, ';');
@@ -2395,19 +2415,19 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         int pg = e->page;
         ed_masses(e, &mm);
         if (!headless || getenv("MW2_LAB_CLICKS")) {
-            while (SDL_PollEvent(&ev)) {
+            while (shell_poll(&ev)) {
                 int x, y, row, k;
                 pg = e->page;   /* every event: an earlier one may have changed the page */
                 ed_masses(e, &mm);
-                if (ev.type == SDL_QUIT) { result = -3; break; }
+                if (ev.type == SDL_EVENT_QUIT) { result = -3; break; }
                 if (menu_opens(&ev)) {   /* CUSTOMIZE is a mode of FUN_000339e0's loop: Esc / right button open the global menu */
                     int r = global_menu(rd, tx, headless, g_cmx, g_cmy);
                     if (r == -3) { result = -3; break; }
                     if (r >= 0) { g_menu_next = r; result = -4; break; }
                     continue;
                 }
-                if (ev.type == SDL_MOUSEMOTION) { g_cmx = ev.motion.x; g_cmy = ev.motion.y; }
-                if (ev.type != SDL_MOUSEBUTTONDOWN || ev.button.button != SDL_BUTTON_LEFT) continue;
+                if (ev.type == SDL_EVENT_MOUSE_MOTION) { g_cmx = ev.motion.x; g_cmy = ev.motion.y; }
+                if (ev.type != SDL_EVENT_MOUSE_BUTTON_DOWN || ev.button.button != SDL_BUTTON_LEFT) continue;
                 x = ev.button.x; y = ev.button.y;
                 if (x >= 50 && x <= 149 && y >= 445 && y <= 469) { result = 0; break; }                       /* ABORT */
                 if (x >= 50 && x <= 149 && y >= 420 && y <= 444) {                                              /* SAVE */
@@ -2704,7 +2724,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         if (headless) { if (f >= frames) result = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(15);
         }
     }
@@ -2737,7 +2757,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
     uint8_t *shp = NULL;
     size_t shplen = 0;
     int shpn = 0, shp_m = -1;
-    Uint32 t0 = SDL_GetTicks();
+    Uint64 t0 = SDL_GetTicks();
     clip *cl[9];
     int cx = CTX(clan);
     static const char *CL[3][9] = {{"AWOGRID", "WWOMP1", "WWOMP1ES", "WWOBKG", "WWOSTAR", "WWOCN", "WWOCP", "WWOVN", "WWOVP"},
@@ -2808,12 +2828,12 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             }
         }
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if ((e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_MOUSEBUTTONDOWN;
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
+                if ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_000339e0 -> 0x258e0 */
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y, h = -1;
                     for (i = 0; i < 8; i++) if (x >= HS[i][0] && x <= HS[i][2] && y >= HS[i][1] && y <= HS[i][3]) h = i;
                     if (x >= HS[10][0] && x <= HS[10][2] && y >= HS[10][1] && y <= HS[10][3] && nv && strstr(var[vi], "usr")) {   /* DELETE (user designs) */
@@ -2953,7 +2973,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         if (headless) { if (f >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(15);
         }
     }
@@ -3028,22 +3048,22 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
         if (!headless && (ed_m >= 0) != text_on) {   /* port: text input only while a name is typed */
             text_on = ed_m >= 0;
-            if (text_on) SDL_StartTextInput(); else SDL_StopTextInput();
+            if (text_on) SDL_StartTextInput(g_win); else SDL_StopTextInput(g_win);
         }
         if (!headless || script) {
-            while (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
+            while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
                 if (ed_m >= 0) {   /* typing a name (FUN_0002a910): nothing else reacts */
                     int done = 0;
-                    if (e.type == SDL_TEXTINPUT) {
+                    if (e.type == SDL_EVENT_TEXT_INPUT) {
                         const char *q;
                         for (q = e.text.text; *q; q++)
                             if (sc_name_char(ed_buf, (unsigned char)*q)) { size_t n = strlen(ed_buf); ed_buf[n] = *q; ed_buf[n + 1] = 0; }
-                    } else if (e.type == SDL_KEYDOWN) {
-                        SDL_Keycode kc = e.key.keysym.sym;
+                    } else if (e.type == SDL_EVENT_KEY_DOWN) {
+                        SDL_Keycode kc = e.key.key;
                         if (kc == SDLK_BACKSPACE && ed_buf[0]) ed_buf[strlen(ed_buf) - 1] = 0;
                         else if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER || kc == SDLK_ESCAPE) done = 1;
-                    } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) done = 1;
+                    } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) done = 1;
                     if (done) {
                         snprintf(st->slot[ed_m].pilot, sizeof st->slot[ed_m].pilot, "%s", ed_buf);
                         whole[ed_m] = 1;
@@ -3054,10 +3074,10 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                     if (script) break;
                     continue;
                 }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if ((e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_MOUSEBUTTONDOWN;
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
+                if ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; if (script) break; continue; }   /* FUN_0003b420 -> 0x258e0 */
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 9; i++) {
                         const int *h = SC_HS[cx][i];
@@ -3100,8 +3120,8 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         g_clip_pal = getenv("MW2_NO_CLIPPAL") || !cl[0] || !cl[0]->s ? NULL : smk_palette(cl[0]->s);
         {   /* each clip steps at its own Smacker rate (the grids, bays and panels: 67 ms; DOSBox AWOGRID 71-74 ms a frame,
              * the 67 ms rounded up to the 70 Hz display) - the loop had stepped them every 66 ms pass */
-            static Uint32 clast[10];
-            Uint32 now = SDL_GetTicks();
+            static Uint64 clast[10];
+            Uint64 now = SDL_GetTicks();
             int on = -1;
             for (i = 0; i < 9; i++) { const int *h = SC_HS[cx][i]; if (*mx >= h[0] && *mx <= h[2] && *my >= h[1] && *my <= h[3]) on = i; }
             for (k = 0; k < 10; k++) {
@@ -3110,7 +3130,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                 if (k >= 1 && k <= 3 && k > st->size) continue;   /* empty bays */
                 if (k == 5) { if (cx == 2) shown = on == 1; else runs = on == 1; }
                 if (k >= 6) shown = lheld && on == k - 4;
-                if (headless || f == 0 || !cl[k]->s || (runs && now - clast[k] >= (Uint32)smk_frame_ms(cl[k]->s))) { if (runs || f == 0) clip_next(cl[k]); clast[k] = now; }
+                if (headless || f == 0 || !cl[k]->s || (runs && now - clast[k] >= (Uint64)smk_frame_ms(cl[k]->s))) { if (runs || f == 0) clip_next(cl[k]); clast[k] = now; }
                 if (shown) clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
             }
         }
@@ -3212,11 +3232,11 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         if (headless) { if (f >= frames && (!script || !*script) && next == -1) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(15);
         }
     }
-    if (text_on) SDL_StopTextInput();
+    if (text_on) SDL_StopTextInput(g_win);
     if (getenv("MW2_SC_EVENTS")) { printf("sc: names"); for (k = 0; k < 3; k++) printf(" '%s'", st->slot[k].pilot); printf("\n"); fflush(stdout); }   /* TEST ONLY */
     for (k = 0; k < 10; k++) clip_close(cl[k]);
     return next;
@@ -3324,7 +3344,7 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     const pilot_rec *list[20];
     int i, done = 0;
     smk *logo = open_smk("AMWLOGO1");
-    Uint32 last = 0;
+    Uint64 last = 0;
     reg_load();
     for (i = 0; i < 20; i++) list[i] = &g_reg[i];
     qsort(list, 20, sizeof list[0], honor_cmp);
@@ -3337,8 +3357,8 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         int y = 182;
         draw_bg();
         if (logo) {
-            Uint32 now = SDL_GetTicks();
-            if (headless || now - last >= (Uint32)smk_frame_ms(logo) || last == 0) { smk_next(logo); last = now; }
+            Uint64 now = SDL_GetTicks();
+            if (headless || now - last >= (Uint64)smk_frame_ms(logo) || last == 0) { smk_next(logo); last = now; }
             if (logo) blit_smk(logo, 120, 4);
         }
         for (i = 0; i < 7; i++) draw_text(&g_flabel, CX[i], 150, HD[i], pal, -1);
@@ -3361,11 +3381,11 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             y += 16;
         }
         if (headless) break;
-        while (SDL_PollEvent(&e))
-            if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && !key_is_modifier(e.key.keysym.sym)) ||
-                (e.type == SDL_MOUSEBUTTONDOWN && (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT))) done = 1;
+        while (shell_poll(&e))
+            if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && !key_is_modifier(e.key.key)) ||
+                (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT))) done = 1;
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-        SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+        SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
         SDL_Delay(30);
     }
     smk_close(logo);
@@ -3382,6 +3402,43 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * port's DISPLAY row at y 397 picks desktop / windowed / the display's modes, and its right half (x 515 on) the port's
  * HUD layout - HUD WIDE / HUD ORIGINAL (mw2port.cfg hud_layout=; no room for a row of its own); the TEXTURES row's
  * right part (x 495 on) the port's DOS shading - DOS DITHERED / DOS SMOOTH (mw2port.cfg dos_shading=, the DOS renderer only) */
+/* the port's GPU interface (mw2port.cfg gpu=, the RESOLUTION row's right half). Windows: the backends SDL's GPU API can
+ * run here (1 Direct3D 12, 2 Vulkan), asked once */
+#if defined(_WIN32)
+static int gpu_backends(void)
+{
+    static int mask = -1;
+    static const char *const NAME[2] = {"direct3d12", "vulkan"};
+    int k;
+    if (mask >= 0) return mask;
+    mask = 0;
+    for (k = 0; k < 2; k++) {
+        SDL_PropertiesID p = SDL_CreateProperties();
+        SDL_SetStringProperty(p, SDL_PROP_GPU_DEVICE_CREATE_NAME_STRING, NAME[k]);
+        SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_DXIL_BOOLEAN, k == 0);
+        SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, k == 1);
+        if (SDL_GPUSupportsProperties(p)) mask |= 1 << k;
+        SDL_DestroyProperties(p);
+    }
+    return mask;
+}
+#endif
+/* the GPU interface the simulation will start with this setting (rb_init's order: the chosen one, else the other) */
+static const char *gpu_backend_text(int gpu)
+{
+#if defined(_WIN32)
+    const int m = gpu_backends();
+    if (gpu == PORTCFG_GPU_VULKAN) return (m & 2) || !(m & 1) ? "GPU VULKAN" : "GPU D3D12";
+    return (m & 1) || !(m & 2) ? "GPU D3D12" : "GPU VULKAN";
+#elif defined(__APPLE__)
+    (void)gpu;
+    return "GPU METAL";
+#else
+    (void)gpu;
+    return "GPU VULKAN";
+#endif
+}
+
 /* the k-th word of a row in the pristine background (the option words: the columns differing from the column's key
  * colour at (380,130), split at gaps of 6+ pixels); returns its x range */
 static int32_t rd32(const uint8_t *b) { return (int32_t)(b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24); }
@@ -3420,13 +3477,14 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     snprintf(p, sizeof p, "%s", gpath("MW2DIF.CFG")); if ((f = fopen(p, "rb"))) { if (fread(dif, 1, sizeof dif, f)) {} fclose(f); }
     portcfg_load(g_dir, &pc);
     {
-        int n = SDL_GetNumDisplayModes(0), k, j;
-        for (k = 0; k < n && nmodes < 64; k++) {
-            SDL_DisplayMode dm;
-            if (SDL_GetDisplayMode(0, k, &dm) != 0) continue;
-            for (j = 0; j < nmodes; j++) if (modes[j].w == dm.w && modes[j].h == dm.h) break;
-            if (j == nmodes && dm.w >= 640 && dm.h >= 480) { modes[nmodes].w = dm.w; modes[nmodes].h = dm.h; nmodes++; }
+        int n = 0, k, j;
+        SDL_DisplayMode **dms = SDL_GetFullscreenDisplayModes(SDL_GetPrimaryDisplay(), &n);   /* SDL3: largest first, as SDL2's list */
+        for (k = 0; dms && k < n && nmodes < 64; k++) {
+            const SDL_DisplayMode *dm = dms[k];
+            for (j = 0; j < nmodes; j++) if (modes[j].w == dm->w && modes[j].h == dm->h) break;
+            if (j == nmodes && dm->w >= 640 && dm->h >= 480) { modes[nmodes].w = dm->w; modes[nmodes].h = dm->h; nmodes++; }
         }
+        SDL_free(dms);
         if (pc.mode == 2) for (j = 0; j < nmodes; j++) if (modes[j].w == pc.w && modes[j].h == pc.h) mi = j;
     }
     load_bg(2);
@@ -3448,17 +3506,24 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         else snprintf(aa, sizeof aa, "%dx%d", pc.w, pc.h);
         if (pc.aa) snprintf(res, sizeof res, "NATIVE %dX AA", pc.aa); else snprintf(res, sizeof res, "NATIVE");
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
+            while (shell_poll(&e)) {
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
                  * one the DOS keyboard reads as a character (not a lone Shift / Ctrl / Alt) */
-                if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && !key_is_modifier(e.key.keysym.sym)) || (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && !key_is_modifier(e.key.key)) || (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 14; i++) {
                         if (x < 375 || x > 633 || y < ROW_Y[i] - 2 || y > ROW_Y[i] + 14) continue;
                         if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
                         else if (i == 1) dif[4] ^= 1;
                         else if (i >= 2 && i <= 6) wr32(snd + 0x14 + 4 * (i - 2), !rd32(snd + 0x14 + 4 * (i - 2)));
+                        else if (i == 7 && x >= 515) {   /* the port's GPU interface (Windows: Direct3D 12 / Vulkan, those that run here;
+                                                          * Linux Vulkan and macOS Metal only - shown greyed) */
+#if defined(_WIN32)
+                            if (pc.gpu == PORTCFG_GPU_VULKAN) { if (gpu_backends() & 1) pc.gpu = PORTCFG_GPU_D3D12; }
+                            else if (gpu_backends() & 2) pc.gpu = PORTCFG_GPU_VULKAN;
+#endif
+                        }
                         else if (i == 7) {   /* RESOLUTION: NATIVE (no AA, 2X, 4X, 8X) -> 320x200 -> 640x480 -> 1024x768 */
                             if (!pc.render_w) {
                                 if (pc.aa < 8) pc.aa = pc.aa == 0 ? 2 : pc.aa * 2;
@@ -3530,8 +3595,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             char vals[14][32];
             tt_item it;
             int k;
-            const char *lines[19];
-            int ly[19], lx[19];
+            const char *lines[20];
+            int ly[20], lx[20], gpu_lock;
             for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
@@ -3551,9 +3616,15 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             lines[16] = "TEXTURES"; ly[16] = ROW_Y[13] + 1; lx[16] = 360;
             lines[17] = pc.hud_original ? "HUD ORIGINAL" : "HUD WIDE"; ly[17] = ROW_Y[8] + 1; lx[17] = 520;   /* the DISPLAY row's right half */
             lines[18] = pc.dos_sky_smooth ? "DOS SMOOTH" : "DOS DITHERED"; ly[18] = ROW_Y[13] + 1; lx[18] = 500;   /* the TEXTURES row's (from 500: the column ends at 633) */
-            for (k = 0; k < 19; k++) {
+            lines[19] = gpu_backend_text(pc.gpu); ly[19] = ROW_Y[7] + 1; lx[19] = 520;   /* the RESOLUTION row's right half */
+#if defined(_WIN32)
+            gpu_lock = gpu_backends() != 3;   /* only one runs here: nothing to choose */
+#else
+            gpu_lock = 1;   /* Linux: Vulkan, macOS: Metal - the only one */
+#endif
+            for (k = 0; k < 20; k++) {
                 const char *t = lines[k];
-                int grey = tx_lock && (k == 13 || k == 16);   /* TEXTURES locked: its label and value greyed */
+                int grey = (tx_lock && (k == 13 || k == 16)) || (gpu_lock && k == 19);   /* TEXTURES locked / the GPU fixed: greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
                     int tx2 = (k >= 14 && k < 17) ? lx[k] - text_width(&g_flabel, t) : lx[k];
                     draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, grey ? 6 : -1);
@@ -3587,7 +3658,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         }
         if (headless) break;
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-        SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+        SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
         SDL_Delay(30);
     }
     smk_close(logo);
@@ -3671,8 +3742,8 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     int top = 0x1cc, done = 0, k, frames = 0, prev_bg = g_bg_entry;
     const uint8_t (*pal)[3];
     uint8_t *bgfb = malloc(sizeof g_fb);
-    const Uint32 t0 = SDL_GetTicks();
-    Uint32 logo_t = t0;
+    const Uint64 t0 = SDL_GetTicks();
+    Uint64 logo_t = t0;
     credits_load();
     load_bg(4);                                   /* shell image 5: "THE KESHIK" under the logo */
     pal = (const uint8_t (*)[3])g_bg.pal;
@@ -3714,11 +3785,11 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         if (headless) top--;
         else top = 0x1cc - (int)((SDL_GetTicks() - t0) * 79u / 1000u);
         if (headless) { if (frames >= (getenv("MW2_KESHIK_FRAMES") ? atoi(getenv("MW2_KESHIK_FRAMES")) : 300)) done = 1; continue; }
-        while (SDL_PollEvent(&e))
-            if (e.type == SDL_QUIT || e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN) done = 1;
-        if (logo && SDL_GetTicks() - logo_t >= (Uint32)smk_frame_ms(logo)) { smk_next(logo); logo_t = SDL_GetTicks(); }
+        while (shell_poll(&e))
+            if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) done = 1;
+        if (logo && SDL_GetTicks() - logo_t >= (Uint64)smk_frame_ms(logo)) { smk_next(logo); logo_t = SDL_GetTicks(); }
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-        SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+        SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
         SDL_Delay(10);
     }
     if (logo) smk_close(logo);
@@ -3866,14 +3937,14 @@ static int cc_test_click(int *mx, int *my)
     return 1;
 }
 static smk *g_cclogo;          /* the amwlogo1 clip at (120,4), as FUN_00021020 plays it on these pages */
-static Uint32 g_cclogo_t;
+static Uint64 g_cclogo_t;
 static void cc_frame(int lines)
 {
     int x, y;
     draw_bg();
     if (g_cclogo) {
-        Uint32 now = SDL_GetTicks();
-        if (!g_cclogo_t || now - g_cclogo_t >= (Uint32)smk_frame_ms(g_cclogo)) { smk_next(g_cclogo); g_cclogo_t = now; }
+        Uint64 now = SDL_GetTicks();
+        if (!g_cclogo_t || now - g_cclogo_t >= (Uint64)smk_frame_ms(g_cclogo)) { smk_next(g_cclogo); g_cclogo_t = now; }
         blit_smk(g_cclogo, 120, 4);
     }
     for (y = 105; y < H; y++) memset(g_fb + (size_t)y * W * 3, 0, (size_t)W * 3);
@@ -3886,7 +3957,7 @@ static void cc_frame(int lines)
 static void cc_present(SDL_Renderer *rd, SDL_Texture *tx)
 {
     SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-    SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+    SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
     SDL_Delay(15);
 }
 static void cc_text(int x, int y, const char *t, int col) { draw_text(&g_fthin, x, y, t, (const uint8_t (*)[3])g_bg.pal, col); }
@@ -3966,7 +4037,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         }
         if (msg[0]) cc_text(176, 470, msg, red);
         f++;
-        if (!headless && naming != text_on) { text_on = naming; if (text_on) SDL_StartTextInput(); else SDL_StopTextInput(); }   /* port */
+        if (!headless && naming != text_on) { text_on = naming; if (text_on) SDL_StartTextInput(g_win); else SDL_StopTextInput(g_win); }   /* port */
         if (script) {   /* TEST ONLY: the events done - the frame as it stands to MW2_CC_SHOT */
             const char *q = script;
             while (*q == ';' || *q == ' ') q++;
@@ -3977,19 +4048,19 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
             }
         }
         if (headless && !script) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } button = SDL_BUTTON_LEFT; }
-        else while (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) { done = 1; break; }
+        else while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
+            if (e.type == SDL_EVENT_QUIT) { done = 1; break; }
             if (naming) {   /* the line editor: nothing else reacts */
                 int end = 0;
-                if (e.type == SDL_TEXTINPUT) {
+                if (e.type == SDL_EVENT_TEXT_INPUT) {
                     const char *q;
                     for (q = e.text.text; *q; q++)
                         if (cc_name_char(nbuf, (unsigned char)*q)) { size_t n = strlen(nbuf); nbuf[n] = *q; nbuf[n + 1] = 0; }
-                } else if (e.type == SDL_KEYDOWN) {
-                    SDL_Keycode kc = e.key.keysym.sym;
+                } else if (e.type == SDL_EVENT_KEY_DOWN) {
+                    SDL_Keycode kc = e.key.key;
                     if (kc == SDLK_BACKSPACE && nbuf[0]) nbuf[strlen(nbuf) - 1] = 0;
                     else if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER || kc == SDLK_ESCAPE) end = 1;
-                } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) end = 1;
+                } else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) end = 1;
                 if (end) {
                     snprintf(cfg->name, sizeof cfg->name, "%s", nbuf);
                     naming = 0;
@@ -3998,9 +4069,9 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
                 if (script) break;
                 continue;
             }
-            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) done = 1;
-            if (e.type == SDL_MOUSEWHEEL) wheel = e.wheel.y;
-            if (e.type == SDL_MOUSEBUTTONDOWN) { mx = e.button.x; my = e.button.y; button = e.button.button; }
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) done = 1;
+            if (e.type == SDL_EVENT_MOUSE_WHEEL) wheel = e.wheel.y;
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) { mx = e.button.x; my = e.button.y; button = e.button.button; }
             if (script) break;
         }
         if (wheel && mx < 0) { scroll -= wheel * 3; if (scroll < 0) scroll = 0; if (scroll > d->nbutton - 10) scroll = d->nbutton > 10 ? d->nbutton - 10 : 0; }
@@ -4057,7 +4128,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
         }
         cc_present(rd, tx);
     }
-    if (text_on) SDL_StopTextInput();
+    if (text_on) SDL_StopTextInput(g_win);
 }
 
 static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
@@ -4089,9 +4160,9 @@ static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         cc_text(0, 440, "ABORT", white);
         f++;
         if (headless) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } }
-        else while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) done = 1;
-            if (e.type == SDL_MOUSEBUTTONDOWN) { mx = e.button.x; my = e.button.y; }
+        else while (shell_poll(&e)) {
+            if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE)) done = 1;
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) { mx = e.button.x; my = e.button.y; }
         }
         if (mx >= 0 && mx < 172) {
             if (my >= 154 && my < 154 + 11 * CC_DEVICES) {   /* 0x1f6a0: a driver that is there, not the keyboard; at most 4 */
@@ -4136,24 +4207,26 @@ static int gm_script_event(const char **sp, SDL_Event *e)
     while (*s == ';' || *s == ' ') s++;
     if (!*s) return 0;
     memset(e, 0, sizeof *e);
-    if (s[0] == 'm' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_MOUSEMOTION; e->motion.x = x; e->motion.y = y; }
-    else if (s[0] == 'l' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_MOUSEBUTTONDOWN; e->button.button = SDL_BUTTON_LEFT; e->button.x = x; e->button.y = y; }
-    else if (s[0] == 'r') { e->type = SDL_MOUSEBUTTONDOWN; e->button.button = SDL_BUTTON_RIGHT; }
-    else if (s[0] == 't') {   /* typed text (SDL_TEXTINPUT), up to the ';' */
+    if (s[0] == 'm' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_EVENT_MOUSE_MOTION; e->motion.x = x; e->motion.y = y; }
+    else if (s[0] == 'l' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_EVENT_MOUSE_BUTTON_DOWN; e->button.button = SDL_BUTTON_LEFT; e->button.x = x; e->button.y = y; }
+    else if (s[0] == 'r') { e->type = SDL_EVENT_MOUSE_BUTTON_DOWN; e->button.button = SDL_BUTTON_RIGHT; }
+    else if (s[0] == 't') {   /* typed text (SDL_EVENT_TEXT_INPUT), up to the ';' */
+        static char text[32];   /* SDL3's text event points at its text (SDL2's held 32 bytes) */
         size_t n = 0;
-        e->type = SDL_TEXTINPUT;
-        while (s[1 + n] && s[1 + n] != ';' && n < sizeof e->text.text - 1) { e->text.text[n] = s[1 + n]; n++; }
-        e->text.text[n] = 0;
+        e->type = SDL_EVENT_TEXT_INPUT;
+        while (s[1 + n] && s[1 + n] != ';' && n < sizeof text - 1) { text[n] = s[1 + n]; n++; }
+        text[n] = 0;
+        e->text.text = text;
     }
     else if (s[0] == 'k' && sscanf(s + 1, "%15s", name) == 1) {
         static const struct { const char *n; SDL_Keycode k; } K[] = {{"up", SDLK_UP}, {"down", SDLK_DOWN}, {"left", SDLK_LEFT}, {"right", SDLK_RIGHT},
-            {"kp8", SDLK_KP_8}, {"kp2", SDLK_KP_2}, {"kp4", SDLK_KP_4}, {"kp6", SDLK_KP_6}, {"enter", SDLK_RETURN}, {"esc", SDLK_ESCAPE}, {"x", SDLK_x},
+            {"kp8", SDLK_KP_8}, {"kp2", SDLK_KP_2}, {"kp4", SDLK_KP_4}, {"kp6", SDLK_KP_6}, {"enter", SDLK_RETURN}, {"esc", SDLK_ESCAPE}, {"x", SDLK_X},
             {"backspace", SDLK_BACKSPACE}, {"kpenter", SDLK_KP_ENTER}};
         size_t k;
         char *c = strchr(name, ';');
         if (c) *c = 0;
-        e->type = SDL_KEYDOWN;
-        for (k = 0; k < sizeof K / sizeof K[0]; k++) if (strcmp(name, K[k].n) == 0) e->key.keysym.sym = K[k].k;
+        e->type = SDL_EVENT_KEY_DOWN;
+        for (k = 0; k < sizeof K / sizeof K[0]; k++) if (strcmp(name, K[k].n) == 0) e->key.key = K[k].k;
     }
     while (*s && *s != ';') s++;
     *sp = s;
@@ -4165,22 +4238,17 @@ static int gm_script_event(const char **sp, SDL_Event *e)
  * press (0x377b0) */
 static int menu_opens(const SDL_Event *e)
 {
-    return (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE) ||
-           (e->type == SDL_MOUSEBUTTONDOWN && e->button.button == SDL_BUTTON_RIGHT);
+    return (e->type == SDL_EVENT_KEY_DOWN && e->key.key == SDLK_ESCAPE) ||
+           (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_RIGHT);
 }
 /* the pointer in the 640x480 frame (the screens' own copies go stale while a sub-screen polls the events) */
 static void pointer_now(SDL_Renderer *rd, int *x, int *y)
 {
-#if SDL_VERSION_ATLEAST(2, 0, 18)
-    int wx, wy;
-    float lx, ly;
+    float wx, wy, lx, ly;
     if (!rd || !g_win || !(SDL_GetWindowFlags(g_win) & SDL_WINDOW_MOUSE_FOCUS)) return;
     SDL_GetMouseState(&wx, &wy);
-    SDL_RenderWindowToLogical(rd, wx, wy, &lx, &ly);
+    SDL_RenderCoordinatesFromWindow(rd, wx, wy, &lx, &ly);
     *x = (int)lx; *y = (int)ly;
-#else
-    (void)rd; (void)x; (void)y;
-#endif
 }
 
 /* the global menu (FUN_000258e0): the screen is kept (0x3e310) and the panel, shell image 7 (DATABASE entry 6), drawn at
@@ -4239,18 +4307,18 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
             }
             break;
         }
-        while (!done && choose < 0 && (script ? gm_script_event(&script, &e) : SDL_PollEvent(&e))) {
-            if (e.type == SDL_QUIT) { result = -3; done = 1; }
-            if (e.type == SDL_MOUSEMOTION) { int h; px = e.motion.x; py = e.motion.y; if ((h = gm_hit(px, py)) >= 0) sel = h; }
-            if (e.type == SDL_KEYDOWN) {
-                SDL_Keycode k = e.key.keysym.sym;
+        while (!done && choose < 0 && (script ? gm_script_event(&script, &e) : shell_poll(&e))) {
+            if (e.type == SDL_EVENT_QUIT) { result = -3; done = 1; }
+            if (e.type == SDL_EVENT_MOUSE_MOTION) { int h; px = e.motion.x; py = e.motion.y; if ((h = gm_hit(px, py)) >= 0) sel = h; }
+            if (e.type == SDL_EVENT_KEY_DOWN) {
+                SDL_Keycode k = e.key.key;
                 if (k == SDLK_ESCAPE) done = closed = 1;
                 else if (k == SDLK_UP || k == SDLK_LEFT || k == SDLK_KP_8 || k == SDLK_KP_4) sel = (sel + 5) % 6;
                 else if (k == SDLK_DOWN || k == SDLK_RIGHT || k == SDLK_KP_2 || k == SDLK_KP_6) sel = (sel + 1) % 6;
                 else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) choose = sel;
             }
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) done = closed = 1;
-            else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT) done = closed = 1;
+            else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                 int h = gm_hit(e.button.x, e.button.y);
                 px = e.button.x; py = e.button.y;
                 if (h >= 0) { sel = h; choose = h; } else done = closed = 1;
@@ -4272,7 +4340,7 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
         }
         if (!done && !headless) {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -4362,11 +4430,11 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
         int hover = -1;
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0003d980 / FUN_00037a50 -> 0x258e0 */
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     if (x >= 5 && x <= 57 && y >= 149 && y <= 440) next = 1;
                     for (i = 0; i < 6; i++)
@@ -4407,7 +4475,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         if (headless) { if (f >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(66);
         }
     }
@@ -4527,16 +4595,16 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         for (i = 0; i < 4; i++) if (en[i] && *mx >= hs[i][0] && *mx <= hs[i][2] && *my >= hs[i][1] && *my <= hs[i][3]) hover = i;
         if (!headless) {
             SDL_Event e;
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00027160 calls 0x258e0 before its own keys */
-                if (e.type == SDL_KEYDOWN) {
-                    if ((e.key.keysym.sym == SDLK_DOWN || e.key.keysym.sym == SDLK_PAGEDOWN) && en[2]) sub++;
-                    if ((e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_PAGEUP) && en[1]) sub--;
-                    if (e.key.keysym.sym == SDLK_HOME || e.key.keysym.sym == SDLK_BACKSPACE) back = 1;   /* Home (0x8047) = BACK */
+                if (e.type == SDL_EVENT_KEY_DOWN) {
+                    if ((e.key.key == SDLK_DOWN || e.key.key == SDLK_PAGEDOWN) && en[2]) sub++;
+                    if ((e.key.key == SDLK_UP || e.key.key == SDLK_PAGEUP) && en[1]) sub--;
+                    if (e.key.key == SDLK_HOME || e.key.key == SDLK_BACKSPACE) back = 1;   /* Home (0x8047) = BACK */
                 }
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y, h = -1;
                     for (i = 0; i < 4; i++) if (en[i] && x >= hs[i][0] && x <= hs[i][2] && y >= hs[i][1] && y <= hs[i][3]) h = i;
                     if (h == 0) next = 1;                                   /* EXIT: the hall */
@@ -4603,7 +4671,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         if (headless) { if (fr >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(15);
         }
     }
@@ -4695,19 +4763,19 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         SDL_Event e;
         int hover = -1;
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y * 3;
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
+                if (e.type == SDL_EVENT_MOUSE_WHEEL) top -= e.wheel.y * 3;
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0001c080 -> 0x258e0 */
-                if (e.type == SDL_KEYDOWN) {
-                    SDL_Keycode k = e.key.keysym.sym;
+                if (e.type == SDL_EVENT_KEY_DOWN) {
+                    SDL_Keycode k = e.key.key;
                     if (k == SDLK_DOWN) top++;
                     if (k == SDLK_UP) top--;
                     if (k == SDLK_PAGEDOWN) top += bh / lh - 2;
                     if (k == SDLK_PAGEUP) top -= bh / lh - 2;
                 }
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 4; i++) {
                         if (x < BRF_HS[i][0] || x > BRF_HS[i][2] || y < BRF_HS[i][1] || y > BRF_HS[i][3]) continue;
@@ -4746,7 +4814,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         if (headless) { if (f >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -4784,11 +4852,11 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
     while (!done) {
         SDL_Event e;
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) || e.type == SDL_MOUSEBUTTONDOWN) done = 1;
-                if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y * 3;
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_DOWN) top++;
-                if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_UP) top--;
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) done = 1;
+                if (e.type == SDL_EVENT_MOUSE_WHEEL) top -= e.wheel.y * 3;
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_DOWN) top++;
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_UP) top--;
             }
         } else done = 1;
         if (top > n - bh / lh) top = n - bh / lh;
@@ -4801,7 +4869,7 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
         draw_text(&g_flabel, 320 - text_width(&g_flabel, "EXIT") / 2, 455, "EXIT", (const uint8_t (*)[3])g_bg.pal, -1);
         if (!headless) {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -4896,12 +4964,12 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     while (next == -1) {
         SDL_Event e;
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_00023890 -> 0x258e0 */
-                if (e.type == SDL_MOUSEWHEEL) top -= e.wheel.y;
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_WHEEL) top -= e.wheel.y;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 3; i++) {
                         if (x < DEB_HS[i][0] || x > DEB_HS[i][2] || y < DEB_HS[i][1] || y > DEB_HS[i][3]) continue;
@@ -4941,7 +5009,7 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         if (headless) { if (f >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -5004,23 +5072,23 @@ static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const c
             draw_text(&g_fthin, cx - text_width(&g_fthin, btn[i]) / 2, 276 - font_height(&g_fthin) / 2, btn[i], pal, -1);
         }
         if (headless) { chosen = def; break; }
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) chosen = def;
-            if (e.type == SDL_KEYDOWN) {
-                SDL_Keycode k = e.key.keysym.sym;
+        while (shell_poll(&e)) {
+            if (e.type == SDL_EVENT_QUIT) chosen = def;
+            if (e.type == SDL_EVENT_KEY_DOWN) {
+                SDL_Keycode k = e.key.key;
                 if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_ESCAPE) chosen = def;
                 else for (i = 0; i < nb; i++) if (toupper((unsigned char)btn[i][0]) == toupper((int)k & 0x7f)) chosen = i;
                 if (nb == 0) chosen = 0;
             }
-            if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 int hit = -1;
                 for (i = 0; i < nb; i++) { int cx = 320 - 30 * (nb - 1) + 61 * i; if (e.button.x >= cx - 26 && e.button.x <= cx + 26 && e.button.y >= 263 && e.button.y <= 289) hit = i; }
-                if (e.type == SDL_MOUSEBUTTONDOWN) pressed = hit;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) pressed = hit;
                 else { if (hit >= 0 && hit == pressed) chosen = hit; pressed = -1; }
             }
         }
         SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-        SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+        SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
         SDL_Delay(10);
     }
     if (saved && !headless) { memcpy(g_fb, saved, sizeof g_fb); g_ntext = n0; }
@@ -5046,9 +5114,9 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
 {
     int next = -1, f = 0, i, reg, cheat;
     smk *grid, *tbl = NULL;   /* MECH LAB: the holotable clip, then the lab */
-    Uint32 tlast = 0;
+    Uint64 tlast = 0;
     int tdone = 0;
-    Uint32 last = 0;
+    Uint64 last = 0;
     reg_load();
     reg = reg_selected(clan);
     if (reg < 0) return 12;
@@ -5059,11 +5127,11 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
         SDL_Event e;
         int hover = -1, trial = campaign_is_trial(clan, g_reg[reg].rank);
         if (!headless) {
-            while (SDL_PollEvent(&e)) {
-                if (e.type == SDL_QUIT) { next = -3; break; }
-                if (e.type == SDL_MOUSEMOTION) { *mx = e.motion.x; *my = e.motion.y; }
+            while (shell_poll(&e)) {
+                if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
+                if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0003d980 / FUN_00037a50 -> 0x258e0 */
-                if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 4; i++) {
                         const rr_hs *h = &RR_HS[clan][i];
@@ -5098,16 +5166,16 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
         }
         draw_bg();
         if (grid) {
-            Uint32 now = SDL_GetTicks();
-            if (headless || now - last >= (Uint32)smk_frame_ms(grid) || f == 0) {
+            Uint64 now = SDL_GetTicks();
+            if (headless || now - last >= (Uint64)smk_frame_ms(grid) || f == 0) {
                 smk_next(grid);
                 last = now;
             }
             if (grid) blit_smk(grid, clan == 1 ? 277 : 303, clan == 1 ? 341 : 329);
         }
         if (tbl) {   /* the holotable clip plays once; the lab opens when it ends */
-            Uint32 now = SDL_GetTicks();
-            if (now - tlast >= (Uint32)smk_frame_ms(tbl)) {
+            Uint64 now = SDL_GetTicks();
+            if (now - tlast >= (Uint64)smk_frame_ms(tbl)) {
                 tlast = now;
                 if (tdone) { smk_close(tbl); tbl = NULL; shell_sound_stop(0x64); next = 9; }
                 else { int fi = smk_next(tbl); if (fi < 0 || fi >= smk_frames(tbl) - 1) tdone = 1; }   /* the last frame shown once */
@@ -5131,7 +5199,7 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
         if (headless) { if (f >= frames) next = -2; }
         else {
             SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-            SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+            SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
             SDL_Delay(10);
         }
     }
@@ -5212,7 +5280,7 @@ static int ask_game_folder(portcfg *c, const char *exe_dir)
             "%s is not a MechWarrior 2 game folder.\n\n"
             "Choose the MW2-game folder itself (the one with install, cd, 3d ... inside - see FOLDER_SETUP.md), "
             "or the folder that holds it.", pick);
-        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "MechWarrior 2", m, NULL) != 0) return -1;   /* no way to tell: stop */
+        if (!SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "MechWarrior 2", m, NULL)) return -1;   /* no way to tell: stop */
     }
     c->game[0] = 0; c->install[0] = 0; c->cd[0] = 0; c->models[0] = 0; c->textures[0] = 0;
     snprintf(c->game, sizeof c->game, "%s", game);
@@ -5242,17 +5310,16 @@ int main(int argc, char **argv)
 #ifdef MW2_ONE_BINARY
     if (argc >= 2 && strcmp(argv[1], "--sim") == 0) return glview_main(argc - 1, argv + 1);   /* the simulation */
     snprintf(g_exe_path, sizeof g_exe_path, "%s", argv[0]);
-    if (!strchr(argv[0], '/')) { char *bp = SDL_GetBasePath(); snprintf(g_exe_path, sizeof g_exe_path, "%s%s", bp ? bp : "./", argv[0]); SDL_free(bp); }
+    if (!strchr(argv[0], '/')) { const char *bp = SDL_GetBasePath(); snprintf(g_exe_path, sizeof g_exe_path, "%s%s", bp ? bp : "./", argv[0]); }
 #ifdef _WIN32
     mw2_exe_path(g_exe_path, sizeof g_exe_path);   /* argv[0] may be relative, or lack .exe */
 #endif
 #endif
     char p[700];
     {   /* the configuration: the per-user file; the game folder from the command line or found and remembered */
-        char *bp = SDL_GetBasePath();
+        const char *bp = SDL_GetBasePath();
         int had_game, picked = 0;
         snprintf(g_exe_dir, sizeof g_exe_dir, "%s", bp ? bp : "./");
-        SDL_free(bp);
         portcfg_load(NULL, &g_cfg);
         had_game = g_cfg.game[0] || g_cfg.install[0];
         if (argc < 2 && g_cfg.game[0] && !portcfg_is_game_dir(g_cfg.game)) {   /* the remembered folder is gone: look again */
@@ -5363,7 +5430,7 @@ int main(int argc, char **argv)
         printf("%d designs, %d over their tonnage\n", cnt, over);
         return over != 0;
     }
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0 && SDL_Init(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) && !SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     g_sfx = sfx_create(NULL);
     {   /* menu music: the MT-32 (its ROMs in the game folder's mt32/, mt32= or MW2_MT32), else Gravis UltraSound
          * patches if they are there (ultrasnd= / ULTRADIR / MW2_ULTRASND) - no longer asked for */
@@ -5386,28 +5453,50 @@ int main(int argc, char **argv)
     }
     if (!headless) {
         portcfg pc;
-        Uint32 wf = SDL_WINDOW_RESIZABLE;
+        SDL_WindowFlags wf = SDL_WINDOW_RESIZABLE;
+        SDL_PropertiesID wp = SDL_CreateProperties();
         portcfg_load(g_dir, &pc);
-        if (pc.mode == 0) wf |= SDL_WINDOW_FULLSCREEN_DESKTOP;        /* native fullscreen (default); the 640x480 art letterboxed */
-        else if (pc.mode == 2) wf |= SDL_WINDOW_FULLSCREEN_DESKTOP;   /* the shell's art is 640x480: the desktop mode serves it */
-        win = g_win = SDL_CreateWindow("MechWarrior 2", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, W * 2, H * 2, wf);
-        /* port: text input off - SDL2 starts it with the video and sdl2-compat on every new window; on macOS it passes
-         * the keys through the input method (the press-and-hold accent picker). Only the roster's pilot name turns it
-         * on, while it is typed (run_roster) */
-        SDL_StopTextInput();
-        rd = SDL_CreateRenderer(win, -1, SDL_RENDERER_PRESENTVSYNC);
-        SDL_RenderSetLogicalSize(rd, W, H);
-        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");   /* the artwork smoothly scaled; the text sharp, at full resolution */
-        tx = SDL_CreateTexture(rd, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, W, H);
+        if (pc.mode == 0) wf |= SDL_WINDOW_FULLSCREEN;   /* native fullscreen (default; SDL3: the desktop's mode); the 640x480 art letterboxed */
+        else if (pc.mode == 2) wf |= SDL_WINDOW_FULLSCREEN;   /* the shell's art is 640x480: the desktop mode serves it */
+        SDL_SetStringProperty(wp, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "MechWarrior 2");
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, W * 2);
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, H * 2);
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64)wf);
+        win = g_win = SDL_CreateWindowWithProperties(wp);
+        SDL_DestroyProperties(wp);
+        /* port: text input off - on macOS it passes the keys through the input method (the press-and-hold accent
+         * picker); SDL2 started it with the video, SDL3 only when asked. Only the roster's pilot name turns it on, while
+         * it is typed (run_roster) */
+        if (win) SDL_StopTextInput(win);
+        /* the menus through the same GPU interface as the simulation (mw2port.cfg gpu=, rb.h): SDL's Direct3D 12 or Vulkan
+         * renderer on Windows, Vulkan on Linux, Metal on macOS - the other one, then SDL's software renderer, if it can't start */
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER,
+#if defined(_WIN32)
+                    pc.gpu == PORTCFG_GPU_VULKAN ? "vulkan,direct3d12,software" : "direct3d12,vulkan,software"
+#elif defined(__APPLE__)
+                    "metal,software"
+#else
+                    "vulkan,software"
+#endif
+                    );
+        rd = win ? SDL_CreateRenderer(win, NULL) : NULL;
+        if (rd) SDL_SetRenderVSync(rd, 1);
+        fprintf(stderr, "mw2: menus drawn with SDL's %s renderer\n", rd ? SDL_GetRendererName(rd) : "(no)");
+        tx = rd ? SDL_CreateTexture(rd, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, W, H) : NULL;
         g_rd = rd; g_tx = tx;
-        if (!getenv("MW2_TEXT_SMOOTH")) {
+        if (rd && !getenv("MW2_TEXT_SMOOTH")) {
             /* the Win9x look: the 640 x 480 screen scaled by whole pixels with no filtering (the art and the text in the
              * frame stay sharp), centred */
-            SDL_SetTextureScaleMode(tx, SDL_ScaleModeNearest);
-            SDL_RenderSetIntegerScale(rd, SDL_TRUE);
+            SDL_SetTextureScaleMode(tx, SDL_SCALEMODE_NEAREST);
+            SDL_SetRenderLogicalPresentation(rd, W, H, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
+        } else if (rd) {   /* the artwork smoothly scaled (SDL2's RENDER_SCALE_QUALITY 1), letterboxed */
+            SDL_SetTextureScaleMode(tx, SDL_SCALEMODE_LINEAR);
+            SDL_SetRenderLogicalPresentation(rd, W, H, SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
         g_text_hires = rd != NULL;
-        { char *bp = SDL_GetBasePath(); ttext_init(bp); SDL_free(bp); }
+        { const char *bp = SDL_GetBasePath(); ttext_init(bp); }
     }
     if (getenv("MW2_SHELL_LAB_EDIT")) {   /* tests: the editor on the slot's (or the Mad Dog's) design */
         char saved[16] = "";
@@ -5451,7 +5540,7 @@ int main(int argc, char **argv)
     }
     if (getenv("MW2_SHELL_CV_LIVE") && rd) combat_variables(rd, tx, 0);
     if (getenv("MW2_SHELL_MENU_LIVE") && rd) { load_bg(g_bg_entry < 0 ? 0 : g_bg_entry); global_menu(rd, tx, 0, mx, my); }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */
-    if (!g_text_hires) { char *bp = SDL_GetBasePath(); ttext_init(bp); SDL_free(bp); }
+    if (!g_text_hires) { const char *bp = SDL_GetBasePath(); ttext_init(bp); }
     if (getenv("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_LOADING_SHOT")) { loading_screen(0); running = 0; }   /* tests */
@@ -5465,10 +5554,10 @@ int main(int argc, char **argv)
             if (screen != cur) { g_from_screen = cur == -99 && getenv("MW2_SHELL_FROM") ? atoi(getenv("MW2_SHELL_FROM")) : cur; cur = screen; }   /* tests: MW2_SHELL_FROM = the screen before the first */
         }
         smk *ov = NULL, *xov[8] = {0};
-        Uint32 xlast[8] = {0};
+        Uint64 xlast[8] = {0};
         const char *pending_video = NULL;
         int next = -1, nclan = clan, f = 0;
-        Uint32 last = SDL_GetTicks();
+        Uint64 last = SDL_GetTicks();
         apply_music(screen, clan);   /* main 0x36700 applies the screen's music first - the cinematic screens 15 / 16 stop it */
         if (screen == 16) {   /* the ending (mend / mend2), then the clan hall */
             play_cinematic(rd, tx, clan == 1 ? "MEND2" : "MEND", headless);
@@ -5592,16 +5681,16 @@ int main(int argc, char **argv)
             SDL_Event e;
             int i, hover = -1;
             if (!headless) {
-                while (SDL_PollEvent(&e)) {
-                    if (e.type == SDL_QUIT) running = 0;
-                    if (e.type == SDL_MOUSEMOTION) { mx = e.motion.x; my = e.motion.y; }
+                while (shell_poll(&e)) {
+                    if (e.type == SDL_EVENT_QUIT) running = 0;
+                    if (e.type == SDL_EVENT_MOUSE_MOTION) { mx = e.motion.x; my = e.motion.y; }
                     if (menu_opens(&e)) {   /* the global menu (FUN_000258e0: the title 0x2a410, the clan hall 0x1dbe0, ...) */
                         int r = global_menu(rd, tx, headless, mx, my);
                         if (r == -3) running = 0;
                         else if (r >= 0) { next = r; nclan = 2; }
                         continue;
                     }
-                    if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                         int bx = e.button.x, by = e.button.y;
                         if (sd) {
                             for (i = 0; i < sd->nhs; i++)
@@ -5620,16 +5709,16 @@ int main(int argc, char **argv)
             }
             draw_bg();
             if (ov) {   /* overlay at its own frame rate */
-                Uint32 now = SDL_GetTicks();
-                if (headless || now - last >= (Uint32)smk_frame_ms(ov) || f == 0) { smk_next(ov); last = now; }
+                Uint64 now = SDL_GetTicks();
+                if (headless || now - last >= (Uint64)smk_frame_ms(ov) || f == 0) { smk_next(ov); last = now; }
                 blit_smk(ov, sd->sx, sd->sy);
             }
             if (sd) {   /* the screen's looping clips (clan halls) */
                 int q;
-                Uint32 now = SDL_GetTicks();
+                Uint64 now = SDL_GetTicks();
                 for (q = 0; q < sd->nov && q < 8; q++) {
                     if (!xov[q]) continue;
-                    if (headless || now - xlast[q] >= (Uint32)smk_frame_ms(xov[q]) || f == 0) {
+                    if (headless || now - xlast[q] >= (Uint64)smk_frame_ms(xov[q]) || f == 0) {
                         smk_next(xov[q]);   /* loops by itself */
                         xlast[q] = now;
                     }
@@ -5665,7 +5754,7 @@ int main(int argc, char **argv)
                 }
             } else {
                 SDL_UpdateTexture(tx, NULL, g_fb, W * 3);
-                SDL_RenderClear(rd); SDL_RenderCopy(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
+                SDL_RenderClear(rd); SDL_RenderTexture(rd, tx, NULL, NULL); text_layer_draw(rd); SDL_RenderPresent(rd);
                 SDL_Delay(10);
             }
         }

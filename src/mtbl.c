@@ -276,7 +276,10 @@ void mtbl_logic_step(mtbl_logic *ml, int32_t now, const mtbl_world *w)
         }
         if (all) ml->result[t] = 2;
         else if (failed) ml->result[t] = 3;
-        else if ((int32_t)ml->tables[t].time_limit > 0 && (int64_t)now >= (int64_t)(int32_t)ml->tables[t].time_limit * 1000) ml->result[t] = 4;   /* signed: -1 = none */
+        /* the time limit (0x1000a9b0: limit <= now_s - star start, now_s = clock / 181; DOS 0x16e80 the same, clock / 182): the star's
+         * start (+4) is -1 from the load (0x1003f97e; DOS 0x4d10e) and set to the clock only by 0x1000acd0 in a network
+         * game (DAT_1024ffcc) - so in single play the elapsed time counts one second more: out of time at limit - 1 s */
+        else if ((int32_t)ml->tables[t].time_limit > 0 && (int64_t)(now / 1000) + 1 >= (int64_t)(int32_t)ml->tables[t].time_limit) ml->result[t] = 4;   /* signed: -1 = none */
         if (ml->result[t]) ml->result_time[t] = now;
     }
     pick_current(ml);

@@ -4,7 +4,7 @@ A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt 
 MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
 the game (see "Setting up the game folder").
 
-## Status (2026-10-30, v1.0.2)
+## Status (2026-11-03, v1.1.0 in testing)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM and a Windows zip.
 
@@ -19,6 +19,8 @@ a Linux tarball, a Fedora RPM and a Windows zip.
   ground) or TITANIUM (with the Titanium disc's files, its own models and lighting). Each look follows its own edition's
   code: the DOS look's cockpit and HUD match DOSBox pixel for pixel; the 3D looks draw, filter and light their textures
   as their editions did (the Rendition look from the code only - no hardware to compare with).
+- **Graphics (from v1.1.0):** drawn through SDL3's GPU API - Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal
+  on macOS (OpenGL is no longer used; see "System requirements").
 - **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
   MT-32 emulator or Gravis UltraSound patches (the GUS synth follows the original ULTRA.MDI driver).
 - **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
@@ -26,43 +28,60 @@ a Linux tarball, a Fedora RPM and a Windows zip.
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 264 of them) and
+AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 270 of them) and
 `make sweep` (every mission's objectives).
 
 ## System requirements
 
-The game draws with **OpenGL 3.3**, so it needs a graphics card and driver that support it:
+The game draws through SDL3's GPU API, so it needs a graphics card and driver for one of these:
 
-| Vendor | Minimum |
-|---|---|
-| NVIDIA | GeForce 8 series (8600 / 8800, 2007) or newer |
-| AMD / ATI | Radeon HD 2000 series (HD 2400 / 2600 / 2900, 2007) or newer |
-| Intel | Windows: HD Graphics 2500 / 4000 (Ivy Bridge, 3rd-gen Core, 2012) or newer. Linux (Mesa): Sandy Bridge (2nd-gen Core, 2011) or newer |
-| Apple | Any Mac that runs a supported macOS (Apple's OpenGL 4.1) |
+| System | Graphics interface | Minimum |
+|---|---|---|
+| Windows 10 / 11 | **Direct3D 12** (the default) or **Vulkan** - Combat Variables (the RESOLUTION row's right half) or `gpu=` in mw2port.cfg; if the chosen one can't start, the other is used | Direct3D 12 feature level 11_0: NVIDIA GeForce GTX 600 series (Kepler, 2012) or newer, AMD Radeon HD 7700 series (GCN, 2012) or newer, Intel HD Graphics 4200-5200 (Haswell, 4th-gen Core, 2013) or newer. Vulkan 1.0: NVIDIA GeForce GTX 600 or newer, AMD Radeon HD 7700 or newer, Intel HD Graphics 500 (Skylake, 6th-gen Core, 2015) or newer |
+| Linux | **Vulkan** | Vulkan 1.0 with `VK_KHR_swapchain` and `VK_KHR_maintenance1`, and the features independentBlend, imageCubeArray and sampleRateShading - every desktop Vulkan driver: NVIDIA GeForce GTX 600 or newer, AMD Radeon HD 7700 (GCN) or newer (Mesa's RADV), Intel Broadwell (5th-gen Core) or newer (Mesa's ANV; Ivy Bridge / Haswell through Mesa's hasvk, untested). Needs the Vulkan loader (`libvulkan1` / `vulkan-loader`) and the driver (`mesa-vulkan-drivers`, or NVIDIA's) |
+| macOS | **Metal** | macOS 10.14 or newer on a Metal GPU (Apple Silicon, or an Intel Mac from 2012 on). The release build is for Apple Silicon |
 
-Older cards such as the GeForce 6 / 7 series (e.g. the 7600) and Radeon X1000 series stop at OpenGL 2.1 and can't run
-it. On Windows, install the card maker's driver: Windows' basic display driver has no OpenGL 3.3. A grey sky and ground
-with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
+Older cards - the GeForce 8 to 500 series, Radeon HD 2000 to 6000, Intel before Haswell (Windows) - can't run it.
+On Windows, install the card maker's driver: Windows' basic display driver has neither Direct3D 12 nor Vulkan. When
+neither starts, the game says so in a message box; on Linux, `vulkaninfo --summary` (package vulkan-tools) shows the
+Vulkan drivers installed. The game prints which interface it started (`gpu: Vulkan (...)` on stdout). These minimums
+are with SDL3 3.4 (the release builds); built against an older SDL3, Vulkan also needs depthClamp, shaderClipDistance and
+drawIndirectFirstInstance, Direct3D 12 resource binding tier 2 (no Haswell / Broadwell) and Metal a Mac2-family GPU. A grey sky and
+ground with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
 
-An OpenGL 2.1 renderer for those older cards is something I plan to look at later; no promises on timing.
+The renderer sits behind a small interface (src/rb.h), so an OpenGL 2.1 renderer for older PCs can be added later -
+something I plan to look at; no promises on timing.
 
 ## Build
-Needs a C99 compiler, make, SDL2 (development files) and OpenGL 3.3.
+Needs a C99 compiler, make, pkg-config and SDL3 3.2.0 or newer (development files; SDL3 brings its GPU API's Direct3D 12,
+Vulkan and Metal backends and loads them at run time - no graphics headers or libraries to install). SDL3 is found
+with `pkg-config sdl3`. The shaders are compiled into the source (src/rb_shaders.c): no shader compiler is needed; after
+changing one (shaders/), `make shaders` regenerates it (glslangValidator, spirv-cross and dxc - see
+scripts/gen_shaders.py).
 
-    macOS:                  xcode-select --install; brew install sdl2
-    Linux (Debian/Ubuntu):  sudo apt install build-essential libsdl2-dev libgl-dev
+    macOS:                  xcode-select --install; brew install sdl3 pkgconf
+    Linux (Fedora 42+):     sudo dnf install gcc gcc-c++ make pkgconf-pkg-config SDL3-devel
+    Linux (Debian 13 / Ubuntu 25.04+):  sudo apt install build-essential pkg-config libsdl3-dev
 
     make && make mw2        # the tools, then the game (mw2: menus + missions in one program)
 
+Older Linux releases (Ubuntu 24.04 and earlier) have no SDL3 package: build it from the release source
+(https://github.com/libsdl-org/SDL/releases, `SDL3-<version>.tar.gz`) with CMake - `cmake -S SDL3-<version> -B build
+-DCMAKE_INSTALL_PREFIX=$HOME/sdl3 && cmake --build build && cmake --install build` - then `make mw2 SDL3_DIR=$HOME/sdl3`
+(`SDL3_DIR` = the prefix whose `lib/pkgconfig` holds `sdl3.pc`; `PKG_CONFIG_PATH` works too). A build left over from
+the SDL2 version: `make clean` first.
+
 Windows (64-bit) builds with MinGW-w64: in MSYS2's MINGW64 shell
-(`pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2`) just `make mw2`; or cross-compile from Linux with
-the SDL2 MinGW development package (as the release workflow does):
+(`pacman -S make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-sdl3`) just `make mw2`; or
+cross-compile from Linux with the SDL3 MinGW development package (`SDL3-devel-<version>-mingw.tar.gz`, as the release
+workflow does):
 
     make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar \
-             SDL2_CONFIG=/path/to/SDL2-x.y.z/x86_64-w64-mingw32/bin/sdl2-config
+             SDL3_DIR=/path/to/SDL3-<version>/x86_64-w64-mingw32
 
-That gives `mw2.exe`; put `SDL2.dll` beside it. Only the game (`mw2`) is set up for Windows, not the other tools.
-Run `make clean` when switching between a Windows and a native build.
+That gives `mw2.exe`; put `SDL3.dll` (the package's `x86_64-w64-mingw32/bin/SDL3.dll`) beside it. Only the game
+(`mw2`) is set up for Windows, not the other tools. Run `make clean` when switching between a Windows and a native
+build.
 
 ## Setting up the game folder
 The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy.
@@ -200,10 +219,11 @@ behave as MSCDEX does.
 ## Tools
 - `glview 3DFX.PRJ ATI.PRJ ati @ CYAN` plays the mission in a Timber Wolf with the game's controls (GAMEKEY.MAP /
   INPUT.MAP, see "Customising controls"); with `MW2_DEBUG_KEYS=1` G toggles a free camera (then WASD/Q/E fly) and [ ] the fog.
-- `glview 3DFX.PRJ ATI.PRJ ati [MECH MISSION]` - interactive viewer (SDL2 + OpenGL 3.3). Drag to orbit, wheel to
+- `glview 3DFX.PRJ ATI.PRJ ati [MECH MISSION]` - interactive viewer (SDL3's GPU API). Drag to orbit, wheel to
   zoom, F fullscreen at desktop resolution, Tab mech, N mission, C camo (0-7), I clan insignia, B filtering,
-  M anti-aliasing, [ ] fog, Space walk animation; in world view P runs the mission (camera = player). Build with `make gl` (needs SDL2 dev files).
-- `glshot ... out.ppm W H` - the same renderer headless, any resolution (Linux/EGL).
+  M anti-aliasing, [ ] fog, Space walk animation; in world view P runs the mission (camera = player). Build with `make gl` (needs SDL3 dev files).
+- `glshot ... out.ppm W H` - the same renderer headless, any resolution (no window: the GPU's off-screen picture;
+  `SDL_VIDEODRIVER=offscreen` on a machine without a display).
 - Sky/ground/fog: set `MW2_SKYGND` to the 3dfx edition's skygnd.par and `MW2_SKYGND_FOG`
   to the PowerVR edition's (the only one with fog values).
 - `mechview3d 3DFX.PRJ ATI.PRJ ati TIMBRWLF JSCAMO_F L1WOLFCL out.ppm` renders a mech in
@@ -348,18 +368,19 @@ click Throttle then W and S (in the order its "+/-" shows), Chassis then A and D
 
     make dist      # dist/mw2port-linux-x86_64.tar.gz: mw2, glview, assets/, README, THIRD_PARTY.md
 
-Unpack anywhere and run `./mw2 /path/to/MW2-game` once. Needs SDL2 and OpenGL 3.3 from the system.
+Unpack anywhere and run `./mw2 /path/to/MW2-game` once. Needs SDL3 and a Vulkan driver from the system (the release
+workflow's Linux tarball carries its own `libSDL3.so.0` beside `mw2`, found through the binary's `$ORIGIN` run path).
 On macOS: `make mw2 && sh scripts/macos_app.sh` builds "MechWarrior 2.app" in the current folder, with its icon and
-SDL2 bundled inside (no Homebrew needed to run it).
+SDL3 bundled inside (no Homebrew needed to run it).
 
 ### Windows
 
-Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2.exe`, `SDL2.dll` and `assets\`
+Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2.exe`, `SDL3.dll` and `assets\`
 must stay together. Then either put your `MW2-game` folder next to `mw2.exe`, put it in your user folder
 (`C:\Users\<you>\MW2-game`), drag the folder onto `mw2.exe` once, or just start `mw2.exe` and choose the folder when
 it asks - it is remembered in
-`%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with OpenGL 3.3 (see "System requirements"), with the
-vendor's driver installed rather than Windows' basic display driver.
+`%APPDATA%\mw2port\mw2port.cfg`. Needs a graphics driver with Direct3D 12 or Vulkan (see "System requirements"), with
+the vendor's driver installed rather than Windows' basic display driver.
 
 The exe isn't code-signed, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then
 **Run anyway**.

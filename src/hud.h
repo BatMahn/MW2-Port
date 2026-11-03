@@ -1,5 +1,5 @@
 /*
- * hud.h - the cockpit HUD, drawn from the game's own SHP sprites (OpenGL 3.3 overlay).
+ * hud.h - the cockpit HUD, drawn from the game's own SHP sprites (an overlay through the render backend, rb.h).
  *
  * Sprites: SHP resources decoded with shp.c and the COCKPIT palette; the 640x480 set (names
  * ending in "6"). Layout: the CPIT record (320x200 rectangles, x2 for 640x480).
@@ -10,7 +10,7 @@
 #include "prj.h"
 
 typedef struct {
-    unsigned tex;
+    unsigned tex;                /* rb_tex (0: none) */
     int      w, h, left, top;   /* size and hotspot offset (left/top relative to the hotspot) */
     int      smooth;            /* bilinear + alpha curve (hud_sprite_smooth) */
 } hud_sprite;

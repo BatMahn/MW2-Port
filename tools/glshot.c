@@ -1,43 +1,23 @@
-/* glshot - headless OpenGL render to an image (EGL, no window needed)
+/* glshot - the world renderer headless to an image (no window: the GPU's off-screen picture, read back)
  *   glshot MODELS.PRJ TEXTURES.PRJ ati|3dfx RECORD MISSION CAMO CLAN out.ppm WIDTH HEIGHT
  *          [yaw] [pitch] [fog_density|-1 = mission's PowerVR fog] [bilinear 0/1] [msaa samples]
  * Sky/ground/fog settings: MW2_SKYGND=3dfx skygnd.par, MW2_SKYGND_FOG=PowerVR skygnd.par
  * RECORD "@" = the mission's world (all its xxxxAREn records); then optional
  *   [target_x target_z distance] after msaa (default: centre of the structures).
  *   MISSION: 4-letter code (CYAN...), CAMO: 0-7, CLAN: insignia index (0 Wolf, 1 Jade Falcon...)
+ * Headless machines: SDL_VIDEODRIVER=offscreen (the GPU device needs SDL's video subsystem for Vulkan).
  */
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GL/gl.h>
-#include <GL/glext.h>
+#include <SDL3/SDL.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "common3d.h"
 #include "glr.h"
+#include "rb.h"
 
 static world_actor *g_actors;
 static int g_actor_count;
-
-static int make_context(void)
-{
-    EGLDisplay d = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
-    EGLint ma, mi, n = 0;
-    EGLConfig c;
-    EGLContext ctx;
-    EGLint ca[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
-    EGLint cx[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
-                   EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE};
-    if (d == EGL_NO_DISPLAY || !eglInitialize(d, &ma, &mi)) return -1;
-    eglBindAPI(EGL_OPENGL_API);
-    eglChooseConfig(d, ca, &c, 1, &n);
-    ctx = eglCreateContext(d, n ? c : EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, cx);
-    if (ctx == EGL_NO_CONTEXT) return -1;
-    return eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx) ? 0 : -1;
-}
 
 int main(int argc, char **argv)
 {
@@ -47,8 +27,7 @@ int main(int argc, char **argv)
     c3d_scene sc;
     glr *r;
     glr_view v;
-    int w, h, samples, y, rc;
-    GLuint fbo_ms, fbo, rb_c, rb_d, rb_out;
+    int w, h, samples, y, rc = 0;
     unsigned char *px;
     FILE *f;
 
@@ -112,7 +91,9 @@ int main(int argc, char **argv)
         }
     }
     c3d_load_scene(ma, ta, strcmp(argv[3], "ati") == 0, argv[5], &sc);
-    if (make_context() != 0) { fprintf(stderr, "no OpenGL 3.3 core context\n"); return 1; }
+    if (!SDL_Init(SDL_INIT_VIDEO) || rb_init(NULL, RB_GPU_AUTO, samples, err, sizeof err) != 0) { fprintf(stderr, "no GPU device: %s\n", err[0] ? err : SDL_GetError()); return 1; }
+    rb_frame(w, h);   /* the picture: w x h, multisampled with samples > 1 */
+    rb_target(0);
     if (!(r = glr_create())) return 1;
     glr_set_mech(r, &m, (const uint8_t (*)[3])sc.palette, sc.slot, atoi(argv[6]), atoi(argv[7]));
     if (g_actors) {
@@ -122,16 +103,6 @@ int main(int argc, char **argv)
             free(all.parts);
         }
     }
-
-    /* multisampled target, resolved into a plain one for reading back */
-    glGenFramebuffers(1, &fbo_ms); glGenRenderbuffers(1, &rb_c); glGenRenderbuffers(1, &rb_d);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb_c); glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb_d); glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, w, h);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_ms);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb_c);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb_d);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) { fprintf(stderr, "framebuffer incomplete\n"); return 1; }
-    if (samples > 1) glEnable(GL_MULTISAMPLE);
 
     glr_default_view(&v);
     c3d_environment(r, &sc, argv[5], &v, argc > 13 ? (float)atof(argv[13]) : -1.0f);
@@ -156,28 +127,20 @@ int main(int argc, char **argv)
     if (argc > 14) v.bilinear = atoi(argv[14]);
     glr_draw(r, &v, w, h);
 
-    glGenFramebuffers(1, &fbo); glGenRenderbuffers(1, &rb_out);
-    glBindRenderbuffer(GL_RENDERBUFFER, rb_out); glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rb_out);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_ms); glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
-    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
-    px = malloc((size_t)w * (size_t)h * 4);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    rc = glGetError() != GL_NO_ERROR;
+    px = malloc((size_t)w * (size_t)h * 3);
+    if (!px) return 1;
+    rb_read_rgb(0, 0, w, h, px);   /* (resolved; GL's row order, the bottom row first) */
     f = fopen(argv[8], "wb");
     if (!f) return 1;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     for (y = h - 1; y >= 0; y--) {            /* GL rows are bottom-up */
         int x;
-        for (x = 0; x < w; x++) fwrite(px + ((size_t)y * (size_t)w + (size_t)x) * 4, 1, 3, f);
+        for (x = 0; x < w; x++) fwrite(px + ((size_t)y * (size_t)w + (size_t)x) * 3, 1, 3, f);
     }
     fclose(f);
-    printf("%s in %s (%d textures) camo %s clan %s %dx%d msaa %d fog %.6f -> %s%s\n", argv[4], argv[5], sc.textures_loaded,
-           argv[6], argv[7], w, h, samples, v.fog_density, argv[8], rc ? " (GL error!)" : "");
-    free(px); glr_destroy(r); c3d_free_scene(&sc); mech3d_free(&m);
+    printf("%s in %s (%d textures) camo %s clan %s %dx%d msaa %d fog %.6f -> %s\n", argv[4], argv[5], sc.textures_loaded,
+           argv[6], argv[7], w, h, samples, v.fog_density, argv[8]);
+    free(px); glr_destroy(r); rb_quit(); SDL_Quit(); c3d_free_scene(&sc); mech3d_free(&m);
     if (g_actors) world3d_free_actors(g_actors, g_actor_count);
     prj_close(ma); prj_close(ta);
     return rc;

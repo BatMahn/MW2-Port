@@ -1,28 +1,18 @@
 /* hud.c - see hud.h. */
 #include "hud.h"
+#include "rb.h"
+#include "rb_shaders.h"
 
-#if defined(__APPLE__)
-#define GL_SILENCE_DEPRECATION
-#include <OpenGL/gl3.h>
-#elif defined(_WIN32)
-#include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
-#else
-#define GL_GLEXT_PROTOTYPES 1
-#include <GL/gl.h>
-#include <GL/glext.h>
-#endif
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
 
 #include "shp.h"
 
-#define HUD_RING (1u << 20)   /* bytes: 65536 HUD vertices */
+#define HUD_RING (1u << 20)   /* bytes: hud_lines' batches at most this much */
 
 struct hud_s {
-    GLuint prog, vao, vbo, lvbo;   /* lvbo: hud_lines batches */
-    size_t ring_at;                /* vbo: a ring of HUD_RING bytes the draws are written along (hud_put) */
-    GLint  u_tex, u_tint, u_textured, u_smooth, u_sharp, u_flash;
+    rb_hud_draw U;         /* the program's uniforms (shaders/hud.frag: u_tint, u_flash, u_textured, u_smooth, u_sharp) */
     float  flash[4];       /* the palette flash: every HUD colour mixed toward rgb by a (hud_set_flash) */
     uint8_t pal[256][3];
     int    have_pal, vw, vh;
@@ -30,7 +20,7 @@ struct hud_s {
     float  ox0;            /* ox as hud_begin set it (hud_side moves ox to a window edge and back) */
     float  n;              /* screen pixels per sprite pixel: 1, or lines / 768 above 768 lines (the K set at the
                             * size it has at 1024 x 768, its Scale3x texture filtered linearly) */
-    GLuint font_tex, font_tex3;   /* the atlas 1:1 (whole-number scales) and Scale3x'd (in-between scales) */
+    rb_tex font_tex, font_tex3;   /* the atlas 1:1 (whole-number scales) and Scale3x'd (in-between scales) */
     int    font_h, cell_w, glyph_w[128], font_sw, font_sh;   /* font_sw / sh: atlas cell strides (1 px gutter) */
 };
 
@@ -40,48 +30,13 @@ static hud_src *g_src;
 static int      g_src_n, g_src_cap;
 static uint8_t  g_src_used[256];   /* the palette indices the loaded sprites use */
 
-static GLuint compile(GLenum t, const char *src)
-{
-    GLuint s = glCreateShader(t);
-    glShaderSource(s, 1, &src, NULL);
-    glCompileShader(s);
-    return s;
-}
-
 hud *hud_create(prj_archive *a)
 {
-    static const char *vs = "#version 330 core\nlayout(location=0) in vec2 p; layout(location=1) in vec2 uv; out vec2 t;"
-                            "void main(){ t = uv; gl_Position = vec4(p, 0.0, 1.0); }\n";
-    static const char *fs = "#version 330 core\nin vec2 t; out vec4 c; uniform sampler2D u_tex; uniform vec4 u_tint; uniform int u_textured; uniform int u_smooth; uniform float u_sharp; uniform vec4 u_flash;"
-                            /* u_sharp > 0 (the font): "sharp bilinear" - each texel a solid block, only its edges blended
-                             * over one screen pixel (u_sharp = screen pixels per texel), so 1-pixel strokes stay crisp at
-                             * any scale, as DirectDraw blitted them 1:1 */
-                            "vec2 sharp(vec2 uv){ vec2 sz = vec2(textureSize(u_tex, 0)); vec2 p = uv * sz - 0.5; vec2 i = floor(p);"
-                            " vec2 f = clamp((fract(p) - 0.5) * u_sharp + 0.5, 0.0, 1.0); return (i + f + 0.5) / sz; }"
-                            "void main(){ c = (u_textured != 0 ? texture(u_tex, u_sharp > 0.0 ? sharp(t) : t) : vec4(1.0)); if (u_smooth != 0) c.a = sqrt(c.a); c *= u_tint; if (c.a < 0.01) discard; c.rgb = mix(c.rgb, u_flash.rgb, u_flash.a); }\n";
+    /* the program: shaders/hud.vert / hud.frag (src/rb_shaders.c) - u_sharp > 0 (the font): "sharp bilinear", each
+     * texel a solid block, only its edges blended over one screen pixel, so 1-pixel strokes stay crisp at any scale */
     hud *h = calloc(1, sizeof *h);
     prj_record r;
     if (!h) return NULL;
-    h->prog = glCreateProgram();
-    glAttachShader(h->prog, compile(GL_VERTEX_SHADER, vs));
-    glAttachShader(h->prog, compile(GL_FRAGMENT_SHADER, fs));
-    glLinkProgram(h->prog);
-    h->u_tex = glGetUniformLocation(h->prog, "u_tex");
-    h->u_tint = glGetUniformLocation(h->prog, "u_tint");
-    h->u_textured = glGetUniformLocation(h->prog, "u_textured");
-    h->u_smooth = glGetUniformLocation(h->prog, "u_smooth");
-    h->u_sharp = glGetUniformLocation(h->prog, "u_sharp");
-    h->u_flash = glGetUniformLocation(h->prog, "u_flash");
-    glGenVertexArrays(1, &h->vao);
-    glGenBuffers(1, &h->vbo);
-    glBindVertexArray(h->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    glBufferData(GL_ARRAY_BUFFER, HUD_RING, NULL, GL_STREAM_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, (void *)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (void *)8);
-    glBindVertexArray(0);
     /* the COCKPIT palette (6-bit VGA values when all are < 64) */
     if (prj_read_named(a, "PAL", "COCKPIT", &r) == PRJ_OK) {
         size_t off = r.size >= 768 ? r.size - 768 : 0;
@@ -116,11 +71,8 @@ void hud_pal_color(const hud *h, int idx, float rgba[4])
 void hud_destroy(hud *h)
 {
     if (!h) return;
-    if (h->font_tex) glDeleteTextures(1, &h->font_tex);
-    if (h->font_tex3) glDeleteTextures(1, &h->font_tex3);
-    glDeleteBuffers(1, &h->vbo);
-    glDeleteVertexArrays(1, &h->vao);
-    glDeleteProgram(h->prog);
+    if (h->font_tex) rb_tex_delete(h->font_tex);
+    if (h->font_tex3) rb_tex_delete(h->font_tex3);
     free(h);
     while (g_src_n > 0) { g_src_n--; free(g_src[g_src_n].pix); free(g_src[g_src_n].mask); }
     memset(g_src_used, 0, sizeof g_src_used);
@@ -198,8 +150,7 @@ static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask,
                     if (n) { t[0] = (uint8_t)(acc[0] / n); t[1] = (uint8_t)(acc[1] / n); t[2] = (uint8_t)(acc[2] / n); }
                 }
     }
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    rb_tex_image(tex, tw, th, rgba, 0);
     free(rgba);
 }
 
@@ -212,12 +163,10 @@ int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, i
     if (prj_read_named(a, "SHP", name, &r) != PRJ_OK) return -1;
     if (shp_decode(r.data, r.size, frame, &f) != 0) { prj_record_free(&r); return -1; }
     prj_record_free(&r);
-    glGenTextures(1, &out->tex);
+    out->tex = rb_tex_new();
     upload_sprite(h, f.pix, f.mask, f.w, f.h, from, to, out->tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    rb_tex_filter(out->tex, RB_NEAREST, RB_NEAREST);
+    rb_tex_wrap(out->tex, RB_REPEAT, RB_CLAMP_TO_EDGE);
     out->w = f.w; out->h = f.h; out->left = f.left; out->top = f.top;
     if (g_src_n == g_src_cap) {
         hud_src *g = realloc(g_src, (size_t)(g_src_cap ? g_src_cap * 2 : 64) * sizeof *g);
@@ -239,7 +188,7 @@ void hud_sprite_free(hud_sprite *s)
     if (s->tex) {
         for (k = 0; k < g_src_n; k++)
             if (g_src[k].tex == s->tex) { free(g_src[k].pix); free(g_src[k].mask); g_src[k] = g_src[--g_src_n]; break; }
-        glDeleteTextures(1, &s->tex);
+        rb_tex_delete(s->tex);
     }
     memset(s, 0, sizeof *s);
 }
@@ -281,16 +230,11 @@ float hud_px_y(const hud *h, float px) { return px * h->n / h->ky; }
 
 void hud_begin(hud *h, int w, int hp)
 {
-    glViewport(0, 0, w, hp);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glUseProgram(h->prog);
-    glUniform1i(h->u_tex, 0);
-    glUniform4fv(h->u_flash, 1, h->flash);
-    glActiveTexture(GL_TEXTURE0);
-    glBindVertexArray(h->vao);
+    rb_viewport(0, 0, w, hp);
+    rb_depth_test(0);
+    rb_blend(RB_BLEND_ALPHA);
+    rb_program(RB_PROG_HUD);
+    memcpy(h->U.u_flash, h->flash, sizeof h->flash);
     h->vw = w; h->vh = hp;
     h->k = (float)hp * 4.0f / 3.0f / 640.0f;
     if ((float)w < (float)hp * 4.0f / 3.0f) h->k = (float)w / 640.0f;
@@ -299,22 +243,19 @@ void hud_begin(hud *h, int w, int hp)
     h->n = hp > 768 ? (float)hp / 768.0f : 1.0f;
 }
 
-/* one draw's vertices (x, y, u, v) written to the ring's next free part and drawn from there. Each HUD draw used to
- * rewrite the start of one small buffer, so every draw had to wait for the GPU to finish the one before (macOS: the
- * HUD took over 100 ms a frame); the ring is refilled (orphaned) when full, and its parts are written unsynchronised */
-static void hud_put(hud *h, const float *v, int nv, GLenum mode)
+/* one draw's vertices (x, y, u, v), triangles, from the frame's transient data (rb_stream: the whole frame's go up in one
+ * copy - a buffer rewritten per draw had made every draw wait for the one before, over 100 ms a frame on macOS) */
+static void hud_put(hud *h, const float *v, int nv)
 {
-    size_t bytes = (size_t)nv * 4 * sizeof(float);
+    size_t bytes = (size_t)nv * 4 * sizeof(float), off;
     void *p;
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
-    if (bytes > HUD_RING) return;
-    if (h->ring_at + bytes > HUD_RING) { glBufferData(GL_ARRAY_BUFFER, HUD_RING, NULL, GL_STREAM_DRAW); h->ring_at = 0; }
-    p = glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)h->ring_at, (GLsizeiptr)bytes,
-                         GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
-    if (p) { memcpy(p, v, bytes); glUnmapBuffer(GL_ARRAY_BUFFER); }
-    else glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)h->ring_at, (GLsizeiptr)bytes, v);
-    glDrawArrays(mode, (GLint)(h->ring_at / (4 * sizeof(float))), nv);
-    h->ring_at += bytes;
+    if (nv <= 0 || bytes > HUD_RING) return;
+    p = rb_stream(bytes, &off);
+    memcpy(p, v, bytes);
+    rb_program(RB_PROG_HUD);
+    rb_vertex(0, RB_STREAM, off);
+    rb_uniforms(0, &h->U, sizeof h->U);
+    rb_draw(0, nv);
 }
 
 /* screen-pixel quad (top-left origin) */
@@ -323,7 +264,7 @@ static void quad_px(hud *h, float x0, float y0, float x1, float y1, float u0, fl
     float X0 = x0 / (float)h->vw * 2.0f - 1.0f, X1 = x1 / (float)h->vw * 2.0f - 1.0f;
     float Y0 = 1.0f - y0 / (float)h->vh * 2.0f, Y1 = 1.0f - y1 / (float)h->vh * 2.0f;
     float v[24] = {X0, Y0, u0, v0, X1, Y0, u1, v0, X1, Y1, u1, v1, X0, Y0, u0, v0, X1, Y1, u1, v1, X0, Y1, u0, v1};
-    hud_put(h, v, 6, GL_TRIANGLES);
+    hud_put(h, v, 6);
 }
 static float sx_(const hud *h, float x) { return floorf(h->ox + x * h->k + 0.5f); }
 static float sy_(const hud *h, float y) { return floorf(y * h->ky + 0.5f); }
@@ -331,9 +272,8 @@ static float sy_(const hud *h, float y) { return floorf(y * h->ky + 0.5f); }
 void hud_end(hud *h)
 {
     (void)h;
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
-    glEnable(GL_DEPTH_TEST);
+    rb_blend(RB_BLEND_OFF);
+    rb_depth_test(1);
 }
 
 /* 640x480 virtual pixels -> clip space (keeps 4:3 centred horizontally on wide windows) */
@@ -343,7 +283,7 @@ static void quad(hud *h, float x0, float y0, float x1, float y1, float u0, float
     float X0 = (ox + x0 * k) / (float)h->vw * 2.0f - 1.0f, X1 = (ox + x1 * k) / (float)h->vw * 2.0f - 1.0f;
     float Y0 = 1.0f - y0 * ky / (float)h->vh * 2.0f, Y1 = 1.0f - y1 * ky / (float)h->vh * 2.0f;
     float v[24] = {X0, Y0, u0, v0, X1, Y0, u1, v0, X1, Y1, u1, v1, X0, Y0, u0, v0, X1, Y1, u1, v1, X0, Y1, u0, v1};
-    hud_put(h, v, 6, GL_TRIANGLES);
+    hud_put(h, v, 6);
 }
 
 /* Bind a sprite. Its texture is the Scale3x upscale of the art (sprite_upload): drawn at 1:1 it is sampled at each 3x3
@@ -351,10 +291,9 @@ static void quad(hud *h, float x0, float y0, float x1, float y1, float u0, float
  * ticks rather than blocky or uneven pixel doubling */
 static void bind_sprite(const hud *h, const hud_sprite *s, float scale)
 {
-    GLint f = s->smooth || scale * h->n > 1.01f ? GL_LINEAR : GL_NEAREST;
-    glBindTexture(GL_TEXTURE_2D, s->tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+    int f = s->smooth || scale * h->n > 1.01f ? RB_LINEAR : RB_NEAREST;
+    rb_texture(0, s->tex);
+    rb_tex_filter(s->tex, f, f);
 }
 
 void hud_draw(hud *h, const hud_sprite *s, float x, float y, const float tint[4])
@@ -362,9 +301,9 @@ void hud_draw(hud *h, const hud_sprite *s, float x, float y, const float tint[4]
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex) return;
     bind_sprite(h, s, 1.0f);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, tint ? tint : one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, tint ? tint : one, sizeof h->U.u_tint);
     {
         float X = sx_(h, x) + (float)s->left * h->n, Y = sy_(h, y) + (float)s->top * h->n;
         quad_px(h, X, Y, X + (float)s->w * h->n, Y + (float)s->h * h->n, 0, 0, 1, 1);
@@ -376,9 +315,9 @@ void hud_draw_scaled(hud *h, const hud_sprite *s, float x, float y, int k)
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex || k < 1) return;
     bind_sprite(h, s, (float)k);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, one, sizeof h->U.u_tint);
     {
         float X = sx_(h, x) + (float)s->left * h->n * (float)k, Y = sy_(h, y) + (float)s->top * h->n * (float)k;
         quad_px(h, X, Y, X + (float)s->w * h->n * (float)k, Y + (float)s->h * h->n * (float)k, 0, 0, 1, 1);
@@ -391,9 +330,9 @@ void hud_draw_f(hud *h, const hud_sprite *s, float x, float y, float k)
     if (k < 0) k = (float)h->vh / 768.0f / (float)h->n;   /* the DOS size: 1:1 at 768 lines */
     if (!s->tex || k <= 0) return;
     bind_sprite(h, s, k);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, one, sizeof h->U.u_tint);
     {
         float X = sx_(h, x) + (float)s->left * (float)h->n * k, Y = sy_(h, y) + (float)s->top * (float)h->n * k;
         quad_px(h, X, Y, X + (float)s->w * (float)h->n * k, Y + (float)s->h * (float)h->n * k, 0, 0, 1, 1);
@@ -407,9 +346,9 @@ void hud_draw_stretch_row(hud *h, const hud_sprite *s, float height_px, int bott
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex) return;
     bind_sprite(h, s, 2.0f);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, one, sizeof h->U.u_tint);
     if (height_px <= 0) height_px = (float)s->h * (float)h->vh / ((float)s->w * 0.75f);   /* the original's: the bar spans a 4:3 screen's width */
     {   /* three pieces: the bevelled end caps at their own proportions, the middle stretched (stretching the whole
          * sprite smeared the caps across the corners) */
@@ -438,9 +377,9 @@ void hud_draw_window(hud *h, const hud_sprite *s, float u0, float width, float x
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex || s->w <= 0) return;
     bind_sprite(h, s, 1.0f);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, tint ? tint : one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, tint ? tint : one, sizeof h->U.u_tint);
     {
         float X = sx_(h, x) - floorf(width * 0.5f) * (float)h->n, Y = sy_(h, y);
         quad_px(h, X, Y, X + width * (float)h->n, Y + (float)s->h * h->n, u0 / (float)s->w, 0, (u0 + width) / (float)s->w, 1);
@@ -449,19 +388,18 @@ void hud_draw_window(hud *h, const hud_sprite *s, float u0, float width, float x
 
 void hud_rect(hud *h, float x, float y, float w, float hg, const float rgba[4])
 {
-    glUniform1i(h->u_textured, 0);
-    glUniform1i(h->u_smooth, 0);
-    glUniform4fv(h->u_tint, 1, rgba);
+    h->U.u_textured = 0;
+    h->U.u_smooth = 0;
+    memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
     quad(h, x, y, x + w, y + hg, 0, 0, 1, 1);
 }
 
 void hud_poly(hud *h, const float *xy, int n, const float rgba[4])
 {
     int i, k;
-    glUniform1i(h->u_textured, 0);
-    glUniform1i(h->u_smooth, 0);
-    glUniform4fv(h->u_tint, 1, rgba);
-    glBindBuffer(GL_ARRAY_BUFFER, h->vbo);
+    h->U.u_textured = 0;
+    h->U.u_smooth = 0;
+    memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
     for (i = 1; i + 1 < n; i++) {   /* a fan of triangles, mapped as quad() maps */
         float v[12];
         const int idx[3] = {0, i, i + 1};
@@ -470,7 +408,7 @@ void hud_poly(hud *h, const float *xy, int n, const float rgba[4])
             v[k * 4 + 1] = 1.0f - xy[idx[k] * 2 + 1] * h->ky / (float)h->vh * 2.0f;
             v[k * 4 + 2] = v[k * 4 + 3] = 0;
         }
-        hud_put(h, v, 3, GL_TRIANGLES);
+        hud_put(h, v, 3);
     }
 }
 
@@ -479,17 +417,15 @@ void hud_clip(hud *h, float x, float y, float w, float hg)
     int X0 = (int)sx_(h, x), X1 = (int)sx_(h, x + w), Yt = (int)sy_(h, y), Yb = (int)sy_(h, y + hg);
     if (X1 <= X0) X1 = X0 + 1;   /* the engine's windows are inclusive: a collapsed one is still a pixel line */
     if (Yb <= Yt) Yb = Yt + 1;
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(X0, h->vh - Yb, X1 - X0, Yb - Yt);
+    rb_scissor(1, X0, h->vh - Yb, X1 - X0, Yb - Yt);
 }
-void hud_clip_off(hud *h) { (void)h; glDisable(GL_SCISSOR_TEST); }
+void hud_clip_off(hud *h) { (void)h; rb_scissor(0, 0, 0, 0, 0); }
 
 /* Whole-window colour pass: out = dst x mul + add (light amplification). Call right after hud_begin. */
 void hud_set_flash(hud *h, float r, float g, float b, float k)
 {
     h->flash[0] = r; h->flash[1] = g; h->flash[2] = b; h->flash[3] = k < 0 ? 0 : k > 1 ? 1 : k;
-    glUseProgram(h->prog);
-    glUniform4fv(h->u_flash, 1, h->flash);
+    memcpy(h->U.u_flash, h->flash, sizeof h->flash);
 }
 
 float hud_flash_level(const hud *h) { return h->flash[3]; }
@@ -498,17 +434,17 @@ void hud_tint(hud *h, int w, int hp, const float mul[3], const float add[3])
 {
     static const float none[4] = {0, 0, 0, 0};
     float m4[4] = {mul[0], mul[1], mul[2], 1}, a4[4] = {add[0], add[1], add[2], 1};
-    glUniform4fv(h->u_flash, 1, none);
-    glUniform1i(h->u_textured, 0);
-    glUniform1i(h->u_smooth, 0);
-    glBlendFunc(GL_DST_COLOR, GL_ZERO);
-    glUniform4fv(h->u_tint, 1, m4);
+    memcpy(h->U.u_flash, none, sizeof none);
+    h->U.u_textured = 0;
+    h->U.u_smooth = 0;
+    rb_blend(RB_BLEND_MUL);
+    memcpy(h->U.u_tint, m4, sizeof m4);
     quad_px(h, 0, 0, (float)w, (float)hp, 0, 0, 1, 1);
-    glBlendFunc(GL_ONE, GL_ONE);
-    glUniform4fv(h->u_tint, 1, a4);
+    rb_blend(RB_BLEND_ADD);
+    memcpy(h->U.u_tint, a4, sizeof a4);
     quad_px(h, 0, 0, (float)w, (float)hp, 0, 0, 1, 1);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glUniform4fv(h->u_flash, 1, h->flash);
+    rb_blend(RB_BLEND_ALPHA);
+    memcpy(h->U.u_flash, h->flash, sizeof h->flash);
 }
 
 int hud_layout(prj_archive *a, int rects[][4], int max)
@@ -532,9 +468,9 @@ void hud_draw_region(hud *h, const hud_sprite *s, float x, float y, float rx, fl
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex || s->w <= 0 || s->h <= 0 || rw <= 0 || rh <= 0) return;
     bind_sprite(h, s, 1.0f);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, one, sizeof h->U.u_tint);
     {
         float n = (float)h->n, X = sx_(h, x) + (float)s->left * n + rx * n, Y = sy_(h, y) + (float)s->top * n + ry * n;
         quad_px(h, X, Y, X + rw * n, Y + rh * n, rx / (float)s->w, ry / (float)s->h, (rx + rw) / (float)s->w, (ry + rh) / (float)s->h);
@@ -573,28 +509,22 @@ int hud_font_load(hud *h, prj_archive *a, const char *name)
                 atlas[dst] = 255; atlas[dst + 1] = 255; atlas[dst + 2] = 255; atlas[dst + 3] = 255;   /* white ink: the tint gives the colour */
             }
     }
-    if (h->font_tex) glDeleteTextures(1, &h->font_tex);
-    if (h->font_tex3) { glDeleteTextures(1, &h->font_tex3); h->font_tex3 = 0; }
-    glGenTextures(1, &h->font_tex);
-    glBindTexture(GL_TEXTURE_2D, h->font_tex);
+    if (h->font_tex) rb_tex_delete(h->font_tex);
+    if (h->font_tex3) { rb_tex_delete(h->font_tex3); h->font_tex3 = 0; }
+    h->font_tex = rb_tex_new();
     {   /* the atlas at the font's own size, filtered linearly and sampled "sharp bilinear" by hud_text (the
          * Windows editions blitted it 1:1 with DirectDraw; Scale3x + linear had softened the 1-pixel strokes) */
         int aw = 16 * h->font_sw, ah = 8 * h->font_sh;
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, aw, ah, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        rb_tex_image(h->font_tex, aw, ah, atlas, 0);
+        rb_tex_filter(h->font_tex, RB_LINEAR, RB_LINEAR);
+        rb_tex_wrap(h->font_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
         {   /* in-between scales: Scale3x and linear filtering keep the strokes even and bold */
             uint32_t *out = scale3x((const uint32_t *)atlas, aw, ah);
             if (out) {
-                glGenTextures(1, &h->font_tex3);
-                glBindTexture(GL_TEXTURE_2D, h->font_tex3);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, aw * 3, ah * 3, 0, GL_RGBA, GL_UNSIGNED_BYTE, out);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                h->font_tex3 = rb_tex_new();
+                rb_tex_image(h->font_tex3, aw * 3, ah * 3, out, 0);
+                rb_tex_filter(h->font_tex3, RB_LINEAR, RB_LINEAR);
+                rb_tex_wrap(h->font_tex3, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
                 free(out);
             }
         }
@@ -621,13 +551,13 @@ float hud_text(hud *h, float x, float y, const char *str, const float rgba[4])
     aw = (float)(16 * h->font_sw); ah = (float)(8 * h->font_sh);
     {   /* a whole-number scale: the 1:1 atlas, every font pixel an exact block (DirectDraw's look); else Scale3x */
         int whole = fabsf(n - floorf(n + 0.5f)) < 0.01f || !h->font_tex3;
-        glBindTexture(GL_TEXTURE_2D, whole ? h->font_tex : h->font_tex3);
-        glUniform1f(h->u_sharp, whole ? n : 0.0f);
+        rb_texture(0, whole ? h->font_tex : h->font_tex3);
+        h->U.u_sharp = whole ? n : 0.0f;
     }
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, 0);
+    h->U.u_textured = 1;
+    h->U.u_smooth = 0;
     X = floorf(X + 0.5f); Y = floorf(Y + 0.5f);   /* on the pixel grid */
-    glUniform4fv(h->u_tint, 1, rgba);
+    memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
     for (; *str; str++) {
         int c = (unsigned char)*str & 127, w = h->glyph_w[c];
         float u = (float)((c % 16) * h->font_sw), v = (float)((c / 16) * h->font_sh), gx = floorf(X + 0.5f);
@@ -635,7 +565,7 @@ float hud_text(hud *h, float x, float y, const char *str, const float rgba[4])
         quad_px(h, gx, Y, gx + (float)w * n, Y + (float)h->font_h * n, u / aw, v / ah, (u + (float)w) / aw, (v + (float)h->font_h) / ah);
         X += (float)w * n;
     }
-    glUniform1f(h->u_sharp, 0.0f);
+    h->U.u_sharp = 0.0f;
     return (X - X0) / h->k;
 }
 
@@ -643,9 +573,7 @@ void hud_sprite_smooth(hud_sprite *s, int on)
 {
     if (!s->tex) return;
     s->smooth = on;
-    glBindTexture(GL_TEXTURE_2D, s->tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, on ? GL_LINEAR : GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, on ? GL_LINEAR : GL_NEAREST);
+    rb_tex_filter(s->tex, on ? RB_LINEAR : RB_NEAREST, on ? RB_LINEAR : RB_NEAREST);
 }
 
 void hud_draw_window_v(hud *h, const hud_sprite *s, float v0, float height, float x, float y)
@@ -655,9 +583,9 @@ void hud_draw_window_v(hud *h, const hud_sprite *s, float v0, float height, floa
     if (v0 < 0) v0 = 0;
     if (v0 + height > (float)s->h) v0 = (float)s->h - height;
     bind_sprite(h, s, 1.0f);
-    glUniform1i(h->u_textured, 1);
-    glUniform1i(h->u_smooth, s->smooth);
-    glUniform4fv(h->u_tint, 1, one);
+    h->U.u_textured = 1;
+    h->U.u_smooth = s->smooth;
+    memcpy(h->U.u_tint, one, sizeof h->U.u_tint);
     {
         float X = sx_(h, x), Y = sy_(h, y);
         quad_px(h, X, Y, X + (float)s->w * h->n, Y + height * (float)h->n, 0, v0 / (float)s->h, 1, (v0 + height) / (float)s->h);
@@ -688,12 +616,12 @@ void hud_lines(hud *h, const float *seg, int n, float wpx, const float rgba[4])
         m++;
     }
     if (m) {   /* one upload and one draw for the lot (a draw per line stalled on the shared buffer) */
-        glUniform1i(h->u_textured, 0);
-        glUniform1i(h->u_smooth, 0);
-        glUniform4fv(h->u_tint, 1, rgba);
+        h->U.u_textured = 0;
+        h->U.u_smooth = 0;
+        memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
         {   /* through the ring, in parts that fit it */
             int done = 0, per = (int)(HUD_RING / (24 * sizeof(float)));
-            while (done < m) { int k = m - done < per ? m - done : per; hud_put(h, v + (size_t)done * 24, k * 6, GL_TRIANGLES); done += k; }
+            while (done < m) { int k = m - done < per ? m - done : per; hud_put(h, v + (size_t)done * 24, k * 6); done += k; }
         }
     }
     free(v);
@@ -714,10 +642,10 @@ void hud_line(hud *h, float x0, float y0, float x1, float y1, float wpx, const f
 #undef CX
 #undef CY
     v[2] = v[3] = v[6] = v[7] = v[10] = v[11] = v[14] = v[15] = v[18] = v[19] = v[22] = v[23] = 0;
-    glUniform1i(h->u_textured, 0);
-    glUniform1i(h->u_smooth, 0);
-    glUniform4fv(h->u_tint, 1, rgba);
-    hud_put(h, v, 6, GL_TRIANGLES);
+    h->U.u_textured = 0;
+    h->U.u_smooth = 0;
+    memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
+    hud_put(h, v, 6);
 }
 
 void hud_circle(hud *h, float cx, float cy, float r, float wpx, const float rgba[4])

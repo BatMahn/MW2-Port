@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *NAMES[9] = {"DEFLT", "FDEFEND", "FDESTROY", "FLEAVE", "FRECON", "LDEFEND", "LDESTROY", "LLEAVE", "LRECON"};
@@ -229,6 +230,7 @@ static int choose_manoeuvre(ai_mind *m, const ai_view *v)
 
 static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
 {
+    if (getenv("MW2_AI_MAN_TRACE")) fprintf(stderr, "aiman %p %d\n", (void *)m, man);   /* TEST ONLY: each manoeuvre start */
     m->man = man;
     m->man_ticks = 0;
     m->man_phase = 0;
@@ -411,9 +413,11 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
     default: done = 1;
     }
     if (*dist >= 0) *dist = d;
-    /* out of weapons (0x1001ea40 -> 0x10020880): a unit with a top speed (controller +0x88 != 0), unless jumping or in 6 */
+    /* out of weapons (0x1001ea40 -> 0x10020880, 0x1001ecc8..0x1001ed7d): a unit with a top speed (controller +0x88 != 0),
+     * unless jumping (+0x196), in 6 (+0x170) or fleeing (state +0x14a == 4); a manoeuvre the step above has just forced
+     * (0: 10 under 45 m) is replaced - +0x174 is not tested */
     jumping = m->man == 4 || m->man == 5 || m->man == 9 || m->man == 11;   /* +0x196 */
-    if (v->moving && v->out_of_weapons && !jumping && m->man != 6 && m->forced_man == -1) {
+    if (v->moving && v->out_of_weapons && !jumping && m->man != 6 && m->state != AI_FLEE) {
         if (ai_rand(m, 4) != 0 && m->prev_man != 5 && jets_ok(v, 40.0f)) { m->forced_man = 4; m->queue5 = 1; }   /* +0x184 = 1 */
         else {
             unsigned r2 = ai_rand(m, 2);

@@ -32,6 +32,9 @@
  *                          sky palette's 15 colours 0xE0-0xEE, 0x3c000); smooth: the same colours blended into an even
  *                          gradient. dos_sky=banded | smooth, its older name, is still read. The other renderers are not
  *                          affected)
+ *   gpu=auto | d3d12 | vulkan   (the GPU interface the simulation and the menus draw through - SDL3's GPU API: Windows
+ *                          Direct3D 12 (auto, the default) or Vulkan, each falling back to the other if it can't start;
+ *                          Linux always Vulkan, macOS always Metal - the setting is ignored there)
  *   system_shortcuts=block | allow   (macOS: block, the default, turns the system's keyboard shortcuts - Mission
  *                          Control's Ctrl+arrows, Cmd+Tab, Spotlight - off while a mission is played with the window in
  *                          front (not in the MAIN MENU or paused); allow leaves them on. Other systems: no effect)
@@ -61,7 +64,9 @@ typedef struct {
     int  hud_original;        /* hud_layout=: 0 wide (default), 1 original (the 4:3 layout centred) */
     int  dos_sky_smooth;      /* dos_shading= (dos_sky=): 0 dithered (default, the original), 1 smooth (the DOS renderer's
                                * Gouraud polygons and haze band blended) */
+    int  gpu;                 /* gpu=: PORTCFG_GPU_* (the values of rb.h's RB_GPU_*) */
 } portcfg;
+enum { PORTCFG_GPU_AUTO, PORTCFG_GPU_D3D12, PORTCFG_GPU_VULKAN };
 /* RENDITION: the Titanium edition's own renderer plugin for the Rendition Verite (plugin/zredline.dll, loaded by mercsw.dll):
  * the enhanced mix's archives beside the Titanium archive, whose textures, sky dome, ground and fog it always draws */
 enum { PORTCFG_ED_ENHANCED, PORTCFG_ED_DOS, PORTCFG_ED_3DFX, PORTCFG_ED_ATI, PORTCFG_ED_S3, PORTCFG_ED_PVR, PORTCFG_ED_MGA,

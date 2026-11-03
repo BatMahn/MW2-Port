@@ -10,8 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SDL2
-        run: brew install sdl2
+      - name: Install SDL3
+        run: brew install sdl3 pkgconf
 
       - name: Build
         run: make mw2
@@ -30,22 +30,43 @@ jobs:
           path: dist/*.zip
 
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04   # (older glibc: the tarball runs on more systems)
+    env:
+      SDL3_VERSION: 3.4.18
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libsdl2-dev libgl1-mesa-dev
+          # (libgl / libegl: SDL3's own build - its OpenGL / EGL video and render backends; the port draws through SDL's GPU
+          # API - Vulkan on Linux, loaded at run time; SDL3 carries the Vulkan headers - and its shaders are in the source)
+          sudo apt-get install -y build-essential cmake pkg-config libgl1-mesa-dev libegl1-mesa-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev libgbm-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+
+      # Ubuntu 22.04 / 24.04 have no SDL3 package: build the release from source (its video / audio backends are loaded
+      # at run time, so one build serves X11 and Wayland, PulseAudio, PipeWire and ALSA) and ship libSDL3.so.0 beside mw2
+      - name: Build SDL3
+        run: |
+          curl -sSfL -o sdl3.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL3_VERSION}/SDL3-${SDL3_VERSION}.tar.gz
+          tar xzf sdl3.tar.gz
+          cmake -S SDL3-${SDL3_VERSION} -B sdl3-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PWD/sdl3 -DCMAKE_INSTALL_LIBDIR=lib \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_STATIC=OFF
+          cmake --build sdl3-build -j$(nproc)
+          cmake --install sdl3-build
+          echo "SDL3_DIR=$PWD/sdl3" >> $GITHUB_ENV
 
       - name: Build
-        run: make mw2
+        run: make mw2 SDL3_DIR=$SDL3_DIR SDL3_LIBS="-L$SDL3_DIR/lib -lSDL3 -Wl,-rpath,\\\$\$ORIGIN"
 
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
+          readelf -d mw2 | grep -q 'RUNPATH.*\$ORIGIN'
           cp mw2 dist/MW2-Port/
+          cp -L $SDL3_DIR/lib/libSDL3.so.0 dist/MW2-Port/
           cp -r assets dist/MW2-Port/
           cp README.md THIRD_PARTY.md dist/MW2-Port/
           cd dist && tar czf MW2-Port-${{ github.ref_name }}-linux-x86_64.tar.gz MW2-Port
@@ -60,7 +81,7 @@ jobs:
     container: fedora:latest
     steps:
       - name: Install build deps
-        run: dnf install -y git rpm-build rpmdevtools gcc gcc-c++ make SDL2-devel mesa-libGL-devel
+        run: dnf install -y git rpm-build rpmdevtools gcc gcc-c++ make pkgconf-pkg-config SDL3-devel
 
       - uses: actions/checkout@v4
 
@@ -80,29 +101,27 @@ jobs:
           path: dist/*.rpm
 
   build-windows:
-    runs-on: ubuntu-24.04   # cross-compiled with MinGW-w64; ships SDL2.dll beside mw2.exe
+    runs-on: ubuntu-24.04   # cross-compiled with MinGW-w64; ships SDL3.dll beside mw2.exe
     env:
-      SDL2_VERSION: 2.32.10
+      SDL3_VERSION: 3.4.18
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install MinGW-w64 and SDL2 (MinGW development package)
+      - name: Install MinGW-w64 and SDL3 (MinGW development package)
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64 zip
-          curl -sSfL -o sdl2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-devel-${SDL2_VERSION}-mingw.tar.gz
-          tar xzf sdl2.tar.gz
-          SDL=$PWD/SDL2-${SDL2_VERSION}/x86_64-w64-mingw32
-          sed -i "s|^prefix=.*|prefix=$SDL|" $SDL/bin/sdl2-config
-          echo "SDL=$SDL" >> $GITHUB_ENV
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-x86-64 pkg-config zip
+          curl -sSfL -o sdl3.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL3_VERSION}/SDL3-devel-${SDL3_VERSION}-mingw.tar.gz
+          tar xzf sdl3.tar.gz
+          echo "SDL=$PWD/SDL3-${SDL3_VERSION}/x86_64-w64-mingw32" >> $GITHUB_ENV
 
       - name: Build
-        run: make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar SDL2_CONFIG=$SDL/bin/sdl2-config
+        run: make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar SDL3_DIR=$SDL
 
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
-          cp mw2.exe $SDL/bin/SDL2.dll dist/MW2-Port/
+          cp mw2.exe $SDL/bin/SDL3.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
           cp README.md FOLDER_SETUP.md THIRD_PARTY.md dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x64.zip MW2-Port

@@ -19,7 +19,7 @@
 #ifndef MW2_INPUTMAP_H
 #define MW2_INPUTMAP_H
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -39,7 +39,7 @@ typedef struct { int sign, device, code; } im_cond;   /* device 0 keyboard (code
  * 0x10870); its event handler (fn 0Ch) leaves the position in 0x4f2 / 0x4f4, read >> 3 (0x107b0) - a 1024 x 1024 box
  * moved 1 unit a mickey and stopped at its edges; an axis reads ((2 pos - 1024) << 16) / 1024 (0x10350). Kept here as
  * the offset from the centre, -512..511; one SDL relative-motion unit is taken as one mickey (port) */
-typedef struct { SDL_Joystick *joy; Uint32 mouse_buttons; int mouse_x, mouse_y; } im_devstate;
+typedef struct { SDL_Joystick *joy; SDL_MouseButtonFlags mouse_buttons; int mouse_x, mouse_y; } im_devstate;
 static im_devstate g_im_dev;
 #define IM_MAX_COND 8   /* conditions in a block: the sim takes 8 (0x47ed0, "chord too big" past them) */
 typedef struct { char name[40]; int ncond; im_cond c[IM_MAX_COND]; } im_rule;
@@ -350,7 +350,7 @@ static int im_uses(const inputmap *m, int d)
  * keypad's + is the PLUS key */
 static int im_action(const inputmap *m, const char *action, SDL_Keycode sym, Uint16 mod)
 {
-    int i, ctrl = (mod & KMOD_CTRL) != 0, alt = (mod & KMOD_ALT) != 0, shift = (mod & KMOD_SHIFT) != 0;
+    int i, ctrl = (mod & SDL_KMOD_CTRL) != 0, alt = (mod & SDL_KMOD_ALT) != 0, shift = (mod & SDL_KMOD_SHIFT) != 0;
     if (sym == SDLK_KP_PLUS) sym = '+';
     for (i = 0; i < m->nbinds; i++) {
         const im_bind *b = &m->binds[i];
@@ -360,7 +360,7 @@ static int im_action(const inputmap *m, const char *action, SDL_Keycode sym, Uin
 }
 
 /* an action's key is held now (with its modifiers): for actions the sim treats as held, e.g. FIRE_WEAPON_GROUP */
-static int im_action_held(const inputmap *m, const char *action, const Uint8 *ks)
+static int im_action_held(const inputmap *m, const char *action, const bool *ks)
 {
     int i, ctrl = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL], alt = ks[SDL_SCANCODE_LALT] || ks[SDL_SCANCODE_RALT];
     int shift = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
@@ -383,9 +383,9 @@ static int im_action_held(const inputmap *m, const char *action, const Uint8 *ks
 static float im_stick_shape(int ax, float v)
 {
     static float sm[8];
-    static Uint32 last[8];
+    static Uint64 last[8];
     float dz = ax == 2 ? 0.2f : 0.125f, a = v < 0 ? -v : v, y;
-    Uint32 now = SDL_GetTicks();
+    Uint64 now = SDL_GetTicks();
     int k = ax & 7;
     if (ax == 3) {   /* "Throttle" (FLTSTCK.DLL / MSJSTICK.DLL, the only drivers naming it): calibrated from its two ends
                       * (0x10540 / MSJ 0x10560): the centre between them, the ends pulled in by a fifth of the half travel,
@@ -405,7 +405,7 @@ static float im_stick_shape(int ax, float v)
         static Uint32 acc[8];
         int n;
         if (!last[k] || now - last[k] > 1000) { sm[k] = y; acc[k] = 0; last[k] = now; return y; }
-        acc[k] += (now - last[k]) * 30u; last[k] = now;
+        acc[k] += (Uint32)((now - last[k]) * 30u); last[k] = now;
         for (n = 0; acc[k] >= 1000u && n < 30; n++) { acc[k] -= 1000u; sm[k] = (2.0f * sm[k] + y) / 3.0f; }
     }
     return sm[k];
@@ -417,22 +417,22 @@ static float im_cond_axis(const im_cond *c)
     if (c->code < 100 || c->code >= 200) return 0;
     if (c->device == 1 && g_im_dev.joy) {
         int ax = c->code - 100;
-        if (ax < SDL_JoystickNumAxes(g_im_dev.joy)) v = (float)SDL_JoystickGetAxis(g_im_dev.joy, ax) / 32767.0f;
+        if (ax < SDL_GetNumJoystickAxes(g_im_dev.joy)) v = (float)SDL_GetJoystickAxis(g_im_dev.joy, ax) / 32767.0f;
         v = im_stick_shape(ax, v);
     } else if (c->device == 2) v = c->code == 100 ? (float)g_im_dev.mouse_x / 512.0f : c->code == 101 ? (float)g_im_dev.mouse_y / 512.0f : 0;   /* MOUSE.DLL 0x10350 */
     return c->sign < 0 ? -v : v;
 }
 
-static int im_cond_held(const im_cond *c, const Uint8 *ks)
+static int im_cond_held(const im_cond *c, const bool *ks)
 {
     int on;
     if (c->device != 0) {
         if (c->code >= 100 && c->code < 200) return 1;   /* an axis: the block's other conditions decide */
         if (c->device == 1 && g_im_dev.joy) {
-            if (c->code >= 200) { Uint8 h = SDL_JoystickNumHats(g_im_dev.joy) > 0 ? SDL_JoystickGetHat(g_im_dev.joy, 0) : 0;
+            if (c->code >= 200) { Uint8 h = SDL_GetNumJoystickHats(g_im_dev.joy) > 0 ? SDL_GetJoystickHat(g_im_dev.joy, 0) : 0;
                                   static const Uint8 HB[4] = {SDL_HAT_UP, SDL_HAT_RIGHT, SDL_HAT_DOWN, SDL_HAT_LEFT}; on = (h & HB[c->code - 200]) != 0; }
-            else on = c->code >= 0 && c->code < SDL_JoystickNumButtons(g_im_dev.joy) && SDL_JoystickGetButton(g_im_dev.joy, c->code);
-        } else if (c->device == 2) on = c->code > 0 && (g_im_dev.mouse_buttons & SDL_BUTTON(c->code)) != 0;
+            else on = c->code >= 0 && c->code < SDL_GetNumJoystickButtons(g_im_dev.joy) && SDL_GetJoystickButton(g_im_dev.joy, c->code);
+        } else if (c->device == 2) on = c->code > 0 && (g_im_dev.mouse_buttons & SDL_BUTTON_MASK(c->code)) != 0;
         else on = 0;
         return c->sign > 0 ? on : !on;
     }
@@ -446,7 +446,7 @@ static int im_cond_held(const im_cond *c, const Uint8 *ks)
 /* the control's axis value now: the sum over its blocks whose other conditions hold (an analog control in INPUT.MAP:
  * throttle, legs_pan_delta, torso_pan, torso_tilt, ...) on device 1 (stick) or 2 (mouse); *present = it has such a block
  * (2: and one whose other conditions hold now - the engine reads an axis only then, 0x100396e0) */
-static float im_axis(const inputmap *m, const char *control, const Uint8 *ks, int device, int *present)
+static float im_axis(const inputmap *m, const char *control, const bool *ks, int device, int *present)
 {
     int i, k;
     float v = 0;
@@ -467,7 +467,7 @@ static float im_axis(const inputmap *m, const char *control, const Uint8 *ks, in
 }
 
 /* the control is on now (any of its blocks holds) */
-static int im_held(const inputmap *m, const char *control, const Uint8 *ks)
+static int im_held(const inputmap *m, const char *control, const bool *ks)
 {
     int i, k;
     for (i = 0; i < m->nrules; i++) {
@@ -493,7 +493,7 @@ static int im_held(const inputmap *m, const char *control, const Uint8 *ks)
  * The caller resets the timer and recentres the menu axes (menu_item_reset / menu_value_reset) on a key. The axes:
  * the sum of the stick and mouse blocks whose other conditions hold. (The 3Dfx DLL compares its float control value,
  * -1..1, with -8192.0 / 8192.0 - the DOS integer limits - so there the axes never move the menu; the port takes DOS's.) */
-static SDL_Keycode im_menu_key(const inputmap *m, const Uint8 *ks, int open, int ticks, int *prev_enter, int *prev_abort)
+static SDL_Keycode im_menu_key(const inputmap *m, const bool *ks, int open, int ticks, int *prev_enter, int *prev_abort)
 {
     int en = im_held(m, "menu_enter", ks), ab = im_held(m, "menu_abort", ks);
     int en_press = en && !*prev_enter, ab_press = ab && !*prev_abort;

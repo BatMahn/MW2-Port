@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.1.0 (unreleased)
+
+- **SDL3.** The port now uses SDL3 (3.2.0 or newer) instead of SDL2 for its window, input and sound; OpenGL 3.3 is still
+  the renderer. The game looks, sounds and plays the same (all checks and picture comparisons identical).
+  - Building: macOS `brew install sdl3 pkgconf`, Fedora `SDL3-devel`, Debian 13 / Ubuntu 25.04+ `libsdl3-dev`; older
+    Linux: build SDL3 from its release source and `make mw2 SDL3_DIR=<prefix>`. Run `make clean` once after updating.
+  - Windows cross build: `make mw2 WINDOWS=1 ... SDL3_DIR=/path/to/SDL3-<version>/x86_64-w64-mingw32`; the zip ships
+    `SDL3.dll` (was `SDL2.dll`).
+  - The macOS app bundles SDL3 (no sdl2-compat any more); the Linux tarball carries its own `libSDL3.so.0`.
+- **New renderer: SDL3's GPU API replaces OpenGL.** Windows draws with Direct3D 12 (default) or Vulkan (Combat
+  Variables, the RESOLUTION row's right half, or `gpu=` in mw2port.cfg; the other is used if the chosen one can't
+  start), Linux with Vulkan, macOS with Metal. Every look renders as before (the test suite's picture checks are
+  unchanged; GL vs Vulkan differences are single-pixel edges and +-1-2 levels of filtering). The menus draw through
+  the same API. No OpenGL is linked or used any more.
+  - New minimums: Direct3D 12 feature level 11_0 or Vulkan 1.0 (GeForce GTX 600 / Radeon HD 7700 / Intel Haswell
+    (D3D12) or Skylake (Vulkan) and newer), Metal on macOS 10.14+. Older cards can't run it; a legacy OpenGL 2.1
+    renderer may be added later (the renderer sits behind src/rb.h, docs/RENDERER.md).
+  - Linux needs the Vulkan loader and a driver (libvulkan1 / vulkan-loader, mesa-vulkan-drivers or NVIDIA's).
+  - Shaders are written once (shaders/, GLSL) and checked in compiled for every API (src/rb_shaders.c);
+    `make shaders` regenerates them (glslangValidator, spirv-cross, dxc).
+- Fixes found while reviewing the Mercenaries fork, each confirmed in MechWarrior 2's own code:
+  - The torso servo sound plays only while the torso lags its aim by more than 2 degrees in the cockpit view; turning
+    the legs is silent, as in the original.
+  - Sound decoding: half- and quarter-rate sound blocks are expanded exactly as the original does.
+  - Instructor voice lines keep the Voice volume when Sound Effects is at 0 (they were silent).
+  - An AI mech out of weapons reacts at once even if another manoeuvre was just chosen, and not while fleeing.
+  - DOS look: no more sky showing through the joins of the cockpit struts.
+  - Mission time limits run out one second before the limit, and the objectives' Time Remaining matches.
+
 ## v1.0.2 (2026-10-30)
 
 - **Missing `3d/` folder** (player report: grey sky and ground, untextured models): without the 3D editions' files

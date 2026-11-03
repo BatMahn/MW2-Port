@@ -27,6 +27,15 @@ GTEST = os.environ.get('MW2_GTEST', '/tmp/gtest')
 OUT = os.environ.get('SEQ_OUT', '/tmp/mw2seq')
 TSCALE = float(os.environ.get('SEQ_TIME_SCALE', '1'))
 GLVIEW = os.path.join(REPO, 'glview')
+# Every run is headless, in one environment: SDL's offscreen video driver (its windows have a Vulkan surface - the
+# GPU picture is drawn and read back as on screen; VK_EXT_headless_surface) and no audio device. The pictures are made
+# with Mesa's software Vulkan driver (lavapipe, package mesa-vulkan-drivers) when it is installed, whatever GPU the
+# machine has, so that a run looks the same from one machine to the next
+HEADLESS = {'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy'}
+for _icd in ('/usr/share/vulkan/icd.d/lvp_icd.json', '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json'):
+    if os.path.exists(_icd) and 'VK_DRIVER_FILES' not in os.environ and 'VK_ICD_FILENAMES' not in os.environ:
+        HEADLESS.update({'VK_DRIVER_FILES': _icd, 'VK_ICD_FILENAMES': _icd})
+        break
 VERBOSE = False
 
 ASAN_RE = re.compile(r'ERROR: AddressSanitizer|ERROR: LeakSanitizer|runtime error:|SUMMARY: UndefinedBehaviorSanitizer')
@@ -145,8 +154,8 @@ def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), en
     for k in list(e):
         if k.startswith('MW2_'):
             del e[k]
-    e.update({'MW2_CONFIG': os.path.join(OUT, name, 'mw2port.cfg'), 'MW2_INSTALL_DIR': gd, 'SDL_VIDEODRIVER': 'offscreen',
-              'SDL_AUDIODRIVER': 'dummy', 'MW2_SIZE': size, 'MW2_SKYGND': os.path.join(GAME, '3d', 'skygnd.par'),
+    e.update({'MW2_CONFIG': os.path.join(OUT, name, 'mw2port.cfg'), 'MW2_INSTALL_DIR': gd, **HEADLESS,
+              'MW2_SIZE': size, 'MW2_SKYGND': os.path.join(GAME, '3d', 'skygnd.par'),
               'MW2_EDITION': edition, 'MW2_STATE_DUMP': dump,
               'MW2_AUTOPILOT': '%g,%g,%g,%d,%s,1,%d' % (secs, throttle, twist, fire, os.path.join(OUT, name, 'final.ppm'), jet)})
     e.setdefault('ASAN_OPTIONS', 'detect_leaks=0')
@@ -1390,7 +1399,7 @@ def training_shell_launch(c):
     with open(os.path.join(OUT, c.name, 'mw2port.cfg'), 'w') as f:
         f.write('game=%s\nrenderer=enhanced\ntextures=original\n' % gd)
     e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-    e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
+    e.update({**HEADLESS, 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
               'MW2_SAVE_DIR': gd, 'MW2_SHELL_SCREEN': '14', 'MW2_SHELL_CLAN': '1', 'MW2_SHELL_FRAMES': '3',
               'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'shell.ppm'), 'MW2_SHELL_TRAIN': '1',
               'MW2_SIM': 'MW2_STATE_DUMP=1 MW2_NO_STARTUP=1 MW2_SIZE=320x200 MW2_AUTOPILOT=1.5,0,0,0,%s,1 %s %s %s ati @ %%s' % (
@@ -1885,7 +1894,7 @@ def shell_music_after_mission(c):
     for scr, extra, label in (('14', {'MW2_SHELL_CLAN': '1', 'MW2_SHELL_TRAIN': '1'}, 'training'),
                               ('7', {'MW2_SHELL_CLICKS': '0'}, 'Instant Action')):
         e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
+        e.update({**HEADLESS, 'MW2_CONFIG': os.path.join(OUT, c.name, 'mw2port.cfg'),
                   'MW2_SAVE_DIR': gd, 'MW2_SHELL_SCREEN': scr, 'MW2_SHELL_FRAMES': '3', 'MW2_SHELL_MUSICLOG': '1',
                   'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'shell%s.ppm' % scr), 'MW2_SIM': 'echo %s'})
         e.update(extra)
@@ -2798,7 +2807,7 @@ def star_in_mw2prm(c):
         c.note('no MW2PRM.CFG in %s: skipped' % mech2)
         return
     shutil.copy(src, os.path.join(d, 'MW2PRM.CFG'))
-    e = dict(os.environ, MW2_STAR_PRM=d, SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'))
+    e = dict(os.environ, MW2_STAR_PRM=d, **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'))
     out = subprocess.run([os.path.join(os.path.dirname(GLVIEW), 'mw2'), mech2], env=e, capture_output=True, text=True, timeout=120).stdout
     lines = [l for l in out.splitlines() if l.startswith('star ')]
     old, new = open(src, 'rb').read(), open(os.path.join(d, 'MW2PRM.CFG'), 'rb').read()
@@ -2828,7 +2837,7 @@ def archive_layout(c):
                                    ('2,1', 'dos_archive_2_next.png', '517,388', (515, 378, 550, 410))):
         out = os.path.join(d, 'p%s.ppm' % page.replace(',', '_'))
         e = dict(os.environ, MW2_ARCH_PAGE=page, MW2_SHELL_SCREEN='5', MW2_SHELL_CLAN='0', MW2_SHELL_FRAMES='2', MW2_SHELL_SHOT=out,
-                 SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1')
+                 **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1')
         if mouse:
             e['MW2_SHELL_MOUSE'] = mouse
         subprocess.run([shell, mech2], env=e, capture_output=True, timeout=120)
@@ -3040,7 +3049,7 @@ def hidden_mechs_playable(c):
             f.write('game=%s\n' % gd)
         for k, name in ((15, 'Elemental'), (16, 'Tarantula'), (17, 'Battle Master IIC')):
             e = {q: v for q, v in os.environ.items() if not q.startswith('MW2_')}
-            e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd,
+            e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd,
                       'MW2_SHELL_SCREEN': '9', 'MW2_SHELL_CLAN': '0', 'MW2_SHELL_FRAMES': '2', 'MW2_SHELL_LAB_CHASSIS': str(k),
                       'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'lab%d.ppm' % k)})
             p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
@@ -3489,7 +3498,7 @@ def titanium_viewer_shot(name, tdir, record, mission, yaw, heading, extra=None):
         os.remove(out)
     e = dict(os.environ)
     e.update({'MW2_CONFIG': titanium_cfg(name, tdir), 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'), 'MW2_TEXTURES': 'titanium',
-              'MW2_INSTALL_DIR': GTEST, 'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_SIZE': '640x480',
+              'MW2_INSTALL_DIR': GTEST, **HEADLESS, 'MW2_SIZE': '640x480',
               'MW2_EDITION': 'enhanced', 'MW2_NO_STARTUP': '1', 'MW2_TEST_VIEWER': '%g,10,%g' % (yaw, heading),
               'MW2_AUTOPILOT': '1,0,0,0,%s,0' % out})
     if extra:
@@ -3759,7 +3768,7 @@ def archive_jade_falcon(c):
                             ('back3', dict(MW2_ARCH_PAGE='2,2', MW2_ARCH_FROM='1,0', MW2_ARCH_BACK='3'), None)):
         out = os.path.join(d, name + '.ppm')
         e = dict(os.environ, MW2_SHELL_SCREEN='5', MW2_SHELL_CLAN='1', MW2_SHELL_FRAMES='5', MW2_SHELL_SHOT=out,
-                 SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1', **env)
+                 **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1', **env)
         r = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120)
         if refn is None:
             c('archive back: page 1 sub 0 next 1' in r.stdout, 'BACK on the first page leaves the Archive (EXIT)', r.stdout[-300:])
@@ -3895,7 +3904,7 @@ def archive_grey_topics(c):
             (1, 'jf_dot13', [(99, y(17))], [65], None)):
         out = os.path.join(d, name + '.ppm')
         e = dict(os.environ, MW2_SHELL_SCREEN='5', MW2_SHELL_CLAN=str(clan), MW2_SHELL_FRAMES=str(len(clicks) + 3), MW2_SHELL_SHOT=out,
-                 SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1',
+                 **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'), MW2_BITMAP_TEXT='1',
                  MW2_ARCH_CLICK=';'.join('%d,%d' % xy for xy in clicks))
         r = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120)
         got = [int(m) for m in re.findall(r'archive click: \d+,\d+ -> (-?\d+)', r.stdout)]
@@ -5089,7 +5098,7 @@ def dropship_flies_at_centre(c):
 
 
 def _shell_env(d, **kw):
-    e = dict(os.environ, SDL_VIDEODRIVER='offscreen', SDL_AUDIODRIVER='dummy', MW2_CONFIG=os.path.join(d, 'x.cfg'),
+    e = dict(os.environ, **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'),
              MW2_BITMAP_TEXT='1')
     e.update({k: str(v) for k, v in kw.items()})
     return e
@@ -5736,7 +5745,7 @@ def shell_star_name_typing(c):
     def run(name, events, clan=2):
         out = os.path.join(OUT, c.name, name + '.ppm')
         e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
+        e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
                   'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': str(clan), 'MW2_SHELL_FRAMES': '3', 'MW2_SHELL_MOUSE': '600,20',
                   'MW2_SC_EVENTS': events, 'MW2_SHELL_SHOT': out})
         r = subprocess.run([shell], env=e, cwd=REPO, capture_output=True, text=True, timeout=120 * TSCALE)
@@ -5785,7 +5794,7 @@ def shell_ia_names_from_record(c):
         d[o:o + 16] = name + b'\0' * (16 - len(name))
     open(p, 'wb').write(bytes(d))
     e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-    e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd,
+    e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd,
               'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': '2', 'MW2_SHELL_FRAMES': '2', 'MW2_SC_EVENTS': '',
               'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'sc.ppm')})
     log = subprocess.run([shell], env=e, cwd=REPO, capture_output=True, text=True, timeout=120 * TSCALE).stdout
@@ -6724,7 +6733,7 @@ def cockpit_controls_current_config(c):
 
     def visit(clicks):
         e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_SHELL_MENU': '2',
+        e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_MENU': '2',
                   'MW2_MENU_COCKPIT': '1', 'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'cc.ppm'), 'MW2_CC_CLICKS': clicks})
         p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
         out = p.stdout.decode('latin-1')
@@ -7011,7 +7020,7 @@ def cockpit_controls_name_typing(c):
         if os.path.exists(out):
             os.remove(out)
         e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
-        e.update({'SDL_VIDEODRIVER': 'offscreen', 'SDL_AUDIODRIVER': 'dummy', 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
+        e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_BITMAP_TEXT': '1',
                   'MW2_SHELL_MENU': '2', 'MW2_MENU_COCKPIT': '1', 'MW2_CC_EDITOR': '1', 'MW2_CC_CLICKS': '',
                   'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'menu.ppm'), 'MW2_CC_SHOT': out, 'MW2_CC_EVENTS': events})
         p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
@@ -7178,6 +7187,166 @@ def scaled_hill_ground_follows_mesh(c):
     c(r.last.get('y', 0) > 2500, 'still on the hill at the end (not fallen inside it)', str(r.last.get('y')))
     c('FALLSIM' not in r.out, 'never under the hill surface (MW2_TEST_FALLSIM)',
       next((l for l in r.out.splitlines() if l.startswith('FALLSIM')), ''))
+
+
+@sequence
+def torso_loop_gate(c):
+    """the torso servo sound (0x1001a180 end, 0x1001ad3b..0x1001adb2; DOS MW2.EXE 0x282af..0x2830f): 0x13c (316, TORSLOOP
+    in every MW2 archive) only for the player, only in the cockpit view (DAT_1024e678 / DOS 0x96ef4) and only while the
+    twist c[3] is more than 2 degrees (0x102473d4; DOS 0x20000) from the demand c[2]. Turning the legs alone is silent (the
+    port had also played it on a leg turn, ASSUMED - the Mercs fork's report found the same gate in Mercs); '.' held
+    twists the torso and the loop plays at 0.40 (halved) and stops after; in the chase view nothing"""
+    pcm = lambda r: [(float(t), int(n), float(v)) for t, n, v in re.findall(r'SFXLOG (-?[\d.]+) pcm (\d+) vol ([\d.]+)', r.out)]
+    hold = [(UP + 0.5, UP + 2.5, 'left'), (UP + 3.5, UP + 4.0, 'period')]
+    env = {'MW2_SFX_LOG': '1', 'MW2_SINK_TRACE': '1'}
+    r = c.run(secs=UP + 6, hold=hold, env=env)
+    sk = [dict((k, float(v.split(',')[0])) for k, v in (kv.split('=') for kv in l.split()[1:]))
+          for l in r.out.splitlines() if l.startswith('SINK ')]
+    hd = [(s['t'], s.get('heading')) for s in r.states if UP + 0.4 <= s['t'] <= UP + 2.6 and s.get('heading') is not None]
+    c(len(hd) >= 2 and abs(hd[-1][1] - hd[0][1]) > 5, 'the legs turned', str(hd[:1] + hd[-1:]))
+    c(all(abs(d['dtw'] - d['twist']) <= 2.0 for d in sk if UP + 0.5 <= d['t'] <= UP + 2.6), 'no torso gap while the legs turn')
+    loop = [x for x in pcm(r) if x[2] > 0 and x[0] >= UP]
+    c(not [x for x in loop if x[0] < UP + 3.4], 'no TORSLOOP on the leg turn', str(loop[:3]))
+    tw = [x for x in loop if UP + 3.4 <= x[0] <= UP + 4.2]
+    c(len(tw) == 1 and abs(tw[0][2] - 0.40) < 0.01, 'TORSLOOP once at 0.40 while the torso twists', str(loop[:4]))
+    ext = dict(env, MW2_AUTOPILOT='%g,-9,-999,0,%s,0,0' % (UP + 6, os.path.join(OUT, c.name + '_ext', 'final.ppm')))
+    r = c.run('_ext', secs=UP + 6, hold=hold, env=ext)
+    c(not [x for x in pcm(r) if x[2] > 0 and x[0] >= UP], 'none in the chase view', str(pcm(r)[:3]))
+
+
+def sflx_reference(d):
+    """the engine's SFLX block decoder (3Dfx MW2.DLL 0x1003356c with 0x10033803 / 0x100337ab; DOS MW2.EXE 0x41860,
+    0x41aeb / 0x41a93) on one record: a single workspace, delta / raw codes into its first n bytes, the half / quarter
+    blocks expanded in place by integer averages reading the workspace's byte n (left from the previous block)"""
+    nb, bs = struct.unpack_from('<IH', d, 8)
+    p, prev, ws, out = 14, 0, bytearray([0x80]) * 2048, bytearray()
+    for _ in range(nb):
+        h = d[p]; p += 1
+        m, cd = h >> 6, h & 15
+        n = bs >> 1 if m == 1 else bs >> 2 if m == 2 else bs
+        if cd == 0:
+            ws[:n] = b'\x80' * n; prev = 0
+        elif cd in (2, 3, 4):
+            k, bits = {2: (2, 1), 3: (4, 2), 4: (16, 4)}[cd]
+            tab = [x * 2 - 128 for x in d[p:p + k]]; p += k
+            i = 0
+            while i < n:
+                byte = d[p]; p += 1
+                for _ in range(8 // bits):
+                    prev = max(-127, min(127, prev + tab[byte & (k - 1)])); byte >>= bits
+                    ws[i] = prev + 128; i += 1
+        elif cd == 5:
+            ws[:n] = d[p:p + n]; p += n; prev = ws[n - 1] - 128
+        if m in (1, 2):
+            tmp, i, f = bytearray(bs + 4), 0, 1 << m
+            while True:
+                a, b = ws[i >> m], ws[(i >> m) + 1]
+                mid = (a + b) >> 1
+                tmp[i:i + f] = bytes([a, mid]) if m == 1 else bytes([a, (a + mid) >> 1, mid, (mid + b) >> 1])
+                i += f
+                if i >= bs - 1:
+                    break
+            ws[:bs] = tmp[:bs]
+        out += ws[:bs]
+    return bytes(out)
+
+
+@sequence
+def sflx_interpolated_blocks(c):
+    """SFLX blocks coded at half / a quarter of the samples (header bits 6-7 = 1 / 2) are expanded as the engine does
+    (0x10033803 / 0x100337ab, DOS 0x41aeb / 0x41a93): in place, integer averages a, (a+b)>>1 (quarters: a, (a+m)>>1, m,
+    (m+b)>>1), the last coded sample paired with the workspace's next byte (the previous block's), and a repeated block
+    is the expanded one; mode 3 codes the whole block (0x1003358b). The port had interpolated linearly, held the last
+    sample, and taken mode 3 as a quarter. MECSEXX2 241 (30 such blocks), MECSONX2 245 (15), MECMGUN1 226 (1)"""
+    tool = os.path.join(REPO, 'prjtool')
+    if not os.path.exists(tool):
+        c.note('no prjtool built: skipped')
+        return
+    for sid, name in ((241, 'MECSEXX2'), (245, 'MECSONX2'), (226, 'MECMGUN1')):
+        rec = os.path.join(OUT, c.name, name + '.sflx')
+        os.makedirs(os.path.dirname(rec), exist_ok=True)
+        subprocess.run([tool, 'extract', os.path.join(GAME, '3d', 'models.prj'), 'SNDS', name, rec], capture_output=True)
+        dump = os.path.join(OUT, c.name, name + '.pcm')
+        if os.path.exists(dump):
+            os.remove(dump)
+        c.run('_' + name, secs=0.2, nostart=True, env={'MW2_TEST_SNDS_DUMP': '%d:%s' % (sid, dump)})
+        want = sflx_reference(open(rec, 'rb').read()) if os.path.exists(rec) else None
+        got = open(dump, 'rb').read() if os.path.exists(dump) else None
+        bad = [i for i in range(min(len(want or b''), len(got or b''))) if want[i] != got[i]]
+        c(want and got and len(want) == len(got) and not bad, '%s: the decoded samples as the engine' % name,
+          '%s / %s bytes, first differences %s' % (len(got or b''), len(want or b''), bad[:6]))
+
+
+@sequence
+def voice_pcm_effects_muted(c):
+    """a KEATING instructor line (PCM through sfx_play_pcm_voice) takes the VOICE slider alone: with EFFECTS at 0
+    (MW2SND.CFG +4 = 0, +8 VOICE full) TNJ1's trn1_01S still plays at full voice volume - the port had divided the
+    EFFECTS gain (0) back out, giving inf x 0 = NaN (the line silent, a NaN in the mixer)"""
+    cfg = bytearray(open(os.path.join(GTEST, 'MW2SND.CFG'), 'rb').read())
+    struct.pack_into('<ii', cfg, 4, 0, 0x10000)
+    r = c.run(secs=3, dump='/0.5', env={'MW2_SFX_LOG': '1'}, mission='TNJ1SCN1', files={'MW2SND.CFG': bytes(cfg)})
+    pl = re.findall(r'SFXLOG ([\d.]+) pcm (\d+) vol (\S+) voice', r.out)
+    c(pl and pl[0][2] == '1.00', 'trn1_01S at VOICE full with EFFECTS 0', str(pl[:2]))
+    fx = re.findall(r'SFXLOG [\d.]+ snd \d+ vol (\S+)', r.out)
+    c(not fx or all(float(v) == 0 for v in fx if v != 'nan') and 'nan' not in fx, 'effects silent', str(fx[:4]))
+
+
+@sequence
+def ai_out_of_weapons_replaces_forced(c):
+    """the out-of-weapons reaction (0x1001ea40, 0x1001ecc8..0x1001ed7d) does not test the forced manoeuvre +0x174: one
+    forced earlier in the same step (manoeuvre 0 under 45 m -> 10, 0x1001f950; the missile dodge 11 / 4) is replaced by
+    the jump / charge / flee; nor does it react while fleeing (state +0x14a == 4). The port had skipped it while anything
+    was forced, so the unit first ran the forced manoeuvre (before: 8 -> 0 -> 10 -> 6, the 0 at 20 m forcing a back-off).
+    YELL's Jenner (actor 2), the player 20 m south: a manoeuvre 0 forced (test hook) in the frame it is disarmed (level
+    1, no jets): it goes straight to the charge (6)"""
+    env = {'MW2_TEST_AIM': '2,2000,0', 'MW2_TEST_MAN': '9.0:2:0', 'MW2_TEST_DISARM': '9.0:2:1', 'MW2_AI_MAN_TRACE': '1'}
+    r = c.run(secs=10, env=env)
+    seq = {}
+    for p, mn in re.findall(r'^aiman (\S+) (-?\d+)', r.out, re.M):
+        seq.setdefault(p, []).append(int(mn))
+    jen = [v for v in seq.values() if 6 in v]
+    c(len(jen) == 1, 'the Jenner charges (6)', str(seq)[:300])
+    if jen:
+        v = jen[0]
+        c(v.index(6) > 0 and v[v.index(6) - 1] == 8, 'the forced 0 replaced at once: 8 (running) -> 6, no 0 between', str(v[:8]))
+
+@sequence
+def dos_cockpit_strut_seams(c):
+    """DOS look: a cockpit polygon crossing the near plane is drawn as GL clips it (the vertex shader leaves it unexpanded)
+    and its fragments must not be cut to the DOS span - the shader had taken "as many corners after clipping as before"
+    (m == n) for "not clipped", but a quad with two corners behind the plane keeps four, so those pixels were discarded
+    and the sky showed through the joins of the canopy struts as a dotted line (DOSBox YELLSCN1: the struts solid). YELL,
+    the Timber Wolf's struts at the top of the view, the torso twisting: no sky pixel between strut pixels"""
+    import numpy as np
+    r = c.run(secs=UP + 1.5, shots=[(UP + 0.5, 'a'), (UP + 1.4, 'b')], dos_look=True, size='640x400',
+              hold=[(UP, UP + 1.5, 'period')])
+    for k in ('a', 'b'):
+        if not os.path.exists(r.shots.get(k, '')):
+            c(False, 'shot %s' % k)
+            continue
+        w, h, px = ppm(r.shots[k])
+        im = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[:30].astype(np.int32)
+        sky = im[:, :, 2] - im[:, :, 0] > 30
+        dark = (im.sum(axis=2) < 140) & ~sky
+        left = np.zeros_like(dark); right = np.zeros_like(dark)
+        left[:, 2:] = dark[:, 1:-1] | dark[:, :-2]
+        right[:, :-2] = dark[:, 1:-1] | dark[:, 2:]
+        holes = np.argwhere(sky & left & right)
+        c(len(holes) == 0, '%s: no sky through the strut joins' % k, '%d pixels, e.g. %s' % (len(holes), holes[:4].tolist()))
+
+
+@sequence
+def star_time_limit_one_second_early(c):
+    """a star's time limit (MTBL +0x0c, every MW2 mission 1500 s): out of time when limit <= now_s - star start
+    (0x1000a9b0; DOS 0x16e80), and the start is -1 in single play (set at load, 0x1003f97e / DOS 0x4d10e; only the
+    network path 0x1000acd0 sets it to the clock) - so the star runs out one whole second before the limit; the
+    objectives' Time Remaining (DOS 0x31d65) is (limit - 1) - now. YELL with every limit set to 12 s (test hook):
+    result 4 (out of time) at 11 s, not 12"""
+    r = c.run(secs=14, nostart=True, dump='/0.1', env={'MW2_TEST_TIME_LIMIT': '12'})
+    o = next((s for s in r.states if s.get('outcome') == 4), None)
+    c(o is not None, 'out of time (outcome 4)', str(sorted(set(s.get('outcome') for s in r.states))))
+    if o is not None:
+        c(10.9 <= o['now'] / 1000.0 <= 11.15, 'at 11 s (limit - 1), not 12', 'now %s' % o['now'])
 
 
 def main():

@@ -1,10 +1,11 @@
 /*
- * glr.h - OpenGL 3.3 core renderer for the enhanced (3D-edition) look.
+ * glr.h - the world renderer (every look: the 3D editions', the DOS edition's, Titanium's).
  *
- * Window/context creation is the caller's job (SDL2 in glview, headless EGL
- * in glshot); this module only issues GL calls, so it runs the same way in
- * both. Any resolution and aspect ratio: the vertical field of view is fixed
- * and wider screens see more to the sides ("Hor+").
+ * The GPU device and window are the caller's (rb_init: SDL_GPU in glview, off-screen in glshot); this module draws
+ * through the render backend (rb.h), into the current target. (The name and the coordinate conventions - "GL space",
+ * GL's clip and window coordinates - are kept from its OpenGL 3.3 days: the shaders keep them, see shaders/world.vert.)
+ * Any resolution and aspect ratio: the vertical field of view is fixed and wider screens see more to the sides
+ * ("Hor+").
  *
  * Coordinates: the game's data is left-handed (+x is the mech's right, +y up,
  * +z forward; e.g. TW1DECLR sits at +x, TW1LULEG at -x). GL is right-handed,
@@ -52,7 +53,7 @@ typedef struct {
     int   notex_actors;      /* OBJECT TEXTURES off: mechs and objects flat-shaded in their palette colours */
     int   flat_sky, flat_ground;   /* the in-game GRAPHICS menu's Textured Sky / Ground off: the texture's average colour
                                     * (3Dfx 0x10027c80 fills with palette 0xe0 / 0xef, set from 0x1002d330's average) */
-    /* an edition's texture filtering (GL enums; 0 = from `bilinear`): the world / mech textures, and the sky / ground */
+    /* an edition's texture filtering (RB_* - OpenGL's enum values; 0 = from `bilinear`): the world / mech textures, and the sky / ground */
     int   tex_min, tex_mag, env_min, env_mag;
     /* the DOS edition's shading (glr_set_dos): the LITE light (position, or a direction when dos_dir), ambient level
      * (0-127 scale), the distance per darker shade level (0 = none) */
@@ -110,8 +111,7 @@ typedef struct {
     int   alpha_blend;
 } glr_view;
 
-/* Requires a current GL 3.3 core context. Returns NULL on failure (shader
- * compile errors are printed to stderr). */
+/* Requires the render backend started (rb_init). Returns NULL on failure. */
 glr *glr_create(void);
 void glr_destroy(glr *r);
 
@@ -199,7 +199,7 @@ typedef struct {
 } glr_ti_shade;
 void glr_set_titanium_extra(glr *r, texture *const bank0[GLR_SLOTS], const glr_ti_shade *shade);
 
-/* Draw into the currently bound framebuffer, viewport w x h. */
+/* Draw into the current target (rb_target), viewport w x h. */
 void glr_draw(glr *r, const glr_view *v, int w, int h);
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h);
 

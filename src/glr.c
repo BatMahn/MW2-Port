@@ -1,16 +1,7 @@
-/* glr.c - see glr.h. OpenGL 3.3 core only. */
-#if defined(__APPLE__)
-#define GL_SILENCE_DEPRECATION
-#include <OpenGL/gl3.h>
-#elif defined(_WIN32)
-#include "glload.h"   /* GL 2.0+ looked up at runtime (opengl32.dll exports only 1.1) */
-#else
-#define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
-#include <GL/glext.h>
-#endif
-
+/* glr.c - see glr.h. Draws through the render backend (rb.h); its shaders are shaders/world.vert / world.frag. */
 #include "glr.h"
+#include "rb.h"
+#include "rb_shaders.h"
 
 #include <limits.h>
 #include <math.h>
@@ -52,15 +43,14 @@ typedef struct {
 } glr_fpoly;
 
 typedef struct {
-    GLuint  vao, vbo;
-    GLuint  tbo;       /* the DOS look: vbo as a buffer texture (R32F), so a Gouraud fragment can read its whole polygon */
-    GLuint  sph_vbo;   /* per vertex: its object's bounding sphere (GL centre, radius) for the view-distance cull */
-    GLuint  tic_vbo;   /* per vertex: the Titanium CPU colour (rgb) and its use (a: 0 none, 1 x the texel (lit), 2 the
+    rb_buf  vbo;       /* (the DOS look also reads it as its storage buffer, so a Gouraud fragment can read its whole polygon) */
+    rb_buf  sph_vbo;   /* per vertex: its object's bounding sphere (GL centre, radius) for the view-distance cull */
+    rb_buf  tic_vbo;   /* per vertex: the Titanium CPU colour (rgb) and its use (a: 0 none, 1 x the texel (lit), 2 the
                         * colour (a palette shade), 3 kind 2: the colour, drawn only with its textures off) */
-    GLint   batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
-    GLsizei batch_count[GLR_BATCHES];
-    GLsizei batch_acount[GLR_SLOTS];    /* of a slot's count: its alpha-flag polygons, last (the ARGB4444 reading, tex_a) */
-    GLsizei vertex_count;
+    int     batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
+    int     batch_count[GLR_BATCHES];
+    int     batch_acount[GLR_SLOTS];    /* of a slot's count: its alpha-flag polygons, last (the ARGB4444 reading, tex_a) */
+    int     vertex_count;
     float      *tic;       /* vertex_count x 4: what tic_vbo holds */
     float      *tipn;      /* vertex_count x 6: the GL position and the normal the lights use (lit polygons) */
     float      *tistat;    /* vertex_count x 3: the static lights' colour (lit polygons) */
@@ -72,12 +62,14 @@ typedef struct {
 } glr_layer;
 
 struct glr {
-    GLuint prog, tex[GLR_SLOTS * 4];
+    rb_world_frame F;                       /* the program's uniform blocks (the OpenGL program's uniforms, same names) */
+    rb_world_draw  D;
+    rb_tex tex[GLR_SLOTS * 4];
     texture *const *bank0;                  /* glr_set_bank0 (the caller's array) */
     glr_layer layer[GLR_LAYERS];
-    GLuint env_vao, env_vbo, env_tex[2];   /* 0 ground, 1 sky */
-    GLuint ground_flat;                    /* 1x1: the ground texture's average colour (terrain textures off) */
-    GLuint sky_flat;                       /* 1x1: the sky texture's average colour (Textured Sky off) */
+    rb_tex env_tex[2];                     /* 0 ground, 1 sky */
+    rb_tex ground_flat;                    /* 1x1: the ground texture's average colour (terrain textures off) */
+    rb_tex sky_flat;                       /* 1x1: the sky texture's average colour (Textured Sky off) */
     int    env_has[2];
     float  tile_sky, tile_ground;
     int    tex_w[GLR_SLOTS * 4], tex_h[GLR_SLOTS * 4], has_tex[GLR_SLOTS * 4];
@@ -87,7 +79,7 @@ struct glr {
      * 8-11; tex[] holds the ARGB1555 one) - the engines read a texture by the flag of the polygon that uploads it (3Dfx
      * 0x10066a30, S3 0x10010170). A slot drawn both ways keeps, in the engines, whichever came first (3Dfx 0x10066e70
      * finds the texture by its data; S3 0x1000fff0): glr_view.tex_cache, tex_cache_decide, texture.upfmt */
-    GLuint tex_a[GLR_SLOTS];
+    rb_tex tex_a[GLR_SLOTS];
     const texture *tex_asrc[GLR_SLOTS];
     const uint32_t *tex_buf[GLR_SLOTS];     /* the reading in tex[] (rgba or alt) */
     int    has_a[GLR_SLOTS];
@@ -96,35 +88,25 @@ struct glr {
     texture *const *ti_bank0;               /* glr_set_titanium_extra: the Titanium bank-0 bitmaps (billboards) */
     glr_ti_shade ti_shade;                  /* glr_set_titanium_extra: the palette shade of its colour type 1 polygons */
     uint8_t ti_pal[2][256][3];              /* per layer: the palette its colour kinds 1 / 2 shade in (set_layer) */
-    GLint  u_tilit, u_tiamb, u_tilt, u_tilv, u_tilc, u_tignd, u_tidn, u_tidp, u_tidc;
 
     float  center[3], radius;
-    GLint  u_point, u_lpos;
-    GLint  u_mono, u_mvp, u_view, u_light, u_ambient, u_fog_density, u_fog_color, u_texsize, u_tex, u_textured, u_unlit, u_wire, u_shadow;
     /* the DOS edition */
     int    dos;
-    int    prog_dos;                        /* r->prog is the DOS look's variant (glr_use_variant) */
-    GLuint nul_buf, nul_tbo;                /* a 1-texel R32F buffer texture: unit 3 never left empty (macOS GL falls back
-                                             * to a slow path for a shader whose samplerBuffer has nothing loadable bound) */
-    GLuint dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
-    GLint  u_dos, u_dos_tab, u_dos_lpos, u_dos_amb, u_dos_fogdist, u_dos_dir, u_dos_vtx, u_dos_smooth, u_vpo, u_dos_eye, u_dos_rx, u_dos_ry, u_dos_rz, u_dos_ps;
-    GLint  u_far, u_vp;
+    int    prog;                            /* RB_PROG_WORLD, or RB_PROG_WORLD_DOS for the DOS look (glr_use_variant) */
+    rb_tex dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
     /* the DOS cockpit set's polygons (glr_view: mech3d_part.dos_pit), in emission order: their world corners (game
      * coordinates) for the draw order (dos_pit_ranks) */
 #define GLR_PIT_MAX 128
     int    pit_n, pit_nv[GLR_PIT_MAX];
     float  pit_v[GLR_PIT_MAX][WTB_MAX_POLY_VERTS][3];
-    GLint  u_pit_rank;
     /* the palette fade of the 3D editions (0x1002ad50): textured polygons in a flat colour, untextured ones toward a
      * target palette by their palette index (glr_set_world_fade) */
-    GLuint ptab_tex;
-    GLint  u_tint, u_pfade, u_ptab, u_notex, u_tinton, u_dsign;
+    rb_tex ptab_tex;
     int    dsign;                           /* glr_set_damage_shade */
     float  tint[3], pfade;
     int    tint_on;
-    GLint  u_alpha, u_mga_lod, u_horizon, u_hz_r, u_hz_u, u_hz_f, u_hz_c, u_hz_band, u_hz_x, u_hz_smooth, u_tifog, u_blend, u_ati;
     /* the Titanium edition's sky dome (glr_set_skydome): triangles (pos, texel uv / (size - 1), slot) by slot */
-    GLuint dome_vao, dome_vbo, dome_tex[GLR_SLOTS];
+    rb_tex dome_tex[GLR_SLOTS];
     float *dome_v;                          /* x, y, z, u, v per vertex (game coordinates, GL z) */
     int    dome_n, dome_first[GLR_SLOTS], dome_count[GLR_SLOTS], dome_has[GLR_SLOTS];
     int   *dome_pfirst, *dome_pcount, *dome_pslot, dome_np;   /* per polygon, in the record's order */
@@ -136,652 +118,116 @@ struct glr {
     uint32_t dos_zhw;   /* zoom (16.16) x the half width: the view's +0x94 (MW2.EXE 0x3ef30) */
     float   dos_eye[3];
     /* sprites (weapon effects) */
-    GLuint spr_vao, spr_vbo;
     glr_particle *par;                      /* glr_set_particles */
     int    par_n, par_cap;
     float  par_alpha;
     glr_sprite spr[GLR_MAX_SPRITES];
     int    spr_n;
     const texture *spr_src[64];
-    GLuint spr_tex[64];
+    rb_tex spr_tex[64];
     int    spr_next;
 };
 
-#define DOS_PROJ_GLSL \
-    /* a vertex as MW2.EXE projects it, in its integers: the world vertices (+0xc..+0x14) and the camera (DAT_0014fe94 / \
-     * 90 / 98) are whole units (cm), so the vertex relative to the camera is round(W) - round(E) (the vertices' \
-     * fixed-point transforms round to nearest, 0x3b522 / 0x3b20c); 0x3dd5c / 0x3e1de turn it by the camera matrix (2.29) \
-     * whose x and y rows carry the zoom's mantissas (0x3ece0: DAT_0014fe40 / 44, 0x3ef30) - x = (R.d) x xm / 2^14, y = \
-     * (U.d) x ym / 2^14, z = (F.d) x 4, each >> 27 rounded (the adc); then 0x3dfb7: ((x << xs) / z + 2) >> 2 from the \
-     * window's centre (idiv: truncated). DOSBox (dosbox-debug, YELLSCN1 1024 x 768, the cockpit's draw list): every \
-     * vertex's camera integers and screen point reproduced from the port's float world points this way. u_dos_rx / ry / \
-     * rz: the three rows / 2^27 (game coordinates, dos_cam_rows); u_dos_ps: xs, ys (port: the zoom from the projection's \
-     * x focal) */ \
-    "uniform vec3 u_dos_eye, u_dos_rx, u_dos_ry, u_dos_rz; uniform ivec2 u_dos_ps;\n" \
-    "int dos_idiv(int n, int d) { int q = abs(n) / abs(d); return (n < 0) != (d < 0) ? -q : q; }\n" /* idiv: truncated */ \
-    "float dos_rnd(float v) { return floor(v + 0.5); }\n" \
-    "int dos_pq(int c, int s, int z) { int q; if (abs(c) < (1 << (30 - s))) q = dos_idiv(c << s, z); else q = int(trunc(float(c) * exp2(float(s)) / float(z))); return (q + 2) >> 2; }\n" \
-    "float dos_camz(vec3 w) { vec3 d = vec3(dos_rnd(w.x) - dos_rnd(u_dos_eye.x), dos_rnd(w.y) - dos_rnd(u_dos_eye.y), dos_rnd(-w.z) - dos_rnd(-u_dos_eye.z)); return dos_rnd(dot(u_dos_rz, d)); }\n" \
-    "ivec2 dos_scr(vec3 w) {\n" \
-    "  vec3 d = vec3(dos_rnd(w.x) - dos_rnd(u_dos_eye.x), dos_rnd(w.y) - dos_rnd(u_dos_eye.y), dos_rnd(-w.z) - dos_rnd(-u_dos_eye.z));\n" \
-    "  int xc = int(dos_rnd(dot(u_dos_rx, d))), yc = int(dos_rnd(dot(u_dos_ry, d))), zc = max(int(dos_rnd(dot(u_dos_rz, d))), 1);\n" \
-    "  ivec2 c = ivec2(u_vp) / 2;\n" \
-    "  return ivec2(c.x + dos_pq(xc, u_dos_ps.x, zc), c.y - dos_pq(yc, u_dos_ps.y, zc));\n" \
-    "}\n" \
-    ""
+/* The program: shaders/world.vert and world.frag (the OpenGL 3.3 program's shaders, compiled offline for every backend
+ * into src/rb_shaders.c; see scripts/gen_shaders.py). Its uniforms are r->F (rb_world_frame: the camera, lights, the
+ * DOS projection - a few times a frame) and r->D (rb_world_draw: per batch), sent with each draw (glr_draw_arrays). */
+#define U2(d, a, b) ((d)[0] = (a), (d)[1] = (b))
+#define U3(d, a, b, c) ((d)[0] = (a), (d)[1] = (b), (d)[2] = (c))
+#define U4(d, a, b, c, e) ((d)[0] = (a), (d)[1] = (b), (d)[2] = (c), (d)[3] = (e))
+#define UV(d, s, n) memcpy((d), (s), (n) * sizeof(float))
 
-static const char *VS =
-    "#version 330 core\n"
-    "layout(location=0) in vec3 a_pos;\n"
-    "layout(location=1) in vec3 a_normal;\n"
-    "layout(location=2) in vec2 a_uv;\n"
-    "layout(location=3) in vec3 a_color;\n"
-    "layout(location=4) in float a_texsel;\n"
-    "layout(location=5) in float a_edge;\n"
-    "layout(location=6) in vec4 a_sphere;\n"
-    "layout(location=7) in vec4 a_tic;\n"
-    "uniform mat4 u_mvp, u_view;\n"
-    "uniform float u_far; uniform vec2 u_vp;\n"
-    "uniform int u_dos; uniform samplerBuffer u_dos_vtx;\n"
-    DOS_PROJ_GLSL
-    "uniform int u_pit_rank[128];\n"   /* GLR_PIT_MAX: the DOS cockpit polygons' places in the draw order (dos_pit_ranks) */
-    "out vec3 v_normal; out vec2 v_uv; out vec3 v_color; flat out int v_texsel; out vec3 v_viewpos; out vec3 v_world;\n"
-    "out vec3 v_bary; flat out int v_emask, v_bb, v_tif, v_dnib; flat out vec4 v_sph;\n"
-    "out vec3 v_tic; flat out int v_ticm;\n"
-    "flat out float v_dkey;\n"
-    "noperspective out vec2 v_gs;\n"   /* the DOS Gouraud shade (a_uv), screen-linear as MW2.EXE 0x59e77 steps it */
-    /* the Titanium vertex fog worked out at the vertex (u_tifog.z = 1: the RENDITION renderer - zredline.dll sends each
-     * vertex's fog byte, 0x100056d8, and the Verite iterates it across the polygon, screen-linear INFERRED) */
-    "uniform vec4 u_tifog;\n"
-    "noperspective out float v_tivf;\n"
-    "noperspective out vec2 v_uvl;\n"   /* the texel uv screen-linear: the ATi Rage edition's affine polygons (u_ati) */
-    "void main() {\n"
-    "  int e = int(a_edge + 0.5), pit = e / 65536;\n"
-    "  e -= 65536 * pit;\n"
-    "  v_dnib = e / 2048; e -= v_dnib * 2048;\n"   /* a mech location's damage nibble (glr_set_damage_shade) */
-    "  v_bb = e >= 1024 ? 1 : 0;\n"
-    /* Titanium (edge code + 256: its model normal, length kept; + 512: a flat palette colour, unlit) */
-    "  v_tif = 0;\n"
-    "  if (e < 1024 && e >= 512) { v_tif |= 2; e -= 512; }\n"
-    "  if (e < 1024 && e >= 256) { v_tif |= 1; e -= 256; }\n"
-    "  vec3 p = a_pos, nrm = a_normal;\n"
-    "  gl_Position = u_mvp * vec4(p, 1.0);\n"
-    /* a colour type 3 billboard (edge code + 1024; engine 0x10026fc7 -> 0x1002a8e0, mode 0): a_pos the foot (texel u 0,
-     * v > 0), a_normal the top (u 0, v 0), a_texsel the corner 0-3. Both are projected; with A the top's and B the foot's
-     * screen point (y down) and d = (B - A) / 2 the corners are A + (-d.y, d.x), A + (d.y, -d.x), B + (d.y, -d.x),
-     * B + (-d.y, d.x) - a square of the edge's screen length, centred on it, whatever the view's pitch or roll - texel
-     * corners (0,0) (1,0) (1,1) (0,1); screen-linear (q = 1), no lighting (0x1002c880 with intensity -1: colour 255) */
-    "  if (e >= 1024) {\n"
-    "    vec4 cb = u_mvp * vec4(a_pos, 1.0), ca = u_mvp * vec4(a_normal, 1.0);\n"
-    "    int k = int(a_texsel + 0.5), tib = k >= 4 ? 1 : 0;\n"
-    "    e -= 1024; nrm = vec3(0.0); k -= 4 * tib;\n"
-    "    if (ca.w <= 1.0 || cb.w <= 1.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
-    "    else if (tib != 0) {\n"
-    /* Titanium (mercsw 0x1004ef4c, mode 0): T the top's and F the foot's screen point, dx = (F.y - T.y) / 2, dy = (F.x -
-     * T.x) / 2: corner 0 (T.x - dx, T.y - dy), 1 (F.x - dx, F.y + dy), 2 (T.x + dx, F.y - dy), 3 (F.x + dx, T.y + dy) -
-     * the square of 0x10026fc7 for an upright edge, not square once it leans (the engine's own mix of T and F); the
-     * corners' sz: 0 and 3 the top's, 1 and 2 the foot's (+0x18 of each, 0x1004f121..0x1004f1a5) */
-    "      vec2 h = 0.5 * u_vp, T = ca.xy / ca.w * h, F = cb.xy / cb.w * h;\n"
-    "      T.y = -T.y; F.y = -F.y;\n"
-    "      float dx = 0.5 * (F.y - T.y), dy = 0.5 * (F.x - T.x);\n"
-    "      vec2 c = k == 0 ? vec2(T.x - dx, T.y - dy) : k == 1 ? vec2(F.x - dx, F.y + dy) : k == 2 ? vec2(T.x + dx, F.y - dy) : vec2(F.x + dx, T.y + dy);\n"
-    "      gl_Position = vec4(c.x / h.x, -c.y / h.y, k == 0 || k == 3 ? ca.z / ca.w : cb.z / cb.w, 1.0);\n"
-    "      p = k == 0 || k == 3 ? a_normal : a_pos;\n"
-    "    } else {\n"
-    "      vec2 h = 0.5 * u_vp, A = ca.xy / ca.w * h, B = cb.xy / cb.w * h;\n"
-    "      A.y = -A.y; B.y = -B.y;\n"
-    "      vec2 d = 0.5 * (B - A), c = k == 0 ? A + vec2(-d.y, d.x) : k == 1 ? A + vec2(d.y, -d.x) : k == 2 ? B + vec2(d.y, -d.x) : B + vec2(-d.y, d.x);\n"
-    "      gl_Position = vec4(c.x / h.x, -c.y / h.y, k < 2 ? ca.z / ca.w : cb.z / cb.w, 1.0);\n"
-    "      p = k < 2 ? a_normal : a_pos;\n"
-    "    }\n"
-    "  }\n"
-    /* the DOS Gouraud fill's coverage (MW2.EXE 0x59e77): a row's span runs from the left chain's x >> 16 to the right
-     * chain's INCLUSIVE (0x5a1dc..0x5a213: w = xR - xL, w + 1 pixels) and the rows from the top vertex's to the bottom
-     * vertex's inclusive (0xa178c = ybot - ytop, 0x5a337 / 0x5a33d), each chain from its vertex's x + 0.5 (0x5a01f) - about
-     * half a pixel more on the right and below than GL's centre rule. So the polygon (its fan, every triangle) is drawn
-     * 2 px larger on screen - each vertex pushed out along its two edges' outward normals (miter, at most 8 px) - and the
-     * fragment keeps exactly the DOS span's pixels (dos_gouraud); polygons crossing the near plane are left as they are */
-    "#if DOS_LOOK\n"
-    "  if (u_dos != 0 && int(a_color.r + 0.5) == 3 && a_texsel > 0.5 && e < 256) {\n"
-    "    int s = int(a_texsel + 0.5) - 1, rel = gl_VertexID - s, t = rel / 3, cn = rel - 3 * t;\n"
-    "    vec2 Q[18]; int n = 0; bool ok = true; vec2 h = 0.5 * u_vp;\n"
-    "    for (int k = 0; k < 16; k++) {\n"
-    "      int b = s + 3 * k;\n"
-    "      for (int c = (k == 0 ? 0 : 1); c < 3; c++) {\n"
-    "        if (c == 2 && ((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) == 0) break;\n"
-    "        vec4 wp = vec4(texelFetch(u_dos_vtx, (b + c) * 13).r, texelFetch(u_dos_vtx, (b + c) * 13 + 1).r, texelFetch(u_dos_vtx, (b + c) * 13 + 2).r, 1.0), q = u_mvp * wp;\n"
-    "        if (q.z + q.w < 0.0 || q.w <= 0.0) ok = false; else { ivec2 sp = dos_scr(wp.xyz); Q[n] = vec2(float(sp.x) + 0.5, u_vp.y - float(sp.y) - 0.5) - h; }\n"
-    "        n++;\n"
-    "      }\n"
-    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) break;\n"
-    "    }\n"
-    "    int j = cn == 0 ? 0 : t + cn;\n"
-    "    if (ok && n >= 3 && j < n && gl_Position.w > 0.0) {\n"
-    "      float area = 0.0;\n"
-    "      for (int i = 0; i < n; i++) { vec2 a = Q[i], b = Q[(i + 1) % n]; area += a.x * b.y - a.y * b.x; }\n"
-    "      vec2 A = Q[(j + n - 1) % n], B = Q[j], C = Q[(j + 1) % n], e1 = B - A, e2 = C - B;\n"
-    "      float sg = area > 0.0 ? 1.0 : -1.0;\n"
-    "      vec2 n1 = length(e1) > 1e-4 ? sg * vec2(e1.y, -e1.x) / length(e1) : vec2(0.0), n2 = length(e2) > 1e-4 ? sg * vec2(e2.y, -e2.x) / length(e2) : vec2(0.0);\n"
-    "      vec2 m = n1 + n2; float d = 1.0 + dot(n1, n2);\n"
-    "      vec2 off = d > 1e-3 ? 3.0 * m / d : 3.0 * m;\n"
-    "      if (length(off) > 24.0) off = off / length(off) * 24.0;\n"
-    "      gl_Position.xy += off / h * gl_Position.w;\n"
-
-    "    }\n"
-    "  }\n"
-    "#endif\n"
-    /* the DOS cockpit set: painted over everything, in the DOS draw order (MW2.EXE 0x3cea0 / 0x3d040: its list sorted
-     * by each polygon's key, the farthest first, and drawn in turn) - a later polygon nearer in depth; one the original
-     * leaves out (wholly behind the eye or off the window, 0x3e1de) is not drawn */
-    "  if (pit > 0 && u_dos != 0) {\n"
-    "    int rk = u_pit_rank[min(pit - 1, 127)];\n"
-    "    if (rk < 0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
-    "    else gl_Position.z = (-1.0 + 0.01 * (1.0 - float(rk + 1) / 256.0)) * gl_Position.w;\n"
-    "  }\n"
-    /* the view distance (the planet's VIEW far; DOS MW2.EXE 0x3f500, 3Dfx 0x1002fba0): an object whose bounding sphere
-     * lies wholly beyond it - centre distance > far + r, or depth - r > far - is not drawn (all its vertices off screen) */
-    "  if (u_far > 0.0 && a_sphere.w > 0.0) {\n"
-    "    vec3 sc = (u_view * vec4(a_sphere.xyz, 1.0)).xyz;\n"
-    "    if (dot(sc, sc) > (u_far + a_sphere.w) * (u_far + a_sphere.w) || -sc.z - a_sphere.w > u_far) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
-    "  }\n"
-    /* the DOS fog key (MW2.EXE 0x3e1de -> *0x97080 = 0x38ae0 -> 0x38ee0): one per polygon - the largest of its corners'
-     * camera z (quarter units: dos_camz; the list key DAT_0014fcc0 = 0) - and the level less ((key << 4) / LITE +24) >> 4,
-     * not the pixel's depth in cm. The polygon's corners from this layer's buffer: its fan triangles back to the one that
-     * starts it (edge bit 4) and on to the one that closes it (bit 2); -1 (the pixel depth) for a vertex not found there */
-    "  v_dkey = -1.0;\n"
-    "#if DOS_LOOK\n"
-    "  if (u_dos != 0) {\n"
-    "    int vid = gl_VertexID, t = vid / 3, k, c;\n"
-    "    if (abs(texelFetch(u_dos_vtx, vid * 13).r - a_pos.x) + abs(texelFetch(u_dos_vtx, vid * 13 + 2).r - a_pos.z) < 0.01) {\n"
-    "      for (k = 0; k < 16 && t > 0; k++) { if (((int(texelFetch(u_dos_vtx, 3 * t * 13 + 12).r + 0.5) % 32 / 3) & 4) != 0) break; t--; }\n"
-    "      float km = -1e9;\n"
-    "      for (k = 0; k < 16; k++) {\n"
-    "        int b = 3 * (t + k);\n"
-    "        for (c = 0; c < 3; c++) km = max(km, dos_camz(vec3(texelFetch(u_dos_vtx, (b + c) * 13).r, texelFetch(u_dos_vtx, (b + c) * 13 + 1).r, texelFetch(u_dos_vtx, (b + c) * 13 + 2).r)));\n"
-    "        if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) break;\n"
-    "      }\n"
-    "      v_dkey = km;\n"
-    "    }\n"
-    "  }\n"
-    "#endif\n"
-    "  v_viewpos = (u_view * vec4(p, 1.0)).xyz; v_world = p;\n"
-    "  { float vz = max(-v_viewpos.z, 1.0); v_tivf = 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, vz / u_tifog.y) : 1.0) * u_tifog.w; }\n"
-    "  v_normal = nrm; v_uv = a_uv; v_color = a_color; v_texsel = int(floor(a_texsel + 0.5)); v_sph = a_sphere;\n"
-    "  v_tic = a_tic.rgb; v_ticm = int(a_tic.a + 0.5); v_gs = a_uv; v_uvl = a_uv;\n"
-    "  int hi = e / 32; e -= hi * 32; int corner = e - 3 * (e / 3);\n"
-    "  v_bary = vec3(corner == 0 ? 1.0 : 0.0, corner == 1 ? 1.0 : 0.0, corner == 2 ? 1.0 : 0.0); v_emask = (e / 3) | (hi << 3);\n"
-    "}\n";
-
-static const char *FS =
-    "#version 330 core\n"
-    "in vec3 v_normal; in vec2 v_uv; in vec3 v_color; flat in int v_texsel; in vec3 v_viewpos; in vec3 v_world; flat in int v_dnib;\n"
-    "in vec3 v_bary; flat in int v_emask, v_bb, v_tif; flat in vec4 v_sph;\n"
-    "in vec3 v_tic; flat in int v_ticm;\n"
-    "flat in float v_dkey;\n"
-    "uniform int u_point; uniform vec3 u_lpos;\n"
-    /* the Titanium lights (mercsw 0x1002ecaa): u_tilit 1 objects, 2 the ground (one colour, 0x1005527e); the ambient, two
-     * world lights (type 1 directional - the unit vector the light travels along -, 2 point - its position), the
-     * explosion lights (u_tidp: position, radius; 0x1002f238) */
-    "uniform int u_tilit; uniform vec3 u_tiamb, u_tignd; uniform ivec2 u_tilt; uniform vec3 u_tilv[2], u_tilc[2];\n"
-    "uniform int u_tidn; uniform vec4 u_tidp[8]; uniform vec3 u_tidc[8];\n"
-    /* the engine's vector length (0x100462fe): the largest component + a quarter of the other two */
-    "float ti_len(vec3 v) { vec3 a = abs(v); float m = max(a.x, max(a.y, a.z)); return m + (a.x + a.y + a.z - m) * 0.25; }\n"
-    "vec3 ti_light(vec3 nn) {\n"
-    "  vec3 c = u_tiamb;\n"
-    "  for (int i = 0; i < 2; i++) {\n"
-    "    if (u_tilt[i] == 1) { float d = -dot(u_tilv[i], nn); if (d > 0.0) c += u_tilc[i] * d; }\n"
-    "    else if (u_tilt[i] == 2) { vec3 l = u_tilv[i] - v_world; float d = dot(l, nn); if (d > 0.0) c += u_tilc[i] * d / max(ti_len(l), 1e-3); }\n"
-    "    else c += u_tilc[i];\n"
-    "  }\n"
-    "  c = min(c, vec3(1.0));\n"
-    /* an explosion / projectile light lights an object's polygon if one of its vertices is inside the light's +-radius
-     * box (0x1002eb36): here the object's bounding sphere's box against it (INFERRED); N.L / |L|, no falloff. The engine's
-     * sums (0x1002f3f9..0x1002f5d5) are never cleared after the static lights: each vertex gets the running total, which
-     * starts at the polygon's LAST vertex's lit colour - so a light that reaches an object adds that colour again on top
-     * of its own (here this point's colour, INFERRED: the vertices' lit colours alike), clamped */
-    "  vec3 acc = c; bool hit = false;\n"
-    "  for (int j = 0; j < 8; j++) {\n"
-    "    if (j >= u_tidn) break;\n"
-    "    vec3 dd = abs(v_sph.xyz - u_tidp[j].xyz);\n"
-    "    if (v_sph.w > 0.0 && (dd.x > u_tidp[j].w + v_sph.w || dd.y > u_tidp[j].w + v_sph.w || dd.z > u_tidp[j].w + v_sph.w)) continue;\n"
-    "    vec3 l = u_tidp[j].xyz - v_world; float d = dot(l, nn);\n"
-    "    hit = true;\n"
-    "    if (d > 0.0) acc += u_tidc[j] * d / max(ti_len(l), 1e-3);\n"
-    "  }\n"
-    "  return hit ? min(c + acc, vec3(1.0)) : c;\n"
-    "}\n"
-    "uniform sampler2D u_tex;\n"
-    "uniform vec2 u_texsize;\n"
-    "uniform int u_textured, u_unlit;\n"
-    "uniform vec4 u_wire, u_mono;\n"
-    "uniform int u_shadow;\n"
-    "uniform vec3 u_light, u_fog_color;\n"
-    "uniform float u_ambient, u_fog_density;\n"
-    "uniform mat4 u_view;\n"
-    "uniform vec3 u_tint; uniform float u_pfade; uniform sampler2D u_ptab; uniform int u_notex, u_tinton, u_dsign;\n"
-    "uniform int u_dos, u_dos_dir; uniform sampler2D u_dos_tab; uniform vec3 u_dos_lpos; uniform float u_dos_amb, u_dos_fogdist;\n"
-    /* the DOS Gouraud fill (glr_dos_gouraud below): the layer's vertices (13 floats each) as a buffer texture, the MVP, the
-     * viewport (origin, size); u_dos_smooth: the port's dos_shading=smooth */
-    "uniform samplerBuffer u_dos_vtx; uniform mat4 u_mvp; uniform vec2 u_vp, u_vpo; uniform int u_dos_smooth;\n"
-    "noperspective in vec2 v_gs;\n"
-    "noperspective in float v_tivf;\n"
-    "uniform float u_alpha; uniform int u_mga_lod;\n"
-    /* the 3D engines' texturing per colour type (glr_view.ati_tex, bits 1 / 2 / 4): a bank-1 textured polygon's bits in
-     * -v_texsel above its texture switch class (set_layer): 4 affine, 8 no alpha mask, 16 colour types 5-11 */
-    "noperspective in vec2 v_uvl; uniform int u_ati;\n"
-    /* the Titanium edition (mercsw.dll): its vertex fog - x 1 = on, y the full-fog depth Z (0: none), z 1 = per vertex
-     * (v_tivf, RENDITION) else per pixel, w the camera's factor; u_blend: alpha-blended (no alpha test), the texel's alpha out */
-    "uniform vec4 u_tifog; uniform int u_blend;\n"
-    /* the DOS horizon fill (MW2.EXE 0x3c000): a pixel is sky when its view ray's world y >= 0 - ray = R (sx - cx) / fx +
-     * U (cy - sy) / fy + F; above the line a haze band of u_hz_band pixels fades from 0xEE (on the line) to 0xE0;
-     * u_hz_x: the window's left and right x; u_hz_smooth: the port's dos_sky=smooth (the band's colours blended) */
-    "uniform int u_horizon, u_hz_smooth; uniform vec3 u_hz_r, u_hz_u, u_hz_f; uniform vec4 u_hz_c; uniform float u_hz_band; uniform vec2 u_hz_x;\n"
-    "out vec4 o_color;\n"
-    /* the DOS edition (MW2.EXE 0x38ae3 / 0x3e086 / 0x38ee0): v_color = (kind, base index, intensity C); kind 0 unlit
-     * (base is the index), 1 flat lit (base = ramp x 16), 2 textured (the texel's index through LUMA). The shade level =
-     * ((C >> 1) x ((f x (128 - amb) >> 7) + amb)) / 0x440, f = 127 x cos(light, normal), less one per fog distance of
-     * depth, clamped 0-15 */
-    "vec3 dos_colour(float idx) { return texture(u_dos_tab, vec2((idx + 0.5) / 256.0, 16.5 / 17.0)).rgb; }\n"
-    /* DOS Gouraud (type 4: 0x3bb80 -> 0x3bd08 / 0x3bd69, the map mode's 0x12690 -> 0x1272d; both only with Gouraud on,
-     * DAT_00097024, else the flat fill 0x59180). The vertices: projected to whole pixels about the window's centre,
-     * ((p << s) / z + 2) >> 2 (0x3dfb7: quarter pixels, rounded), the shade c (16.16) = ramp x 16 + i (L + 1) / 16
-     * (0x3bd22; a < 48 as it is). MW2.EXE 0x59e77 then fills row by row from the top vertex (the last of the least y,
-     * 0x59f58) down two chains, one backward and one forward through the vertex list (0x59f9f / 0x5a03a, the first
-     * edges of no height skipped; later ones count 1 row, 0x5a61d), each edge starting at its upper vertex's x << 16 +
-     * 0x8000 and c + 0x8000 (0x5a01f / 0x5a0b7, 0x5a662) and stepping dx / dy, dc / dy per row (16.16, truncated; the
-     * last row steps on without switching, 0x5a33f). A row's span runs from the smaller chain's x >> 16 to the
-     * larger's (0x5a1d5), stepped per PIXEL PAIR: s = (cR - cL) / max(w >> 1, 1), w its last pixel - its first
-     * (0x5a1ea..0x5a202). Two accumulators run the pairs: the even pixel (from the span's own left end) at cL + DA,
-     * the odd at cL + DB, + s per pair (0x5a214..0x5a2fd); the colour is the byte of the integer part (the palette
-     * index). DA = 0x7fff (the callers' push, 0x3bd6b / 0x12723), DB = 0, swapped after every row (0x5a310..0x5a320;
-     * at the top clip by the rows skipped, 0x5a10b), the top row starting with DA; a left-clipped span keeps its
-     * phase (0x5a5c4). So pixel k of row r (from the unclipped span's left end / the polygon's top row): idx =
-     * (cL + floor(k / 2) s + (k + r even ? 0x7fff : 0)) >> 16 - a 1-pixel checkerboard of n / n + 1 where the shade's
-     * fraction is under 0.5, flat n + 1 above, its phase per polygon (DOSBox YELLSCN1 1024 x 768: the cockpit's
-     * checkerboards change phase at polygon edges). The port does it in integers per output pixel at any size (DOS
-     * draws it at its own resolution - 1024 x 768 one checker cell per pixel): the fragment reads its polygon
-     * (v_texsel - 1: its fan's first vertex in the layer's buffer; the triangles end at the one whose edge code has
-     * the closing bit), near-clips it (GL's plane, not DOS's 0x3de4e - near-clipped polygons approximate), rounds the
-     * vertices as 0x3dfb7 about the viewport's centre and walks the chains to its row; the pixels GL covers outside
-     * the DOS span take its end. dos_shading=smooth (not the original): the colours blended at c + 0.25 - the
-     * dither's mean - within the polygon's own shades */
-    "#if DOS_LOOK\n"
-    "vec4 dos_gclip(int i) { int b = i * 13; return u_mvp * vec4(texelFetch(u_dos_vtx, b).r, texelFetch(u_dos_vtx, b + 1).r, texelFetch(u_dos_vtx, b + 2).r, 1.0); }\n"
-    "float dos_gshade(int i, float g) { int b = i * 13; return texelFetch(u_dos_vtx, b + 7).r + texelFetch(u_dos_vtx, b + 6).r * g; }\n"
-    "int dos_q(float p) { return (int(trunc(p * 4.0)) + 2) >> 2; }\n"   /* 0x3dfb7: quarter pixels, + 2 >> 2 */
-    "ivec2 dos_gvtx(vec4 q) { vec2 p = q.xy / q.w * 0.5 * u_vp; ivec2 c = ivec2(u_vp) / 2; return ivec2(c.x + dos_q(p.x), c.y - dos_q(p.y)); }\n"
-    DOS_PROJ_GLSL
-    /* one chain (dir -1: backward, the first, 0x5a5eb; + 1 forward, 0x5a689) at DOS row y: (x, c) in 16.16 */
-    "ivec2 dos_gchain(ivec2 V[20], int C[20], int m, int top, int dir, int y, int ybot) {\n"
-    "  int a = top, b = (a + dir + m) % m, r0 = V[top].y;\n"
-    "  for (int g = 0; g < 20 && V[b].y == V[a].y && b != top; g++) { a = b; b = (a + dir + m) % m; }\n"
-    "  int cnt = V[b].y - V[a].y, yq = y == ybot && y > r0 ? y - 1 : y;\n"
-    "  for (int g = 0; g < 20 && yq >= r0 + cnt && b != top; g++) { r0 += cnt; a = b; b = (a + dir + m) % m; cnt = V[b].y - V[a].y; if (cnt == 0) cnt = 1; }\n"
-    "  if (cnt == 0) cnt = 1;\n"
-    "  uint t = uint(y - r0);\n"
-    "  return ivec2(int(uint(V[a].x * 65536 + 0x8000) + t * uint(dos_idiv((V[b].x - V[a].x) * 65536, cnt))),\n"
-    "               int(uint(C[a] + 0x8000) + t * uint(dos_idiv(C[b] - C[a], cnt))));\n"
-    "}\n"
-    "vec3 dos_gouraud(float lev) {\n"
-    "  float g = (lev + 1.0) / 16.0, px = floor(gl_FragCoord.x), py = floor(gl_FragCoord.y);\n"
-    "  float cc = v_gs.y + v_gs.x * g + 0.5, cmin = -1e9, cmax = 1e9;\n"   /* (no polygon: interpolated, screen parity) */
-    "  int k = int(px), r = int(py);\n"
-    "  uint val = 0u; bool exact = false;\n"
-    "  if (v_texsel > 0) {\n"
-    "    vec4 P[18]; float C[18]; int I[18]; ivec2 V[20]; int CF[20]; int n = 0, m = 0, s = v_texsel - 1, L1 = int(lev) + 1;\n"
-    "    for (int t = 0; t < 16; t++) {\n"
-    "      int b = s + 3 * t;\n"
-    "      if (t == 0) { P[0] = dos_gclip(b); C[0] = dos_gshade(b, g); I[0] = b; n = 1; }\n"
-    "      P[n] = dos_gclip(b + 1); C[n] = dos_gshade(b + 1, g); I[n] = b + 1; n++;\n"
-    "      if (((int(texelFetch(u_dos_vtx, b * 13 + 12).r + 0.5) % 32 / 3) & 2) != 0) { P[n] = dos_gclip(b + 2); C[n] = dos_gshade(b + 2, g); I[n] = b + 2; n++; break; }\n"
-    "    }\n"
-    "    cmin = 1e9; cmax = -1e9;\n"
-    "    for (int i = 0; i < n; i++) {\n"   /* the near plane (z + w >= 0), the shade carried */
-    "      vec4 a = P[i], b = P[(i + 1) % n]; float da = a.z + a.w, db = b.z + b.w;\n"
-    "      cmin = min(cmin, C[i]); cmax = max(cmax, C[i]);\n"
-    "      if (da >= 0.0) { int b2 = I[i] * 13; V[m] = dos_scr(vec3(texelFetch(u_dos_vtx, b2).r, texelFetch(u_dos_vtx, b2 + 1).r, texelFetch(u_dos_vtx, b2 + 2).r)); CF[m] = int(floor(C[i] * 65536.0 + 0.5)); m++; }\n"
-    "      if ((da >= 0.0) != (db >= 0.0)) { float t = da / (da - db); V[m] = dos_gvtx(mix(a, b, t)); CF[m] = int(floor(mix(C[i], C[(i + 1) % n], t) * 65536.0 + 0.5)); m++; }\n"
-    "    }\n"
-    "    if (m >= 3) {\n"
-    "      int top = 0, ybot = V[0].y;\n"
-    "      for (int i = 0; i < m; i++) { if (V[i].y <= V[top].y) top = i; ybot = max(ybot, V[i].y); }\n"   /* 0x59f58: the last of the least y */
-    "      int y0 = int(u_vp.y) - 1 - (int(py) - int(u_vpo.y)), y = clamp(y0, V[top].y, ybot);\n"   /* the DOS row (y down) */
-    "      if (m == n && y0 != y) discard;\n"   /* not near-clipped: the DOS span's rows only (see the vertex shader) */
-    "      ivec2 e1 = dos_gchain(V, CF, m, top, -1, y, ybot), e2 = dos_gchain(V, CF, m, top, 1, y, ybot);\n"
-    "      if (e2.x <= e1.x) { ivec2 t2 = e1; e1 = e2; e2 = t2; }\n"   /* 0x5a1d5 */
-    "      int x0 = e1.x >> 16, w = (e2.x >> 16) - x0;\n"
-    "      int st = w != 0 ? dos_idiv(e2.y - e1.y, max(w >> 1, 1)) : 0;\n"
-    "      k = int(px) - int(u_vpo.x) - x0;\n"
-    "      if (m == n && (k < 0 || k > w)) discard;\n"   /* and its pixels, both ends inclusive (0x5a213) */
-    "      k = clamp(k, 0, w); r = y - V[top].y;\n"
-    "      val = uint(e1.y) + uint(k >> 1) * uint(st); exact = true;\n"
-    "      cc = float(int(val)) / 65536.0;\n"
-    "    }\n"
-    "  }\n"
-    "  if (u_dos_smooth != 0) {\n"
-    "    float e = clamp(cc - 0.25, cmin, cmax), e0 = floor(e);\n"
-    "    return mix(dos_colour(e0), dos_colour(e0 + 1.0), e - e0);\n"
-    "  }\n"
-    "  if (exact) return dos_colour(float(((val + (((k + r) & 1) == 0 ? 0x7fffu : 0u)) >> 16) & 0xffu));\n"
-    "  return dos_colour(floor(cc + (((k + r) & 1) == 0 ? 32767.0 / 65536.0 : 0.0)));\n"
-    "}\n"
-    "#endif\n"
-    "void main() {\n"
-    /* the wireframe (image enhancement): only the polygons' own edges, 1 px - corner k's barycentric is the distance
-     * to the edge opposite it (bit 0: corner 0's, bit 1: corner 1's, bit 2: corner 2's) */
-    "  if (u_wire.a > 0.0) {\n"
-    "    vec3 w = fwidth(v_bary); float d = 1.0e9;\n"
-    "    if ((v_emask & 1) != 0) d = min(d, v_bary.x / max(w.x, 1e-6));\n"
-    "    if ((v_emask & 2) != 0) d = min(d, v_bary.y / max(w.y, 1e-6));\n"
-    "    if ((v_emask & 4) != 0) d = min(d, v_bary.z / max(w.z, 1e-6));\n"
-    /* hidden lines removed: a polygon's inside is drawn black (it hides what is behind it, as DOS); edges in the
-     * layer's colour, an active building's (flag 8) in the mechs' blue */
-    "    if (d > 1.0) { o_color = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
-    "    int wc = (v_emask >> 3) & 7;\n"   /* 1 colour 7 blue, 2 0xb red, 3 3 yellow, 4 8 dark red (60,0,0) */
-    "    o_color = wc == 1 ? vec4(0.0, 48.0 / 255.0, 212.0 / 255.0, 1.0) : wc == 2 ? vec4(252.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0)\n"
-    "            : wc == 3 ? vec4(252.0 / 255.0, 204.0 / 255.0, 0.0, 1.0) : wc == 4 ? vec4(60.0 / 255.0, 0.0, 0.0, 1.0) : vec4(u_wire.rgb, 1.0); return; }\n"
-    "  if (u_shadow != 0) { o_color = vec4(0.0, 0.0, 0.0, 0.45); return; }\n"
-    "  if (u_horizon != 0) {\n"
-    "    float sx = gl_FragCoord.x, sy = gl_FragCoord.y;\n"   /* GL y up: sy grows upward */
-    "    vec3 ray = u_hz_r * (sx - u_hz_c.x) / u_hz_c.z + u_hz_u * (sy - u_hz_c.y) / u_hz_c.w + u_hz_f;\n"
-    "    if (ray.y < 0.0) { o_color = vec4(dos_colour(239.0), 1.0); return; }\n"   /* 0xEF ground */
-    "    float idx = 224.0;\n"                                                      /* 0xE0 sky */
-    /* the band (0x3c000 -> 0x59e77, only with Gouraud on, DAT_00097024): a quad from the line (corners 0xEE << 16,
-     * DAT_00096eac - 1) up u_hz_band rows (corners 0xE0 << 16, DAT_00096ea8), its colour c = 238 - 14 d / band (d: the
-     * rows above the line) stepped down the edges from c + 0x8000 (0x5a0xx), each row's pixels in pairs as c + 0x8000 and
-     * c (in_stack 8 = 0x8000 from 0x3cc8b), the pair swapped every row (0x5a310): idx = floor(c + 0.5 + 0.5 chk) - a
-     * half-step checkerboard, counted from the span's left end and the quad's top row (DOSBox YELLSCN1 1024 x 768:
-     * every step one flat band and one 1-pixel checkerboard band of it and the next, row for row as here; the phase -
-     * which pixel of a pair is the brighter - set to that capture, the GL row count being one off the quad's own). dos_sky=smooth: the same
-     * colours blended at e = c + 0.25 (the staircase's mean: each flat band's middle = its own colour) */
-    "    if (u_hz_band > 0.0 && abs(u_hz_u.y) > 1e-6) {\n"
-    "      float sh = u_hz_c.y - u_hz_c.w * ((sx - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"   /* the line's row here */
-    "      float d = sy - sh;\n"
-    "      if (d >= 0.0 && d < u_hz_band) {\n"
-    "        float c = 238.0 - 14.0 * d / u_hz_band;\n"
-    "        if (u_hz_smooth != 0) {\n"
-    "          float e = clamp(c + 0.25, 224.0, 238.0), e0 = min(floor(e), 237.0);\n"
-    "          o_color = vec4(mix(dos_colour(e0), dos_colour(e0 + 1.0), e - e0), 1.0); return;\n"
-    "        }\n"
-    "        float shl = u_hz_c.y - u_hz_c.w * ((u_hz_x.x - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"
-    "        float shr = u_hz_c.y - u_hz_c.w * ((u_hz_x.y - u_hz_c.x) * u_hz_r.y / u_hz_c.z + u_hz_f.y) / u_hz_u.y;\n"
-    "        int row = int(floor(max(shl, shr) + u_hz_band - sy)), col = int(floor(sx - u_hz_x.x));\n"
-    "        idx = min(floor(c + (((row + col) & 1) != 0 ? 1.0 : 0.5)), 238.0);\n"
-    "      }\n"
-    "    }\n"
-    "    o_color = vec4(dos_colour(idx), 1.0); return;\n"
-    "  }\n"
-    "#if DOS_LOOK\n"
-    "  if (u_dos != 0) {\n"
-    "    int kind = int(v_color.r + 0.5); float base = floor(v_color.g + 0.5), C = floor(v_color.b + 0.5);\n"
-    "    if (kind == 0) { o_color = vec4(dos_colour(base), 1.0); return; }\n"
-    /* kind 4: a type 3 billboard - its texel indices as they are (0x38ae3 returns a 0x3000 word unshaded) */
-    "    if (kind == 4) { vec4 tb = texture(u_tex, v_uv / u_texsize); if (tb.a < 0.5) discard; o_color = vec4(dos_colour(floor(tb.r * 255.0 + 0.5)), 1.0); return; }\n"
-    "    float nl = length(v_normal); vec3 Ld = u_dos_dir != 0 ? normalize(u_dos_lpos) : normalize(u_dos_lpos - v_world);\n"
-    /* one-sided (0x3e1de): a polygon is drawn only when its normal faces the eye - (v0 - eye) . n < 0 - and lit by the
-     * same normal, signed (0x3e086: 127 cos; behind the light below the ambient). The DOS normal (0x380a0 -> 0x3a4b9)
-     * is the winding's: here -cross(v1 - v0, v2 - v0) of the file's vertices (the 3D editions' stored normals, which
-     * the engine negates at load, 0x10042140, agree) */
-    "    vec3 nf = nl > 0.0 ? -v_normal / nl : vec3(0.0);\n"
-    "    if (nl > 0.0 && dot(v_viewpos, mat3(u_view) * nf) >= 0.0) discard;\n"
-    "    float f = nl > 0.0 ? trunc(127.0 * dot(nf, Ld)) : 127.0;\n"
-    "    float lev = floor(floor(C / 2.0) * (floor(f * (128.0 - u_dos_amb) / 128.0) + u_dos_amb) / 1088.0);\n"
-    "    if (u_dos_fogdist > 0.0) lev -= v_dkey >= 0.0 ? float((int(v_dkey) * 16 / int(u_dos_fogdist)) >> 4) : floor(max(-v_viewpos.z, 0.0) / u_dos_fogdist);\n"
-    "    lev = clamp(lev, 0.0, 15.0);\n"
-    "    if (kind == 1) { o_color = vec4(dos_colour(base + lev), 1.0); return; }\n"
-    /* Gouraud (0x3bb80): each vertex's baked index a = ramp | i, rescaled by the polygon's level - ramp + i (L + 1) / 16 -
-     * when a >= 48 (16.16 a >= 0x300000), else taken as it is: the fixed part in the vertex's v (ramp, or a), the scaled
-     * part in its u (i, or 0); filled and dithered as 0x59e77 does (dos_gouraud). Flat-lit (types 1 / 2, 0x59180) and
-     * textured (5-7: 0x5b549 affine, 0x3fb20 perspective) polygons have no dither in DOS */
-    "    if (kind == 3) { o_color = vec4(dos_gouraud(lev), 1.0); return; }\n"
-    "    vec4 tx = texture(u_tex, v_uv / u_texsize); if (tx.a < 0.5) discard;\n"
-    "    float ti = floor(tx.r * 255.0 + 0.5);\n"
-    "    float si = lev >= 15.0 ? ti : floor(texture(u_dos_tab, vec2((ti + 0.5) / 256.0, (lev + 0.5) / 17.0)).r * 255.0 + 0.5);\n"
-    "    o_color = vec4(dos_colour(si), 1.0); return;\n"
-    "  }\n"
-    "#endif\n"
-    /* a Titanium colour kind 2 polygon (mercsw 0x1001b466 / 0x10053280): drawn only as the kind 1 shade its object's
-     * texture switch makes it (its class in -v_texsel switched off, 0x1001b47a..0x1001b4f3) - or as an outline (above) */
-    "  if (v_ticm == 3 && ((-v_texsel) & u_notex) == 0) discard;\n"
-    "  vec3 base = u_mono.a > 1.5 ? v_color : u_mono.a > 0.0 ? u_mono.rgb : v_ticm >= 2 ? v_tic : v_color; float ta = 1.0; bool tinted = false;\n"
-    /* the Combat Variables texture switches (0x1002a8a0 render flags DAT_1024e228, 0x1002a748..): a textured polygon whose
-     * object class (-v_texsel: 1 OBJECT, 2 TERRAIN) is switched off is drawn in its texture's average colour (v_color) */
-    "  if (u_textured != 0 && u_mono.a <= 0.0 && (v_texsel >= 0 || ((-v_texsel) & u_notex) == 0)) {\n"
-    "    vec4 t; int af = u_ati != 0 && v_texsel < 0 ? -v_texsel : 0;\n"
-    /* (u_ati bit 1) an affine polygon - q = 1 at every vertex (3Dfx 0x1002c880 / S3 0x1001da40 / Matrox 0x1005104c: oow
-     * 1.0; ATi 0x1002def4 / 0x1002df03) or C3D_ERS_TMAP_PERSP_COR 0 (ATi 0x100686b0) - takes its texel uv screen-linear;
-     * (bit 2) DISPLAY DETAIL low (3Dfx 0x1024e224 / S3 0x10061fc4 / Matrox 0x100adecc / ATi 0x1018a84c = 1) every type 5-11 */
-    "    vec2 uv = ((u_ati & 1) != 0 && (af & 4) != 0) || ((u_ati & 2) != 0 && (af & 16) != 0) ? v_uvl : v_uv;\n"
-    "    if (u_mga_lod != 0) { float z = -v_viewpos.z; t = textureLod(u_tex, uv / u_texsize, z < 2500.0 ? 0.0 : z < 5000.0 ? 1.0 : z < 15000.0 ? 2.0 : 3.0); }\n"
-    "    else t = texture(u_tex, uv / u_texsize);\n"
-    /* (u_ati bit 4) types 5-7 and the sky / ground fills drawn without the alpha flag: no alpha test / key - the alpha-0
-     * texels in their own colour (ATi C3D_ERS_TMAP_TEXOP none; 3Dfx 0x10067240 / 0x100674c0 blend only with flag 2;
-     * Matrox 0x100624a0 keys only with it, 0x1006256a) */
-    /* u_blend 2 / 3 (glr_view.alpha_blend, 3Dfx 0x10067240): 2 an ARGB4444 cache entry, the texel's alpha squared
-     * (grAlphaCombine(3, 4, 1, 1, 0)); 3 an ARGB1555 entry, the vertex alpha alone (u_alpha 230.4 / 255) */
-    "    if (u_blend == 3) {} else if (u_blend != 0) { if (t.a < 0.004) discard; } else if (t.a < 0.5 && ((af & 8) == 0 || (u_ati & 4) == 0)) discard; base = t.rgb * u_tint; ta = u_blend == 2 ? t.a * t.a : u_blend == 3 ? 1.0 : t.a; tinted = u_tinton != 0; }\n"
-    /* an untextured polygon's palette colour toward the fade's target palette (its index + 1 in v_texsel) */
-    "  else if (u_pfade > 0.0 && v_texsel > 0 && v_bb == 0) base = mix(base, texture(u_ptab, vec2((float(v_texsel - 1) + 0.5) / 256.0, 0.5)).rgb, u_pfade);\n"
-    "  float n = length(v_normal);\n"
-    "  vec3 L = u_point != 0 ? normalize(u_lpos - v_world) : u_light;\n"
-    "  float diff = n > 0.0 ? abs(dot(v_normal / n, L)) : 0.5;\n"   /* two-sided: winding unknown */
-    /* a tinted textured polygon (the 3D editions' palette fades, 0x1002c880 with DAT_1024e494): the tint is its vertex
-     * colour - unlit. A mech location (type word 0x100) by its damage nibble n (0x1002b9b0, DAT_1024e428 = PLNT +52):
-     * the light x (1 - n / 15), or x (1 + n / 15) when the planet's flag is set, at most full */
-    "  float ds = v_dnib > 0 ? (u_dsign != 0 ? 1.0 + float(v_dnib) / 15.0 : 1.0 - float(v_dnib) / 15.0) : 1.0;\n"
-    /* Titanium: a polygon lit per vertex (v_ticm 1: the colour the lights gave its corners, interpolated - Gouraud, as
-     * mercsw 0x1002ecaa / 0x1002f238 and dx5draw's SHADEMODE) */
-    "  vec3 lit = u_unlit != 0 || v_bb != 0 || tinted || (v_tif & 2) != 0 || v_ticm == 3 ? base : u_tilit == 1 ? base * (v_ticm == 1 ? v_tic : ti_light((v_tif & 1) != 0 ? v_normal : n > 0.0 ? v_normal / n : vec3(0.0)))\n"
-    "           : u_tilit == 2 ? base * u_tignd : base * min(1.0, (u_ambient + diff) * ds);\n"   /* SGL: ambient + parallel light, saturating */
-    /* PowerVR PCX2 table fog (Imagination's Series 1 driver source, MIT: dlcamera.c sgl_set_fog, rncamera.c, simulat3
-     * hwsabren.c Fog / texas.c): per pixel, from the depth 1/w: index i = depth >> shift = K / z (K below, z the view depth
-     * in game units), the 8-bit fog f = PowerTable[i & 127] >> min(i >> 7, 9) with PowerTable[k] = 256 x 2^(-k/128)
-     * (entry 0 = 255), so f = 0 from i = 1152 (near) up to 255 far; colour += (fog - colour) x f / 256 */
-    "  float fz = max(-v_viewpos.z, 1.0);\n"
-    "  float fi = u_fog_density > 0.0 ? floor(u_fog_density / fz) : 1.0e9;\n"
-    "  float fk = mod(fi, 128.0), fs = floor(fi / 128.0);\n"
-    "  float ft = fk == 0.0 ? 255.0 : floor(256.0 * exp2(-fk / 128.0));\n"
-    "  float ff = fs >= 9.0 ? 0.0 : floor(ft / exp2(fs)) / 256.0;\n"
-    /* Titanium (mercsw.dll): the vertex fog the D3D plugin takes as the specular alpha a (fog = 1 - a); the world, the
-     * objects and the ground (0x10053474, 0x10001b53): a = (1 - min(1, z / Z)) x the camera's factor (density Y's
-     * ground fog / low cloud, 0x1006a851); Z = 0: no distance fog */
-    "  if (u_tifog.x > 0.5) ff = u_tifog.z > 0.5 ? v_tivf : 1.0 - (u_tifog.y > 0.0 ? 1.0 - min(1.0, fz / u_tifog.y) : 1.0) * u_tifog.w;\n"
-    "  o_color = vec4(lit + (u_fog_color - lit) * ff, u_blend != 0 ? ta * u_alpha : u_alpha);\n"
-    "}\n";
-
-static GLuint compile(GLenum type, const char *src, int dos)
+/* glDrawArrays with the program's uniforms as they are now (u_first: the vertex shader's gl_VertexID base) */
+static void glr_draw_arrays(glr *r, int first, int count)
 {
-    GLuint s = glCreateShader(type);
-    GLint ok = 0;
-    /* "#version" first, then DOS_LOOK: the DOS look's own shader code (Gouraud fill, projection, fog key) is compiled
-     * only into its program - the other looks' program carries none of it (its loops, arrays and buffer reads) */
-    const char *nl = strchr(src, '\n'), *part[3];
-    GLint len[3];
-    part[0] = src; len[0] = (GLint)(nl - src + 1);
-    part[1] = dos ? "#define DOS_LOOK 1\n" : "#define DOS_LOOK 0\n"; len[1] = (GLint)strlen(part[1]);
-    part[2] = nl + 1; len[2] = (GLint)strlen(nl + 1);
-    glShaderSource(s, 3, part, len);
-    glCompileShader(s);
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[2048];
-        glGetShaderInfoLog(s, sizeof log, NULL, log);
-        fprintf(stderr, "glr: shader compile failed:\n%s\n", log);
-        glDeleteShader(s);
-        return 0;
-    }
-    return s;
+    r->D.u_first = first;
+    rb_program(r->prog);
+    rb_uniforms(0, &r->F, sizeof r->F);
+    rb_uniforms(1, &r->D, sizeof r->D);
+    rb_draw(first, count);
 }
-
-static GLuint glr_link(int dos)
+/* glBindTexture on unit 0 with its filters (the OpenGL renderer set them on the bound texture before each draw) */
+static void glr_bind(rb_tex t, int minf, int magf)
 {
-    GLuint vs = compile(GL_VERTEX_SHADER, VS, dos), fs = compile(GL_FRAGMENT_SHADER, FS, dos), prog;
-    GLint ok = 0;
-    if (!vs || !fs) { if (vs) glDeleteShader(vs); if (fs) glDeleteShader(fs); return 0; }
-    prog = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    glLinkProgram(prog);
-    glDeleteShader(vs);
-    glDeleteShader(fs);
-    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[2048];
-        glGetProgramInfoLog(prog, sizeof log, NULL, log);
-        fprintf(stderr, "glr: link failed:\n%s\n", log);
-        glDeleteProgram(prog);
-        return 0;
-    }
-    return prog;
+    rb_texture(0, t);
+    rb_tex_filter(t, minf, magf);
 }
-
-/* the uniforms' locations in r->prog (-1: not in this variant - glUniform ignores it) */
-static void glr_locate(glr *r)
+/* a layer's buffers (glBindVertexArray of the layer's VAO) */
+static void glr_bind_layer(const glr *r, int li);
+/* the transient vertices (env_vertex layout) drawn from the frame's stream: the sphere and Titanium colour zero, as the
+ * OpenGL renderer's constant attributes 6 / 7 */
+static void glr_bind_stream(size_t off)
 {
-#define U(name) r->name = glGetUniformLocation(r->prog, #name)
-    U(u_point); U(u_lpos);
-    U(u_mvp); U(u_view); U(u_light); U(u_ambient); U(u_fog_density); U(u_fog_color);
-    U(u_texsize); U(u_tex); U(u_textured); U(u_mono);
-#undef U
-    r->u_far = glGetUniformLocation(r->prog, "u_far");
-    r->u_vp = glGetUniformLocation(r->prog, "u_vp");
-    r->u_tint = glGetUniformLocation(r->prog, "u_tint");
-    r->u_tinton = glGetUniformLocation(r->prog, "u_tinton");
-    r->u_dsign = glGetUniformLocation(r->prog, "u_dsign");
-    r->u_pfade = glGetUniformLocation(r->prog, "u_pfade");
-    r->u_ptab = glGetUniformLocation(r->prog, "u_ptab");
-    r->u_notex = glGetUniformLocation(r->prog, "u_notex");
-    r->u_unlit = glGetUniformLocation(r->prog, "u_unlit");
-    r->u_wire = glGetUniformLocation(r->prog, "u_wire");
-    r->u_shadow = glGetUniformLocation(r->prog, "u_shadow");
-    r->u_dos = glGetUniformLocation(r->prog, "u_dos");
-    r->u_dos_tab = glGetUniformLocation(r->prog, "u_dos_tab");
-    r->u_dos_lpos = glGetUniformLocation(r->prog, "u_dos_lpos");
-    r->u_dos_amb = glGetUniformLocation(r->prog, "u_dos_amb");
-    r->u_dos_fogdist = glGetUniformLocation(r->prog, "u_dos_fogdist");
-    r->u_dos_dir = glGetUniformLocation(r->prog, "u_dos_dir");
-    r->u_dos_vtx = glGetUniformLocation(r->prog, "u_dos_vtx");
-    r->u_dos_smooth = glGetUniformLocation(r->prog, "u_dos_smooth");
-    r->u_vpo = glGetUniformLocation(r->prog, "u_vpo");
-    r->u_dos_eye = glGetUniformLocation(r->prog, "u_dos_eye");
-    r->u_pit_rank = glGetUniformLocation(r->prog, "u_pit_rank");
-    r->u_dos_rx = glGetUniformLocation(r->prog, "u_dos_rx");
-    r->u_dos_ry = glGetUniformLocation(r->prog, "u_dos_ry");
-    r->u_dos_rz = glGetUniformLocation(r->prog, "u_dos_rz");
-    r->u_dos_ps = glGetUniformLocation(r->prog, "u_dos_ps");
-    glUseProgram(r->prog);   /* the buffer sampler on its own unit always: a samplerBuffer left on unit 0 with u_tex's
-                              * sampler2D makes every draw invalid */
-    glUniform1i(r->u_dos_vtx, 3);
-    glUseProgram(0);
-    r->u_alpha = glGetUniformLocation(r->prog, "u_alpha");
-    r->u_mga_lod = glGetUniformLocation(r->prog, "u_mga_lod");
-    r->u_horizon = glGetUniformLocation(r->prog, "u_horizon");
-    r->u_hz_r = glGetUniformLocation(r->prog, "u_hz_r");
-    r->u_hz_u = glGetUniformLocation(r->prog, "u_hz_u");
-    r->u_hz_f = glGetUniformLocation(r->prog, "u_hz_f");
-    r->u_hz_c = glGetUniformLocation(r->prog, "u_hz_c");
-    r->u_hz_band = glGetUniformLocation(r->prog, "u_hz_band");
-    r->u_hz_x = glGetUniformLocation(r->prog, "u_hz_x");
-    r->u_hz_smooth = glGetUniformLocation(r->prog, "u_hz_smooth");
-    r->u_tifog = glGetUniformLocation(r->prog, "u_tifog");
-#define U(name) r->name = glGetUniformLocation(r->prog, #name)
-    U(u_tilit); U(u_tiamb); U(u_tilt); U(u_tilv); U(u_tilc); U(u_tignd); U(u_tidn); U(u_tidp); U(u_tidc);
-#undef U
-    r->u_blend = glGetUniformLocation(r->prog, "u_blend");
-    r->u_ati = glGetUniformLocation(r->prog, "u_ati");
+    rb_vertex(0, RB_STREAM, off);
+    rb_vertex(1, 0, 0);
+    rb_vertex(2, 0, 0);
+    rb_storage(0);
+}
+static size_t glr_stream(const float *v, size_t floats)
+{
+    size_t off;
+    void *p = rb_stream(floats * sizeof(float), &off);
+    memcpy(p, v, floats * sizeof(float));
+    return off;
 }
 
 /* the program for the look: the DOS look's variant (DOS_LOOK 1) or the others' (glr_set_dos switches) */
 static void glr_use_variant(glr *r, int dos)
 {
-    GLuint p;
-    if (r->prog && r->prog_dos == dos) return;
-    if (!(p = glr_link(dos))) return;   /* (keeps the old program) */
-    if (r->prog) glDeleteProgram(r->prog);
-    r->prog = p; r->prog_dos = dos;
-    glr_locate(r);
+    r->prog = dos ? RB_PROG_WORLD_DOS : RB_PROG_WORLD;
 }
 
 glr *glr_create(void)
 {
     glr *r = calloc(1, sizeof *r);
+    int l, k;
     if (!r) return NULL;
     glr_use_variant(r, 0);
-    if (!r->prog) { free(r); return NULL; }
-    {
-        int l;
-        for (l = 0; l < GLR_LAYERS; l++) {
-            glGenVertexArrays(1, &r->layer[l].vao);
-            glGenBuffers(1, &r->layer[l].vbo);
-            glGenTextures(1, &r->layer[l].tbo);
-            glGenBuffers(1, &r->layer[l].sph_vbo);
-            glGenBuffers(1, &r->layer[l].tic_vbo);
-        }
+    for (l = 0; l < GLR_LAYERS; l++) {
+        r->layer[l].vbo = rb_buf_new();
+        r->layer[l].sph_vbo = rb_buf_new();
+        r->layer[l].tic_vbo = rb_buf_new();
     }
-    glGenTextures(GLR_SLOTS * 4, r->tex);
-    glGenTextures(GLR_SLOTS, r->tex_a);
-    glGenVertexArrays(1, &r->env_vao);
-    glGenBuffers(1, &r->env_vbo);
-    glGenTextures(2, r->env_tex);
-    glGenVertexArrays(1, &r->spr_vao);
-    glGenBuffers(1, &r->spr_vbo);
-    glGenTextures(64, r->spr_tex);
-    glVertexAttrib4f(6, 0, 0, 0, 0);   /* the sky, ground and sprites: no sphere, never culled */
-    glVertexAttrib4f(7, 0, 0, 0, 0);   /* nor a Titanium CPU colour */
-    glGenVertexArrays(1, &r->dome_vao);
-    glGenBuffers(1, &r->dome_vbo);
-    glGenTextures(GLR_SLOTS, r->dome_tex);
-    glGenTextures(1, &r->dos_tex);
-    {
-        static const float z = 0;
-        glGenBuffers(1, &r->nul_buf);
-        glBindBuffer(GL_TEXTURE_BUFFER, r->nul_buf);
-        glBufferData(GL_TEXTURE_BUFFER, sizeof z, &z, GL_STATIC_DRAW);
-        glBindBuffer(GL_TEXTURE_BUFFER, 0);
-        glGenTextures(1, &r->nul_tbo);
-        glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
-        glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, r->nul_buf);
-        glActiveTexture(GL_TEXTURE0);
-    }
-    glGenTextures(1, &r->ptab_tex);
+    for (k = 0; k < GLR_SLOTS * 4; k++) r->tex[k] = rb_tex_new();
+    for (k = 0; k < GLR_SLOTS; k++) r->tex_a[k] = rb_tex_new();
+    for (k = 0; k < 2; k++) r->env_tex[k] = rb_tex_new();
+    for (k = 0; k < 64; k++) r->spr_tex[k] = rb_tex_new();
+    for (k = 0; k < GLR_SLOTS; k++) r->dome_tex[k] = rb_tex_new();
+    r->dos_tex = rb_tex_new();
+    r->ptab_tex = rb_tex_new();
     return r;
 }
 
 void glr_destroy(glr *r)
 {
+    int k;
     if (!r) return;
-    glDeleteTextures(GLR_SLOTS * 4, r->tex);
-    glDeleteTextures(GLR_SLOTS, r->tex_a);
-    glDeleteTextures(2, r->env_tex);
-    glDeleteTextures(1, &r->dos_tex);
-    glDeleteTextures(1, &r->nul_tbo);
-    glDeleteBuffers(1, &r->nul_buf);
-    glDeleteTextures(1, &r->ptab_tex);
-    glDeleteBuffers(1, &r->env_vbo);
-    glDeleteVertexArrays(1, &r->env_vao);
-    glDeleteBuffers(1, &r->spr_vbo);
-    glDeleteVertexArrays(1, &r->spr_vao);
-    glDeleteTextures(64, r->spr_tex);
-    glDeleteTextures(GLR_SLOTS, r->dome_tex);
-    glDeleteBuffers(1, &r->dome_vbo);
-    glDeleteVertexArrays(1, &r->dome_vao);
+    for (k = 0; k < GLR_SLOTS * 4; k++) rb_tex_delete(r->tex[k]);
+    for (k = 0; k < GLR_SLOTS; k++) rb_tex_delete(r->tex_a[k]);
+    for (k = 0; k < 2; k++) rb_tex_delete(r->env_tex[k]);
+    rb_tex_delete(r->ground_flat); rb_tex_delete(r->sky_flat);
+    rb_tex_delete(r->dos_tex);
+    rb_tex_delete(r->ptab_tex);
+    for (k = 0; k < 64; k++) rb_tex_delete(r->spr_tex[k]);
+    for (k = 0; k < GLR_SLOTS; k++) rb_tex_delete(r->dome_tex[k]);
     free(r->dome_v);
     free(r->dome_pfirst); free(r->dome_pcount); free(r->dome_pslot);
     free(r->par);
-    {
-        int l;
-        for (l = 0; l < GLR_LAYERS; l++) {
-            glDeleteBuffers(1, &r->layer[l].vbo);
-            glDeleteTextures(1, &r->layer[l].tbo);
-            glDeleteBuffers(1, &r->layer[l].sph_vbo);
-            glDeleteBuffers(1, &r->layer[l].tic_vbo);
-            free(r->layer[l].tic); free(r->layer[l].tipn); free(r->layer[l].tistat); free(r->layer[l].tip); free(r->layer[l].fp);
-            glDeleteVertexArrays(1, &r->layer[l].vao);
-        }
+    for (k = 0; k < GLR_LAYERS; k++) {
+        rb_buf_delete(r->layer[k].vbo);
+        rb_buf_delete(r->layer[k].sph_vbo);
+        rb_buf_delete(r->layer[k].tic_vbo);
+        free(r->layer[k].tic); free(r->layer[k].tipn); free(r->layer[k].tistat); free(r->layer[k].tip); free(r->layer[k].fp);
     }
-    glDeleteProgram(r->prog);
     free(r);
+}
+
+static void glr_bind_layer(const glr *r, int li)
+{
+    const glr_layer *L = &r->layer[li];
+    rb_vertex(0, L->vbo, 0);
+    rb_vertex(1, L->sph_vbo, 0);
+    rb_vertex(2, L->tic_vbo, 0);
+    rb_storage(r->dos ? L->vbo : 0);
 }
 
 static const texture *asrc[GLR_SLOTS];   /* set_layer's texture average cache (glr_flush_textures clears it) */
@@ -811,12 +257,8 @@ static void upload_alpha_reading(glr *r, int slot, const texture *t)
     r->has_a[slot] = t && t->alt;
     if (!r->has_a[slot] || r->tex_asrc[slot] == t) return;
     r->tex_asrc[slot] = t;
-    glBindTexture(GL_TEXTURE_2D, r->tex_a[slot]);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->alt4444 ? t->alt : t->rgba);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    rb_tex_image(r->tex_a[slot], t->w, t->h, t->alt4444 ? t->alt : t->rgba, 1);
+    rb_tex_wrap(r->tex_a[slot], RB_REPEAT, RB_REPEAT);
 }
 
 static void upload_texture(glr *r, int slot, const texture *t)
@@ -829,12 +271,8 @@ static void upload_texture(glr *r, int slot, const texture *t)
     if (slot < GLR_SLOTS) r->tex_buf[slot] = px;
     r->tex_w[slot] = t->w;
     r->tex_h[slot] = t->h;
-    glBindTexture(GL_TEXTURE_2D, r->tex[slot]);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    rb_tex_image(r->tex[slot], t->w, t->h, px, 1);
+    rb_tex_wrap(r->tex[slot], RB_REPEAT, RB_REPEAT);
 }
 
 /* An object's bounding sphere in GL coordinates (engine 0x10029060: the centre of its vertices' box, the radius the
@@ -1441,9 +879,9 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         }
     }
     for (b = 0; b < GLR_BATCHES; b++) {
-        L->batch_count[b] = (GLsizei)count[b];
-        L->batch_first[b] = (GLint)(pos[b] + (b < GLR_SLOTS ? acount[b] : 0) - count[b]);
-        if (b < GLR_SLOTS) L->batch_acount[b] = (GLsizei)acount[b];
+        L->batch_count[b] = (int)count[b];
+        L->batch_first[b] = (int)(pos[b] + (b < GLR_SLOTS ? acount[b] : 0) - count[b]);
+        if (b < GLR_SLOTS) L->batch_acount[b] = (int)acount[b];
     }
     if (bounds && n > 0) {
         for (a = 0; a < 3; a++) r->center[a] = (mn[a] + mx[a]) / 2;
@@ -1452,40 +890,16 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
         if (r->radius <= 0) r->radius = 1;
     }
 
-    glBindVertexArray(L->vao);
-    glBindBuffer(GL_ARRAY_BUFFER, L->vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * FLOATS_PER_VERTEX * sizeof *buf), buf, GL_STATIC_DRAW);
-    glActiveTexture(GL_TEXTURE3);               /* (the DOS Gouraud fill reads its polygon from it; set up on unit 3, the
-                                                 * buffer sampler's, so no other unit ever holds a buffer texture) */
-    glBindTexture(GL_TEXTURE_BUFFER, L->tbo);
-    glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, L->vbo);
-    glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
-    glActiveTexture(GL_TEXTURE0);
-    {
-        static const int sizes[6] = {3, 3, 2, 3, 1, 1};
-        size_t off = 0;
-        for (a = 0; a < 6; a++) {
-            glEnableVertexAttribArray((GLuint)a);
-            glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float),
-                                  (const void *)(off * sizeof(float)));
-            off += (size_t)sizes[a];
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, L->sph_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *sph), sph, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(6);
-    glVertexAttribPointer(6, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
-    glBindBuffer(GL_ARRAY_BUFFER, L->tic_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(n * 4 * sizeof *tic), tic, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(7);
-    glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (const void *)0);
+    /* (the DOS Gouraud fill also reads its polygon from vbo: the program's storage buffer) */
+    rb_buf_data(L->vbo, buf, n * FLOATS_PER_VERTEX * sizeof *buf);
+    rb_buf_data(L->sph_vbo, sph, n * 4 * sizeof *sph);
+    rb_buf_data(L->tic_vbo, tic, n * 4 * sizeof *tic);
     free(L->tic); free(L->tipn); free(L->tistat); free(L->tip); free(L->fp);
     L->tic = tic; L->tipn = tipn; L->tistat = NULL; L->tip = tip; L->tip_n = tip_n;
     L->fp = fp; L->fp_n = fp_n; fp = NULL;
     L->tic_static_ok = 0; L->tic_dyn = 1;
     tic = tipn = NULL; tip = NULL;
-    glBindVertexArray(0);
-    L->vertex_count = (GLsizei)n;
+    L->vertex_count = (int)n;
     for (b = 0; b < GLR_SLOTS; b++)
         if (L->batch_count[b] > 0) upload_texture(r, b, r->slot_frame[b] && slots[b] ? r->slot_frame[b] : slots[b]);
     for (b = 0; b < GLR_SLOTS; b++)
@@ -1667,10 +1081,8 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
     }
     L->tic_dyn = nd > 0;
     L->tic_static_ok = 1;
-    if (lo >= 0 && hi > lo) {
-        glBindBuffer(GL_ARRAY_BUFFER, L->tic_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)((size_t)lo * 4 * sizeof(float)), (GLsizeiptr)((size_t)(hi - lo) * 4 * sizeof(float)), L->tic + (size_t)lo * 4);
-    }
+    if (lo >= 0 && hi > lo)   /* (the whole buffer: a backend upload replaces it all) */
+        rb_buf_data(L->tic_vbo, L->tic, (size_t)L->vertex_count * 4 * sizeof(float));
 }
 
 int glr_set_mech(glr *r, const mech3d *m, const uint8_t palette[256][3],
@@ -1722,24 +1134,18 @@ void glr_set_environment(glr *r, const texture *ground, const texture *sky, floa
     for (k = 0; k < 2; k++) {
         r->env_has[k] = t[k] != NULL;
         if (!t[k]) continue;
-        glBindTexture(GL_TEXTURE_2D, r->env_tex[k]);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t[k]->w, t[k]->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t[k]->rgba);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        rb_tex_image(r->env_tex[k], t[k]->w, t[k]->h, t[k]->rgba, 1);
+        rb_tex_wrap(r->env_tex[k], RB_REPEAT, RB_REPEAT);
         {   /* the flat ground / sky: the texture's average colour */
             unsigned long sum[3] = {0, 0, 0}, n = (unsigned long)t[k]->w * (unsigned long)t[k]->h, i;
             unsigned char px[4];
             const unsigned char *by = (const unsigned char *)t[k]->rgba;   /* RGBA bytes, as uploaded */
-            GLuint *ft = k == 0 ? &r->ground_flat : &r->sky_flat;
+            rb_tex *ft = k == 0 ? &r->ground_flat : &r->sky_flat;
             for (i = 0; i < n; i++) { sum[0] += by[i * 4]; sum[1] += by[i * 4 + 1]; sum[2] += by[i * 4 + 2]; }
             px[0] = (unsigned char)(n ? sum[0] / n : 0); px[1] = (unsigned char)(n ? sum[1] / n : 0); px[2] = (unsigned char)(n ? sum[2] / n : 0); px[3] = 255;
-            if (!*ft) glGenTextures(1, ft);
-            glBindTexture(GL_TEXTURE_2D, *ft);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            if (!*ft) *ft = rb_tex_new();
+            rb_tex_image(*ft, 1, 1, px, 0);
+            rb_tex_wrap(*ft, RB_REPEAT, RB_REPEAT);
         }
     }
 }
@@ -1802,13 +1208,9 @@ void glr_set_skydome(glr *r, const wtb_object *o, texture *const slots[GLR_SLOTS
         r->dome_count[s] = r->dome_n - r->dome_first[s];
         if (!r->dome_count[s]) continue;
         r->dome_has[s] = 1;
-        glBindTexture(GL_TEXTURE_2D, r->dome_tex[s]);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   /* bilinear, no mips (dx5draw 0x100034a0) */
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        rb_tex_image(r->dome_tex[s], t->w, t->h, t->rgba, 0);
+        rb_tex_wrap(r->dome_tex[s], RB_REPEAT, RB_REPEAT);
+        rb_tex_filter(r->dome_tex[s], RB_LINEAR, RB_LINEAR);   /* bilinear, no mips (dx5draw 0x100034a0) */
     }
     r->dome_np = o->poly_count;
     for (i = 0; i < o->poly_count; i++)   /* (a polygon without a texture or with under 3 corners: none) */
@@ -1836,19 +1238,16 @@ void glr_set_sprites(glr *r, const glr_sprite *s, int n)
     r->spr_n = n;
 }
 
-/* the GL texture for a sprite texture (small cache keyed by the texture) */
-static GLuint sprite_texture(glr *r, const texture *t)
+/* the backend texture for a sprite texture (small cache keyed by the texture) */
+static rb_tex sprite_texture(glr *r, const texture *t)
 {
     int k;
     for (k = 0; k < 64; k++) if (r->spr_src[k] == t) return r->spr_tex[k];
     k = r->spr_next;
     r->spr_next = (r->spr_next + 1) & 63;
     r->spr_src[k] = t;
-    glBindTexture(GL_TEXTURE_2D, r->spr_tex[k]);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t->w, t->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    rb_tex_image(r->spr_tex[k], t->w, t->h, t->rgba, 1);
+    rb_tex_wrap(r->spr_tex[k], RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
     return r->spr_tex[k];
 }
 
@@ -1935,12 +1334,9 @@ void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float 
         uint8_t img[256][4];
         int x;
         for (x = 0; x < 256; x++) { img[x][0] = pal[x][0]; img[x][1] = pal[x][1]; img[x][2] = pal[x][2]; img[x][3] = 255; }
-        glBindTexture(GL_TEXTURE_2D, r->ptab_tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        rb_tex_image(r->ptab_tex, 256, 1, img, 0);
+        rb_tex_filter(r->ptab_tex, RB_NEAREST, RB_NEAREST);
+        rb_tex_wrap(r->ptab_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
     }
 }
 
@@ -1950,8 +1346,7 @@ void glr_set_dos_palette(glr *r, const uint8_t pal[256][3])
 {
     int x;
     for (x = 0; x < 256; x++) { r->dos_img[16][x][0] = pal[x][0]; r->dos_img[16][x][1] = pal[x][1]; r->dos_img[16][x][2] = pal[x][2]; }
-    glBindTexture(GL_TEXTURE_2D, r->dos_tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 16, 256, 1, GL_RGBA, GL_UNSIGNED_BYTE, r->dos_img[16]);
+    rb_tex_image(r->dos_tex, 256, 17, r->dos_img, 0);   /* (the whole table: a backend upload replaces it all) */
 }
 
 void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
@@ -1964,12 +1359,9 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
     for (y = 0; y < 16; y++)
         for (x = 0; x < 256; x++) { uint8_t v = luma ? luma[y * 256 + x] : (uint8_t)x; img[y][x][0] = img[y][x][1] = img[y][x][2] = v; img[y][x][3] = 255; }
     for (x = 0; x < 256; x++) { img[16][x][0] = pal[x][0]; img[16][x][1] = pal[x][1]; img[16][x][2] = pal[x][2]; img[16][x][3] = 255; }
-    glBindTexture(GL_TEXTURE_2D, r->dos_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 17, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    rb_tex_image(r->dos_tex, 256, 17, img, 0);
+    rb_tex_filter(r->dos_tex, RB_NEAREST, RB_NEAREST);
+    rb_tex_wrap(r->dos_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
 }
 
 void glr_draw(glr *r, const glr_view *v, int w, int h) { glr_draw_rect(r, v, 0, 0, w, h); }
@@ -2320,15 +1712,13 @@ static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], co
  * cache holds (tex_cache_decide; a mw2.mip CEL: ARGB4444) - and returns their u_blend: 2 an ARGB4444 entry (+0x434 = 1:
  * grAlphaCombine(3, 4, 1, 1, 0), the texel's alpha squared), 3 an ARGB1555 one (guAlphaSource(1): the vertex alpha
  * 230.4 / 255 over the whole polygon) */
-static int alpha_bind(glr *r, const glr_view *v, int s, GLenum minf, GLenum magf)
+static int alpha_bind(glr *r, const glr_view *v, int s, int minf, int magf)
 {
     const texture *T = r->tex_src[s];
     const int dec = T && T->alt && v->tex_cache && !r->ti_slots ? T->upfmt : 0;
     const int a4 = (dec != 1 || tex_mip(v, T)) && r->has_a[s];
-    glBindTexture(GL_TEXTURE_2D, a4 ? r->tex_a[s] : r->tex[s]);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-    glUniform2f(r->u_texsize, (float)r->tex_w[s], (float)r->tex_h[s]);
+    glr_bind(a4 ? r->tex_a[s] : r->tex[s], minf, magf);
+    U2(r->D.u_texsize, (float)r->tex_w[s], (float)r->tex_h[s]);
     return a4 || !(T && T->alt) ? 2 : 3;
 }
 
@@ -2358,7 +1748,7 @@ static int akey_cmp(const void *a, const void *b)
  * depth writes off, the blended ones sorted by the same key (equal keys: emission order - the engine's quicksort leaves
  * them in an order the whole list decides), back-facing ones skipped as 0x1002b9b0 skips them ((corner 0 - eye) .
  * normal >= 0) */
-static void alpha_pass(glr *r, const glr_view *v, const float view[16], const float eye[3], const int defer[GLR_LAYERS], GLenum minf, GLenum magf)
+static void alpha_pass(glr *r, const glr_view *v, const float view[16], const float eye[3], const int defer[GLR_LAYERS], int minf, int magf)
 {
     static glr_akey *ak;
     static int cap;
@@ -2386,30 +1776,29 @@ static void alpha_pass(glr *r, const glr_view *v, const float view[16], const fl
     }
     if (n <= 0) return;
     qsort(ak, (size_t)n, sizeof *ak, akey_cmp);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-    glDepthFunc(GL_LEQUAL);
-    glUniform1i(r->u_textured, 1);
+    rb_blend(RB_BLEND_ALPHA);
+    rb_depth_write(0);
+    rb_depth_func(RB_LEQUAL);
+    r->D.u_textured = 1;
     for (k = 0; k < n; k++) {
         const glr_fpoly *g = &r->layer[ak[k].li].fp[ak[k].i];
         if (ak[k].li != cur_li) {
             cur_li = ak[k].li;
-            glBindVertexArray(r->layer[cur_li].vao);
-            glUniform4fv(r->u_mono, 1, cur_li == 1 ? v->mono : off0);
+            glr_bind_layer(r, cur_li);
+            UV(r->D.u_mono, cur_li == 1 ? v->mono : off0, 4);
         }
         if (g->slot != cur_s) {
             const int mode = alpha_bind(r, v, cur_s = g->slot, minf, magf);
-            glUniform1i(r->u_blend, mode);
-            glUniform1f(r->u_alpha, mode == 3 ? 230.4f / 255.0f : 1.0f);
+            r->D.u_blend = mode;
+            r->D.u_alpha = mode == 3 ? 230.4f / 255.0f : 1.0f;
         }
-        glDrawArrays(GL_TRIANGLES, g->first, 3 * (g->n - 2));
+        glr_draw_arrays(r, g->first, 3 * (g->n - 2));
     }
-    glDisable(GL_BLEND);
-    glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
-    glUniform1i(r->u_blend, 0);
-    glUniform1f(r->u_alpha, 1.0f);
+    rb_blend(RB_BLEND_OFF);
+    rb_depth_write(1);
+    rb_depth_func(RB_LESS);
+    r->D.u_blend = 0;
+    r->D.u_alpha = 1.0f;
 }
 
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
@@ -2417,12 +1806,12 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     float proj[16], view[16], mvp[16], eye[3], L[3], ll, dist;
     float yaw = v->yaw * 3.14159265f / 180.0f, pitch = v->pitch * 3.14159265f / 180.0f;
     int s;
-    GLenum minf = v->bilinear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST, magf = v->bilinear ? GL_LINEAR : GL_NEAREST;
-    GLenum eminf, emagf;
-    if (v->tex_min) minf = (GLenum)v->tex_min;   /* an edition's own filtering */
-    if (v->tex_mag) magf = (GLenum)v->tex_mag;
-    if (r->dos) minf = magf = GL_NEAREST;        /* DOS: texel indices, never blended */
-    eminf = v->env_min ? (GLenum)v->env_min : minf; emagf = v->env_mag ? (GLenum)v->env_mag : magf;
+    int minf = v->bilinear ? RB_LINEAR_MIPMAP_LINEAR : RB_NEAREST, magf = v->bilinear ? RB_LINEAR : RB_NEAREST;
+    int eminf, emagf;
+    if (v->tex_min) minf = (int)v->tex_min;   /* an edition's own filtering */
+    if (v->tex_mag) magf = (int)v->tex_mag;
+    if (r->dos) minf = magf = RB_NEAREST;        /* DOS: texel indices, never blended */
+    eminf = v->env_min ? (int)v->env_min : minf; emagf = v->env_mag ? (int)v->env_mag : magf;
 
     /* auto framing: fit the bounding sphere in the vertical field of view */
     if (v->use_target) {
@@ -2457,32 +1846,38 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     ll = sqrtf(v->light[0] * v->light[0] + v->light[1] * v->light[1] + v->light[2] * v->light[2]);
     for (s = 0; s < 3; s++) L[s] = v->light[s] / (ll > 0 ? ll : 1);
 
-    glViewport(x0, y0, w, h);
-    if (x0 || y0) { glEnable(GL_SCISSOR_TEST); glScissor(x0, y0, w, h); }
-    if (v->clip[2] > 0 && v->clip[3] > 0) { glEnable(GL_SCISSOR_TEST); glScissor(v->clip[0], v->clip[1], v->clip[2], v->clip[3]); }
-    if (v->wire || v->solo) glClearColor(0, 0, 0, 1); else glClearColor(v->sky_color[0], v->sky_color[1], v->sky_color[2], 1);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE); /* winding isn't consistent in the data */
-    glUseProgram(r->prog);
-    glUniform1i(r->u_point, 0);                 /* the sky and ground layers: the sun only (explosions light objects) */
-    glUniform3fv(r->u_lpos, 1, v->light_pos);
-    glUniform3fv(r->u_light, 1, L);
-    glUniform1f(r->u_ambient, v->ambient);
-    glUniform3fv(r->u_fog_color, 1, v->fog_color);
-    glUniform1i(r->u_tex, 0);
-    glUniform1i(r->u_dos, 0);
-    if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1);
-    glUniform1i(r->u_tinton, r->tint_on && !r->dos && !r->ti_slots);   /* (not the Titanium look: its renderer not traced) */
-    glUniform1i(r->u_dsign, r->dsign);
-    glUniform1f(r->u_pfade, 0);
-    glUniform1i(r->u_horizon, 0);
-    glUniform1i(r->u_mga_lod, 0);
-    glUniform1f(r->u_alpha, 1.0f);
-    glUniform1i(r->u_blend, 0);
-    glUniform1i(r->u_ati, r->dos ? 0 : v->ati_tex);
-    glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
-    glUniform1i(r->u_unlit, r->dos);            /* DOS: the sky and ground are flat palette colours, unlit (0x3c000) */
+    rb_viewport(x0, y0, w, h);
+    if (x0 || y0) rb_scissor(1, x0, y0, w, h);
+    if (v->clip[2] > 0 && v->clip[3] > 0) rb_scissor(1, v->clip[0], v->clip[1], v->clip[2], v->clip[3]);
+    {
+        const float black[4] = {0, 0, 0, 1}, sky[4] = {v->sky_color[0], v->sky_color[1], v->sky_color[2], 1};
+        rb_clear(v->wire || v->solo ? black : sky, 1, 1);
+    }
+    rb_depth_test(1);
+    rb_depth_write(1);
+    rb_depth_func(RB_LESS);
+    rb_blend(RB_BLEND_OFF);
+    rb_depth_bias(0, 0, 0);   /* (no culling: winding isn't consistent in the data) */
+    rb_program(r->prog);
+    r->F.u_fbh = (float)rb_target_height();   /* (the shaders' GL gl_FragCoord) */
+    r->F.u_point = 0;                 /* the sky and ground layers: the sun only (explosions light objects) */
+    UV(r->F.u_lpos, v->light_pos, 3);
+    UV(r->F.u_light, L, 3);
+    r->F.u_ambient = v->ambient;
+    UV(r->F.u_fog_color, v->fog_color, 3);
+    (void)0;
+    r->F.u_dos = 0;
+    if (r->tint_on && !r->dos) UV(r->D.u_tint, r->tint, 3); else U3(r->D.u_tint, 1, 1, 1);
+    r->D.u_tinton = r->tint_on && !r->dos && !r->ti_slots;   /* (not the Titanium look: its renderer not traced) */
+    r->F.u_dsign = r->dsign;
+    r->F.u_pfade = 0;
+    r->D.u_horizon = 0;
+    r->D.u_mga_lod = 0;
+    r->D.u_alpha = 1.0f;
+    r->D.u_blend = 0;
+    r->F.u_ati = r->dos ? 0 : v->ati_tex;
+    U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
+    r->D.u_unlit = r->dos;            /* DOS: the sky and ground are flat palette colours, unlit (0x3c000) */
     {   /* the Titanium lights (glr_view.ti_light), in GL coordinates (z negated); off until the ground and the layers */
         float lv[2][3], lc[2][3], dp[GLR_TI_DYN][4], dc[GLR_TI_DYN][3];
         int lt[2], k2, nd = v->ti_dyn_n < GLR_TI_DYN ? v->ti_dyn_n : GLR_TI_DYN;
@@ -2497,25 +1892,20 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             dp[k2][0] = v->ti_dyn[k2][0]; dp[k2][1] = v->ti_dyn[k2][1]; dp[k2][2] = -v->ti_dyn[k2][2]; dp[k2][3] = v->ti_dyn[k2][3];
             dc[k2][0] = v->ti_dyn[k2][4]; dc[k2][1] = v->ti_dyn[k2][5]; dc[k2][2] = v->ti_dyn[k2][6];
         }
-        glUniform1i(r->u_tilit, 0);
-        glUniform3fv(r->u_tiamb, 1, v->ti_amb);
-        glUniform3fv(r->u_tignd, 1, v->ti_gnd);
-        glUniform2i(r->u_tilt, lt[0], lt[1]);
-        glUniform3fv(r->u_tilv, 2, &lv[0][0]);
-        glUniform3fv(r->u_tilc, 2, &lc[0][0]);
-        glUniform1i(r->u_tidn, nd);
-        if (nd > 0) { glUniform4fv(r->u_tidp, nd, &dp[0][0]); glUniform3fv(r->u_tidc, nd, &dc[0][0]); }
+        r->D.u_tilit = 0;
+        UV(r->F.u_tiamb, v->ti_amb, 3);
+        UV(r->F.u_tignd, v->ti_gnd, 3);
+        U2(r->F.u_tilt, lt[0], lt[1]);
+        for (k2 = 0; k2 < 2; k2++) { UV(r->F.u_tilv[k2], lv[k2], 3); UV(r->F.u_tilc[k2], lc[k2], 3); }
+        r->F.u_tidn = nd;
+        for (k2 = 0; k2 < nd; k2++) { UV(r->F.u_tidp[k2], dp[k2], 4); UV(r->F.u_tidc[k2], dc[k2], 3); }
     }
-    glUniform2f(r->u_texsize, 1, 1);            /* environment UVs are in texture repeats */
-    glUniform1i(r->u_textured, 1);
-    glActiveTexture(GL_TEXTURE3);               /* the buffer sampler's unit: a loadable buffer texture for every draw */
-    glBindTexture(GL_TEXTURE_BUFFER, r->nul_tbo);
-    glActiveTexture(GL_TEXTURE0);
+    U2(r->D.u_texsize, 1, 1);            /* environment UVs are in texture repeats */
+    r->D.u_textured = 1;
     {
         static const float off[4] = {0, 0, 0, 0};
-        glUseProgram(r->prog);
-        glUniform4fv(r->u_wire, 1, off);
-        glUniform4fv(r->u_mono, 1, off);
+        UV(r->D.u_wire, off, 4);
+        UV(r->D.u_mono, off, 4);
     }
     if (!v->wire && !v->solo && (r->env_has[0] || r->env_has[1] || r->dos || r->dome_n > 0)) {
         /* Sky tent and ground quad, built around the camera each frame (vertex table
@@ -2563,20 +1953,8 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             static const float QX[4] = {-1, 1, 1, -1}, QY[4] = {-1, -1, 1, 1};
             for (c = 0; c < 6; c++) { int k = QUAD[c]; f = env_vertex(f, QX[k], QY[k], 0.999f, 0, 0, 0, 0, 0); }
         }
-        glBindVertexArray(r->env_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, r->env_vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof env, env, GL_STREAM_DRAW);
-        {
-            static const int sizes[6] = {3, 3, 2, 3, 1, 1};
-            size_t off = 0;
-            int a;
-            for (a = 0; a < 6; a++) {
-                glEnableVertexAttribArray((GLuint)a);
-                glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float),
-                                      (const void *)(off * sizeof(float)));
-                off += (size_t)sizes[a];
-            }
-        }
+        const size_t env_off = glr_stream(env, sizeof env / sizeof *env);
+        glr_bind_stream(env_off);
         if (r->dos) {
             /* DOS (MW2.EXE 0x3c000): no sky or ground geometry - the window is filled at the horizon, sky above (with
              * its haze band), ground below; the terrain and objects draw over it */
@@ -2587,43 +1965,38 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             rl = sqrtf(Rv[0] * Rv[0] + Rv[2] * Rv[2]); if (rl < 1e-6f) rl = 1; Rv[0] /= rl; Rv[2] /= rl;
             Uv[0] = Rv[1] * Fv[2] - Rv[2] * Fv[1]; Uv[1] = Rv[2] * Fv[0] - Rv[0] * Fv[2]; Uv[2] = Rv[0] * Fv[1] - Rv[1] * Fv[0];
             fy = (float)h * 0.5f / tanf(v->vfov * 3.14159265f / 360.0f);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, r->dos_tex);
-            glUniform1i(r->u_dos_tab, 1);
-            glActiveTexture(GL_TEXTURE0);
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, ident);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, ident);
-            glUniform3fv(r->u_hz_r, 1, Rv); glUniform3fv(r->u_hz_u, 1, Uv); glUniform3fv(r->u_hz_f, 1, Fv);
-            glUniform4f(r->u_hz_c, (float)x0 + (float)w * 0.5f, (float)y0 + (float)h * 0.5f, fy, fy);
-            glUniform1f(r->u_hz_band, v->dos_band * (float)w / 320.0f);   /* 0x14950: the height in 320-wide pixels */
-            glUniform2f(r->u_hz_x, (float)x0, (float)(x0 + w));
-            glUniform1i(r->u_hz_smooth, v->dos_sky_smooth);
-            glUniform1i(r->u_horizon, 1);
-            glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
-            glDrawArrays(GL_TRIANGLES, 42, 6);
-            glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
-            glUniform1i(r->u_horizon, 0);
+            rb_texture(1, r->dos_tex);
+            UV(r->F.u_mvp, ident, 16);
+            UV(r->F.u_view, ident, 16);
+            UV(r->F.u_hz_r, Rv, 3); UV(r->F.u_hz_u, Uv, 3); UV(r->F.u_hz_f, Fv, 3);
+            U4(r->F.u_hz_c, (float)x0 + (float)w * 0.5f, (float)y0 + (float)h * 0.5f, fy, fy);
+            r->F.u_hz_band = v->dos_band * (float)w / 320.0f;   /* 0x14950: the height in 320-wide pixels */
+            U2(r->F.u_hz_x, (float)x0, (float)(x0 + w));
+            r->F.u_hz_smooth = v->dos_sky_smooth;
+            r->D.u_horizon = 1;
+            rb_depth_test(0); rb_depth_write(0);
+            glr_draw_arrays(r, 42, 6);
+            rb_depth_write(1); rb_depth_test(1);
+            r->D.u_horizon = 0;
         }
         if (r->env_has[1] && !r->dos) {
             /* rotation-only view so the tent stays centred on the eye */
             look_at(sview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]});
             perspective(sproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 1.0e5f, 2.0e8f);
             mat_mul(smvp, sproj, sview);
-            glDisable(GL_DEPTH_TEST);
-            glDepthMask(GL_FALSE);
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, smvp);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, sview);
-            glUniform1f(r->u_fog_density, 0);
-            glUniform4f(r->u_tifog, 0, 0, 0, 1);
-            glUniform1f(r->u_ambient, 1);
-            glBindTexture(GL_TEXTURE_2D, v->flat_sky && r->sky_flat ? r->sky_flat : r->env_tex[1]);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)(v->mga_mip ? GL_NEAREST : eminf));   /* Mystique sky: one level */
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)emagf);
-            glDrawArrays(GL_TRIANGLES, 0, 30);   /* walls + ceiling */
-            glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
-            glDepthMask(GL_TRUE);
-            glEnable(GL_DEPTH_TEST);
-            glUniform1f(r->u_ambient, v->ambient);
+            rb_depth_test(0);
+            rb_depth_write(0);
+            UV(r->F.u_mvp, smvp, 16);
+            UV(r->F.u_view, sview, 16);
+            r->F.u_fog_density = 0;
+            U4(r->F.u_tifog, 0, 0, 0, 1);
+            r->F.u_ambient = 1;
+            glr_bind(v->flat_sky && r->sky_flat ? r->sky_flat : r->env_tex[1], (v->mga_mip ? RB_NEAREST : eminf), emagf);   /* Mystique sky: one level */
+            glr_draw_arrays(r, 0, 30);   /* walls + ceiling */
+            U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
+            rb_depth_write(1);
+            rb_depth_test(1);
+            r->F.u_ambient = v->ambient;
         }
         if (v->pvr_veil && v->fog_density >= 1e-7f && !r->dos) {
             /* the PowerVR fog veil: white, unlit, fogged by the table fog at its own depth, 40 % opaque, drawn over the
@@ -2631,20 +2004,20 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             float vproj[16], vmvp[16];
             perspective(vproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 100.0f, 2.0e8f);
             mat_mul(vmvp, vproj, view);
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, vmvp);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, view);
-            glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
-            glUniform1i(r->u_textured, 0);
-            glUniform1i(r->u_unlit, 1);
-            glUniform1f(r->u_alpha, 0.4f);
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
-            glDrawArrays(GL_TRIANGLES, 36, 6);
-            glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
-            glDisable(GL_BLEND);
-            glUniform1f(r->u_alpha, 1.0f);
-            glUniform1i(r->u_unlit, r->dos);
-            glUniform1i(r->u_textured, 1);
+            UV(r->F.u_mvp, vmvp, 16);
+            UV(r->F.u_view, view, 16);
+            r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
+            r->D.u_textured = 0;
+            r->D.u_unlit = 1;
+            r->D.u_alpha = 0.4f;
+            rb_blend(RB_BLEND_ALPHA);
+            rb_depth_test(0); rb_depth_write(0);
+            glr_draw_arrays(r, 36, 6);
+            rb_depth_write(1); rb_depth_test(1);
+            rb_blend(RB_BLEND_OFF);
+            r->D.u_alpha = 1.0f;
+            r->D.u_unlit = r->dos;
+            r->D.u_textured = 1;
         }
         if (r->dome_n > 0 && !r->dos && v->ortho_w <= 0) {
             /* the Titanium sky dome: around the eye (its x, z; the dome's own height), no depth (the 16-bit engine has no
@@ -2671,91 +2044,67 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 look_at(dview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]});
                 perspective(dproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 100.0f, 2.0e8f);
                 mat_mul(dmvp, dproj, dview);
-                glBindVertexArray(r->dome_vao);
-                glBindBuffer(GL_ARRAY_BUFFER, r->dome_vbo);
-                glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)r->dome_n * FLOATS_PER_VERTEX * sizeof *dv), dv, GL_STREAM_DRAW);
-                {
-                    static const int sizes[6] = {3, 3, 2, 3, 1, 1};
-                    size_t off = 0;
-                    int a;
-                    for (a = 0; a < 6; a++) {
-                        glEnableVertexAttribArray((GLuint)a);
-                        glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float), (const void *)(off * sizeof(float)));
-                        off += (size_t)sizes[a];
-                    }
-                }
-                glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
-                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-                glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, dmvp);
-                glUniformMatrix4fv(r->u_view, 1, GL_FALSE, dview);
-                glUniform1f(r->u_fog_density, 0);
-                glUniform4f(r->u_tifog, 0, 0, 0, 1);
-                glUniform1i(r->u_unlit, 1);
-                glUniform1i(r->u_blend, 1);
+                glr_bind_stream(glr_stream(dv, (size_t)r->dome_n * FLOATS_PER_VERTEX));
+                rb_depth_test(0); rb_depth_write(0);
+                rb_blend(RB_BLEND_ALPHA);
+                UV(r->F.u_mvp, dmvp, 16);
+                UV(r->F.u_view, dview, 16);
+                r->F.u_fog_density = 0;
+                U4(r->F.u_tifog, 0, 0, 0, 1);
+                r->D.u_unlit = 1;
+                r->D.u_blend = 1;
                 /* the polygons in the record's order (mercsw 0x10055b90 draws an object's polygons in turn, no sorting; the
                  * z-buffer then keeps the dome - 14 km out, drawn after the ground, 6.4 km - behind everything: here
                  * without depth, first) */
                 for (k = 0; k < r->dome_np; k++) {
                     if (r->dome_pcount[k] <= 0) continue;
-                    glBindTexture(GL_TEXTURE_2D, r->dome_tex[r->dome_pslot[k]]);
-                    glDrawArrays(GL_TRIANGLES, r->dome_pfirst[k], r->dome_pcount[k]);
+                    rb_texture(0, r->dome_tex[r->dome_pslot[k]]);
+                    glr_draw_arrays(r, r->dome_pfirst[k], r->dome_pcount[k]);
                 }
-                glUniform1i(r->u_blend, 0);
-                glUniform1i(r->u_unlit, r->dos);
-                glUniform4f(r->u_tifog, v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
-                glDisable(GL_BLEND);
-                glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
-                glBindVertexArray(r->env_vao);
-                glBindBuffer(GL_ARRAY_BUFFER, r->env_vbo);
+                r->D.u_blend = 0;
+                r->D.u_unlit = r->dos;
+                U4(r->F.u_tifog, v->ti_fog[0], v->ti_fog[1], 0, v->ti_fog[2]);
+                rb_blend(RB_BLEND_OFF);
+                rb_depth_write(1); rb_depth_test(1);
+                glr_bind_stream(env_off);
             }
         }
         if (r->env_has[0] && !r->dos) {
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, view);
-            glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
-            glBindTexture(GL_TEXTURE_2D, v->flat_ground && r->ground_flat ? r->ground_flat : r->env_tex[0]);   /* TERRAIN TEXTURES: objects of type 0x800 only */
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)eminf);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)emagf);
-            glUniform1i(r->u_mga_lod, v->mga_mip);
-            if (v->ti_light) glUniform1i(r->u_tilit, 2);   /* Titanium: the ground's one colour (0x1005527e) */
-            glDrawArrays(GL_TRIANGLES, 30, 6);
-            glUniform1i(r->u_tilit, 0);
-            glUniform1i(r->u_mga_lod, 0);
+            UV(r->F.u_mvp, mvp, 16);
+            UV(r->F.u_view, view, 16);
+            r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
+            glr_bind(v->flat_ground && r->ground_flat ? r->ground_flat : r->env_tex[0], eminf, emagf);   /* TERRAIN TEXTURES: objects of type 0x800 only */
+            r->D.u_mga_lod = v->mga_mip;
+            if (v->ti_light) r->D.u_tilit = 2;   /* Titanium: the ground's one colour (0x1005527e) */
+            glr_draw_arrays(r, 30, 6);
+            r->D.u_tilit = 0;
+            r->D.u_mga_lod = 0;
         }
-        glBindVertexArray(0);
     }
-    glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-    glUniformMatrix4fv(r->u_view, 1, GL_FALSE, view);
-    glUniform3fv(r->u_light, 1, L);
-    glUniform1i(r->u_point, v->point_light);
-    glUniform1f(r->u_ambient, v->ambient);
-    glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
-    glUniform3fv(r->u_fog_color, 1, v->fog_color);
-    glUniform1f(r->u_far, v->ortho_w > 0 ? 0.0f : v->far_cull);   /* the world and actor layers carry their spheres */
-    glUniform2f(r->u_vp, (float)w, (float)h);                     /* the billboards' screen squares */
-    glUniform2f(r->u_vpo, (float)x0, (float)y0);                  /* (and the DOS Gouraud fill's polygon) */
-    glUniform1f(r->u_pfade, r->dos ? 0.0f : r->pfade);
-    glUniform1i(r->u_notex, (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0));
-    if (r->pfade > 0 && !r->dos) {
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, r->ptab_tex);
-        glUniform1i(r->u_ptab, 2);
-        glActiveTexture(GL_TEXTURE0);
-    }
-    glUniform1i(r->u_tex, 0);
-    glUniform1i(r->u_unlit, 0);
+    UV(r->F.u_mvp, mvp, 16);
+    UV(r->F.u_view, view, 16);
+    UV(r->F.u_light, L, 3);
+    r->F.u_point = v->point_light;
+    r->F.u_ambient = v->ambient;
+    r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
+    UV(r->F.u_fog_color, v->fog_color, 3);
+    r->F.u_far = v->ortho_w > 0 ? 0.0f : v->far_cull;   /* the world and actor layers carry their spheres */
+    U2(r->F.u_vp, (float)w, (float)h);                     /* the billboards' screen squares */
+    U2(r->F.u_vpo, (float)x0, (float)y0);                  /* (and the DOS Gouraud fill's polygon) */
+    r->F.u_pfade = r->dos ? 0.0f : r->pfade;
+    r->F.u_notex = (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0);
+    if (r->pfade > 0 && !r->dos) rb_texture(2, r->ptab_tex);
+    r->D.u_unlit = 0;
     if (r->dos) {   /* the DOS edition's shading: the LUMA / palette table on unit 1 */
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, r->dos_tex);
-        glUniform1i(r->u_dos_tab, 1);
-        glUniform1i(r->u_dos, v->wire ? 0 : 1);
+        rb_texture(1, r->dos_tex);
+        r->F.u_dos = v->wire ? 0 : 1;
         /* an explosion takes the light (0x51060: moved to the blast, the ambient 10 lower) */
-        if (v->point_light) glUniform3fv(r->u_dos_lpos, 1, v->light_pos);   /* (already in GL coordinates, as u_lpos) */
-        else glUniform3f(r->u_dos_lpos, v->dos_lpos[0], v->dos_lpos[1], -v->dos_lpos[2]);
-        glUniform1f(r->u_dos_amb, v->point_light ? v->dos_amb - 10.0f : v->dos_amb);
-        glUniform1f(r->u_dos_fogdist, v->dos_fogdist);
-        glUniform1i(r->u_dos_dir, v->point_light ? 0 : v->dos_dir);
-        glUniform1i(r->u_dos_smooth, v->dos_sky_smooth);   /* the port's dos_shading=smooth */
+        if (v->point_light) UV(r->F.u_dos_lpos, v->light_pos, 3);   /* (already in GL coordinates, as u_lpos) */
+        else U3(r->F.u_dos_lpos, v->dos_lpos[0], v->dos_lpos[1], -v->dos_lpos[2]);
+        r->F.u_dos_amb = v->point_light ? v->dos_amb - 10.0f : v->dos_amb;
+        r->F.u_dos_fogdist = v->dos_fogdist;
+        r->F.u_dos_dir = v->point_light ? 0 : v->dos_dir;
+        r->F.u_dos_smooth = v->dos_sky_smooth;   /* the port's dos_shading=smooth */
         {   /* the projection's integers (MW2.EXE 0x3ef30): zoom 16.16 (from the x focal; clamped 0x8000..0x100000) x the
              * half width, normalised to a 16-bit mantissa (top bit 15) and a shift (top bit - 13); y the same from
              * round16(zoom x 0xffff) (the view's +0x44 - DOSBox 1024 x 768: DAT_0014fe44 = 0xffff, shifts 12 / 11) */
@@ -2785,11 +2134,11 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 R[1][c3] = dos_round16((int64_t)ms[1] * rows[1][c3]);
                 R[2][c3] = rows[2][c3];
             }
-            glUniform3f(r->u_dos_eye, eye[0], eye[1], eye[2]);
-            glUniform3f(r->u_dos_rx, (float)((double)R[0][0] / 134217728.0), (float)((double)R[0][1] / 134217728.0), (float)((double)R[0][2] / 134217728.0));
-            glUniform3f(r->u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));
-            glUniform3f(r->u_dos_rz, (float)((double)R[2][0] / 134217728.0), (float)((double)R[2][1] / 134217728.0), (float)((double)R[2][2] / 134217728.0));
-            glUniform2i(r->u_dos_ps, sh2[0], sh2[1]);
+            U3(r->F.u_dos_eye, eye[0], eye[1], eye[2]);
+            U3(r->F.u_dos_rx, (float)((double)R[0][0] / 134217728.0), (float)((double)R[0][1] / 134217728.0), (float)((double)R[0][2] / 134217728.0));
+            U3(r->F.u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));
+            U3(r->F.u_dos_rz, (float)((double)R[2][0] / 134217728.0), (float)((double)R[2][1] / 134217728.0), (float)((double)R[2][2] / 134217728.0));
+            U2(r->F.u_dos_ps, sh2[0], sh2[1]);
             memcpy(r->dos_R, R, sizeof r->dos_R);   /* (glr_dos_project: the HUD's markers through the same integers) */
             r->dos_sh[0] = sh2[0]; r->dos_sh[1] = sh2[1]; r->dos_vw = w; r->dos_vh = h; r->dos_ok = 1;
             r->dos_zhw = (uint32_t)((uint64_t)zoom * hw);
@@ -2797,13 +2146,12 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             if (r->pit_n > 0) {   /* the cockpit set's draw order */
                 int rk[GLR_PIT_MAX];
                 dos_pit_ranks(r, (const int64_t (*)[3])R, eye, w, h, sh2, rk);
-                glUniform1iv(r->u_pit_rank, r->pit_n, rk);
+                for (k3 = 0; k3 < r->pit_n; k3++) r->F.u_pit_rank4[k3 >> 2][k3 & 3] = rk[k3];
             }
         }
-        glUniform1f(r->u_fog_density, 0);
+        r->F.u_fog_density = 0;
     }
-    glActiveTexture(GL_TEXTURE0);
-    glUniform1i(r->u_tilit, v->ti_light && !r->dos ? 1 : 0);   /* Titanium: the objects' lights (0x1002ecaa) */
+    r->D.u_tilit = v->ti_light && !r->dos ? 1 : 0;   /* Titanium: the objects' lights (0x1002ecaa) */
     if (v->tex_cache && !r->dos && !r->ti_slots && v->ortho_w <= 0) tex_cache_decide(r, v, view, mvp, eye);
     int ablend = v->alpha_blend && !r->dos && !r->ti_slots && !v->wire, adefer[GLR_LAYERS];
     for (int li = 0; li < GLR_LAYERS; li++) adefer[li] = ablend && alpha_deferred(&r->layer[li]);
@@ -2811,41 +2159,35 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
     const glr_layer *L = &r->layer[li];
     if (r->ti_slots && !r->dos) ti_colours(r, li, v, view, eye);   /* the Titanium per-vertex colours */
     if (v->solo && li == 0) continue;
-    {   static const float off0[4] = {0, 0, 0, 0}; glUniform4fv(r->u_mono, 1, li == 1 ? v->mono : off0); }
+    {   static const float off0[4] = {0, 0, 0, 0}; UV(r->D.u_mono, li == 1 ? v->mono : off0, 4); }
     {   /* image enhancement: lines, world red, actors (mechs, cockpit) blue (DOS w) */
         static const float wr[4] = {60.0f / 255.0f, 0, 0, 1}, wb[4] = {0, 48.0f / 255.0f, 215.0f / 255.0f, 1}, off[4] = {0, 0, 0, 0};   /* DOS capture: world (60,0,0), mechs and cockpit (0,48,215) */
-        glUniform4fv(r->u_wire, 1, v->wire ? (li == 0 ? wr : wb) : off);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);   /* the wireframe's edges come from the fragment shader */
+        UV(r->D.u_wire, v->wire ? (li == 0 ? wr : wb) : off, 4);   /* (the wireframe's edges come from the fragment shader) */
     }
-    glBindVertexArray(L->vao);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_BUFFER, r->dos ? L->tbo : r->nul_tbo); glActiveTexture(GL_TEXTURE0);
+    glr_bind_layer(r, li);
     for (s = 0; s <= GLR_SLOTS; s++) {
         if (L->batch_count[s] <= 0) continue;
         if (s < GLR_SLOTS) {
-            glBindTexture(GL_TEXTURE_2D, r->tex[s]);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-            glUniform2f(r->u_texsize, (float)r->tex_w[s], (float)r->tex_h[s]);
-            glUniform1i(r->u_textured, 1);   /* Combat Variables textures: per object class (u_notex) */
+            glr_bind(r->tex[s], minf, magf);
+            U2(r->D.u_texsize, (float)r->tex_w[s], (float)r->tex_h[s]);
+            r->D.u_textured = 1;   /* Combat Variables textures: per object class (u_notex) */
         } else {
-            glUniform1i(r->u_textured, 0);
+            r->D.u_textured = 0;
         }
         {   /* 3Dfx / S3 (texture.alt): the polygons without the alpha flag in tex[] (ARGB1555), the alpha-flag ones (acount,
              * last) in tex_a (ARGB4444) - or, with the texture cache (tex_cache_decide), both in the reading the cache holds
              * (a 3Dfx alpha polygon on a mw2.mip texture: ARGB4444) */
             const texture *T = s < GLR_SLOTS ? r->tex_src[s] : NULL;
             const int dec = T && T->alt && v->tex_cache && !r->ti_slots ? T->upfmt : 0;
-            const GLsizei na = s < GLR_SLOTS ? L->batch_count[s] - L->batch_acount[s] : L->batch_count[s];
+            const int na = s < GLR_SLOTS ? L->batch_count[s] - L->batch_acount[s] : L->batch_count[s];
             const int use_a0 = dec == 2, use_a1 = s < GLR_SLOTS && L->batch_acount[s] > 0 && (dec != 1 || tex_mip(v, T));
             if ((use_a0 || use_a1) && !(r->has_a[s] && r->tex_asrc[s] == T)) upload_alpha_reading(r, s, T);
             if (s < GLR_SLOTS && (use_a0 || (use_a1 && r->has_a[s]) || dec || (ablend && L->batch_acount[s] > 0))) {
                 if (na > 0) {
                     if (use_a0 && r->has_a[s]) {
-                        glBindTexture(GL_TEXTURE_2D, r->tex_a[s]);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+                        glr_bind(r->tex_a[s], minf, magf);
                     }
-                    glDrawArrays(GL_TRIANGLES, L->batch_first[s], na);
+                    glr_draw_arrays(r, L->batch_first[s], na);
                 }
                 /* S3: an alpha-flag polygon on an ARGB1555 surface blends by the texel's bit 15 (0x100107a0: alpha state
                  * 0x13 = 0x80000 by the polygon's flag, not the surface's format - the texture's alpha, INFERRED from the
@@ -2854,28 +2196,24 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                  * everything else, alpha_pass, or here blended when the layer's fp list lacks some) */
                 if (L->batch_acount[s] > 0 && ablend && !adefer[li]) {
                     const int mode = alpha_bind(r, v, s, minf, magf);
-                    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE);
-                    glUniform1i(r->u_blend, mode); glUniform1f(r->u_alpha, mode == 3 ? 230.4f / 255.0f : 1.0f);
-                    glDrawArrays(GL_TRIANGLES, L->batch_first[s] + na, L->batch_acount[s]);
-                    glDisable(GL_BLEND); glDepthMask(GL_TRUE); glUniform1i(r->u_blend, 0); glUniform1f(r->u_alpha, 1.0f);
+                    rb_blend(RB_BLEND_ALPHA); rb_depth_write(0);
+                    r->D.u_blend = mode; r->D.u_alpha = mode == 3 ? 230.4f / 255.0f : 1.0f;
+                    glr_draw_arrays(r, L->batch_first[s] + na, L->batch_acount[s]);
+                    rb_blend(RB_BLEND_OFF); rb_depth_write(1); r->D.u_blend = 0; r->D.u_alpha = 1.0f;
                 } else if (L->batch_acount[s] > 0 && !ablend && !(v->tex_cache == 2 && dec == 1 && T->a1555 == 0)) {
-                    glBindTexture(GL_TEXTURE_2D, use_a1 && r->has_a[s] ? r->tex_a[s] : r->tex[s]);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-                    glDrawArrays(GL_TRIANGLES, L->batch_first[s] + na, L->batch_acount[s]);
+                    glr_bind(use_a1 && r->has_a[s] ? r->tex_a[s] : r->tex[s], minf, magf);
+                    glr_draw_arrays(r, L->batch_first[s] + na, L->batch_acount[s]);
                 }
-            } else glDrawArrays(GL_TRIANGLES, L->batch_first[s], L->batch_count[s]);
+            } else glr_draw_arrays(r, L->batch_first[s], L->batch_count[s]);
         }
     }
     for (s = 0; s < GLR_SLOTS; s++) {   /* the Titanium models' textures */
         if (L->batch_count[GLR_TI + s] <= 0) continue;
-        glBindTexture(GL_TEXTURE_2D, r->tex[2 * GLR_SLOTS + s]);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-        glUniform2f(r->u_texsize, (float)r->tex_w[2 * GLR_SLOTS + s], (float)r->tex_h[2 * GLR_SLOTS + s]);
-        glUniform1i(r->u_textured, 1);   /* per object class (u_notex, v_texsel = -class): mercsw keeps the bitmap of an
+        glr_bind(r->tex[2 * GLR_SLOTS + s], minf, magf);
+        U2(r->D.u_texsize, (float)r->tex_w[2 * GLR_SLOTS + s], (float)r->tex_h[2 * GLR_SLOTS + s]);
+        r->D.u_textured = 1;   /* per object class (u_notex, v_texsel = -class): mercsw keeps the bitmap of an
                                           * object whose type is not in the switch mask (0x1001b4fc) */
-        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_TI + s], L->batch_count[GLR_TI + s]);
+        glr_draw_arrays(r, L->batch_first[GLR_TI + s], L->batch_count[GLR_TI + s]);
     }
     for (s = 0; s < GLR_SLOTS; s++) {   /* bank-0 billboards (colour type 3: scrub rocks, cacti), alpha-blended: the 3Dfx
                                          * engine draws them with flag 2 - SRC_ALPHA / ONE_MINUS_SRC_ALPHA, alpha test
@@ -2883,16 +2221,14 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                                          * archives' one-bit alpha gives the same picture as a key */
         int blend = !v->wire;
         if (L->batch_count[GLR_B0 + s] <= 0) continue;
-        glBindTexture(GL_TEXTURE_2D, r->tex[GLR_SLOTS + s]);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-        glUniform2f(r->u_texsize, (float)r->tex_w[GLR_SLOTS + s], (float)r->tex_h[GLR_SLOTS + s]);
-        glUniform1i(r->u_textured, 1);
+        glr_bind(r->tex[GLR_SLOTS + s], minf, magf);
+        U2(r->D.u_texsize, (float)r->tex_w[GLR_SLOTS + s], (float)r->tex_h[GLR_SLOTS + s]);
+        r->D.u_textured = 1;
         /* (glr_view.alpha_blend: their ARGB4444 cache entry - flag 2 at the miss, 0x10066e70 +0x434 - blends by the
          * texel's alpha squared; the 3Dfx billboards' 4-bit alpha has every level, soft edges) */
-        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glUniform1i(r->u_blend, ablend ? 2 : 1); }
-        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_B0 + s], L->batch_count[GLR_B0 + s]);
-        if (blend) { glDisable(GL_BLEND); glUniform1i(r->u_blend, 0); }
+        if (blend) { rb_blend(RB_BLEND_ALPHA); r->D.u_blend = ablend ? 2 : 1; }
+        glr_draw_arrays(r, L->batch_first[GLR_B0 + s], L->batch_count[GLR_B0 + s]);
+        if (blend) { rb_blend(RB_BLEND_OFF); r->D.u_blend = 0; }
     }
     for (s = 0; s < GLR_SLOTS; s++) {   /* Titanium billboards (0x1004ef4c): the bitmap x the vertex colour 0xc8 (200 / 255),
                                          * Render type 8 (alpha-blended) for a texture of type > 0, else type 2 (0x1000131e);
@@ -2904,52 +2240,46 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
         const texture *bt = r->ti_bank0 ? r->ti_bank0[s] : NULL;
         int blend = bt && bt->type > 0 && !v->wire;
         if (L->batch_count[GLR_TB + s] <= 0) continue;
-        glBindTexture(GL_TEXTURE_2D, r->tex[3 * GLR_SLOTS + s]);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-        glUniform2f(r->u_texsize, (float)r->tex_w[3 * GLR_SLOTS + s], (float)r->tex_h[3 * GLR_SLOTS + s]);
-        glUniform1i(r->u_textured, !(li == 0 ? v->notex_world : v->notex_actors));
-        glUniform3f(r->u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);
-        if (blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); glUniform1i(r->u_blend, 1); }
-        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_TB + s], L->batch_count[GLR_TB + s]);
-        if (blend) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); glUniform1i(r->u_blend, 0); }
-        if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1);
+        glr_bind(r->tex[3 * GLR_SLOTS + s], minf, magf);
+        U2(r->D.u_texsize, (float)r->tex_w[3 * GLR_SLOTS + s], (float)r->tex_h[3 * GLR_SLOTS + s]);
+        r->D.u_textured = !(li == 0 ? v->notex_world : v->notex_actors);
+        U3(r->D.u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);
+        if (blend) { rb_blend(RB_BLEND_ALPHA); rb_depth_write(0); r->D.u_blend = 1; }
+        glr_draw_arrays(r, L->batch_first[GLR_TB + s], L->batch_count[GLR_TB + s]);
+        if (blend) { rb_blend(RB_BLEND_OFF); rb_depth_write(1); r->D.u_blend = 0; }
+        if (r->tint_on && !r->dos) UV(r->D.u_tint, r->tint, 3); else U3(r->D.u_tint, 1, 1, 1);
     }
     if (L->batch_count[GLR_SLOTS + 2] > 0) {   /* unlit plain colours (type 0: the laser bolts) */
-        glUniform1i(r->u_textured, 0);
-        glUniform1i(r->u_unlit, 1);
-        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_SLOTS + 2], L->batch_count[GLR_SLOTS + 2]);
-        glUniform1i(r->u_unlit, 0);
+        r->D.u_textured = 0;
+        r->D.u_unlit = 1;
+        glr_draw_arrays(r, L->batch_first[GLR_SLOTS + 2], L->batch_count[GLR_SLOTS + 2]);
+        r->D.u_unlit = 0;
     }
     if (L->batch_count[GLR_SLOTS + 1] > 0 && !v->wire) {   /* shadows: the ground darkened, not painted over (3D editions'
                                                          * flat shadow pieces - the dropship's, the buildings') */
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-1.0f, -4.0f);
-        glUniform1i(r->u_shadow, 1);
-        glDrawArrays(GL_TRIANGLES, L->batch_first[GLR_SLOTS + 1], L->batch_count[GLR_SLOTS + 1]);
-        glUniform1i(r->u_shadow, 0);
-        glDisable(GL_POLYGON_OFFSET_FILL);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
+        rb_blend(RB_BLEND_ALPHA);
+        rb_depth_write(0);
+        rb_depth_bias(1, -1.0f, -4.0f);
+        r->D.u_shadow = 1;
+        glr_draw_arrays(r, L->batch_first[GLR_SLOTS + 1], L->batch_count[GLR_SLOTS + 1]);
+        r->D.u_shadow = 0;
+        rb_depth_bias(0, 0, 0);
+        rb_depth_write(1);
+        rb_blend(RB_BLEND_OFF);
     }
     }
     if (ablend) alpha_pass(r, v, view, eye, adefer, minf, magf);
-    glBindVertexArray(0);
-    glUniform1i(r->u_dos, 0);
-    { static const float off0[4] = {0, 0, 0, 0}; glUniform4fv(r->u_mono, 1, off0); }
-    glUniform1i(r->u_tilit, 0);
+    r->F.u_dos = 0;
+    { static const float off0[4] = {0, 0, 0, 0}; UV(r->D.u_mono, off0, 4); }
+    r->D.u_tilit = 0;
     if (r->par_n > 0 && !v->solo && !v->wire && v->ortho_w <= 0) {
         /* the Titanium particles: each a square in clip space from its projected point, size_px x (height / 480) pixels
          * right and down (0x1004da51..0x1004db20), in runs of one texture */
         static const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
         static float *pb;
         static int pcap;
-        static const int sizes[6] = {3, 3, 2, 3, 1, 1};
         float *f;
-        int k, a, off = 0, first = 0, nv = 0;
+        int k, first = 0, nv = 0;
         if (pcap < r->par_n) { free(pb); pcap = r->par_n; pb = malloc((size_t)pcap * 6 * FLOATS_PER_VERTEX * sizeof *pb); }
         if (pb) {
             f = pb;
@@ -2972,57 +2302,46 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
                 f = env_vertex(f, cx, cy - sy, cz, 0, 0, 0, 0, 1);
             }
             nv = (int)((f - pb) / FLOATS_PER_VERTEX);
-            glBindVertexArray(r->spr_vao);
-            glBindBuffer(GL_ARRAY_BUFFER, r->spr_vbo);
-            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)nv * FLOATS_PER_VERTEX * sizeof *pb), pb, GL_STREAM_DRAW);
-            for (a = 0; a < 6; a++) {
-                glEnableVertexAttribArray((GLuint)a);
-                glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float), (void *)(size_t)(off * sizeof(float)));
-                off += sizes[a];
-            }
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, ident);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, ident);
-            glUniform1f(r->u_far, 0);
-            glUniform1f(r->u_fog_density, 0);
-            glUniform4f(r->u_tifog, 0, 0, 0, 1);
-            glUniform1i(r->u_unlit, 1);
-            glUniform1i(r->u_textured, 1);
-            glUniform1i(r->u_blend, 1);
-            glUniform1f(r->u_alpha, r->par_alpha);
-            glUniform2f(r->u_texsize, 1, 1);
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDepthMask(GL_FALSE);
+            glr_bind_stream(glr_stream(pb, (size_t)nv * FLOATS_PER_VERTEX));
+            UV(r->F.u_mvp, ident, 16);
+            UV(r->F.u_view, ident, 16);
+            r->F.u_far = 0;
+            r->F.u_fog_density = 0;
+            U4(r->F.u_tifog, 0, 0, 0, 1);
+            r->D.u_unlit = 1;
+            r->D.u_textured = 1;
+            r->D.u_blend = 1;
+            r->D.u_alpha = r->par_alpha;
+            U2(r->D.u_texsize, 1, 1);
+            rb_blend(RB_BLEND_ALPHA);
+            rb_depth_write(0);
             for (k = 0; k <= r->par_n; k++) {   /* runs of one texture */
                 if (k < r->par_n && k > first && r->par[k].tex == r->par[first].tex) continue;
                 if (k > first) {
                     int q;
-                    glBindTexture(GL_TEXTURE_2D, sprite_texture(r, r->par[first].tex));
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
+                    glr_bind(sprite_texture(r, r->par[first].tex), minf, magf);
                     for (q = first; q < k; q++)
-                        if (pb[q * 6 * FLOATS_PER_VERTEX] < 1e8f) glDrawArrays(GL_TRIANGLES, q * 6, 6);
+                        if (pb[q * 6 * FLOATS_PER_VERTEX] < 1e8f) glr_draw_arrays(r, q * 6, 6);
                 }
                 first = k;
             }
-            glDepthMask(GL_TRUE); glDisable(GL_BLEND);
-            glUniform1i(r->u_blend, 0);
-            glUniform1f(r->u_alpha, 1.0f);
-            glUniform1i(r->u_unlit, 0);
-            glUniformMatrix4fv(r->u_mvp, 1, GL_FALSE, mvp);
-            glUniformMatrix4fv(r->u_view, 1, GL_FALSE, view);
-            glUniform1f(r->u_fog_density, v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density));
+            rb_depth_write(1); rb_blend(RB_BLEND_OFF);
+            r->D.u_blend = 0;
+            r->D.u_alpha = 1.0f;
+            r->D.u_unlit = 0;
+            UV(r->F.u_mvp, mvp, 16);
+            UV(r->F.u_view, view, 16);
+            r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
             /* (RENDITION: the world, objects and effects fogged per vertex; the ground and dome above per pixel / unfogged) */
-            glUniform4f(r->u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
-            glUniform1f(r->u_far, v->ortho_w > 0 ? 0.0f : v->far_cull);
-            glBindVertexArray(0);
+            U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
+            r->F.u_far = v->ortho_w > 0 ? 0.0f : v->far_cull;
         }
     }
     if (r->spr_n > 0 && !v->solo) {   /* weapon effects: camera-facing cards, unlit, alpha-tested, fogged */
         static float buf[GLR_MAX_SPRITES * 6 * FLOATS_PER_VERTEX];
-        static const int sizes[6] = {3, 3, 2, 3, 1, 1};
         float right[3] = {view[0], view[4], view[8]}, up[3] = {view[1], view[5], view[9]};
         float *f = buf;
-        int k, a, off = 0;
+        int k;
         for (k = 0; k < r->spr_n; k++) {
             const glr_sprite *sp = &r->spr[k];
             float c[3] = {sp->pos[0], sp->pos[1], -sp->pos[2]}, q[4][3];
@@ -3097,35 +2416,24 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             f = env_vertex(f, q[2][0], q[2][1], q[2][2], 0, 0, 0, tw, 0);
             f = env_vertex(f, q[3][0], q[3][1], q[3][2], 0, 0, 0, 0, 0);
         }
-        glBindVertexArray(r->spr_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, r->spr_vbo);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)(f - buf) * sizeof *buf), buf, GL_STREAM_DRAW);
-        for (a = 0; a < 6; a++) {
-            glEnableVertexAttribArray((GLuint)a);
-            glVertexAttribPointer((GLuint)a, sizes[a], GL_FLOAT, GL_FALSE, FLOATS_PER_VERTEX * sizeof(float), (void *)(size_t)(off * sizeof(float)));
-            off += sizes[a];
-        }
-        glUniform1i(r->u_unlit, 1);
-        glUniform1i(r->u_textured, 1);
-        if (v->wire) { static const float dr[4] = {60.0f / 255.0f, 0, 0, 1}; glUniform4fv(r->u_wire, 1, dr); }   /* the edges' colour codes decide */
+        glr_bind_stream(glr_stream(buf, (size_t)(f - buf)));
+        r->D.u_unlit = 1;
+        r->D.u_textured = 1;
+        if (v->wire) { static const float dr[4] = {60.0f / 255.0f, 0, 0, 1}; UV(r->D.u_wire, dr, 4); }   /* the edges' colour codes decide */
         if (v->fx_blend) {   /* Titanium: Render type 8, SRCALPHA / INVSRCALPHA (dx5draw 0x100044ff, 0x100035ab) */
-            glUniform1i(r->u_blend, 1);
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDepthMask(GL_FALSE);
+            r->D.u_blend = 1;
+            rb_blend(RB_BLEND_ALPHA);
+            rb_depth_write(0);
         }
         for (k = 0; k < r->spr_n; k++) {
-            glBindTexture(GL_TEXTURE_2D, sprite_texture(r, r->spr[k].tex));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (GLint)minf);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (GLint)magf);
-            glUniform2f(r->u_texsize, (float)r->spr[k].tex->w, (float)r->spr[k].tex->h);
-            if (r->spr[k].ti) glUniform3f(r->u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);   /* mercsw 0x1004f33a: diffuse 0xc8 */
-            glDrawArrays(GL_TRIANGLES, k * 6, 6);
-            if (r->spr[k].ti) { if (r->tint_on && !r->dos) glUniform3fv(r->u_tint, 1, r->tint); else glUniform3f(r->u_tint, 1, 1, 1); }
+            glr_bind(sprite_texture(r, r->spr[k].tex), minf, magf);
+            U2(r->D.u_texsize, (float)r->spr[k].tex->w, (float)r->spr[k].tex->h);
+            if (r->spr[k].ti) U3(r->D.u_tint, 200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);   /* mercsw 0x1004f33a: diffuse 0xc8 */
+            glr_draw_arrays(r, k * 6, 6);
+            if (r->spr[k].ti) { if (r->tint_on && !r->dos) UV(r->D.u_tint, r->tint, 3); else U3(r->D.u_tint, 1, 1, 1); }
         }
-        if (v->fx_blend) { glUniform1i(r->u_blend, 0); glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
-        glUniform1i(r->u_unlit, 0);
-        glBindVertexArray(0);
+        if (v->fx_blend) { r->D.u_blend = 0; rb_blend(RB_BLEND_OFF); rb_depth_write(1); }
+        r->D.u_unlit = 0;
     }
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glDisable(GL_SCISSOR_TEST);
+    rb_scissor(0, 0, 0, 0, 0);
 }

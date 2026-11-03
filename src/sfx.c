@@ -1,7 +1,7 @@
 /* sfx.c - see sfx.h. */
 #include "sfx.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -170,7 +170,7 @@ struct sfx_s {
     sfx_music_fn music; void *music_user;
     int   paused;                /* sfx_pause */
     prj_archive *a;
-    SDL_AudioDeviceID dev;
+    SDL_AudioStream *stream;   /* SDL3: the device stream (owns the device; its callback asks for the mixer's output) */
     int    rate;
     clip   cache[SFX_CACHE];
     voice  v[SFX_VOICES];
@@ -178,9 +178,13 @@ struct sfx_s {
 
 /* SFLX (engine 0x10032238 / block decoder 0x1003356c): "SFLX", u32, u32 block count (+8), u16 samples per block (+12),
  * then blocks: a header byte - bits 6-7 the interpolation (0 none, 1 half the samples coded then doubled, 2 a quarter,
- * quadrupled, linearly), bits 0-3 the codec: 0 silence, 1 the previous block again, 2 / 3 / 4 delta codes of 1 / 2 / 4
- * bits (first 2 / 4 / 16 table bytes, each delta = byte x 2 - 128; codes LSB first) added to a running sample clamped to
- * +-127, 5 raw unsigned bytes. The running sample carries from block to block. Out: unsigned 8-bit at 11025 Hz. */
+ * quadrupled; 3 like 0: all samples coded, none expanded), bits 0-3 the codec: 0 silence, 1 the previous block again,
+ * 2 / 3 / 4 delta codes of 1 / 2 / 4 bits (first 2 / 4 / 16 table bytes, each delta = byte x 2 - 128; codes LSB first)
+ * added to a running sample clamped to +-127, 5 raw unsigned bytes. The running sample carries from block to block.
+ * The block is decoded into one workspace (0x1024fb80; DOS 0x9750c) and expanded IN PLACE by integer averages
+ * (0x10033803 halves: a, (a + b) >> 1; 0x100337ab quarters: a, (a + m) >> 1, m, (m + b) >> 1 with m = (a + b) >> 1;
+ * DOS 0x41aeb / 0x41a93 the same) where b, for the last coded sample, is the workspace's next byte - left from the
+ * previous block; a repeated block (codec 1) is the expanded workspace again. Out: unsigned 8-bit at 11025 Hz. */
 int sfx_decode_sflx(const uint8_t *rec, size_t len, unsigned char **out);
 static int sflx_decode(const uint8_t *rec, size_t len, unsigned char **out);
 int sfx_decode_sflx(const uint8_t *rec, size_t len, unsigned char **out) { return sflx_decode(rec, len, out); }
@@ -190,17 +194,19 @@ static int sflx_decode(const uint8_t *rec, size_t len, unsigned char **out)
     unsigned bs, n, i;
     size_t p = 14, o = 0;
     int prev = 0;
-    unsigned char *dst, buf[2048], blk[2048];
+    unsigned char *dst, buf[2048], blk[2048 + 4];
     if (len < 14) return -1;
     nb = (uint32_t)rec[8] | (uint32_t)rec[9] << 8 | (uint32_t)rec[10] << 16 | (uint32_t)rec[11] << 24;
     bs = (unsigned)rec[12] | (unsigned)rec[13] << 8;
     if (bs == 0 || bs > 2048 || nb > 1000000) return -1;
     dst = malloc((size_t)nb * bs + 1);
     if (!dst) return -1;
-    memset(buf, 0x80, sizeof buf);
+    memset(blk, 0x80, sizeof blk);
+    memset(buf, 0x80, sizeof buf);   /* (the engine's workspace is static: its first block's stale byte is the last
+                                       * decode's - ASSUMED silence here) */
     for (b = 0; b < nb && p < len; b++) {
         int h = rec[p++], m = h >> 6, c = h & 15;
-        n = bs >> (m > 2 ? 2 : m);
+        n = m == 1 ? bs >> 1 : m == 2 ? bs >> 2 : bs;   /* 0x1003358b: mode 3 codes the whole block */
         if (c == 0) { memset(buf, 0x80, n); prev = 0; }
         else if (c == 1) { /* the previous block's samples again */ }
         else if (c >= 2 && c <= 4) {
@@ -224,14 +230,20 @@ static int sflx_decode(const uint8_t *rec, size_t len, unsigned char **out)
             if (p + n > len) break;
             memcpy(buf, rec + p, n); p += n; prev = buf[n - 1] - 128;
         } else break;
-        if (m) {   /* linear interpolation up to the block size */
-            unsigned f = 1u << m, q;
-            for (i = 0; i < n; i++) {
-                int a0 = buf[i], a1 = i + 1 < n ? buf[i + 1] : buf[i];
-                for (q = 0; q < f && i * f + q < bs; q++) blk[i * f + q] = (unsigned char)(a0 + (a1 - a0) * (int)q / (int)f);
-            }
-            memcpy(dst + o, blk, bs);
-        } else memcpy(dst + o, buf, bs);
+        if (m == 1 || m == 2) {   /* 0x10033803 / 0x100337ab: expanded in place (buf[n] is the previous block's) */
+            i = 0;
+            do {   /* the output index, while < block size - 1 */
+                unsigned a0 = buf[i >> m], a1 = buf[(i >> m) + 1], mid = (a0 + a1) >> 1;
+                if (m == 1) { blk[i] = (unsigned char)a0; blk[i + 1] = (unsigned char)mid; }
+                else {
+                    blk[i] = (unsigned char)a0; blk[i + 1] = (unsigned char)((a0 + mid) >> 1);
+                    blk[i + 2] = (unsigned char)mid; blk[i + 3] = (unsigned char)((mid + a1) >> 1);
+                }
+                i += 1u << m;
+            } while (i + 1 < bs);
+            memcpy(buf, blk, bs);
+        }
+        memcpy(dst + o, buf, bs);
         o += bs;
     }
     *out = dst;
@@ -296,19 +308,36 @@ static void mix(void *user, Uint8 *stream, int len)
     for (f = 0; f < frames * 2; f++) o[f] = tanhf(o[f] * 0.6f);   /* headroom + soft limit: overlapping full-scale samples */
 }
 
+/* SDL3: the stream asks for bytes in its input format (44.1 kHz stereo float - the mixer's, as SDL2's device was opened)
+ * and converts them to the device's; the requests vary in size, so the mixer runs in whole frames of at most 1024 (SDL2's
+ * buffer). SDL holds the stream's lock through the callback (sfx_lock and the play / stop calls take the same lock). */
+static void SDLCALL stream_cb(void *user, SDL_AudioStream *stream, int additional, int total)
+{
+    float buf[1024 * 2];
+    const int fb = (int)(2 * sizeof(float));
+    (void)total;
+    while (additional > 0) {
+        int frames = (additional + fb - 1) / fb;
+        if (frames > 1024) frames = 1024;
+        mix(user, (Uint8 *)buf, frames * fb);
+        if (!SDL_PutAudioStreamData(stream, buf, frames * fb)) return;
+        additional -= frames * fb;
+    }
+}
+
 sfx *sfx_create(prj_archive *a)
 {
-    SDL_AudioSpec want, have;
+    SDL_AudioSpec want;
     sfx *s = calloc(1, sizeof *s);
     if (!s) return NULL;
     s->a = a;
     SDL_zero(want);
-    want.freq = 44100; want.format = AUDIO_F32SYS; want.channels = 2; want.samples = 1024;
-    want.callback = mix; want.userdata = s;
-    s->dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-    if (!s->dev) { free(s); return NULL; }
-    s->rate = have.freq;
-    SDL_PauseAudioDevice(s->dev, 0);
+    want.freq = 44100; want.format = SDL_AUDIO_F32; want.channels = 2;
+    if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)) SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024");   /* SDL2's samples = 1024 */
+    s->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, stream_cb, s);
+    if (!s->stream) { free(s); return NULL; }
+    s->rate = want.freq;   /* the stream converts to the device's rate */
+    if (!SDL_ResumeAudioStreamDevice(s->stream)) { SDL_DestroyAudioStream(s->stream); free(s); return NULL; }   /* opened paused */
     return s;
 }
 
@@ -316,8 +345,8 @@ void sfx_destroy(sfx *s)
 {
     int i;
     if (!s) return;
+    SDL_DestroyAudioStream(s->stream);   /* closes the device: no callback after this */
     if (getenv("MW2_SFX_TRACE")) fprintf(stderr, "sfx: %ld plays, %ld callbacks, %ld frames mixed\n", s->plays, s->callbacks, s->mixed_frames);
-    SDL_CloseAudioDevice(s->dev);
     for (i = 0; i < SFX_CACHE; i++) free(s->cache[i].data);
     free(s);
 }
@@ -365,19 +394,19 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     c = &s->cache[index];
     if (!c->data) { c->len = sfx_decode(s->a, index, &c->data); if (c->len <= 0) return; }
     s->plays++;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     {   /* the engine (0x10032ad0 -> 0x10032000): a sound at its playing cap (the table's) does not start; else a free
          * one of the 8 effect handles, else the last playing one of LOWER priority is stolen; none: it does not play.
          * Voice lines have their own handles. */
         int prio, cap, same = 0, busy = 0, steal = -1;
         snd_rule(index, &prio, &cap);
         for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].index == index) same++;
-        if (cap >= 0 && same >= cap) { SDL_UnlockAudioDevice(s->dev); return; }
+        if (cap >= 0 && same >= cap) { SDL_UnlockAudioStream(s->stream); return; }
         for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && !s->v[k].is_voice) { busy++; if (s->v[k].prio < prio && !s->v[k].loop) steal = k; }
         best = -1;
         if (s->next_is_voice || busy < 8) { for (k = 0; k < SFX_VOICES; k++) if (!s->v[k].c) { best = k; break; } }
         else best = steal;
-        if (best < 0) { SDL_UnlockAudioDevice(s->dev); return; }
+        if (best < 0) { SDL_UnlockAudioStream(s->stream); return; }
         s->v[best].index = index; s->v[best].prio = prio;
     }
     if (pan < -1) pan = -1;
@@ -390,7 +419,7 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     s->v[best].step = 11025.0 / (double)s->rate;    /* engine rate: 11025 Hz */
     s->v[best].l = volume * (pan <= 0 ? 1.0f : 1.0f - pan);
     s->v[best].r = volume * (pan >= 0 ? 1.0f : 1.0f + pan);
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw) { sfx_play_at3(s, index, dx, 0.0f, dz, listener_yaw, 0); }
@@ -431,11 +460,11 @@ void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listene
 
 int sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volume, int loop)
 {
-    if (s) volume *= gain_of(s->gain_fx);   /* the EFFECTS slider */
+    if (s && !s->next_is_voice) volume *= gain_of(s->gain_fx);   /* the EFFECTS slider (a voice line: the VOICE one, already) */
     int k, best = -1;
     if (s && pcm) sfx_log("pcm", len, volume, s->next_is_voice, 0.0f);   /* TEST ONLY */
     if (!s || !pcm || len <= 0 || rate <= 0) return -1;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (!s->v[k].c) { best = k; break; }
     if (best < 0) best = 0;
     s->v[best].index = -1; s->v[best].prio = 0x32; s->v[best].is_voice = 0;
@@ -447,14 +476,15 @@ int sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volu
     s->v[best].l = s->v[best].r = volume;
     s->v[best].loop = loop;
     s->v[best].is_voice = s->next_is_voice; s->next_is_voice = 0;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
     return 0;
 }
 
 void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume)
 {
     if (!s) return;
-    volume = volume * gain_of(s->gain_voice) / gain_of(s->gain_fx);   /* the VOICE slider, not EFFECTS */
+    volume *= gain_of(s->gain_voice);   /* the VOICE slider, not EFFECTS (dividing the EFFECTS gain back out gave
+                                         * inf x 0 = NaN with EFFECTS at 0 - a silent line and a NaN in the mix) */
     s->next_is_voice = 1;
     sim_voice(len);   /* TEST ONLY */
     sfx_play_pcm(s, pcm, len, 11025, volume, 0);
@@ -465,9 +495,9 @@ int sfx_voice_busy(sfx *s)
 {
     int k, on = 0;
     if (!s) return 0;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].is_voice) on = 1;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
     if (getenv("MW2_SFX_SIMCLOCK")) return sfx_log_time >= 0 && sfx_log_time < s_sim_voice_end;   /* TEST ONLY */
     return on;
 }
@@ -476,9 +506,9 @@ void sfx_stop_voice(sfx *s, int index)
 {
     int k;
     if (!s) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].is_voice && s->v[k].index == index) s->v[k].c = NULL;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
     s_sim_voice_end = -1;   /* TEST ONLY clock */
 }
 
@@ -486,9 +516,9 @@ int sfx_playing(sfx *s, int index)
 {
     int k, on = 0;
     if (!s || index <= 0 || index >= SFX_CACHE) return 0;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c == &s->cache[index]) on = 1;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
     return on;
 }
 
@@ -496,9 +526,9 @@ void sfx_stop_pcm(sfx *s, const unsigned char *pcm)
 {
     int k;
     if (!s || !pcm) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c == &s->v[k].own && s->v[k].own.data == pcm) s->v[k].c = NULL;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan)
@@ -508,52 +538,52 @@ void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan)
     volume *= gain_of(s->gain_fx);   /* the EFFECTS slider, as sfx_play_pcm */
     if (pan < -1) pan = -1;
     if (pan > 1) pan = 1;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++)
         if (s->v[k].c == &s->v[k].own && s->v[k].own.data == pcm) {
             s->v[k].l = volume * (pan <= 0 ? 1.0f : 1.0f - pan);
             s->v[k].r = volume * (pan >= 0 ? 1.0f : 1.0f + pan);
         }
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_pcm_rate(sfx *s, const unsigned char *pcm, int rate)
 {
     int k;
     if (!s || !pcm || rate <= 0) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++)
         if (s->v[k].c == &s->v[k].own && s->v[k].own.data == pcm) s->v[k].step = (double)rate / (double)s->rate;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_stop_loops(sfx *s)
 {
     int k;
     if (!s) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].loop) { s->v[k].c = NULL; s->v[k].loop = 0; }
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_pause(sfx *s, int on)
 {
     int k;
     if (!s) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     if (on && !s->paused)   /* engine 0x10031f30: the effect samples end (0x10032c70), the voice and the music pause */
         for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && !s->v[k].loop && !s->v[k].is_voice) s->v[k].c = NULL;
     s->paused = on != 0;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 
 void sfx_set_music(sfx *s, sfx_music_fn fn, void *user)
 {
     if (!s) return;
-    SDL_LockAudioDevice(s->dev);
+    SDL_LockAudioStream(s->stream);
     s->music = fn; s->music_user = user;
-    SDL_UnlockAudioDevice(s->dev);
+    SDL_UnlockAudioStream(s->stream);
 }
 int sfx_rate(const sfx *s) { return s ? s->rate : 44100; }
-void sfx_lock(sfx *s) { if (s) SDL_LockAudioDevice(s->dev); }
-void sfx_unlock(sfx *s) { if (s) SDL_UnlockAudioDevice(s->dev); }
+void sfx_lock(sfx *s) { if (s) SDL_LockAudioStream(s->stream); }
+void sfx_unlock(sfx *s) { if (s) SDL_UnlockAudioStream(s->stream); }
