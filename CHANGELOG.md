@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.1 (unreleased)
+## v1.1.2 (unreleased)
 
 - **Movie looks** (a port presentation option): the full-screen movies (intro, landings, endings) can be shown as
   ORIGINAL (the default, unchanged), SMOOTH, SCANLINES, CRT or CURVED CRT, fitted 4:3 (default), FILL or STRETCH -
