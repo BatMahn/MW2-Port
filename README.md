@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-03, v1.1.0 in testing)
+## Status (2026-11-03, v1.1.3)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 
