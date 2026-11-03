@@ -131,8 +131,49 @@ jobs:
           name: windows
           path: dist/*.zip
 
+  build-windows-legacy:
+    # the legacy build for Windows XP-era PCs: 32-bit, SDL2 (SDL3 does not run on XP), the OpenGL 1.2 renderer (RB=gl12),
+    # SSE2 (Pentium 4 / Athlon 64 or newer); ships SDL2.dll beside mw2.exe. Modern PCs: the windows-x64 zip
+    runs-on: ubuntu-24.04
+    env:
+      SDL2_VERSION: 2.32.10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 (i686) and SDL2 (MinGW development package)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 g++-mingw-w64-i686 pkg-config zip
+          curl -sSfL -o sdl2.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-devel-${SDL2_VERSION}-mingw.tar.gz
+          tar xzf sdl2.tar.gz
+          echo "SDL2_PREFIX=$PWD/SDL2-${SDL2_VERSION}/i686-w64-mingw32" >> $GITHUB_ENV
+
+      - name: Build
+        run: make mw2 WINDOWS=1 RB=gl12 SDL=2 CC=i686-w64-mingw32-gcc CXX=i686-w64-mingw32-g++ AR=i686-w64-mingw32-ar SDL2_DIR=$SDL2_PREFIX
+
+      - name: Check the imports (every DLL function Windows XP SP3 has)
+        run: |
+          i686-w64-mingw32-objdump -p mw2.exe | grep -E "DLL Name|^\s+[0-9a-f]+\s+[0-9]+ " > imports.txt
+          cat imports.txt
+          if grep -E "api-ms-win|ucrtbase|GetTickCount64|ConditionVariable|GetThreadId|SetFileInformationByHandle|_putenv_s|InitOnce|SRWLock" imports.txt; then
+            echo "mw2.exe imports a function Windows XP does not have" >&2; exit 1
+          fi
+
+      - name: Package
+        run: |
+          mkdir -p dist/MW2-Port
+          cp mw2.exe $SDL2_PREFIX/bin/SDL2.dll dist/MW2-Port/
+          cp -r assets dist/MW2-Port/
+          cp README.md FOLDER_SETUP.md THIRD_PARTY.md packaging/windows/README-legacy.txt dist/MW2-Port/
+          cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x86-legacy.zip MW2-Port
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-legacy
+          path: dist/*.zip
+
   release:
-    needs: [build-macos, build-linux, build-fedora, build-windows]
+    needs: [build-macos, build-linux, build-fedora, build-windows, build-windows-legacy]
     runs-on: ubuntu-latest
     permissions:
       contents: write

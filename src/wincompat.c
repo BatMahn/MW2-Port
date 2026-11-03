@@ -75,6 +75,71 @@ int mw2_pick_folder(const char *title, char *out, size_t n)
     if (SUCCEEDED(hr)) CoUninitialize();
     return r;
 }
+
+#ifdef MW2_LEGACY_XP
+/* ---- the legacy build (Windows XP SP3): calls whose usual implementations need Windows Vista */
+int mw2_setenv(const char *k, const char *v, int overwrite)
+{
+    size_t n;
+    char *kv;
+    int r;
+    if (!overwrite && getenv(k)) return 0;
+    n = strlen(k) + strlen(v ? v : "") + 2;
+    if (!(kv = (char *)malloc(n))) return -1;
+    snprintf(kv, n, "%s=%s", k, v ? v : "");
+    r = _putenv(kv) == 0 ? 0 : -1;   /* (MSVCRT copies the string; an empty value removes the variable) */
+    free(kv);
+    return r;
+}
+
+/* The MinGW-w64 GCC 13 runtime's thread primitives (libgcc gthr-win32.o: once, mutexes) and C++ static-initialisation
+ * guards (libstdc++ guard.o -> gthr-win32-cond.o) import GetThreadId and the condition-variable calls, Vista's. The
+ * MT-32 emulator's C++ needs only these: defined here with Windows 2000 / XP calls, the linker takes them instead of
+ * the archives' (the layouts: GCC 13's bits/gthr-default.h - a mutex is a CRITICAL_SECTION, once is {done, started}) */
+typedef struct { int done; long started; } mw2_gthread_once;
+int __gthr_win32_once(mw2_gthread_once *o, void (*f)(void));
+int __gthr_win32_once(mw2_gthread_once *o, void (*f)(void))
+{
+    if (!o || !f) return 22;   /* EINVAL */
+    if (!o->done) {
+        if (InterlockedIncrement(&o->started) == 0) { f(); o->done = 1; }
+        else while (!o->done) Sleep(0);   /* (another thread runs it) */
+    }
+    return 0;
+}
+void __gthr_win32_mutex_init_function(CRITICAL_SECTION *m);
+void __gthr_win32_mutex_destroy(CRITICAL_SECTION *m);
+int __gthr_win32_mutex_lock(CRITICAL_SECTION *m);
+int __gthr_win32_mutex_unlock(CRITICAL_SECTION *m);
+void __gthr_win32_mutex_init_function(CRITICAL_SECTION *m) { InitializeCriticalSection(m); }
+void __gthr_win32_mutex_destroy(CRITICAL_SECTION *m) { DeleteCriticalSection(m); }
+int __gthr_win32_mutex_lock(CRITICAL_SECTION *m) { EnterCriticalSection(m); return 0; }
+int __gthr_win32_mutex_unlock(CRITICAL_SECTION *m) { LeaveCriticalSection(m); return 0; }
+
+/* the Itanium C++ ABI's guards for function-local statics (the first byte set: initialised), under one recursive lock */
+static CRITICAL_SECTION g_guard_cs;
+static volatile LONG g_guard_state;   /* 0 none, 1 being made, 2 ready */
+static void guard_lock(void)
+{
+    if (g_guard_state != 2) {
+        if (InterlockedCompareExchange(&g_guard_state, 1, 0) == 0) { InitializeCriticalSection(&g_guard_cs); InterlockedExchange(&g_guard_state, 2); }
+        else while (g_guard_state != 2) Sleep(0);
+    }
+    EnterCriticalSection(&g_guard_cs);
+}
+int __cxa_guard_acquire(long long *g);
+void __cxa_guard_release(long long *g);
+void __cxa_guard_abort(long long *g);
+int __cxa_guard_acquire(long long *g)
+{
+    if (*(volatile char *)g) return 0;
+    guard_lock();
+    if (*(volatile char *)g) { LeaveCriticalSection(&g_guard_cs); return 0; }
+    return 1;   /* (the lock held until release / abort) */
+}
+void __cxa_guard_release(long long *g) { *(volatile char *)g = 1; LeaveCriticalSection(&g_guard_cs); }
+void __cxa_guard_abort(long long *g) { (void)g; LeaveCriticalSection(&g_guard_cs); }
+#endif
 #else
 typedef int mw2_wincompat_unused;   /* ISO C: a translation unit must not be empty */
 #endif

@@ -202,6 +202,7 @@ static rcmd *cmd_new(int type)
 static const char *backend_sdl_name(int b) { return b == RB_GPU_D3D12 ? "direct3d12" : b == RB_GPU_VULKAN ? "vulkan" : "metal"; }
 const char *rb_backend_name(void) { return !g_dev ? "none" : g_backend == RB_GPU_D3D12 ? "Direct3D 12" : g_backend == RB_GPU_VULKAN ? "Vulkan" : "Metal"; }
 int rb_backend(void) { return g_backend; }
+uint64_t rb_window_flags(int low) { (void)low; return 0; }   /* (SDL_GPU claims any window) */
 const char *rb_device_name(void) { return g_devname; }
 
 static void order_for(int pref, int out[3], int *n)

@@ -1,7 +1,7 @@
 /* sfx.c - see sfx.h. */
 #include "sfx.h"
 
-#include <SDL3/SDL.h>
+#include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>

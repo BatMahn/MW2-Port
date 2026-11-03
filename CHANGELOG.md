@@ -7,6 +7,19 @@
   Combat Variables (the FMV rows right of OBJECT DENSITY / CHUNKY EXPLOSIONS) or `videos=` / `video_fit=` in
   mw2port.cfg. The filtered looks are drawn at the window's real pixel size (the shell window now uses Retina / high
   pixel density pixels on macOS). Filters adapted from the Mercenaries fork (src/vidfx.c). README "Movie Options".
+- **Legacy build for older PCs** (`MW2-Port-<tag>-windows-x86-legacy.zip`): 32-bit, Windows XP SP3 or newer, a
+  Pentium 4 / Athlon 64 or newer, an OpenGL 1.2 graphics driver (GeForce 2, Radeon 7000, Intel GMA 900, Voodoo 3 and
+  newer). The port is no longer 64-bit only. The game is the same; what differs underneath:
+  - **OpenGL 1.2 renderer** (src/rb_gl12.c, src/rb_gl12_world.c; build with `make mw2 RB=gl12`): the renderer interface
+    (src/rb.h) on OpenGL 1.2's fixed-function pipeline - the shaders' vertex stage on the CPU, their per-pixel steps as
+    texture variants, a fog table texture, triangles split for the Matrox mip bands and cut along the DOS dither's
+    iso-lines. Every look matches the normal renderer to within one level per pixel on average (docs/RENDERER_GL12.md).
+    It replaces the OpenGL 2.1 renderer that was planned.
+  - **SDL2** (`SDL=2`): SDL3 does not run on XP; src/sdlcompat.h maps the port's SDL3 calls onto SDL2 2.0.18+ (the
+    release uses SDL2 2.32.10). The normal builds are unchanged (SDL3, SDL_GPU).
+  - **Same simulation**: built with SSE2 arithmetic, as the 64-bit builds - all 59 missions' objective sweeps identical
+    between a 32-bit and a 64-bit build.
+  - Not yet tested on real XP hardware (KNOWN_ISSUES.md).
 
 ## v1.1.0 (2026-11-03)
 

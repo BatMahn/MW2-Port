@@ -7,7 +7,7 @@
  *   MISSION: 4-letter code (CYAN...), CAMO: 0-7, CLAN: insignia index (0 Wolf, 1 Jade Falcon...)
  * Headless machines: SDL_VIDEODRIVER=offscreen (the GPU device needs SDL's video subsystem for Vulkan).
  */
-#include <SDL3/SDL.h>
+#include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

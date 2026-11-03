@@ -1,12 +1,13 @@
-# MechWarrior 2 (DOS, 1995) - 64-bit port
+# MechWarrior 2 (DOS, 1995) - native port
 
-A native 64-bit reimplementation of MechWarrior 2: 31st Century Combat, rebuilt module by module from the original
-MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows. You need your own copy of
-the game (see "Setting up the game folder").
+A native reimplementation of MechWarrior 2: 31st Century Combat, rebuilt module by module from the original
+MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows - 64-bit, and
+(from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
+of the game (see "Setting up the game folder").
 
 ## Status (2026-11-03, v1.1.0 in testing)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
-a Linux tarball, a Fedora RPM and a Windows zip.
+a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 
 - **Shell:** clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables, Cockpit Controls,
   Hall of Honor, the roster and both clans' Archives. The pilot-name easter-egg mechs (Elemental, Tarantula, Battle
@@ -20,7 +21,8 @@ a Linux tarball, a Fedora RPM and a Windows zip.
   code: the DOS look's cockpit and HUD match DOSBox pixel for pixel; the 3D looks draw, filter and light their textures
   as their editions did (the Rendition look from the code only - no hardware to compare with).
 - **Graphics (from v1.1.0):** drawn through SDL3's GPU API - Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal
-  on macOS (OpenGL is no longer used; see "System requirements").
+  on macOS. The legacy Windows build (from v1.1.2) draws with OpenGL 1.2's fixed-function pipeline instead, for the
+  cards of the XP years (see "System requirements").
 - **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
   MT-32 emulator or Gravis UltraSound patches (the GUS synth follows the original ULTRA.MDI driver).
 - **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
@@ -33,7 +35,7 @@ AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scr
 
 ## System requirements
 
-The game draws through SDL3's GPU API, so it needs a graphics card and driver for one of these:
+The normal builds (64-bit) draw through SDL3's GPU API, so they need a graphics card and driver for one of these:
 
 | System | Graphics interface | Minimum |
 |---|---|---|
@@ -49,8 +51,23 @@ are with SDL3 3.4 (the release builds); built against an older SDL3, Vulkan also
 drawIndirectFirstInstance, Direct3D 12 resource binding tier 2 (no Haswell / Broadwell) and Metal a Mac2-family GPU. A grey sky and
 ground with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
 
-The renderer sits behind a small interface (src/rb.h), so an OpenGL 2.1 renderer for older PCs can be added later -
-something I plan to look at; no promises on timing.
+### The legacy build (older PCs)
+
+For PCs those minimums leave out there is a legacy Windows build (`windows-x86-legacy` zip): the same game, drawn with
+OpenGL 1.2's fixed-function pipeline (docs/RENDERER_GL12.md) and running on SDL2 (SDL3 does not run on Windows XP).
+A modern PC should use the normal build.
+
+| | Legacy build (`windows-x86-legacy`) |
+|---|---|
+| System | Windows XP SP3 or newer, 32-bit (runs on 64-bit Windows too) |
+| CPU | Pentium 4 / Athlon 64 or newer (SSE2: the simulation's arithmetic is the 64-bit builds') |
+| Graphics | an OpenGL 1.2 driver, or OpenGL 1.1 with `GL_EXT_texture_edge_clamp` (then the Matrox look's mip bands are left out) - the card maker's driver, not Windows' built-in OpenGL 1.1 software renderer. Typical cards: GeForce 2 and newer, Radeon 7000 and newer, Intel GMA 900 and newer, 3dfx Voodoo 3-5 (256 x 256 textures: the HUD's larger art is tiled, larger world textures scaled down) |
+| Colour | 32-bit desktop with a 24-bit depth buffer, else 16-bit (5-6-5) with a 16-bit depth buffer |
+
+The legacy build has no multisampling (the RESOLUTION row's AA steps do nothing) and shows `GPU OPENGL`; the menus
+draw with SDL's OpenGL renderer (its software renderer if that can't start). It prints `gpu: OpenGL (...)` with the
+card, the driver's version, the colour / depth bits and the texture limit. Not yet tested on real Windows XP hardware
+(KNOWN_ISSUES.md).
 
 ## Build
 Needs a C99 compiler, make, pkg-config and SDL3 3.2.0 or newer (development files; SDL3 brings its GPU API's Direct3D 12,
@@ -82,6 +99,18 @@ workflow does):
 That gives `mw2.exe`; put `SDL3.dll` (the package's `x86_64-w64-mingw32/bin/SDL3.dll`) beside it. Only the game
 (`mw2`) is set up for Windows, not the other tools. Run `make clean` when switching between a Windows and a native
 build.
+
+The legacy build (32-bit, Windows XP SP3 and newer) cross-compiles with MinGW-w64's i686 compiler and the SDL2 MinGW
+development package (`SDL2-devel-2.32.10-mingw.tar.gz`, its `i686-w64-mingw32` folder; SDL2 2.0.18 is the oldest the
+port builds with):
+
+    make mw2 WINDOWS=1 RB=gl12 SDL=2 CC=i686-w64-mingw32-gcc CXX=i686-w64-mingw32-g++ AR=i686-w64-mingw32-ar \
+             SDL2_DIR=/path/to/SDL2-2.32.10/i686-w64-mingw32
+
+and put `SDL2.dll` (that folder's `bin/SDL2.dll`) beside `mw2.exe`. `RB=gl12` picks the OpenGL 1.2 renderer
+(src/rb_gl12.c), `SDL=2` SDL2 (src/sdlcompat.h maps the SDL3 calls); the Makefile then adds `-msse2 -mfpmath=sse
+-mstackrealign` and `_WIN32_WINNT=0x0501` (XP). Each also works on its own for testing: `make mw2 RB=gl12` on Linux or
+macOS (system OpenGL; Mesa's llvmpipe headless), `SDL=2` with the system's SDL2.
 
 ## Setting up the game folder
 The port needs the original game's files in one folder (called `MW2-game` below). Copy these from your own copy.
@@ -375,7 +404,8 @@ SDL3 bundled inside (no Homebrew needed to run it).
 
 ### Windows
 
-Download the `windows-x64` zip from a GitHub release and unzip it anywhere: `mw2.exe`, `SDL3.dll` and `assets\`
+Download the `windows-x64` zip from a GitHub release (or, for an XP-era PC, the `windows-x86-legacy` zip - `SDL2.dll`
+in place of `SDL3.dll`; see "The legacy build") and unzip it anywhere: `mw2.exe`, `SDL3.dll` and `assets\`
 must stay together. Then either put your `MW2-game` folder next to `mw2.exe`, put it in your user folder
 (`C:\Users\<you>\MW2-game`), drag the folder onto `mw2.exe` once, or just start `mw2.exe` and choose the folder when
 it asks - it is remembered in

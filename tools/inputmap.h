@@ -19,7 +19,7 @@
 #ifndef MW2_INPUTMAP_H
 #define MW2_INPUTMAP_H
 
-#include <SDL3/SDL.h>
+#include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>

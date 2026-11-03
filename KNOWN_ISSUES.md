@@ -1,6 +1,6 @@
 # Known issues
 
-What is still open in the port as of 2026-10-26. Technical detail, engine addresses and evidence for each item are in
+What is still open in the port as of 2026-11-03. Technical detail, engine addresses and evidence for each item are in
 [ASSUMPTIONS.md](ASSUMPTIONS.md) under "Open items". None of these blocks play.
 
 ## Open
@@ -14,7 +14,12 @@ What is still open in the port as of 2026-10-26. Technical detail, engine addres
 - **Graphics interfaces** - the game draws through SDL3's GPU API (Direct3D 12 / Vulkan on Windows, Vulkan on Linux,
   Metal on macOS). Vulkan is tested (Mesa's software driver, the test suite's pictures) and Metal runs on Apple Silicon; Direct3D 12 is
   built but not yet run on real hardware - report anything that looks different from Vulkan. Cards without Direct3D 12 or
-  Vulkan (older than the GeForce GTX 600 / Radeon HD 7700 / Intel Haswell) can't run it; an OpenGL 2.1 renderer for those
-  PCs is planned (the renderer's interface, src/rb.h, is kept small for it).
+  Vulkan (older than the GeForce GTX 600 / Radeon HD 7700 / Intel Haswell) can't run the normal builds: they need the
+  legacy build.
+- **Legacy build (Windows XP, OpenGL 1.2)** - not yet tested on real Windows XP hardware or a real OpenGL 1.x driver: it is
+  built and its imports checked against XP SP3, and its pictures are compared with the normal renderer's on Mesa's
+  software OpenGL only. Its renderer approximates a few per-pixel details (docs/RENDERER_GL12.md): a point light's
+  direction per corner, polygons cut by the near plane in the DOS look, no multisampling; an off-screen picture larger than the window (`render=1024x768` in a smaller
+  window) is cut to the window. Report anything that looks wrong, with the card and the `gpu: OpenGL (...)` line.
 - **macOS downloads** - the app isn't notarised: run `xattr -dr com.apple.quarantine "MechWarrior 2.app"` once (README).
 

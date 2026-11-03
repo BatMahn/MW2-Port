@@ -6,8 +6,12 @@
  * the shell's tables (title: FUN_0002a410, hotspot table 0x7e7fc).
  * Headless capture: MW2_SHELL_SHOT=out.ppm MW2_SHELL_FRAMES=n MW2_SHELL_MOUSE=x,y MW2_SHELL_SCREEN=id
  */
-#include <SDL3/SDL.h>
+#include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
+#ifdef MW2_SDL2
+#include <SDL_main.h>        /* (the legacy build: SDL2main's WinMain -> SDL_main) */
+#else
 #include <SDL3/SDL_main.h>   /* the platform entry point (Windows: WinMain -> SDL_RunApp -> main, argv in UTF-8) */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3585,7 +3589,7 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * (play_cinematic's movie looks: a port presentation option) */
 /* the port's GPU interface (mw2port.cfg gpu=, the RESOLUTION row's right half). Windows: the backends SDL's GPU API can
  * run here (1 Direct3D 12, 2 Vulkan), asked once */
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(MW2_RB_GL12)
 static int gpu_backends(void)
 {
     static int mask = -1;
@@ -3607,7 +3611,10 @@ static int gpu_backends(void)
 /* the GPU interface the simulation will start with this setting (rb_init's order: the chosen one, else the other) */
 static const char *gpu_backend_text(int gpu)
 {
-#if defined(_WIN32)
+#if defined(MW2_RB_GL12)   /* the legacy build: OpenGL 1.2 only */
+    (void)gpu;
+    return "GPU OPENGL";
+#elif defined(_WIN32)
     const int m = gpu_backends();
     if (gpu == PORTCFG_GPU_VULKAN) return (m & 2) || !(m & 1) ? "GPU VULKAN" : "GPU D3D12";
     return (m & 1) || !(m & 2) ? "GPU D3D12" : "GPU VULKAN";
@@ -3706,7 +3713,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         else if (i >= 2 && i <= 6) wr32(snd + 0x14 + 4 * (i - 2), !rd32(snd + 0x14 + 4 * (i - 2)));
                         else if (i == 7 && x >= 515) {   /* the port's GPU interface (Windows: Direct3D 12 / Vulkan, those that run here;
                                                           * Linux Vulkan and macOS Metal only - shown greyed) */
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(MW2_RB_GL12)
                             if (pc.gpu == PORTCFG_GPU_VULKAN) { if (gpu_backends() & 1) pc.gpu = PORTCFG_GPU_D3D12; }
                             else if (gpu_backends() & 2) pc.gpu = PORTCFG_GPU_VULKAN;
 #endif
@@ -3809,10 +3816,10 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             /* the movie look and fit: OBJECT DENSITY's and CHUNKY EXPLOSIONS' right part (x 495 on, as DOS shading's) */
             lines[20] = FMV_TEXT[pc.videos >= 0 && pc.videos < PORTCFG_VID_COUNT ? pc.videos : 0]; ly[20] = ROW_Y[5] + 1; lx[20] = 500;
             lines[21] = FIT_TEXT[pc.video_fit >= 0 && pc.video_fit < PORTCFG_FIT_COUNT ? pc.video_fit : 0]; ly[21] = ROW_Y[6] + 1; lx[21] = 500;
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(MW2_RB_GL12)
             gpu_lock = gpu_backends() != 3;   /* only one runs here: nothing to choose */
 #else
-            gpu_lock = 1;   /* Linux: Vulkan, macOS: Metal - the only one */
+            gpu_lock = 1;   /* Linux: Vulkan, macOS: Metal, the legacy build OpenGL - the only one */
 #endif
             for (k = 0; k < 22; k++) {
                 const char *t = lines[k];
@@ -5666,7 +5673,9 @@ int main(int argc, char **argv)
         /* the menus through the same GPU interface as the simulation (mw2port.cfg gpu=, rb.h): SDL's Direct3D 12 or Vulkan
          * renderer on Windows, Vulkan on Linux, Metal on macOS - the other one, then SDL's software renderer, if it can't start */
         SDL_SetHint(SDL_HINT_RENDER_DRIVER,
-#if defined(_WIN32)
+#if defined(MW2_RB_GL12)   /* the legacy build (no SDL_GPU): SDL's OpenGL renderer (OpenGL 1.1), else its software one */
+                    "opengl,software"
+#elif defined(_WIN32)
                     pc.gpu == PORTCFG_GPU_VULKAN ? "vulkan,direct3d12,software" : "direct3d12,vulkan,software"
 #elif defined(__APPLE__)
                     "metal,software"

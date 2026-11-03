@@ -27,10 +27,12 @@
 #define RTLD_DEFAULT ((void *)-2)   /* <dlfcn.h>'s value, hidden under strict POSIX */
 #endif
 #endif
-#include "rb.h"           /* the render backend (SDL_GPU) */
+#include "rb.h"           /* the render backend (SDL_GPU, or OpenGL 1.2 in the RB=gl12 build) */
 #include "rb_shaders.h"
-#include <SDL3/SDL.h>
-#ifndef SDL_MAIN_HANDLED
+#include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
+#if !defined(SDL_MAIN_HANDLED) && defined(MW2_SDL2)
+#include <SDL_main.h>
+#elif !defined(SDL_MAIN_HANDLED)
 #include <SDL3/SDL_main.h>   /* glview on its own; in mw2 the shell has the entry point (built with SDL_MAIN_HANDLED) */
 #endif
 #include <math.h>
@@ -5165,19 +5167,26 @@ static int dos_hud_mark(const glr *r, int w, int h, const float wp[3], int isnav
     return 1;
 }
 
-/* SDL3's SDL_CreateWindow has no position: the window centred on the primary display, as SDL2's SDL_WINDOWPOS_CENTERED */
+/* SDL3's SDL_CreateWindow has no position: the window centred on the primary display, as SDL2's SDL_WINDOWPOS_CENTERED.
+ * The render backend's own flags added (the OpenGL backend: an OpenGL window, 8-8-8 / 24-bit depth, else 5-6-5 / 16) */
 static SDL_Window *sim_window(int w, int h, SDL_WindowFlags flags)
 {
-    SDL_Window *win;
-    SDL_PropertiesID p = SDL_CreateProperties();
-    SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "MechWarrior 2");
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64)flags);
-    win = SDL_CreateWindowWithProperties(p);
-    SDL_DestroyProperties(p);
+    SDL_Window *win = NULL;
+    int low;
+    for (low = 0; low < 2 && !win; low++) {
+        const uint64_t rf = rb_window_flags(low);
+        SDL_PropertiesID p;
+        if (low && !rf) break;
+        p = SDL_CreateProperties();
+        SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "MechWarrior 2");
+        SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
+        SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+        SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+        SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+        SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64)(flags | (SDL_WindowFlags)rf));
+        win = SDL_CreateWindowWithProperties(p);
+        SDL_DestroyProperties(p);
+    }
     return win;
 }
 
@@ -5238,7 +5247,9 @@ int main(int argc, char **argv)
             /* said on stderr and in a box (the Windows program and the macOS app have no console; tests: no box) */
             char m[1024];
             snprintf(m, sizeof m,
-#if defined(_WIN32)
+#if defined(MW2_RB_GL12)
+                     "Could not start OpenGL:\n%s\n\nThe game needs an OpenGL 1.2 driver (or 1.1 with GL_EXT_texture_edge_clamp): install the graphics card's own driver.",
+#elif defined(_WIN32)
                      "Could not start Direct3D 12 or Vulkan:\n%s\n\nUpdate your graphics driver and try again.",
 #elif defined(__APPLE__)
                      "Could not start Metal:\n%s\n\nThis Mac's graphics can't run the game (it needs a Metal GPU and macOS 10.14 or newer).",
@@ -7094,7 +7105,7 @@ int main(int argc, char **argv)
             if (c3d_ti) {   /* Titanium (mercsw 0x1005580d): each tick adds skyAnim / 181 to the clouds' U and V, wrapped
                              * past 1; the camera-height fog terms (with a renderer that fogs) */
                 int k2;
-                if (last && !g_mm_depth && !g_paused)
+                if (last && !g_mm_depth && !g_paused && !getenv("MW2_TEST_SKY_STILL"))   /* (TEST ONLY: still, as above) */
                     for (k2 = 0; k2 < 2; k2++) {
                         v.ti_scroll[k2] += c3d_ti_sg.anim[k2] * (float)(now - last) * 0.182f;
                         v.ti_scroll[k2] -= floorf(v.ti_scroll[k2]);

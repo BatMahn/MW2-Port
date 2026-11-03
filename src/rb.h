@@ -3,8 +3,8 @@
  * and the simulation's frame (tools/glview.c) use. One implementation today, rb_gpu.c on SDL3's GPU API (SDL_GPU):
  * Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal on macOS. The calls keep OpenGL's model - a current
  * target, viewport, scissor, blend and depth state, textures with their own filtering, whole-buffer uploads, draws
- * that see everything set before them - so a second implementation (an OpenGL 2.1 renderer for older PCs is planned)
- * can sit behind the same header. Coordinates are OpenGL's: viewport, scissor, blit and read-back rectangles from the
+ * that see everything set before them - so a second implementation sits behind the same header: rb_gl12.c on OpenGL
+ * 1.2's fixed-function pipeline (the legacy build for older PCs, make ... RB=gl12; chosen when building). Coordinates are OpenGL's: viewport, scissor, blit and read-back rectangles from the
  * target's bottom-left corner; texture rows top first as uploaded.
  *
  * rb_gpu.c records the frame and runs it at rb_present / rb_read_rgb / rb_finish: every upload made before a draw that
@@ -41,8 +41,9 @@ enum { RB_LESS, RB_LEQUAL };
  * colour (4 floats); the HUD 0 = x, y, u, v. Uniform slots: the world 0 rb_world_frame, 1 rb_world_draw (both stages);
  * the HUD 0 rb_hud_draw (fragment). Texture units: the world 0 u_tex, 1 u_dos_tab, 2 u_ptab; the HUD 0 */
 enum { RB_PROG_WORLD, RB_PROG_WORLD_DOS, RB_PROG_HUD, RB_PROG_COUNT };
-/* the GPU backends (mw2port.cfg gpu=): AUTO = the platform's first (Windows Direct3D 12, then Vulkan) */
-enum { RB_GPU_AUTO, RB_GPU_D3D12, RB_GPU_VULKAN, RB_GPU_METAL };
+/* the GPU backends (mw2port.cfg gpu=): AUTO = the platform's first (Windows Direct3D 12, then Vulkan); OPENGL: the
+ * RB=gl12 build's (its only one) */
+enum { RB_GPU_AUTO, RB_GPU_D3D12, RB_GPU_VULKAN, RB_GPU_METAL, RB_GPU_OPENGL };
 #define RB_STREAM 0xffffffffu   /* rb_vertex: the frame's transient data (rb_stream) */
 
 /* Start: a GPU device for the window (NULL: none, off-screen targets only), the backend `pref` if it starts here,
@@ -50,8 +51,11 @@ enum { RB_GPU_AUTO, RB_GPU_D3D12, RB_GPU_VULKAN, RB_GPU_METAL };
  * else -1 with the reason in err */
 int  rb_init(struct SDL_Window *win, int pref, int samples, char *err, size_t errn);
 void rb_quit(void);
-const char *rb_backend_name(void);       /* "Direct3D 12", "Vulkan", "Metal" */
-int  rb_backend(void);                   /* RB_GPU_D3D12 / VULKAN / METAL */
+const char *rb_backend_name(void);       /* "Direct3D 12", "Vulkan", "Metal", "OpenGL" */
+int  rb_backend(void);                   /* RB_GPU_D3D12 / VULKAN / METAL / OPENGL */
+/* the SDL_WindowFlags the backend's window needs (OpenGL: SDL_WINDOW_OPENGL, with its pixel format set - low 1: 5-6-5
+ * colour and a 16-bit depth buffer, for a second try when 8-8-8 / 24 is refused); SDL_GPU: 0 */
+uint64_t rb_window_flags(int low);
 const char *rb_device_name(void);        /* the GPU and driver, as the backend reports them */
 
 /* the window's picture: its size in pixels this frame, and multisampling (samples 1: off) */

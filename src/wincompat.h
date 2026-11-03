@@ -20,12 +20,18 @@
 #define realpath(p, r) _fullpath((r), (p), 260)
 
 /* setenv / unsetenv (MSVCRT has _putenv_s; an empty value removes the variable) */
+#ifndef MW2_LEGACY_XP
 static inline int mw2_setenv(const char *k, const char *v, int overwrite)
 {
     if (!overwrite && getenv(k)) return 0;
     return _putenv_s(k, v ? v : "") == 0 ? 0 : -1;
 }
 static inline int mw2_unsetenv(const char *k) { return _putenv_s(k, "") == 0 ? 0 : -1; }
+#else
+/* the legacy build: Windows XP's msvcrt.dll has no _putenv_s (Vista): _putenv("K=V") does the same (it copies) */
+int mw2_setenv(const char *k, const char *v, int overwrite);
+static inline int mw2_unsetenv(const char *k) { return mw2_setenv(k, "", 1); }
+#endif
 #define setenv mw2_setenv
 #define unsetenv mw2_unsetenv
 
