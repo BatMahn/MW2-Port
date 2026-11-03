@@ -93,6 +93,10 @@ int portcfg_load(const char *unused, portcfg *c)
             int k;
             for (k = 0; k < PORTCFG_FIT_COUNT; k++) if (strcmp(v, PORTCFG_FIT_NAME[k]) == 0) c->video_fit = k;
         }
+        else if (strcmp(line, "menu_music") == 0) {
+            int k;
+            for (k = 0; k < PORTCFG_MM_COUNT; k++) if (strcmp(v, PORTCFG_MM_NAME[k]) == 0) c->menu_music = k;
+        }
         else if (strcmp(line, "textures_kind") == 0) c->textures_ati = strcmp(v, "3dfx") != 0;
         else if (strcmp(line, "renderer") == 0 || strcmp(line, "edition") == 0) {   /* (edition=: the old single look) */
             int e;
@@ -100,7 +104,7 @@ int portcfg_load(const char *unused, portcfg *c)
             if (strcmp(v, "titanium") == 0) { c->renderer = PORTCFG_ED_ENHANCED; c->texset = PORTCFG_TX_TITANIUM; }   /* migrated */
         } else if (strcmp(line, "textures") == 0 && (strcmp(v, "original") == 0 || strcmp(v, "titanium") == 0))
             c->texset = strcmp(v, "titanium") == 0 ? PORTCFG_TX_TITANIUM : PORTCFG_TX_ORIGINAL;
-        STR(game); STR(install); STR(cd); STR(music); STR(ultrasnd); STR(mt32); STR(models); STR(textures); STR(skygnd); STR(skygnd_fog); STR(titanium);
+        STR(game); STR(install); STR(cd); STR(music); STR(ultrasnd); STR(mt32); STR(sc55); STR(models); STR(textures); STR(skygnd); STR(skygnd_fog); STR(titanium);
 #undef STR
     }
     fclose(f);
@@ -118,7 +122,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "# MechWarrior 2 port settings (see portcfg.h). Paths left out are taken from the game folder.\n");
     if (c->game[0]) fprintf(f, "game=%s\n", c->game);
 #define OPT(k) if (c->k[0] && !c->game[0]) fprintf(f, #k "=%s\n", c->k)
-    OPT(install); OPT(cd); OPT(music); OPT(ultrasnd); OPT(mt32); OPT(models); OPT(textures); OPT(skygnd); OPT(skygnd_fog); OPT(titanium);
+    OPT(install); OPT(cd); OPT(music); OPT(ultrasnd); OPT(mt32); OPT(sc55); OPT(models); OPT(textures); OPT(skygnd); OPT(skygnd_fog); OPT(titanium);
 #undef OPT
     if (c->mode == 0) fprintf(f, "resolution=desktop\n");
     else if (c->mode == 1) fprintf(f, "resolution=window\n");
@@ -134,6 +138,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "gpu=%s\n", c->gpu == PORTCFG_GPU_D3D12 ? "d3d12" : c->gpu == PORTCFG_GPU_VULKAN ? "vulkan" : "auto");
     fprintf(f, "videos=%s\n", PORTCFG_VID_NAME[c->videos > 0 && c->videos < PORTCFG_VID_COUNT ? c->videos : PORTCFG_VID_ORIGINAL]);
     fprintf(f, "video_fit=%s\n", PORTCFG_FIT_NAME[c->video_fit > 0 && c->video_fit < PORTCFG_FIT_COUNT ? c->video_fit : PORTCFG_FIT_43]);
+    fprintf(f, "menu_music=%s\n", PORTCFG_MM_NAME[c->menu_music > 0 && c->menu_music < PORTCFG_MM_COUNT ? c->menu_music : PORTCFG_MM_AUTO]);
     fclose(f);
     return 0;
 }
@@ -215,6 +220,7 @@ int portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint)
         if (!c->ultrasnd[0] && is_dir(p)) snprintf(c->ultrasnd, sizeof c->ultrasnd, "%s", p);
         snprintf(p, sizeof p, "%s/mt32", c->game);
         if (!c->mt32[0] && is_dir(p)) snprintf(c->mt32, sizeof c->mt32, "%s", p);
+        if (!c->sc55[0] && find_ci(c->game, "sc55", p, sizeof p) && is_dir(p)) snprintf(c->sc55, sizeof c->sc55, "%s", p);   /* sc55/ (any case) */
         snprintf(p, sizeof p, "%s/3d/models.prj", c->game);
         if (!c->models[0] && exists(p)) snprintf(c->models, sizeof c->models, "%s", p);
         snprintf(p, sizeof p, "%s/3d/textures.prj", c->game);
@@ -252,6 +258,15 @@ const char *const PORTCFG_ED_NAME[PORTCFG_ED_COUNT] = {"enhanced", "dos", "3dfx"
 const char *const PORTCFG_TX_NAME[PORTCFG_TX_COUNT] = {"original", "titanium"};
 const char *const PORTCFG_VID_NAME[PORTCFG_VID_COUNT] = {"original", "smooth", "scanlines", "crt", "crt_curved"};
 const char *const PORTCFG_FIT_NAME[PORTCFG_FIT_COUNT] = {"4:3", "fill", "stretch"};
+const char *const PORTCFG_MM_NAME[PORTCFG_MM_COUNT] = {"auto", "mt32", "sc55", "gus"};
+
+int portcfg_menu_music(int preferred, const int have[PORTCFG_MM_COUNT])
+{
+    int k;
+    if (preferred > PORTCFG_MM_AUTO && preferred < PORTCFG_MM_COUNT && have[preferred]) return preferred;
+    for (k = PORTCFG_MM_MT32; k < PORTCFG_MM_COUNT; k++) if (have[k]) return k;   /* MT-32, SC-55, GUS */
+    return PORTCFG_MM_AUTO;
+}
 
 static void cp(char *dst, const char *src) { snprintf(dst, PORTCFG_PATH, "%s", src ? src : ""); }
 

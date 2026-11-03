@@ -30,6 +30,9 @@
 #include "mek.h"
 #include "shp.h"
 #include "mt32mid.h"
+#ifndef MW2_NO_SC55
+#include "sc55mid.h"
+#endif
 #include "bwd.h"
 #include "cockpitcfg.h"
 #include "portcfg.h"
@@ -124,11 +127,22 @@ static uint8_t  *g_song_data;
 static int       g_song_entry = -1;
 static mt32_synth *g_mt32;   /* the MT-32 (the menu music's default); NULL: Gravis patches if present */
 static mt32_song  *g_msong;
+#ifndef MW2_NO_SC55
+static sc55_synth *g_sc55;   /* the SC-55 (the General MIDI set, as MPU401.MDI); its song loops on its own thread */
+#define SC55_STOP() (g_sc55 ? sc55_stop(g_sc55) : (void)0)
+#else
+static void *g_sc55;         /* (the legacy build: no SC-55) */
+#define SC55_STOP() ((void)0)
+#endif
+static int  g_sc55_on;       /* a song is playing on the SC-55 */
 static long g_song_len;
 static int  g_song_rate = 44100;
 static void music_cb(void *u, float *out, int frames)
 {
     (void)u;
+#ifndef MW2_NO_SC55
+    if (g_sc55) { sc55_render(g_sc55, out, frames); return; }   /* (queued by its thread; the song loops there) */
+#endif
     if (g_mt32) {   /* the MT-32 song set; loops */
         if (g_msong && !mt32_song_render(g_msong, out, frames) && g_song_data && g_song_len > 0) {
             mt32_song_close(g_msong);
@@ -891,31 +905,45 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     smk_close(s);
 }
 
+static void play_entry(int entry, int screen);
 static void apply_music(int screen, int clan)
 {
     uint32_t v;
     int entry;
-    long n;
-    if ((!g_bank && !g_mt32) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
+    if ((!g_bank && !g_mt32 && !g_sc55) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
     v = MUSIC[clan][screen];
     if (!v) return;
     if (v & 0x20000000) {   /* 0x35c4c / main loop 0x36700: the song closed and forgotten (0xa6380 = 0, 0xa6384 = 0) */
         sfx_lock(g_sfx);
-        if ((g_song || g_msong) && getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
-        gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1;
+        if ((g_song || g_msong || g_sc55_on) && getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
+        gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1;
         sfx_unlock(g_sfx);
         return;
     }
-    /* the song set by device (driver table 0x83e14): MT32MPU.MDI +24, ULTRA.MDI +32; DATABASE index = number + that */
+    /* the song set by device (driver table 0x83e14): MT32MPU.MDI +24, ULTRA.MDI and MPU401.MDI (the SC-55) +32;
+     * DATABASE index = number + that */
     entry = (int)(v & 0xffffff) + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1;
     sfx_lock(g_sfx);
-    if (v & 0x10000000) { gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; }
-    if (entry != g_song_entry || (!g_song && !g_msong)) {
+    if (v & 0x10000000) { gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; }
+    play_entry(entry, screen);
+    sfx_unlock(g_sfx);
+}
+
+/* (under sfx_lock) the DATABASE entry's song on the open device, unless it is already playing */
+static void play_entry(int entry, int screen)
+{
+    long n;
+    if (entry != g_song_entry || (!g_song && !g_msong && !g_sc55_on)) {
         gus_song_close(g_song); g_song = NULL;
         mt32_song_close(g_msong); g_msong = NULL;
+        if (g_sc55_on) { SC55_STOP(); g_sc55_on = 0; }
         free(g_song_data); g_song_data = NULL;
         n = shelldb_entry(&g_db, entry, &g_song_data);
         if (n > 0) {
+#ifndef MW2_NO_SC55
+            if (g_sc55) g_sc55_on = sc55_play(g_sc55, g_song_data, (size_t)n) == 0;
+            else
+#endif
             if (g_mt32) g_msong = mt32_song_open(g_mt32, g_song_data, (size_t)n);
             else g_song = gus_song_open(g_bank, g_song_data, (size_t)n, sfx_rate(g_sfx));
         }
@@ -923,6 +951,88 @@ static void apply_music(int screen, int clan)
         g_song_len = n; g_song_rate = sfx_rate(g_sfx);
         if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: start entry %d (screen %d)\n", entry, screen);   /* TEST ONLY */
     }
+}
+
+/* ---- the menu music's device (mw2port.cfg menu_music=, Combat Variables' MUSIC entry): the device menu_music= names if
+ * its files are there, else the first present of the MT-32 (its ROMs in the game folder's mt32/, mt32= or MW2_MT32), the
+ * SC-55 (ROM dumps in sc55/, sc55= or MW2_SC55; not in the legacy build) and Gravis UltraSound patches (ultrasnd= /
+ * ULTRADIR / MW2_ULTRASND) - none asked for. g_mm_have: the devices whose files are here (a device that failed to open
+ * is taken off) */
+static const char *g_mm_mt32, *g_mm_sc55, *g_mm_gus;
+static int  g_mm_have[PORTCFG_MM_COUNT];
+static char g_mm_model[32];
+static int mt32_files(const char *d)
+{
+    static const char *const C[] = {"MT32_CONTROL.ROM", "mt32_control.rom", "CM32L_CONTROL.ROM", "cm32l_control.rom"};
+    static const char *const P[] = {"MT32_PCM.ROM", "mt32_pcm.rom", "CM32L_PCM.ROM", "cm32l_pcm.rom"};
+    char b[1200];
+    int i, c = 0, q = 0;
+    FILE *f;
+    for (i = 0; d && i < 4; i++) {
+        snprintf(b, sizeof b, "%s/%s", d, C[i]); if ((f = fopen(b, "rb"))) { fclose(f); c = 1; }
+        snprintf(b, sizeof b, "%s/%s", d, P[i]); if ((f = fopen(b, "rb"))) { fclose(f); q = 1; }
+    }
+    return c && q;
+}
+static void music_device_open(int pref, int startup)
+{
+    int dev, q;
+    if (startup) {
+        const char *mm = getenv("MW2_MENU_MUSIC");
+        g_mm_mt32 = getenv("MW2_MT32"); g_mm_gus = getenv("MW2_ULTRASND"); g_mm_sc55 = getenv("MW2_SC55");
+        if (mm) for (q = 0; q < PORTCFG_MM_COUNT; q++) if (strcmp(mm, PORTCFG_MM_NAME[q]) == 0) pref = q;
+        if (!g_mm_mt32 && g_cfg.mt32[0]) g_mm_mt32 = g_cfg.mt32;
+        if (!g_mm_sc55 && g_cfg.sc55[0]) g_mm_sc55 = g_cfg.sc55;
+        if (!g_mm_gus && g_cfg.ultrasnd[0]) g_mm_gus = g_cfg.ultrasnd;
+        if (!g_mm_gus) g_mm_gus = getenv("ULTRADIR");
+        if (!g_mm_gus && getenv("ULTRASND") && strchr(getenv("ULTRASND"), '/')) g_mm_gus = getenv("ULTRASND");
+        if (g_mm_mt32 && !mt32_files(g_mm_mt32)) fprintf(stderr, "mw2: no usable MT-32 ROMs in %s (MT32_CONTROL.ROM + MT32_PCM.ROM)\n", g_mm_mt32);
+        g_mm_have[PORTCFG_MM_MT32] = g_mm_mt32 && mt32_files(g_mm_mt32);
+#ifndef MW2_NO_SC55
+        g_mm_have[PORTCFG_MM_SC55] = g_mm_sc55 && sc55_detect(g_mm_sc55, g_mm_model, sizeof g_mm_model) >= 0;   /* a complete ROM set */
+#endif
+        g_mm_have[PORTCFG_MM_GUS] = g_mm_gus != NULL;
+        if (g_sfx) sfx_set_music(g_sfx, music_cb, NULL);
+    }
+    while (g_sfx && (dev = portcfg_menu_music(pref, g_mm_have)) != PORTCFG_MM_AUTO) {   /* the first that opens */
+        if (dev == PORTCFG_MM_MT32 && (g_mt32 = mt32_open(g_mm_mt32, sfx_rate(g_sfx)))) break;
+        if (dev == PORTCFG_MM_MT32) fprintf(stderr, "mw2: no usable MT-32 ROMs in %s (MT32_CONTROL.ROM + MT32_PCM.ROM)\n", g_mm_mt32);
+#ifndef MW2_NO_SC55
+        if (dev == PORTCFG_MM_SC55 && (g_sc55 = sc55_open(g_mm_sc55, sfx_rate(g_sfx)))) break;
+        if (dev == PORTCFG_MM_SC55) fprintf(stderr, "mw2: the %s ROMs in %s could not be loaded\n", g_mm_model, g_mm_sc55);
+#endif
+        if (dev == PORTCFG_MM_GUS && (g_bank = gus_bank_open(g_mm_gus, 1024))) break;
+        g_mm_have[dev] = 0;
+    }
+    if (pref != PORTCFG_MM_AUTO && !g_mm_have[pref])
+        fprintf(stderr, "mw2: menu_music=%s: its files are not there%s - using the first device found\n", PORTCFG_MM_NAME[pref],
+#ifdef MW2_NO_SC55
+                pref == PORTCFG_MM_SC55 ? " (and the legacy build has no SC-55)" :
+#endif
+                "");
+    if (startup) fprintf(stderr, "mw2: audio %s (%s), ", g_sfx ? "on" : "OFF - no audio device", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none");
+    else fprintf(stderr, "mw2: ");
+    fprintf(stderr, "menu music %s%s%s%s%s%s\n", startup ? "" : "now ",
+            g_mt32 ? "Roland MT-32 (ROMs from " : g_sc55 ? "Roland " : g_bank ? "Gravis UltraSound patches (" : "OFF - put the MT-32 ROMs (MT32_CONTROL.ROM, MT32_PCM.ROM) in the game folder's mt32/",
+            g_sc55 ? g_mm_model : "", g_sc55 ? " (ROMs from " : "",
+            g_mt32 ? g_mm_mt32 : g_sc55 ? g_mm_sc55 : g_bank ? g_mm_gus : "", g_mt32 || g_bank || g_sc55 ? ")" : "");
+}
+/* a new menu_music= choice (Combat Variables, on leaving it): the song stopped, the device closed and the chosen one
+ * opened, the song playing before started again on it (its number in the new device's set) */
+static void music_switch(int pref)
+{
+    int num = -1;
+    if (!g_sfx) return;
+    sfx_lock(g_sfx);
+    if (g_song_entry >= 0 && (g_song || g_msong || g_sc55_on)) num = g_song_entry + 1 - (g_mt32 ? 24 : GUS_MUSIC_OFFSET);
+    gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1;
+    mt32_close(g_mt32); g_mt32 = NULL;
+    gus_bank_close(g_bank); g_bank = NULL;
+#ifndef MW2_NO_SC55
+    sc55_close(g_sc55); g_sc55 = NULL;
+#endif
+    music_device_open(pref, 0);
+    if (num > 0 && (g_mt32 || g_bank || g_sc55)) play_entry(num + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1, -1);
     sfx_unlock(g_sfx);
 }
 
@@ -1297,7 +1407,7 @@ static int launch_ia(void)
     setenv("MW2_OF", FORM_ARG[g_ia.form[0]], 1);
     setenv("MW2_OE", FORM_ARG[g_ia.form[1]], 1);
     sim_command(line, sizeof line, scen, save);
-    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
@@ -3478,7 +3588,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     setenv("MW2_OF", FORM_ARG[g_star[clan].formation], 1);
     setenv("MW2_PILOT", g_reg[reg].name, 1);
     sim_command(line, sizeof line, scen, save);
-    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
@@ -3586,7 +3696,9 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
  * right part (x 495 on) the port's DOS shading - DOS DITHERED / DOS SMOOTH (mw2port.cfg dos_shading=, the DOS renderer only);
  * the OBJECT DENSITY and CHUNKY EXPLOSIONS rows' right parts (x 495 on) the port's movie look - FMV ORIGINAL / SMOOTH /
  * SCANLINES / CRT / CURVED CRT (mw2port.cfg videos=) - and fit - FMV 4:3 / FILL / STRETCH (video_fit=), each click the next
- * (play_cinematic's movie looks: a port presentation option) */
+ * (play_cinematic's movie looks: a port presentation option); the DIFFICULTY row's right part (x 495 on, under the MUSIC
+ * slider) the menu music's device - MUSIC AUTO / MT-32 / SC-55 / GUS (mw2port.cfg menu_music=; AUTO and the devices whose
+ * files are here, applied on leaving the screen) */
 /* the port's GPU interface (mw2port.cfg gpu=, the RESOLUTION row's right half). Windows: the backends SDL's GPU API can
  * run here (1 Direct3D 12, 2 Vulkan), asked once */
 #if defined(_WIN32) && !defined(MW2_RB_GL12)
@@ -3652,7 +3764,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     char p[700];
     FILE *f;
     portcfg pc;
-    int done = 0, i, nmodes = 0, mi = -1;
+    int done = 0, i, nmodes = 0, mi = -1, mm0;
     struct { int w, h; } modes[64];
     smk *logo = open_smk("AMWLOGO1");
     /* the original's rows (DIFFICULTY and HEAT TRACKING 20 px up, see above), the port's DISPLAY, RENDERER, TEXTURES */
@@ -3667,6 +3779,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     snprintf(p, sizeof p, "%s", gpath("MW2SND.CFG")); if ((f = fopen(p, "rb"))) { if (fread(snd, 1, sizeof snd, f)) {} fclose(f); }
     snprintf(p, sizeof p, "%s", gpath("MW2DIF.CFG")); if ((f = fopen(p, "rb"))) { if (fread(dif, 1, sizeof dif, f)) {} fclose(f); }
     portcfg_load(g_dir, &pc);
+    mm0 = pc.menu_music;
     {
         int n = 0, k, j;
         SDL_DisplayMode **dms = SDL_GetFullscreenDisplayModes(SDL_GetPrimaryDisplay(), &n);   /* SDL3: largest first, as SDL2's list */
@@ -3705,7 +3818,15 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 14; i++) {
                         if (x < 375 || x > 633 || y < ROW_Y[i] - 2 || y > ROW_Y[i] + 14) continue;
-                        if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
+                        if (i == 0 && x >= 495) {   /* the port's menu music device: AUTO and the devices whose files are here */
+                            int d2 = pc.menu_music, tries;
+                            for (tries = 0; tries < PORTCFG_MM_COUNT; tries++) {
+                                d2 = (d2 + 1) % PORTCFG_MM_COUNT;
+                                if (d2 == PORTCFG_MM_AUTO || g_mm_have[d2]) break;
+                            }
+                            pc.menu_music = g_cfg.menu_music = d2;
+                        }
+                        else if (i == 0) dif[5] = (uint8_t)((dif[5] + 1) % 3);
                         else if (i == 1) dif[4] ^= 1;
                         else if (i == 5 && x >= 495) pc.videos = g_cfg.videos = (pc.videos + 1) % PORTCFG_VID_COUNT;   /* the port's
                                                                          * movie look (FMV ...; the next movie shows it) */
@@ -3791,8 +3912,9 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             int k;
             static const char *const FMV_TEXT[PORTCFG_VID_COUNT] = {"FMV ORIGINAL", "FMV SMOOTH", "FMV SCANLINES", "FMV CRT", "FMV CURVED CRT"};
             static const char *const FIT_TEXT[PORTCFG_FIT_COUNT] = {"FMV 4:3", "FMV FILL", "FMV STRETCH"};
-            const char *lines[22];
-            int ly[22], lx[22], gpu_lock;
+            static const char *const MM_TEXT[PORTCFG_MM_COUNT] = {"MUSIC AUTO", "MUSIC MT-32", "MUSIC SC-55", "MUSIC GUS"};
+            const char *lines[23];
+            int ly[23], lx[23], gpu_lock, mm_lock, ndev = 0;
             for (k = 0; k < 14; k++) {
                 if (k == 0) snprintf(vals[k], sizeof vals[k], "%s", DIFF[sel[0] >= 0 && sel[0] < 3 ? sel[0] : 1]);
                 else if (k == 4 || k == 5) snprintf(vals[k], sizeof vals[k], "%s", sel[k] == 0 ? "HIGH" : "LOW");   /* DISPLAY DETAIL, OBJECT DENSITY */
@@ -3821,9 +3943,14 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 #else
             gpu_lock = 1;   /* Linux: Vulkan, macOS: Metal, the legacy build OpenGL - the only one */
 #endif
-            for (k = 0; k < 22; k++) {
+            /* the menu music device: the DIFFICULTY row's right part (x 495 on, as DOS shading's), under the MUSIC slider; greyed
+             * with fewer than two devices (nothing to choose) or a chosen device whose files are gone (auto's choice plays) */
+            for (k = PORTCFG_MM_MT32; k < PORTCFG_MM_COUNT; k++) ndev += g_mm_have[k] != 0;
+            mm_lock = ndev < 2 || (pc.menu_music > 0 && pc.menu_music < PORTCFG_MM_COUNT && !g_mm_have[pc.menu_music]);
+            lines[22] = MM_TEXT[pc.menu_music > 0 && pc.menu_music < PORTCFG_MM_COUNT ? pc.menu_music : 0]; ly[22] = ROW_Y[0] + 1; lx[22] = 500;
+            for (k = 0; k < 23; k++) {
                 const char *t = lines[k];
-                int grey = (tx_lock && (k == 13 || k == 16)) || (gpu_lock && k == 19);   /* TEXTURES locked / the GPU fixed: greyed */
+                int grey = (tx_lock && (k == 13 || k == 16)) || (gpu_lock && k == 19) || (mm_lock && k == 22);   /* TEXTURES locked / the GPU fixed / one music device: greyed */
                 if (!ttext_available()) {   /* no font file: the original menu font */
                     int tx2 = (k >= 14 && k < 17) ? lx[k] - text_width(&g_flabel, t) : lx[k];
                     draw_text(&g_flabel, tx2, ly[k] - 1, t, (const uint8_t (*)[3])g_bg.pal, grey ? 6 : -1);
@@ -3866,6 +3993,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         snprintf(p, sizeof p, "%s/MW2DIF.CFG", g_dir); if ((f = fopen(p, "wb"))) { fwrite(dif, 1, sizeof dif, f); fclose(f); }
         portcfg_save(g_dir, &pc);
     }
+    if (pc.menu_music != mm0) music_switch(pc.menu_music);   /* on leaving: the chosen device opened, the song restarted on it */
 }
 
 /* ---- the global menu (FUN_000258e0: Esc / right button): panel DATABASE image 7 at (198,116) 244x248, six items
@@ -4584,7 +4712,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     unsetenv("MW2_OF"); unsetenv("MW2_OE");
     setenv("MW2_PILOT", pilot, 1);
     sim_command(line, sizeof line, up, save);
-    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
+    sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     if (g_win) SDL_HideWindow(g_win);
@@ -5631,25 +5759,7 @@ int main(int argc, char **argv)
     }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) && !SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     g_sfx = sfx_create(NULL);
-    {   /* menu music: the MT-32 (its ROMs in the game folder's mt32/, mt32= or MW2_MT32), else Gravis UltraSound
-         * patches if they are there (ultrasnd= / ULTRADIR / MW2_ULTRASND) - no longer asked for */
-        const char *m = getenv("MW2_MT32");
-        const char *u = getenv("MW2_ULTRASND");
-        if (!m && g_cfg.mt32[0]) m = g_cfg.mt32;
-        if (m && g_sfx) g_mt32 = mt32_open(m, sfx_rate(g_sfx));
-        if (m && !g_mt32) fprintf(stderr, "mw2: no usable MT-32 ROMs in %s (MT32_CONTROL.ROM + MT32_PCM.ROM)\n", m);
-        if (!g_mt32) {
-            if (!u && g_cfg.ultrasnd[0]) u = g_cfg.ultrasnd;
-            if (!u) u = getenv("ULTRADIR");
-            if (!u && getenv("ULTRASND") && strchr(getenv("ULTRASND"), '/')) u = getenv("ULTRASND");
-            if (u) g_bank = gus_bank_open(u, 1024);
-        }
-        if (g_mt32 || g_bank) sfx_set_music(g_sfx, music_cb, NULL);
-        fprintf(stderr, "mw2: audio %s (%s), menu music %s%s%s\n", g_sfx ? "on" : "OFF - no audio device",
-                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none",
-                g_mt32 ? "Roland MT-32 (ROMs from " : g_bank ? "Gravis UltraSound patches (" : "OFF - put the MT-32 ROMs (MT32_CONTROL.ROM, MT32_PCM.ROM) in the game folder's mt32/",
-                g_mt32 ? m : g_bank ? u : "", g_mt32 || g_bank ? ")" : "");
-    }
+    music_device_open(g_cfg.menu_music, 1);
     if (!headless) {
         portcfg pc;
         SDL_WindowFlags wf = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;   /* real pixels on a Retina display (macOS;
@@ -5975,6 +6085,9 @@ int main(int argc, char **argv)
     sfx_set_music(g_sfx, NULL, NULL);
     sfx_destroy(g_sfx);
     gus_song_close(g_song); free(g_song_data); gus_bank_close(g_bank);
+#ifndef MW2_NO_SC55
+    sc55_close(g_sc55);
+#endif
     free(g_amb); free(g_flabel.d); free(g_flist.d);
     shell_image_free(&g_bg);
     shelldb_close(&g_db);

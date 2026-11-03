@@ -7549,6 +7549,120 @@ def shell_movie_settings(c):
     c(s1[0] == (0 if s0[0] else 1) and s1[1] == (0 if s0[1] else 1), 'the left parts toggle the original rows', '%s -> %s' % (s0, s1))
 
 
+
+@sequence
+def shell_sc55_menu_music(c):
+    """agent SC: the Roland SC-55 menu music (Nuked SC-55) without firmware - a stub SC-55mk2 ROM set (zero-filled, the
+    right sizes) in MW2_SC55 with MW2_MENU_MUSIC=sc55: the shell chooses the SC-55 (start-up line), plays the screen's
+    song from the General MIDI set (MPU401.MDI's +32, table 0x83e14: Instant Action 0x23 -> entry 66) and exits cleanly;
+    an empty sc55 folder: not offered - auto's choice (the MT-32 with mt32/, else the GUS) and a note on stderr"""
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    d = os.path.join(OUT, c.name)
+    os.makedirs(d, exist_ok=True)
+    gd = install_dir(c.name, None)
+    with open(os.path.join(d, 'mw2port.cfg'), 'w') as f:
+        f.write('game=%s\nedition=enhanced\n' % gd)
+    stub, empty = os.path.join(d, 'sc55'), os.path.join(d, 'sc55_empty')
+    for x in (stub, empty):
+        if os.path.isdir(x):
+            shutil.rmtree(x)
+        os.makedirs(x)
+    for name, size in (('rom1.bin', 0x8000), ('rom2.bin', 0x80000), ('waverom1.bin', 0x200000), ('waverom2.bin', 0x100000),
+                       ('rom_sm.bin', 0x1000)):
+        with open(os.path.join(stub, name), 'wb') as f:
+            f.write(bytes(size))
+
+    def shell_run(sc55):
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({**HEADLESS, 'MW2_CONFIG': os.path.join(d, 'mw2port.cfg'), 'MW2_SAVE_DIR': gd, 'MW2_SHELL_SCREEN': '7',
+                  'MW2_SHELL_CLICKS': '0', 'MW2_SHELL_FRAMES': '60', 'MW2_SHELL_MUSICLOG': '1', 'MW2_SC55': sc55,
+                  'MW2_MENU_MUSIC': 'sc55', 'MW2_SHELL_SHOT': os.path.join(d, 'shell.ppm'), 'MW2_SIM': 'echo %s'})
+        try:
+            p = subprocess.run([shell], env=e, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
+        except subprocess.TimeoutExpired:
+            return None, ''
+        return p.returncode, p.stdout.decode('latin-1')
+
+    rc, out = shell_run(stub)
+    with open(os.path.join(d, 'log_stub.txt'), 'w') as f:
+        f.write(out)
+    c(rc == 0, 'stub ROM set: the shell ran and exited cleanly', 'rc %s' % rc)
+    c('menu music Roland SC-55mk2 (ROMs from %s)' % stub in out, 'stub ROM set: the SC-55mk2 chosen',
+      [l for l in out.splitlines() if 'menu music' in l])
+    ev = re.findall(r'music: start entry (\d+)', out)
+    c(ev[:1] == ['66'], 'the General MIDI set: Instant Action 0x23 + 32 - 1 = entry 66', str(ev))
+    rc, out = shell_run(empty)
+    with open(os.path.join(d, 'log_empty.txt'), 'w') as f:
+        f.write(out)
+    c(rc == 0 and 'menu music Roland SC-55' not in out and 'menu_music=sc55: its files are not there' in out,
+      'no ROMs: the SC-55 not offered', [l for l in out.splitlines() if 'menu' in l])
+    shutil.rmtree(stub)
+    shutil.rmtree(empty)
+
+
+
+@sequence
+def shell_menu_music_setting(c):
+    """agent SC: Combat Variables' menu music entry (the DIFFICULTY row's right part, x 495 on; TEST ONLY MW2_CV_EVENTS):
+    each click the next of AUTO and the devices whose files are here (MT-32 with mt32/, SC-55 with a complete ROM set -
+    stub ROMs here, GUS with ultrasnd/), saved as mw2port.cfg menu_music=, and on leaving the screen the device is
+    closed and the chosen one opened ("menu music now ..."); without SC-55 ROMs SC-55 is skipped; the row's left part
+    still cycles DIFFICULTY (MW2DIF.CFG +5) and the right part leaves it alone"""
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    d = os.path.join(OUT, c.name)
+    os.makedirs(d, exist_ok=True)
+    gd = install_dir(c.name, None)
+    if not os.path.exists(os.path.join(gd, 'mt32')) or not os.path.exists(os.path.join(gd, 'ultrasnd')):
+        c.note('no mt32/ and ultrasnd/ in the test game folder: skipped')
+        return
+    cfg = os.path.join(d, 'mw2port.cfg')
+    with open(cfg, 'w') as f:
+        f.write('game=%s\nedition=enhanced\n' % gd)
+    stub, empty = os.path.join(d, 'sc55'), os.path.join(d, 'sc55_empty')
+    for x in (stub, empty):
+        if os.path.isdir(x):
+            shutil.rmtree(x)
+        os.makedirs(x)
+    for name, size in (('rom1.bin', 0x8000), ('rom2.bin', 0x80000), ('waverom1.bin', 0x200000), ('waverom2.bin', 0x100000),
+                       ('rom_sm.bin', 0x1000)):
+        with open(os.path.join(stub, name), 'wb') as f:
+            f.write(bytes(size))
+    difp = os.path.join(gd, 'MW2DIF.CFG')   # (written by Combat Variables on leaving)
+
+    def dif():
+        return open(difp, 'rb').read()[5] if os.path.exists(difp) else None
+
+    def cv(events, sc55):
+        e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+        e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SAVE_DIR': gd, 'MW2_SHELL_CV': '1', 'MW2_CV_EVENTS': events,
+                  'MW2_SC55': sc55, 'MW2_SHELL_SHOT': os.path.join(d, 'cv.ppm')})
+        p = subprocess.run([shell, gd], env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120 * TSCALE)
+        out = p.stdout.decode('latin-1')
+        vals = dict(l.strip().split('=', 1) for l in open(cfg) if '=' in l)
+        now = re.findall(r'menu music now (Roland MT-32|Roland SC-55mk2|Gravis UltraSound)', out)
+        return vals.get('menu_music'), now[-1] if now else None, p.returncode
+
+    dif0 = None
+    for want, dev in (('mt32', 'Roland MT-32'), ('sc55', 'Roland SC-55mk2'), ('gus', 'Gravis UltraSound'), ('auto', 'Roland MT-32')):
+        mm, now, rc = cv('l 520,200', stub)
+        c(rc == 0 and mm == want and now == dev, 'one click: menu_music=%s, %s opened' % (want, dev), '%s %s rc %s' % (mm, now, rc))
+        dif0 = dif() if dif0 is None else dif0
+        c(dif() == dif0, 'the right part leaves DIFFICULTY alone', '%s -> %s' % (dif0, dif()))
+    mm, now, rc = cv('l 520,200;l 520,200', empty)
+    c(mm == 'gus' and now == 'Gravis UltraSound', 'no SC-55 ROMs: AUTO -> MT-32 -> GUS (SC-55 skipped)', '%s %s' % (mm, now))
+    mm, now, rc = cv('l 400,200', empty)
+    c(mm == 'gus' and now is None and dif() == (dif0 + 1) % 3,
+      'the left part still cycles DIFFICULTY; the device unchanged (not reopened)', '%s %s' % (mm, now))
+    shutil.rmtree(stub)
+    shutil.rmtree(empty)
+
+
 def main():
     global GLVIEW, VERBOSE
     ap = argparse.ArgumentParser()

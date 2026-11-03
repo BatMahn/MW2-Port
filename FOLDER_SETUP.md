@@ -5,7 +5,8 @@ will find everything. Folder names are lower-case and sit **directly** inside `M
 
 **Only `3d/` comes from this repository** (`gamedata/3d/`), because the 3D-card editions are hard to find now.
 **Everything else you supply from your own copies:** your original DOS CD and install (`cd/`, `install/`), your MT-32
-ROMs, your CD audio rip, your Titanium Edition disc and your Gravis UltraSound package. None of those are provided here.
+ROMs, your Roland SC-55 ROM dumps, your CD audio rip, your Titanium Edition disc and your Gravis UltraSound package. None
+of those are provided here.
 
 ```
 MW2-game/
@@ -44,6 +45,13 @@ MW2-game/
 │   ├── MT32_CONTROL.ROM
 │   └── MT32_PCM.ROM
 │
+├── sc55/                    YOUR COPY - optional, Roland SC-55 ROM dumps (menu music on an emulated Sound Canvas;
+│   ├── rom1.bin             not in the Windows legacy build). Names as Nuked SC-55 uses them - an SC-55mk2 v1.01 here
+│   ├── rom2.bin
+│   ├── rom_sm.bin
+│   ├── waverom1.bin
+│   └── waverom2.bin
+│
 ├── music/                   YOUR COPY - CD soundtrack ripped from your disc, optional (FLAC, MP3 or WAV)
 │   ├── Track02.mp3
 │   ├── Track03.mp3
@@ -64,8 +72,27 @@ MW2-game/
 
 ## Minimum to play
 
-Only `install/` and `cd/` are required. Add `3d/` for the textured renderers, `mt32/` (or `ultrasnd/`) for menu music,
-`music/` for the CD soundtrack and `titanium/` for the Titanium textures.
+Only `install/` and `cd/` are required. Add `3d/` for the textured renderers, `mt32/` (or `sc55/`, or `ultrasnd/`) for
+menu music, `music/` for the CD soundtrack and `titanium/` for the Titanium textures.
+
+## The SC-55 ROM files (sc55/)
+
+The emulator is Nuked SC-55; the files go straight into `sc55/` under the names it uses (upper or lower case both work).
+The model is recognised from the names - put one set in the folder. The Roland part numbers are the chips' markings, as
+Nuked SC-55's README lists them:
+
+| Model | Files (Roland part) |
+|---|---|
+| SC-55mk2 / SC-155mk2 (v1.01) | `rom1.bin` (R15199858, H8/532 MCU), `rom2.bin` (R00233567, H8/532 extra code), `rom_sm.bin` (R15199880, M37450M2 MCU), `waverom1.bin` (R15209359, wave 16M), `waverom2.bin` (R15279813, wave 8M) |
+| SC-55st (v1.01) | `rom1.bin` (R15199858), `rom2_st.bin` (R00561413), `rom_sm.bin` (R15199880), `waverom1.bin` (R15209359), `waverom2.bin` (R15279813) |
+| SC-55 (mk1) v1.00 / v1.21 / v2.0 | `sc55_rom1.bin` (R15199748 / R15199778 / R15199799, H8/532 MCU), `sc55_rom2.bin` (R1544925800 / R15209363 / R15209387, extra code), `sc55_waverom1.bin` (R15209276, wave A), `sc55_waverom2.bin` (R15209277, wave B), `sc55_waverom3.bin` (R15209281, wave C) - no sub-MCU ROM |
+| CM-300 / SCC-1 (v1.10 / v1.20), SCC-1A | `cm300_rom1.bin`, `cm300_rom2.bin`, `cm300_waverom1.bin` ... `cm300_waverom3.bin` |
+| SCB-55 / RLP-3194 | `scb55_rom1.bin`, `scb55_rom2.bin`, `scb55_waverom1.bin`, `scb55_waverom2.bin` |
+| RLP-3237 | `rlp3237_rom1.bin`, `rlp3237_rom2.bin`, `rlp3237_waverom1.bin` |
+| SC-155 | `sc155_rom1.bin`, `sc155_rom2.bin`, `sc155_waverom1.bin` ... `sc155_waverom3.bin` |
+
+(Nuked SC-55's README has the part numbers for every model and firmware version. The JV-880 set it also supports is
+not used: the JV-880 is not a General MIDI module.)
 
 ## Common mistakes
 
@@ -84,7 +111,7 @@ Only `install/` and `cd/` are required. Add `3d/` for the textured renderers, `m
 
 From inside your game folder:
 
-    ls                     # should show: 3d  cd  install  mt32  music  titanium  ultrasnd   (the ones you have)
+    ls                     # should show: 3d  cd  install  mt32  music  sc55  titanium  ultrasnd   (the ones you have)
     ls cd/MECH2/MW2.PRJ    # must exist
     ls install/MW2REG.CFG  # must exist
 

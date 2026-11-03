@@ -68,7 +68,7 @@ jobs:
           cp mw2 dist/MW2-Port/
           cp -L $SDL3_DIR/lib/libSDL3.so.0 dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md THIRD_PARTY.md dist/MW2-Port/
+          cp README.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && tar czf MW2-Port-${{ github.ref_name }}-linux-x86_64.tar.gz MW2-Port
 
       - uses: actions/upload-artifact@v4
@@ -123,7 +123,7 @@ jobs:
           mkdir -p dist/MW2-Port
           cp mw2.exe $SDL/bin/SDL3.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md FOLDER_SETUP.md THIRD_PARTY.md dist/MW2-Port/
+          cp README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x64.zip MW2-Port
 
       - uses: actions/upload-artifact@v4
@@ -164,7 +164,7 @@ jobs:
           mkdir -p dist/MW2-Port
           cp mw2.exe $SDL2_PREFIX/bin/SDL2.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md FOLDER_SETUP.md THIRD_PARTY.md packaging/windows/README-legacy.txt dist/MW2-Port/
+          cp README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE packaging/windows/README-legacy.txt dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x86-legacy.zip MW2-Port
 
       - uses: actions/upload-artifact@v4

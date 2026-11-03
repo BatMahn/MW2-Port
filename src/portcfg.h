@@ -4,8 +4,12 @@
  * plain "key=value" lines:
  *   game=<folder>          the game folder: install/ (settings, pilots, saves), cd/ (the disc's files) or an .iso,
  *                          music/ (CD tracks), ultrasnd/ (Gravis patches), 3d/ (3D-edition models, textures, sky)
- *   install= cd= music= ultrasnd= mt32= models= textures= skygnd=     optional overrides of the folder's parts
- *                          (mt32/: the MT-32 ROMs MT32_CONTROL.ROM + MT32_PCM.ROM for the menu music)
+ *   install= cd= music= ultrasnd= mt32= sc55= models= textures= skygnd=     optional overrides of the folder's parts
+ *                          (mt32/: the MT-32 ROMs MT32_CONTROL.ROM + MT32_PCM.ROM for the menu music; sc55/: Roland
+ *                          SC-55 ROM dumps - rom1.bin ... (SC-55mk2) or sc55_rom1.bin ... (SC-55), Nuked SC-55's names)
+ *   menu_music=auto | mt32 | sc55 | gus   (the menu music's device: auto, the default, takes the first whose files are
+ *                          there - MT-32, SC-55, Gravis UltraSound; a named one is used if its files are there, else
+ *                          auto's choice. sc55 is not in the legacy build. Combat Variables' MUSIC entry sets it)
  *   textures_kind=ati | 3dfx
  *   renderer=enhanced | dos | 3dfx | ati | s3 | pvr | mga | rendition   (how the simulation is drawn: the port's enhanced
  *                          mix, or one of the original editions - its own archive, sky file, fog and texture filtering;
@@ -59,6 +63,8 @@ typedef struct {
     int render_w, render_h;   /* 0 = native */
     float speed;              /* game speed: 1.0 = real time (speed= in the file; default 0.85) */
     char game[PORTCFG_PATH], install[PORTCFG_PATH], cd[PORTCFG_PATH], music[PORTCFG_PATH], ultrasnd[PORTCFG_PATH], mt32[PORTCFG_PATH];
+    char sc55[PORTCFG_PATH];         /* the Roland SC-55 ROM dumps (the game folder's sc55/) */
+    int  menu_music;          /* menu_music=: PORTCFG_MM_* (the menu music's device; auto by default) */
     char models[PORTCFG_PATH], textures[PORTCFG_PATH], skygnd[PORTCFG_PATH];
     char skygnd_fog[PORTCFG_PATH];   /* the PowerVR edition's skygnd.par (the fog densities): 3d/skygnd_pvr.par */
     char titanium[PORTCFG_PATH];     /* the Titanium edition's folder (MW2.PRJ + SKYGND.PAR of its 16-bit build) */
@@ -76,6 +82,12 @@ typedef struct {
     int  video_fit;           /* video_fit=: PORTCFG_FIT_* (their shape in the window; 4:3 by default) */
 } portcfg;
 enum { PORTCFG_GPU_AUTO, PORTCFG_GPU_D3D12, PORTCFG_GPU_VULKAN };
+/* the menu music's devices: none, or the emulated MT-32 / SC-55 / Gravis UltraSound; auto = the first one present */
+enum { PORTCFG_MM_AUTO, PORTCFG_MM_MT32, PORTCFG_MM_SC55, PORTCFG_MM_GUS, PORTCFG_MM_COUNT };
+extern const char *const PORTCFG_MM_NAME[PORTCFG_MM_COUNT];   /* "auto", "mt32", "sc55", "gus" */
+/* The device to play the menu music on: the preferred one (menu_music=) if have[it], else the first of MT-32, SC-55,
+ * GUS with have[] set (have[] indexed by PORTCFG_MM_*); PORTCFG_MM_AUTO (0) = none. */
+int  portcfg_menu_music(int preferred, const int have[PORTCFG_MM_COUNT]);
 /* the movie looks, in vidfx.h's order (VIDFX_*), and the fit modes */
 enum { PORTCFG_VID_ORIGINAL, PORTCFG_VID_SMOOTH, PORTCFG_VID_SCANLINES, PORTCFG_VID_CRT, PORTCFG_VID_CRT_CURVED, PORTCFG_VID_COUNT };
 extern const char *const PORTCFG_VID_NAME[PORTCFG_VID_COUNT];   /* "original", "smooth", "scanlines", "crt", "crt_curved" */

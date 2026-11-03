@@ -24,7 +24,8 @@ a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, W
   on macOS. The legacy Windows build (from v1.1.2) draws with OpenGL 1.2's fixed-function pipeline instead, for the
   cards of the XP years (see "System requirements").
 - **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
-  MT-32 emulator or Gravis UltraSound patches (the GUS synth follows the original ULTRA.MDI driver).
+  MT-32 emulator, the Roland SC-55 emulator (Nuked SC-55, from v1.1.3) or Gravis UltraSound patches (the GUS synth
+  follows the original ULTRA.MDI driver).
 - **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
   every view control as in the original.
 
@@ -67,7 +68,8 @@ A modern PC should use the normal build.
 The legacy build has no multisampling (the RESOLUTION row's AA steps do nothing) and shows `GPU OPENGL`; the menus
 draw with SDL's OpenGL renderer (its software renderer if that can't start). It prints `gpu: OpenGL (...)` with the
 card, the driver's version, the colour / depth bits and the texture limit. Not yet tested on real Windows XP hardware
-(KNOWN_ISSUES.md).
+(KNOWN_ISSUES.md). The legacy build has no Roland SC-55 menu music (the emulator needs most of a modern CPU core, and it
+keeps that build lean): it plays the menu music on the MT-32 or the Gravis UltraSound patches.
 
 ## Build
 Needs a C99 compiler, make, pkg-config and SDL3 3.2.0 or newer (development files; SDL3 brings its GPU API's Direct3D 12,
@@ -126,8 +128,10 @@ Only the 3D editions' data (`3d/`) is included in this repository; everything el
                   rest, copied as they are on the disc. Or set cd=/path/to/mw2cd.iso in the settings file to read
                   straight from a disc image (see "Your disc image")
       mt32/       REQUIRED for the menu music - the Roland MT-32 ROMs: MT32_CONTROL.ROM and MT32_PCM.ROM
-                  (without them the menus fall back to Gravis UltraSound patches in ultrasnd/, if present)
+                  (without them the menus fall back to an SC-55 in sc55/ or Gravis UltraSound patches in
+                  ultrasnd/, if present)
       music/      optional - the CD soundtrack (Track02..Track27 as FLAC, MP3 or WAV; see "CD music")
+      sc55/       optional - Roland SC-55 ROM dumps (menu music on an emulated Sound Canvas; see below)
       ultrasnd/   optional - Gravis UltraSound patches (menu music without the MT-32 ROMs; see below)
       3d/         the 3D editions' data - included in this repository under gamedata/3d/: copy that folder here
       titanium/   optional - two files from the TITANIUM EDITION disc (1998), for the Titanium textures (see below)
@@ -194,7 +198,33 @@ folder in as `ultrasnd/`:
     MW2-game/ultrasnd/MIDI/ULTRAMID.INI
     MW2-game/ultrasnd/MIDI/ACPIANO.PAT  ... (about 280 .PAT files)
 
-Running the DOS installer is not needed; extracting the archives is enough. With both present, the MT-32 is used.
+Running the DOS installer is not needed; extracting the archives is enough. With both present, the MT-32 is used
+(unless Combat Variables' MUSIC entry or `menu_music=gus` chooses the GUS - see "Roland SC-55" below).
+
+### Roland SC-55 (optional)
+The DOS game also plays its menu music in General MIDI, through Miles' MPU401.MDI driver ("the Roland Sound Canvas,
+RAP-10, and compatibles"). The port can play that song set on an emulated Roland SC-55 - Nuked SC-55, built in (not in
+the Windows legacy build). The SC-55's firmware and wave ROMs are Roland's and are **not included**: put your own dumps
+in a `sc55/` folder in the game folder (or set `sc55=/path/to/folder`), named as Nuked SC-55 names them, e.g. for an
+SC-55mk2 v1.01:
+
+    MW2-game/sc55/rom1.bin  rom2.bin  rom_sm.bin  waverom1.bin  waverom2.bin
+
+(an original SC-55: `sc55_rom1.bin sc55_rom2.bin sc55_waverom1.bin sc55_waverom2.bin sc55_waverom3.bin`; every model's
+names and Roland part numbers are in [FOLDER_SETUP.md](FOLDER_SETUP.md)). The model is recognised from the file names.
+
+Which device plays the menu music: in the game, Combat Variables - the entry right of DIFFICULTY, under the MUSIC
+slider (MUSIC AUTO / MUSIC MT-32 / MUSIC SC-55 / MUSIC GUS; each click the next, only the devices whose files are there;
+greyed when there is only one). The change takes effect when you leave Combat Variables: the song stops, the chosen
+device starts and the song playing before starts again on it (the SC-55 after its boot, about a second). Or
+`menu_music=` in the settings file - `auto` (the default) takes the first whose files are there, in the order MT-32,
+SC-55, Gravis UltraSound, so adding `sc55/` changes nothing while `mt32/` is there; `menu_music=sc55` (or `mt32`, `gus`)
+picks one, and falls back to auto's choice if its files are missing. The start-up line says which: `menu music Roland
+SC-55mk2 (ROMs from ...)`.
+
+The emulator runs the unit's chips cycle by cycle and needs a good part of one modern CPU core while music plays (it
+runs on its own thread, a short queue ahead of the sound output; it sleeps when no music plays, e.g. during missions).
+It boots for about a second of emulated time when the game starts, so the first menu song can start a moment late.
 
 Then run the game once with the folder; it remembers it:
 
@@ -267,9 +297,13 @@ behave as MSCDEX does.
   extract resources. TEXT resources are stored byte-negated; extract decodes them.
 
 ## Licences
-The port's source code is the author's. miniaudio (third_party/) is public domain / MIT-0; Liberation Sans
-(assets/fonts/) is under the SIL Open Font License; see THIRD_PARTY.md. The game data in gamedata/ is from MechWarrior 2
-(Activision, 1995) and remains Activision's; it is here only so the owner can rebuild a working setup.
+The port's source code is the author's, released under the GNU General Public License, version 2 or (at your option) any
+later version (GPL-2.0-or-later; the text is in [LICENSE](LICENSE)). The game data is not covered: MechWarrior 2's files -
+your own copy, and the 3D editions' data in gamedata/ - are Activision's (1995) and remain Activision's; gamedata/ is here
+only so owners of the game can rebuild a working setup. Third-party components keep their own licences (THIRD_PARTY.md):
+Nuked SC-55 (third_party/nuked-sc55/) GPL-2.0-or-later; Munt's mt32emu (third_party/mt32emu/) LGPL-2.1-or-later;
+miniaudio (third_party/) public domain / MIT-0; stb_truetype (src/third_party/) public domain / MIT; Liberation Sans
+(assets/fonts/) SIL Open Font License 1.1. No ROMs are included: the MT-32 and SC-55 firmware are Roland's.
 
 ## Playing
 
@@ -283,6 +317,7 @@ holds your copy of the game:
     cd/         the disc's files (or point cd= at an .iso)
     music/      the CD soundtrack (Track02..27, FLAC/MP3/WAV)
     mt32/       the MT-32 ROMs (menu music)
+    sc55/       optional: Roland SC-55 ROM dumps (menu music on an emulated SC-55)
     ultrasnd/   Gravis UltraSound patches (menu music without the ROMs)
     3d/         the 3D editions' data - copy gamedata/3d/ from this repository (without 3d/: the DOS models, untextured)
     titanium/   optional: MW2.PRJ + SKYGND.PAR from the Titanium disc's Install/16bit/ (the TITANIUM textures)
@@ -301,15 +336,16 @@ remembers the folder in the per-user settings file:
     renderer=enhanced         # enhanced | dos | 3dfx | ati | s3 | pvr | mga | rendition
     textures=original         # original | titanium (the old edition= is still read: edition=titanium becomes
                               # renderer=enhanced textures=titanium)
-    # optional overrides: install= cd= music= ultrasnd= models= textures= skygnd= skygnd_fog= textures_kind=ati|3dfx
-    #                     titanium= (the Titanium files' folder)
+    menu_music=auto           # auto | mt32 | sc55 | gus (the menu music's device; auto: the first present, in that order)
+    # optional overrides: install= cd= music= ultrasnd= mt32= sc55= models= textures= skygnd= skygnd_fog=
+    #                     textures_kind=ati|3dfx  titanium= (the Titanium files' folder)
 
 Resolution (with anti-aliasing), the display mode and the look are also in the game: the global menu (Esc / right
 button) -> COMBAT VARIABLES (RESOLUTION, DISPLAY, RENDERER, TEXTURES - RENDERER and TEXTURES head the DETAIL group). Controls follow your install's GAMEKEY.MAP / INPUT.MAP; set them up in the
 global menu -> COCKPIT CONTROLS, as in the original.
 In a mission, Esc opens the original's MAIN MENU and pauses the game: Abort Mission, Graphics (Textured Sky / Ground and
 the port's Renderer - Enhanced, 3Dfx, ATi, S3, PowerVR, Matrox or Rendition - and Textures - Original or Titanium - switched on
-the spot and kept for the next mission), Audio Ctrl (music / effects / voice sliders), Combat Variables (textures, detail, density, explosion chunks)
+the spot and kept for the next mission), Audio Ctrl (music / effects / voice sliders), Combat Variables (textures, detail, density, explosion chunks, the menu music device)
 and Flee to Windows (leaves the game). Digits pick an item, arrows / Space change a value, 0 or Enter accepts, Esc
 backs out. Ctrl+Q still aborts the mission directly. The DOS renderer keeps its own archive: choose it in the shell
 (in a DOS mission Renderer and Textures stay as they are).

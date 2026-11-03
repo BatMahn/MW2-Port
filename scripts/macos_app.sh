@@ -12,6 +12,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/assets/fonts"
 cp mw2 "$APP/Contents/MacOS/"   # one executable: the shell and (mw2 --sim) the simulation
 cp assets/fonts/LiberationSans-Bold.ttf assets/fonts/README.md "$APP/Contents/Resources/assets/fonts/"
 cp packaging/macos/mw2port.icns "$APP/Contents/Resources/"
+cp LICENSE THIRD_PARTY.md "$APP/Contents/Resources/"   # the licences (GPL-2.0-or-later; third-party components)
 # bundle SDL3: the dylib named libSDL3 in the binary's load commands (Homebrew: /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib;
 # an SDL3 built from source links @rpath/libSDL3.0.dylib - found through pkg-config's libdir then)
 if otool -L "$APP/Contents/MacOS/mw2" | grep -q 'libSDL2'; then

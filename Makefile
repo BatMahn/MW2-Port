@@ -28,6 +28,13 @@ ifeq ($(SDL),2)
   SDL3_CFLAGS := $(filter-out -Dmain=SDL_main,$(shell $(SDL2_PKG) --cflags sdl2 2>/dev/null)) -DMW2_SDL2
   SDL3_LIBS   := $(shell $(SDL2_PKG) --libs sdl2 2>/dev/null)
   SDL3_CHECK   = @$(SDL2_PKG) --exists 'sdl2 >= $(SDL2_MIN_VERSION)' 2>/dev/null || { echo "SDL2 >= $(SDL2_MIN_VERSION) not found by $(PKG_CONFIG) (sdl2.pc): set SDL2_DIR=<prefix> (README, Build: the legacy build)" >&2; exit 1; }
+  # no Roland SC-55 emulation in the legacy build (Nuked SC-55 needs most of a modern CPU core; keeps that build lean)
+  CFLAGS += -DMW2_NO_SC55
+  SC55_LIB =
+  SC55_SRC =
+else
+  SC55_LIB = build/libnsc55.a
+  SC55_SRC = src/sc55mid.c
 endif
 # The render backend (src/rb.h): SDL_GPU (default; Direct3D 12 / Vulkan / Metal), or RB=gl12 - OpenGL 1.2's fixed-function
 # pipeline (src/rb_gl12.c, the legacy build for older PCs; docs/RENDERER_GL12.md), linked to the system's OpenGL
@@ -136,17 +143,26 @@ build/mt32emu/%.o: third_party/mt32emu/%.cpp
 build/libmt32emu.a: $(MT32_OBJ)
 	$(AR) rcs $@ $^
 
+# the SC-55 emulator (Nuked SC-55, GPL 2.0+; the emulator core only, third_party/nuked-sc55): C++, a static library
+NSC55_SRC = $(wildcard third_party/nuked-sc55/*.cpp)
+NSC55_OBJ = $(patsubst third_party/nuked-sc55/%.cpp,build/nsc55/%.o,$(NSC55_SRC))
+build/nsc55/%.o: third_party/nuked-sc55/%.cpp $(wildcard third_party/nuked-sc55/*.h)
+	@mkdir -p $(dir $@)
+	$(CXX) -O2 -w $(LEGACY_FLAGS) -c $< -o $@
+build/libnsc55.a: $(NSC55_OBJ)
+	$(AR) rcs $@ $^
+
 # mw2: one executable - the shell, and with --sim the simulation (glview built in, its main renamed)
-mw2: $(WINRES) build/libmt32emu.a src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
+mw2: $(WINRES) build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(SDL3_CFLAGS) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(WINRES) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(SC55_LIB) $(WINRES) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
 
-mw2shell: build/libmt32emu.a src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
+mw2shell: build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
 	$(SDL3_CHECK)
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(SDL3_CFLAGS) $(filter %.c,$^) build/libmt32emu.a -o $@ $(SDL3_LIBS) -lm $(CXXLIB)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(SDL3_CFLAGS) -Ithird_party $(filter %.c,$^) build/libmt32emu.a $(SC55_LIB) -o $@ $(SDL3_LIBS) -lm -lpthread $(CXXLIB)
 
 glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
 	$(SDL3_CHECK)
@@ -178,6 +194,11 @@ test_titanium: tests/test_titanium.c src/tex.c src/skygnd.c src/portcfg.c src/pr
 test_gamefolder: tests/test_gamefolder.c src/portcfg.c src/portcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_gamefolder.c src/portcfg.c -o $@
 
+# the SC-55 menu music without firmware: ROM set detection, the device choice, a stub ROM set run (tests/test_sc55.c)
+test_sc55: tests/test_sc55.c src/sc55mid.c src/sc55mid.h src/shelldb.c src/portcfg.c build/libnsc55.a
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Isrc -Ithird_party $(SDL3_CFLAGS) tests/test_sc55.c src/sc55mid.c src/shelldb.c src/portcfg.c build/libnsc55.a -o $@ $(SDL3_LIBS) -lm -lpthread $(CXXLIB)
+
 test_cockpitcfg: tests/test_cockpitcfg.c src/cockpitcfg.c src/cockpitcfg.h
 	$(CC) $(CFLAGS) -Isrc tests/test_cockpitcfg.c src/cockpitcfg.c -o $@
 
@@ -198,10 +219,11 @@ check: all
 	./test_gamefolder
 	$(MAKE) test_inputmap && ./test_inputmap $(MW2)
 	$(MAKE) test_cockpitcfg && ./test_cockpitcfg $(MW2)
+	$(MAKE) test_sc55 && ./test_sc55 $(MW2)
 	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 $(MW2) > /tmp/mw2lab.txt; r=$$?; tail -1 /tmp/mw2lab.txt; exit $$r
 
 clean:
-	rm -rf build $(BIN) $(GLBIN) mw2 mw2.exe
+	rm -rf build $(BIN) $(GLBIN) mw2 mw2.exe test_sc55
 
 .PHONY: all check clean
 
@@ -219,7 +241,7 @@ dist: mw2
 	mkdir -p $(DIST)/assets/fonts
 	cp mw2 $(DIST)/
 	cp assets/fonts/LiberationSans-Bold.ttf assets/fonts/README.md $(DIST)/assets/fonts/
-	cp README.md THIRD_PARTY.md $(DIST)/
+	cp README.md THIRD_PARTY.md LICENSE $(DIST)/
 	cd dist && tar czf mw2port-linux-x86_64.tar.gz mw2port
 	@echo "dist/mw2port-linux-x86_64.tar.gz"
 

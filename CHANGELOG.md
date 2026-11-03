@@ -1,6 +1,22 @@
 # Changelog
 
-## v1.1.2 (2026-11-03)
+## v1.1.3 (unreleased)
+
+- **Roland SC-55 menu music** (Nuked SC-55 built in): the menus' General MIDI song set - the one the DOS game plays
+  through Miles' MPU401.MDI on a Sound Canvas - on an emulated Roland SC-55, as a third music device beside the MT-32
+  and the Gravis UltraSound. Bring your own ROM dumps: a `sc55/` folder in the game folder (or `sc55=`), with the file
+  names Nuked SC-55 uses (SC-55mk2 v1.01: rom1.bin, rom2.bin, rom_sm.bin, waverom1.bin, waverom2.bin; SC-55: sc55_rom1.bin
+  ... sc55_waverom3.bin; also the SC-55st, CM-300 / SCC-1, SCB-55, RLP-3237, SC-155). The model is recognised from the
+  files. `menu_music=auto|mt32|sc55|gus` chooses the device; auto (the default) keeps the MT-32 first, then the SC-55,
+  then the GUS - nothing changes for an existing setup. In the game: Combat Variables, the entry right of DIFFICULTY
+  (MUSIC AUTO / MT-32 / SC-55 / GUS - the devices whose files are there), applied on leaving the screen: the song
+  restarts on the chosen device. The emulator runs on its own thread a short queue ahead of the
+  sound output and sleeps when no music plays. Not in the Windows legacy build. README "Roland SC-55 (optional)",
+  FOLDER_SETUP.md.
+- **Licence: the port is now GPL-2.0-or-later** (LICENSE; README "Licences"). The game data stays Activision's; the
+  third-party components keep their licences (THIRD_PARTY.md). The release packages carry LICENSE.
+
+## v1.1.2 (unreleased)
 
 - **Movie looks** (a port presentation option): the full-screen movies (intro, landings, endings) can be shown as
   ORIGINAL (the default, unchanged), SMOOTH, SCANLINES, CRT or CURVED CRT, fitted 4:3 (default), FILL or STRETCH -

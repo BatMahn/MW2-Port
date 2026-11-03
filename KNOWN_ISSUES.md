@@ -21,5 +21,9 @@ What is still open in the port as of 2026-11-03. Technical detail, engine addres
   software OpenGL only. Its renderer approximates a few per-pixel details (docs/RENDERER_GL12.md): a point light's
   direction per corner, polygons cut by the near plane in the DOS look, no multisampling; an off-screen picture larger than the window (`render=1024x768` in a smaller
   window) is cut to the window. Report anything that looks wrong, with the card and the `gpu: OpenGL (...)` line.
+- **Roland SC-55 menu music (v1.1.3)** - built and its path tested with stub ROM files only: no SC-55 firmware was
+  available, so the emulated unit's actual sound, its boot time (the port waits 1 s of emulated time, then sends a GS
+  reset) and its CPU use with the real firmware are untested. Report the start-up line (`menu music Roland ...`), how
+  the music sounds and whether it stutters, with your CPU.
 - **macOS downloads** - the app isn't notarised: run `xattr -dr com.apple.quarantine "MechWarrior 2.app"` once (README).
 
