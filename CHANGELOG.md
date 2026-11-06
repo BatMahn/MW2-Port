@@ -14,7 +14,7 @@
   "titanium: no SKYDOME record ... is titanium= the 16-bit build's MW2.PRJ?". The reporter's exact cause is not
   confirmed.
 
-## v1.1.3
+## v1.1.3 (2026-11-03)
 
 - **Roland SC-55 menu music** (Nuked SC-55 built in): the menus' General MIDI song set - the one the DOS game plays
   through Miles' MPU401.MDI on a Sound Canvas - on an emulated Roland SC-55, as a third music device beside the MT-32
