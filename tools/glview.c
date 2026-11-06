@@ -3988,6 +3988,14 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             prj_record_free(&pr);
         }
     }
+    if (g_world) {   /* the world's insignia decals (the dropships') show the player's clan (MW2_CLAN: the shell's campaign / training
+                      * clan, Instant Action's friendly clan; Wolf 0, Jade Falcon 1, the viewer's order) - INFERRED: with 0 every
+                      * Jade Falcon mission's dropship wore the Wolf crest. Units keep theirs (tex_offset, their star) */
+        const char *ce = getenv("MW2_CLAN");
+        int wc = ce ? atoi(ce) : 0, q;
+        if (wc < 0 || wc > 5) wc = 0;
+        for (q = 0; q < m.part_count; q++) m.parts[q].world_clan = wc;
+    }
     glr_set_mech(r, &m, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, camo, clan);
     /* the ambient term: LITE level x 3/256 (PowerVR 0x100607d0: sgl ambient = render-config +0x2a x 0.01171875 x the
      * light colour; the fog colour's ambient term is the same value) */

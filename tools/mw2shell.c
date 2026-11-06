@@ -1406,6 +1406,7 @@ static int launch_ia(void)
     printf("launch: %s -of=%s -oe=%s (files in %s)\n", scen, FORM_ARG[g_ia.form[0]], FORM_ARG[g_ia.form[1]], save);
     setenv("MW2_OF", FORM_ARG[g_ia.form[0]], 1);
     setenv("MW2_OE", FORM_ARG[g_ia.form[1]], 1);
+    { char cl[8]; snprintf(cl, sizeof cl, "%d", g_ia.clan[0]); setenv("MW2_CLAN", cl, 1); }   /* (the friendly clan: the world's decals) */
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
@@ -3587,6 +3588,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     unsetenv("MW2_OE");
     setenv("MW2_OF", FORM_ARG[g_star[clan].formation], 1);
     setenv("MW2_PILOT", g_reg[reg].name, 1);
+    { char cl[8]; snprintf(cl, sizeof cl, "%d", clan); setenv("MW2_CLAN", cl, 1); }   /* (the world's insignia decals) */
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
@@ -4711,6 +4713,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     printf("launch: training %s\n", up);
     unsetenv("MW2_OF"); unsetenv("MW2_OE");
     setenv("MW2_PILOT", pilot, 1);
+    { char cl[8]; snprintf(cl, sizeof cl, "%d", clan); setenv("MW2_CLAN", cl, 1); }   /* (the world's insignia decals) */
     sim_command(line, sizeof line, up, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */

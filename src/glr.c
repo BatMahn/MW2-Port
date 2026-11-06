@@ -572,7 +572,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     continue;
                 }
                 if (slot == GLR_SLOT_CAMO) slot += camo + part->tex_offset;
-                else if (slot == GLR_SLOT_INSIGNIA) slot += clan + part->tex_offset;   /* engine 0x10042000 */
+                else if (slot == GLR_SLOT_INSIGNIA) slot += clan + part->tex_offset + part->world_clan;   /* engine 0x10042000 */
                 if (model->extended && !part->flat && slot < GLR_SLOTS && slots && slots[slot] && (q->color & 0xFF) != 0xF0) batch = slot;
                 if (ti) {
                     /* the Titanium colour word (mercsw 0x1001b050: kinds 2, 5, 6, 7 textured - 0x1001b346 -, the bitmap the low

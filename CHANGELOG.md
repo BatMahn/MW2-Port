@@ -1,6 +1,20 @@
 # Changelog
 
-## v1.1.3 (2026-11-03)
+## v1.1.4 (2026-11-06)
+
+- **Jade Falcon dropships wore the Clan Wolf crest** (the 3D editions' textures). The insignia slot is offset by a clan
+  value (engine 0x10042000) that the port always left at 0, Wolf. World objects now add the player's clan: the
+  campaign's or training's, or Instant Action's friendly clan. The shell passes it to the mission as `MW2_CLAN`. Mechs
+  keep the insignia their star gives them. Which value the original uses is INFERRED from the crest the players
+  expect; it is not traced.
+- **A flat blue sky with Titanium textures** (reported on Vulkan and Direct3D 12). With the Titanium textures, the sky
+  is the mission's SKYDOME object from the Titanium archive. When that archive has no SKYDOME, the port drew no sky,
+  and only SKYGND.PAR's plain `sky=` colour showed. That happens with an `MW2.PRJ` that is not the 16-bit build's;
+  the disc's 8-bit archive has no SKYDOME. The port now falls back to the mission's own cloud sky and logs:
+  "titanium: no SKYDOME record ... is titanium= the 16-bit build's MW2.PRJ?". The reporter's exact cause is not
+  confirmed.
+
+## v1.1.3
 
 - **Roland SC-55 menu music** (Nuked SC-55 built in): the menus' General MIDI song set - the one the DOS game plays
   through Miles' MPU401.MDI on a Sound Canvas - on an emulated Roland SC-55, as a third music device beside the MT-32

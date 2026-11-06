@@ -259,7 +259,16 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
             bwd_mission_free(&bm);
         }
     }
-    if (!dome) glr_set_skydome(r, NULL, ts.slot);
+    if (!dome) {
+        /* no SKYDOME in the Titanium archive (one that is not the 16-bit build's MW2.PRJ - the disc's 8-bit one is the DOS
+         * archive): the mission's own sky texture (slot 0x8c) rather than none - with neither, only SKYGND.PAR's flat
+         * sky= colour showed (a player's report: a plain blue sky with Titanium textures, Vulkan and D3D12) */
+        glr_set_skydome(r, NULL, ts.slot);
+        glr_set_environment(r, c3d_ti_sg.tile_ground > 0 ? ground : NULL, s->slot[SKYGND_SKY_SLOT], 4.0f,
+                            32.0e6f * c3d_ti_sg.tile_ground / (c3d_ti_sg.ground_max * 2.0f));
+        fprintf(stderr, "titanium: no SKYDOME record for %.4sSCN1 in the Titanium archive - is titanium= the 16-bit build's "
+                        "MW2.PRJ (the disc's Install/16bit)? Drawing the mission's own sky.\n", mission);
+    }
     {   /* the stars' camouflage sets: the maps' CAMO chunks {i32 star, i32 set}, each clamped 0..7 (mercsw 0x10073a6b ->
          * 0x100a11f0, initially {0..7}; the engine keeps the previous mission's, here reset per mission) */
         char name[16];

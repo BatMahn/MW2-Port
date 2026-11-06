@@ -62,6 +62,8 @@ typedef struct {
                                   * (world3d_ti_attach), drawn in place of `model`; NULL none */
     int       dos_pit;       /* the cockpit set (repr 4) in the DOS look: its polygons in the DOS draw order (glr) */
     int       ti_insignia;   /* world objects: added to that model's slot 0x3f (its structure's AFFL team, mercsw 0x100748ab) */
+    int       world_clan;    /* world objects (the 3D editions' textures): the player's clan, added to the insignia slot
+                              * (the dropships' decals; glview MW2_CLAN) - units carry theirs in tex_offset */
 } mech3d_part;
 
 #define MECH3D_MAX_NODES 64
