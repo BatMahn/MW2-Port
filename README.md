@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-06, v1.1.8)
+## Status (2026-11-06, v1.1.9)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 
@@ -123,6 +123,9 @@ Only the 3D editions' data (`3d/`) is included in this repository; everything el
       install/    REQUIRED - the contents of your installed DOS game folder (C:\MECH2 after running the game's
                   INSTALL): the *.CFG settings, MW2REG.CFG (pilots), the *.BWD lance files, SETUP\, SND\ ... Copying
                   the whole folder is fine. The port writes pilots, saves and settings here.
+                  Optional: DATABASE.MW2 from the root of the Windows 95 CD, copied here, adds that edition's two menu
+                  voices ("MechWarrior 2... choose your clan", "Report to cadet training"). It is a superset of the DOS
+                  file.
       cd/         REQUIRED - the contents of the ORIGINAL DOS game CD (1995, not the Titanium disc): the disc's
                   MECH2\ folder (MW2.PRJ, DATABASE.MW2, ...), SMK\ (movies), KEATING\ (training voices) and the
                   rest, copied as they are on the disc. Or set cd=/path/to/mw2cd.iso in the settings file to read

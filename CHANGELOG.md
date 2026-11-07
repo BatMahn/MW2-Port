@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.9 (2026-11-06)
+
+- **"MechWarrior 2... choose your clan" and "Report to cadet training"** come from the Windows 95 edition. Its
+  DATABASE.MW2 is the DOS one plus two WAVs: 0x68 and 0x69. Its shell (MW2SHELL.DLL) plays them, and the port now
+  does too when they are there:
+  - **0x68 "MechWarrior 2... choose your clan"** plays at volume 0x78 when the main menu opens (0x10005200). The
+    menu's background loop (0x4a) starts only after the line ends (0x10005342). It stops when you leave the menu.
+  - **0x69 "Report to cadet training"** plays at volume 0x7f in the clan hall after the roster makes a new pilot. The
+    roster sets a flag at 0x10018723 and the hall checks it at 0x100047eb. Wolf plays the line at once. Falcon plays it
+    after its door clips (ajf8orl1 / ajf8orr1), which the port does not show, so the port plays it at once there too.
+  - **To get them:** copy `DATABASE.MW2` from the root of the Windows 95 CD into your `install/` folder. The port
+    reads `install/` first. The file is the DOS one with the two WAVs added; all its other entries are byte for byte
+    the same. Without it, the menus behave as the DOS game.
+- **v1.1.8's logo-clip sound on the main menu is removed.** Neither edition plays that clip's sound track.
+- **Shell WAVs read their sample rate from the `fmt` chunk.** It was read from a fixed offset, which is wrong for
+  0x68 / 0x69: they carry a LIST chunk first.
+
 ## v1.1.8 (2026-11-06)
 
 - **The main menu said "A call to trial... justice by combat".** DATABASE 0x52 is the Trials of Grievance line, not

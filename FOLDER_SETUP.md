@@ -38,6 +38,7 @@ MW2-game/
 │   ├── SND/
 │   ├── EN01STAR.BWD ... EN05STAR.BWD   USERSTAR.BWD
 │   ├── MW2.ADV  MW2.PHX
+│   ├── DATABASE.MW2         optional - from the ROOT of the Windows 95 CD: adds two menu voices (a superset of the DOS file)
 │   ├── MW2CAR.CFG  MW2DIF.CFG  MW2MSN.CFG  MW2PRM.CFG  MW2REG.CFG  MW2SND.CFG  STAR0.CFG
 │   └── SYMLOG.TXT  TMP.OUT
 │

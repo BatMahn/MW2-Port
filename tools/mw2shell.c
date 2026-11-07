@@ -629,10 +629,11 @@ static void play_ambient(int entry)
     if (entry < 0 || !g_sfx) return;
     n = shelldb_entry(&g_db, entry, &g_amb);
     g_amblen = n;
+    int rate = 11025;
     for (i = 12; i + 8 <= n; ) {   /* find fmt / data chunks */
         uint32_t cl = g_amb[i + 4] | g_amb[i + 5] << 8 | g_amb[i + 6] << 16 | (uint32_t)g_amb[i + 7] << 24;
+        if (!memcmp(g_amb + i, "fmt ", 4) && i + 14 <= n) rate = g_amb[i + 12] | g_amb[i + 13] << 8;
         if (!memcmp(g_amb + i, "data", 4)) {
-            int rate = g_amb[24] | g_amb[25] << 8;
             sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, (float)0x1e / 127.0f, 1);   /* the main
                                          * menu's loop (0x2a4c9): faded up to volume 0x1e, the voice's level */
             return;
@@ -647,18 +648,22 @@ static void play_ambient(int entry)
  * 0x8367c +0x10, e.g. 0x55 "Firemoth") at 0x28; CUSTOMIZE's location pick 0x50 at 0x28 (0x2fb20 / 0x2fb50). */
 typedef struct { uint8_t *wav; const uint8_t *pcm; int len, rate; } shell_snd;
 static shell_snd g_snd[160];
-static void shell_sound(int index, int vol)
+/* the WAV's samples, loaded once; 0 when the DATABASE has no such entry (the Windows 95 edition's DATABASE.MW2 adds
+ * 0x68 and 0x69 to the DOS one's 103) */
+static shell_snd *shell_sound_load(int index)
 {
     shell_snd *z;
     long n, i;
-    if (index <= 0 || index > 160 || !g_sfx) return;
+    if (index <= 0 || index > 160) return NULL;
     z = &g_snd[index - 1];
     if (!z->wav) {
         n = shelldb_entry(&g_db, index - 1, &z->wav);
-        for (i = 12; z->wav && i + 8 <= n; ) {
+        z->rate = 11025;
+        for (i = 12; z->wav && i + 8 <= n; ) {   /* the chunks: fmt (the rate - not always at byte 24: the Windows 95
+                                                  * edition's 0x68 / 0x69 carry a LIST chunk first), then data */
             uint32_t cl = z->wav[i + 4] | z->wav[i + 5] << 8 | z->wav[i + 6] << 16 | (uint32_t)z->wav[i + 7] << 24;
+            if (!memcmp(z->wav + i, "fmt ", 4) && i + 14 <= n) z->rate = z->wav[i + 12] | z->wav[i + 13] << 8;
             if (!memcmp(z->wav + i, "data", 4)) {
-                z->rate = z->wav[24] | z->wav[25] << 8;
                 z->pcm = z->wav + i + 8;
                 z->len = (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8));
                 break;
@@ -666,7 +671,17 @@ static void shell_sound(int index, int vol)
             i += 8 + (long)cl + (cl & 1);
         }
     }
-    if (!z->pcm || z->len <= 0) return;
+    return z->pcm && z->len > 0 && z->rate > 0 ? z : NULL;
+}
+static int shell_sound_ms(int index)   /* the sound's length in ms; -1: not in this DATABASE */
+{
+    shell_snd *z = shell_sound_load(index);
+    return z ? (int)((long)z->len * 1000L / z->rate) : -1;
+}
+static void shell_sound(int index, int vol)
+{
+    shell_snd *z;
+    if (!g_sfx || !(z = shell_sound_load(index))) return;
     sfx_stop_pcm(g_sfx, z->pcm);
     sfx_play_pcm(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f, 0);
 }
@@ -1085,6 +1100,7 @@ static int g_from_screen = -1;   /* the screen before the current one */
  * clear plays the registration clip (aworgstr / ajfrgstr) and goes to the roster (12), whose entry says "Register SibKo
  * identity" (DATABASE 0x51) - every time a clan is chosen from the main menu, not only with no pilot on file */
 static int g_reg_session;
+static int g_new_pilot;   /* the roster made a pilot this visit (Windows 95 MW2SHELL.DLL 0x10086efc) */
 static int g_ia_ctx = 2;   /* the star the IA screen's MECH LAB / STAR CONFIG buttons opened: 2 friendly, 3 enemy */
 static int g_lab_slot;
 static void ov_set(overlay *o, const char *name, int x, int y)
@@ -1672,6 +1688,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
     reg_load();
     load_bg(clan == 1 ? 23 : 16);
     if (!headless) shell_sound(0x51, 0x1e);   /* 0x384f8: DATABASE sound 0x51 at volume 0x1e on entering */
+    g_new_pilot = 0;   /* (Windows 95 0x10018440) */
     while (next == -1) {
         SDL_Event e;
         int sel = reg_selected(clan), hover = -1, nclick = 0, c;
@@ -1716,6 +1733,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                             for (j = 0; j < 10; j++) g_reg[clan * 10 + j].selected = 0;
                             r->selected = 1;
                             reg_save();
+                            g_new_pilot = 1;   /* (Windows 95 0x10018723) */
                             editing = -1;
                             old_list = 0;
                         }
@@ -5887,7 +5905,8 @@ int main(int argc, char **argv)
         smk *ov = NULL, *xov[8] = {0};
         Uint64 xlast[8] = {0};
         const char *pending_video = NULL;
-        int next = -1, nclan = clan, f = 0;
+        int next = -1, nclan = clan, f = 0, amb_entry = -1;
+        Uint64 amb_due = 0;
         Uint64 last = SDL_GetTicks();
         apply_music(screen, clan);   /* main 0x36700 applies the screen's music first - the cinematic screens 15 / 16 stop it */
         if (screen == 16) {   /* the ending (mend / mend2), then the clan hall */
@@ -6011,15 +6030,24 @@ int main(int argc, char **argv)
         load_bg(sd ? (sd->bg >= 0 ? sd->bg : (clan == 1 ? 17 : 10)) : (clan == 1 ? 17 : 10));   /* rooms not built: the hall's */
         if (sd && sd->smk) ov = open_smk(sd->smk);
         if (sd) { int q; for (q = 0; q < sd->nov && q < 8; q++) xov[q] = open_smk(sd->ov[q].name); }
-        play_ambient(sd ? sd->ambient : -1);
-        if (sd && sd->id == 8 && ov) {   /* the main menu's logo clip (amwlogo1, FUN_00039ad0 0x2a472) and its own sound track -
-                                         * "MechWarrior 2... choose your clan" by players' reports; DATABASE has no such line */
-            if (getenv("MW2_SMK_TRACE")) { int16_t *a = NULL; size_t ns = 0; int rate = 0, ch = 1; smk_audio(ov, &a, &ns, &rate, &ch); fprintf(stderr, "title clip %s: audio %zu samples at %d Hz\n", sd->smk, ns, rate); free(a); }
-            clip_sound(ov, headless);
+        {   /* the main menu (Windows 95 MW2SHELL.DLL 0x10005200): "MechWarrior 2... choose your clan" (DATABASE 0x68, only in
+             * that edition's DATABASE.MW2) at volume 0x78, and the 0x4a loop only once it has ended (the 0x404 handler
+             * 0x10005342: 0x1002561e not playing); without 0x68 the loop starts at once, as the DOS shell's (0x2a410) */
+            int vms = sd && sd->id == 8 && !headless ? shell_sound_ms(0x68) : -1;
+            amb_due = 0;
+            if (vms >= 0) { play_ambient(-1); shell_sound(0x68, 0x78); amb_due = SDL_GetTicks() + (Uint64)vms; amb_entry = sd->ambient; }
+            else play_ambient(sd ? sd->ambient : -1);
         }
+        if (sd && sd->id == 1 && g_new_pilot && !headless) shell_sound(0x69, 0x7f);   /* the hall after the roster made a pilot
+                                         * (Windows 95 MW2SHELL.DLL 0x100047eb, flag 0x10086efc set at 0x10018723): "Report
+                                         * to cadet training" (DATABASE 0x69, that edition's only) at volume 0x7f. Wolf plays it
+                                         * at once (0x10004b25); Falcon once its door clips ajf8orl1 / ajf8orr1 end (0x10004b61),
+                                         * which the port does not show - at once too */
+        if (sd && sd->id == 1) g_new_pilot = 0;
         while (next == -1 && running) {
             SDL_Event e;
             int i, hover = -1;
+            if (amb_due && SDL_GetTicks() >= amb_due) { amb_due = 0; play_ambient(amb_entry); }
             if (!headless) {
                 while (shell_poll(&e)) {
                     if (e.type == SDL_EVENT_QUIT) running = 0;
@@ -6099,6 +6127,7 @@ int main(int argc, char **argv)
             }
         }
         smk_close(ov);
+        if (sd && sd->id == 8) shell_sound_stop(0x68);   /* the main menu's voice ends with the menu */
         { int q; for (q = 0; q < 8; q++) smk_close(xov[q]); }
         if (pending_video) play_cinematic(rd, tx, pending_video, headless);   /* e.g. the registration clip */
         if (next != -1) { screen = next; clan = nclan; }
