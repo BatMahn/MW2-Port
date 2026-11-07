@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.7 (2026-11-06)
+
+- **"MechWarrior... choose your clan" now plays on the main menu**, once each time the menu opens (DATABASE 0x52, volume
+  0x1e). This is a PORT CHOICE made on players' reports. The DOS MW2SHELL.EXE plays the line on entering Trials of
+  Grievance from the main menu instead (FUN_00029680), which v1.1.5 followed. Trials of Grievance no longer plays it.
+- **The main menu's background loop is quieter.** It plays at the original's volume 0x1e, the voice's level (0x2a4c9),
+  instead of half volume, which buried the line.
+
+## v1.1.6 (2026-11-06)
+
+- v1.1.5's notes corrected: the roster's line is "Register SibKo identity". No code changes.
+
 ## v1.1.5 (2026-11-06)
 
 - **The menu voices were missing.** Both lines are DATABASE sounds that the original's shell plays. Traced in

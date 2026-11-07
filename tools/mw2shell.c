@@ -633,7 +633,8 @@ static void play_ambient(int entry)
         uint32_t cl = g_amb[i + 4] | g_amb[i + 5] << 8 | g_amb[i + 6] << 16 | (uint32_t)g_amb[i + 7] << 24;
         if (!memcmp(g_amb + i, "data", 4)) {
             int rate = g_amb[24] | g_amb[25] << 8;
-            sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, 0.5f, 1);
+            sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, (float)0x1e / 127.0f, 1);   /* the main
+                                         * menu's loop (0x2a4c9): faded up to volume 0x1e, the voice's level */
             return;
         }
         i += 8 + (long)cl + (cl & 1);
@@ -1440,8 +1441,6 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
     if (g_from_screen == 8) { g_ia.scen = 0; ia_load_scenario(); }   /* FUN_00029680 from the main menu (EBX 8): the first
                                                                          * scenario, both stars reloaded from it (FUN_000291b0) */
     else if (!g_ia.loaded) ia_load_scenario();
-    if (!headless && g_from_screen == 8) shell_sound(0x52, 0x1e);   /* FUN_00029680 0x29763 / 0x29a2f: from the main menu (EBX 8)
-                                         * DATABASE sound 0x52 - "MechWarrior... choose your clan" - once, at volume 0x1e */
     ov_set(&ov[0], IA_CLAN[g_ia.clan[0]], 13, 205);
     ov_set(&ov[1], IA_CLAN[g_ia.clan[1]], 483, 329);
     ov_set(&ov[2], "WIALANCH", 209, 371);
@@ -6011,6 +6010,10 @@ int main(int argc, char **argv)
         if (sd && sd->smk) ov = open_smk(sd->smk);
         if (sd) { int q; for (q = 0; q < sd->nov && q < 8; q++) xov[q] = open_smk(sd->ov[q].name); }
         play_ambient(sd ? sd->ambient : -1);
+        if (!headless && sd && sd->id == 8) shell_sound(0x52, 0x1e);   /* "MechWarrior... choose your clan" (DATABASE 0x52, volume
+                                         * 0x1e), once on entering the main menu. PORT CHOICE (players' report): the DOS
+                                         * MW2SHELL plays it on entering Trials of Grievance from the main menu instead
+                                         * (FUN_00029680 0x29763 / 0x29a2f, EBX 8) */
         while (next == -1 && running) {
             SDL_Event e;
             int i, hover = -1;
