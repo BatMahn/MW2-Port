@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.5 (2026-11-06)
+
+- **The menu voices were missing.** Both lines are DATABASE sounds that the original's shell plays. Traced in
+  MW2SHELL.EXE:
+  - **"MechWarrior... choose your clan"** (DATABASE 0x52) plays once, at volume 0x1e, when Trials of Grievance is
+    entered from the main menu (FUN_00029680, 0x29763 / 0x29a2f: the previous screen 8). The port never played it.
+  - **"Register SibKo company"** (DATABASE 0x51) plays on entering the pilot roster (0x384f8). The port played it
+    there, but reached the roster on its own only when no pilot was on file. The original keeps a "registered this
+    session" flag in its main loop (0x36700). The main menu clears the flag and choosing a pilot in the roster sets it.
+    A clan hall entered with the flag clear plays the registration clip and goes to the roster (FUN_0001dbe0). So every
+    time a clan is chosen from the main menu, the clip and the line come first, as in the original. Starting the shell
+    anywhere else, such as the return from a mission, keeps the pilot on file.
+
 ## v1.1.4 (2026-11-06)
 
 - **Jade Falcon dropships wore the Clan Wolf crest** (the 3D editions' textures). The insignia slot is offset by a clan

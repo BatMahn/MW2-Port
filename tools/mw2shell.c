@@ -1079,6 +1079,11 @@ static ia_state g_ia = {0, {{9, -1, -1}, {5, -1, -1}}, {0, 0}, {0, 1}, 18, {{""}
 
 typedef struct { smk *s; int x, y; Uint64 last; int hold, once; char then[16]; } overlay;
 static int g_from_screen = -1;   /* the screen before the current one */
+/* main 0x36700's "registered this session" byte (esp+0x1e4): cleared at start-up (0x36e2f), by the main menu (case 8, 0x37048)
+ * and on entering the roster (0x38425), set when the roster picks a pilot (0x385f1). The clan hall (FUN_0001dbe0, BL) with it
+ * clear plays the registration clip (aworgstr / ajfrgstr) and goes to the roster (12), whose entry says "Register SibKo
+ * company" (DATABASE 0x51) - every time a clan is chosen from the main menu, not only with no pilot on file */
+static int g_reg_session;
 static int g_ia_ctx = 2;   /* the star the IA screen's MECH LAB / STAR CONFIG buttons opened: 2 friendly, 3 enemy */
 static int g_lab_slot;
 static void ov_set(overlay *o, const char *name, int x, int y)
@@ -1435,6 +1440,8 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
     if (g_from_screen == 8) { g_ia.scen = 0; ia_load_scenario(); }   /* FUN_00029680 from the main menu (EBX 8): the first
                                                                          * scenario, both stars reloaded from it (FUN_000291b0) */
     else if (!g_ia.loaded) ia_load_scenario();
+    if (!headless && g_from_screen == 8) shell_sound(0x52, 0x1e);   /* FUN_00029680 0x29763 / 0x29a2f: from the main menu (EBX 8)
+                                         * DATABASE sound 0x52 - "MechWarrior... choose your clan" - once, at volume 0x1e */
     ov_set(&ov[0], IA_CLAN[g_ia.clan[0]], 13, 205);
     ov_set(&ov[1], IA_CLAN[g_ia.clan[1]], 483, 329);
     ov_set(&ov[2], "WIALANCH", 209, 371);
@@ -5868,6 +5875,8 @@ int main(int argc, char **argv)
     /* the opening movie (main 0x36700: "mintro" unless started as "mw2 sim" - the return from a mission) */
     if (running && rd && !shot && !getenv("MW2_NO_INTRO") && !(argc > 1 && strcasecmp(argv[argc - 1], "sim") == 0))
         play_cinematic(rd, tx, "MINTRO", 0);
+    if (screen != 8 && clan >= 0 && clan <= 1) { reg_load(); g_reg_session = reg_selected(clan) >= 0; }   /* started elsewhere (the
+                                         * return from a mission, tests): the pilot on file stands, as the original's restored state */
     while (running && screen != -3) {
         const screen_def *sd = find_screen(screen, clan);
         {   /* the screen we came from (the Mech Lab's ACCEPT MECH returns there - FUN_000339e0 case 7: EBX) */
@@ -5916,9 +5925,10 @@ int main(int argc, char **argv)
             rg = reg_selected(clan);
             if (rg >= 0) prm_player_name(g_reg[rg].name);
         }
-        if (screen == 1 && clan >= 0 && clan <= 1) {   /* first visit with no pilot: registration clip, then the roster */
+        if (screen == 8) g_reg_session = 0;   /* main 0x36700 case 8 (0x37048) */
+        if (screen == 1 && clan >= 0 && clan <= 1) {   /* not registered this session (or no pilot): registration clip, then the roster */
             reg_load();
-            if (reg_selected(clan) < 0 && !getenv("MW2_SHELL_NOREG")) {
+            if ((!g_reg_session || reg_selected(clan) < 0) && !getenv("MW2_SHELL_NOREG")) {
                 play_cinematic(rd, tx, clan == 1 ? "AJFRGSTR" : "AWORGSTR", headless);
                 screen = 12;
             }
@@ -5975,7 +5985,10 @@ int main(int argc, char **argv)
             continue;
         }
         if (screen == 12 && clan >= 0 && clan <= 1) {
-            int r = run_roster(rd, tx, headless, frames, clan, &mx, &my);
+            int r;
+            g_reg_session = 0;   /* 0x38425 */
+            r = run_roster(rd, tx, headless, frames, clan, &mx, &my);
+            if (r >= 0 && r != 8) { reg_load(); g_reg_session = reg_selected(clan) >= 0; }   /* 0x385f1: a pilot taken */
             if (r == -2) {
                 FILE *o = fopen(shot, "wb");
                 if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
