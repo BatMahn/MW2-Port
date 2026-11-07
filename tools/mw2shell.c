@@ -1082,7 +1082,7 @@ static int g_from_screen = -1;   /* the screen before the current one */
 /* main 0x36700's "registered this session" byte (esp+0x1e4): cleared at start-up (0x36e2f), by the main menu (case 8, 0x37048)
  * and on entering the roster (0x38425), set when the roster picks a pilot (0x385f1). The clan hall (FUN_0001dbe0, BL) with it
  * clear plays the registration clip (aworgstr / ajfrgstr) and goes to the roster (12), whose entry says "Register SibKo
- * company" (DATABASE 0x51) - every time a clan is chosen from the main menu, not only with no pilot on file */
+ * identity" (DATABASE 0x51) - every time a clan is chosen from the main menu, not only with no pilot on file */
 static int g_reg_session;
 static int g_ia_ctx = 2;   /* the star the IA screen's MECH LAB / STAR CONFIG buttons opened: 2 friendly, 3 enemy */
 static int g_lab_slot;
