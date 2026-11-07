@@ -1441,6 +1441,8 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
     if (g_from_screen == 8) { g_ia.scen = 0; ia_load_scenario(); }   /* FUN_00029680 from the main menu (EBX 8): the first
                                                                          * scenario, both stars reloaded from it (FUN_000291b0) */
     else if (!g_ia.loaded) ia_load_scenario();
+    if (!headless && g_from_screen == 8) shell_sound(0x52, 0x1e);   /* FUN_00029680 0x29763 / 0x29a2f: from the main menu (EBX 8)
+                                         * DATABASE sound 0x52 - "A call to trial... justice by combat" - once, at volume 0x1e */
     ov_set(&ov[0], IA_CLAN[g_ia.clan[0]], 13, 205);
     ov_set(&ov[1], IA_CLAN[g_ia.clan[1]], 483, 329);
     ov_set(&ov[2], "WIALANCH", 209, 371);
@@ -6010,10 +6012,11 @@ int main(int argc, char **argv)
         if (sd && sd->smk) ov = open_smk(sd->smk);
         if (sd) { int q; for (q = 0; q < sd->nov && q < 8; q++) xov[q] = open_smk(sd->ov[q].name); }
         play_ambient(sd ? sd->ambient : -1);
-        if (!headless && sd && sd->id == 8) shell_sound(0x52, 0x1e);   /* "MechWarrior... choose your clan" (DATABASE 0x52, volume
-                                         * 0x1e), once on entering the main menu. PORT CHOICE (players' report): the DOS
-                                         * MW2SHELL plays it on entering Trials of Grievance from the main menu instead
-                                         * (FUN_00029680 0x29763 / 0x29a2f, EBX 8) */
+        if (sd && sd->id == 8 && ov) {   /* the main menu's logo clip (amwlogo1, FUN_00039ad0 0x2a472) and its own sound track -
+                                         * "MechWarrior 2... choose your clan" by players' reports; DATABASE has no such line */
+            if (getenv("MW2_SMK_TRACE")) { int16_t *a = NULL; size_t ns = 0; int rate = 0, ch = 1; smk_audio(ov, &a, &ns, &rate, &ch); fprintf(stderr, "title clip %s: audio %zu samples at %d Hz\n", sd->smk, ns, rate); free(a); }
+            clip_sound(ov, headless);
+        }
         while (next == -1 && running) {
             SDL_Event e;
             int i, hover = -1;

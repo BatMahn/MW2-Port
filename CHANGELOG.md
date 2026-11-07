@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.8 (2026-11-06)
+
+- **The main menu said "A call to trial... justice by combat".** DATABASE 0x52 is the Trials of Grievance line, not
+  "choose your clan". It plays again where the DOS shell plays it: once, on entering Trials of Grievance from the main
+  menu (FUN_00029680). This reverts v1.1.7's move.
+- **"MechWarrior 2... choose your clan" on the main menu.** No DATABASE sound holds this line. The main menu plays its
+  logo clip (amwlogo1, FUN_00039ad0), and the port now plays that clip's own sound track once when the menu opens.
+  INFERRED: the line is expected in that track, which has not been checked against the disc's file.
+  `MW2_SMK_TRACE=1` logs the track's length when the menu opens.
+
 ## v1.1.7 (2026-11-06)
 
 - **"MechWarrior... choose your clan" now plays on the main menu**, once each time the menu opens (DATABASE 0x52, volume
