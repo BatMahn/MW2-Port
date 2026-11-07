@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.10 (2026-11-06)
+
+- FOLDER_SETUP.md: a section on the Windows 95 menu voices. It covers where the Windows 95 CD's `DATABASE.MW2` goes
+  (`install/`), how to tell the two editions' files apart by size, two "Common mistakes" rows and a check command.
+  No code changes.
+
 ## v1.1.9 (2026-11-06)
 
 - **"MechWarrior 2... choose your clan" and "Report to cadet training"** come from the Windows 95 edition. Its

@@ -74,7 +74,23 @@ MW2-game/
 ## Minimum to play
 
 Only `install/` and `cd/` are required. Add `3d/` for the textured renderers, `mt32/` (or `sc55/`, or `ultrasnd/`) for
-menu music, `music/` for the CD soundtrack and `titanium/` for the Titanium textures.
+menu music, `music/` for the CD soundtrack and `titanium/` for the Titanium textures. Add the Windows 95 CD's
+`DATABASE.MW2` to `install/` for the two extra menu voices (below).
+
+## The Windows 95 menu voices (install/DATABASE.MW2)
+
+The Windows 95 edition of MechWarrior 2 has two menu lines the DOS game does not: "MechWarrior 2... choose your clan"
+on the main menu, and "Report to cadet training" in the clan hall after you register a new pilot. They are two extra
+sounds at the end of that edition's `DATABASE.MW2`. Everything else in the file is identical to the DOS one.
+
+To hear them, copy `DATABASE.MW2` from the **root** of the Windows 95 CD into `install/`. Leave `cd/` as it is: the
+port reads `install/` first, so this copy is used instead of `cd/MECH2/DATABASE.MW2`. This also works when `cd=` points
+at a disc image. Without it, the menus behave as the DOS game: no main-menu voice, and no line after registering.
+
+| Edition | File | Size | Entries |
+|---|---|---|---|
+| DOS CD (1995) | `MECH2\DATABASE.MW2` | 3,989,669 bytes | 103 |
+| Windows 95 CD | `DATABASE.MW2` (disc root) | 4,037,479 bytes | 105 |
 
 ## The SC-55 ROM files (sc55/)
 
@@ -107,6 +123,8 @@ not used: the JV-880 is not a General MIDI module.)
 | `3d/3d/models.prj` (ran `cp -R gamedata/3d MW2-game/3d` when `3d/` already existed) | `3d/models.prj` |
 | `Music/`, `CD/`, `Install/` | use the folder names exactly as shown: `music/`, `cd/`, `install/` |
 | `music/01 - Title.mp3` with the music starting at 01 | Name from `Track02`, or set `MW2_CDA_TRACK_OFFSET=1` |
+| Windows 95 `DATABASE.MW2` copied over `cd/MECH2/DATABASE.MW2` | It works, but keep `cd/` as the disc: put it in `install/` |
+| Windows 95 CD copied into `cd/` | `cd/` is the 1995 DOS disc; only `DATABASE.MW2` from the Windows 95 CD is used, in `install/` |
 
 ## Check it
 
@@ -115,6 +133,7 @@ From inside your game folder:
     ls                     # should show: 3d  cd  install  mt32  music  sc55  titanium  ultrasnd   (the ones you have)
     ls cd/MECH2/MW2.PRJ    # must exist
     ls install/MW2REG.CFG  # must exist
+    ls -l install/DATABASE.MW2   # optional: 4037479 bytes if it is the Windows 95 one
 
 Then run `./mw2 /path/to/MW2-game` once (Windows: drag the folder onto `mw2.exe`); the port remembers the folder after that.
 
