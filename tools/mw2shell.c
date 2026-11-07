@@ -197,21 +197,34 @@ static int font_height(const font *fo) { return fo->d && fo->len > 12 ? (fo->d[8
  * aware, keeps the letterforms) and linearly filtered - so text stays crisp in native fullscreen. Headless captures
  * still rasterise into the frame. The queue is cleared when a frame starts (draw_bg / text_layer_clear). */
 static int g_text_hires;   /* set once a renderer exists */
-typedef struct { const font *fo; int x, y, remap1; char t[96]; const uint8_t (*pal)[3]; uint32_t palsum; } text_item;
+typedef struct { const font *fo; int x, y, remap1; char t[96]; const uint8_t (*pal)[3]; uint32_t palsum; unsigned hole; } text_item;
 static text_item g_text[256];
 static int g_ntext;
 static int g_ntt;
-static void text_layer_clear(void) { g_ntext = 0; g_ntt = 0; }
+/* areas drawn over the text after it was queued (the global menu's panel, a dialog): the original draws them into the
+ * frame over its text, so the text stays visible outside them and is hidden inside; the hi-res layer draws each earlier
+ * item clipped to the outside of its holes (bit k of the item's hole: g_hole[k]) */
+static SDL_Rect g_hole[8];
+static int g_nhole;
+static void text_layer_clear(void) { g_ntext = 0; g_ntt = 0; g_nhole = 0; }
+static void tt_mark_holes(unsigned bit);
 static void text_layer_cull(int x0, int y0, int x1, int y1)   /* a dimmed / covered area hides the text under it */
 {
     int i, n = 0;
+    int k;
+    unsigned bit;
+    for (k = 0; k < g_nhole; k++) if (g_hole[k].x == x0 && g_hole[k].y == y0 && g_hole[k].w == x1 - x0 && g_hole[k].h == y1 - y0) break;
+    if (k == g_nhole && g_nhole < 8) { g_hole[k].x = x0; g_hole[k].y = y0; g_hole[k].w = x1 - x0; g_hole[k].h = y1 - y0; g_nhole++; }
+    bit = k < 8 ? 1u << k : 0;
     for (i = 0; i < g_ntext; i++) {
         const text_item *it = &g_text[i];
         int fh = it->fo->d ? it->fo->d[8] : 10;
         if (it->x < x1 && it->x + 400 > x0 && it->y < y1 && it->y + fh > y0 && it->x >= x0 && it->y >= y0 && it->y + fh <= y1) continue;
-        g_text[n++] = g_text[i];
+        g_text[n] = g_text[i];
+        g_text[n++].hole |= bit;   /* partly under it: clipped */
     }
     g_ntext = n;
+    tt_mark_holes(bit);
 }
 static void raster_text(const font *fo, int x, int y, const char *t, const uint8_t (*pal)[3], int remap1)
 {
@@ -243,7 +256,7 @@ static void draw_text(const font *fo, int x, int y, const char *t, const uint8_t
     if (g_ntext < 256 && fo->d) {
         text_item *it = &g_text[g_ntext++];
         int k;
-        it->fo = fo; it->x = x; it->y = y; it->remap1 = remap1; it->pal = pal;
+        it->fo = fo; it->x = x; it->y = y; it->remap1 = remap1; it->pal = pal; it->hole = 0;
         snprintf(it->t, sizeof it->t, "%s", t);
         it->palsum = 0;
         for (k = 0; k < 256; k++) it->palsum = it->palsum * 31u + (uint32_t)(pal[k][0] | pal[k][1] << 8 | pal[k][2] << 16);
@@ -253,13 +266,14 @@ static void draw_text(const font *fo, int x, int y, const char *t, const uint8_t
 /* ---- TrueType text (the port's own settings text, matched to the artwork's painted lettering: Liberation Sans Bold,
  * caps 12 px in 640x480 space, condensed to 85%, (221,221,221)). Queued like the shell fonts and rendered at the
  * display's physical scale; rasterised into the frame when headless. align: 0 left, 1 right (x = right edge). */
-typedef struct { int x, y, align; float cap; uint8_t rgb[3]; char t[64]; } tt_item;
+typedef struct { int x, y, align; float cap; uint8_t rgb[3]; char t[64]; unsigned hole; } tt_item;
 static tt_item g_tt[32];
+static void tt_mark_holes(unsigned bit) { int i; for (i = 0; i < g_ntt; i++) g_tt[i].hole |= bit; }
 static void tt_text(int x, int y, const char *t, int align)
 {
     if (g_ntt < 32) {
         tt_item *it = &g_tt[g_ntt++];
-        it->x = x; it->y = y; it->align = align; it->cap = 12.0f;
+        it->x = x; it->y = y; it->align = align; it->cap = 12.0f; it->hole = 0;
         it->rgb[0] = it->rgb[1] = it->rgb[2] = 221;
         snprintf(it->t, sizeof it->t, "%s", t);
     }
@@ -492,25 +506,64 @@ static int vec_text(SDL_Renderer *rd, const text_item *it)
     }
     return 1;
 }
+static void text_item_draw(SDL_Renderer *rd, const text_item *it)
+{
+    const char *t;
+    float x = (float)it->x;
+    int fh = it->fo->d[8];
+    if (vec_text(rd, it)) return;
+    for (t = it->t; *t; t++) {
+        int gw = 4;
+        SDL_Texture *tex = glyph_texture(rd, it, (unsigned char)*t & 127, &gw);
+        if (tex) { SDL_FRect dr = {x, (float)it->y, (float)gw, (float)fh}; SDL_RenderTexture(rd, tex, NULL, &dr); }
+        x += (float)gw;
+    }
+}
+/* the 640x480 frame less the item's holes, as up to 32 rectangles; -1: no holes (drawn unclipped) */
+static int hole_pieces(unsigned mask, SDL_Rect *pc)
+{
+    int n = 1, k;
+    if (!mask) return -1;
+    pc[0].x = 0; pc[0].y = 0; pc[0].w = W; pc[0].h = H;
+    for (k = 0; k < g_nhole; k++) {
+        SDL_Rect out[32];
+        int m = 0, j;
+        const SDL_Rect *h = &g_hole[k];
+        if (!(mask & (1u << k))) continue;
+        for (j = 0; j < n; j++) {
+            const SDL_Rect *r = &pc[j];
+            int ix0 = r->x > h->x ? r->x : h->x, iy0 = r->y > h->y ? r->y : h->y;
+            int ix1 = r->x + r->w < h->x + h->w ? r->x + r->w : h->x + h->w, iy1 = r->y + r->h < h->y + h->h ? r->y + r->h : h->y + h->h;
+            if (ix0 >= ix1 || iy0 >= iy1) { if (m < 32) out[m++] = *r; continue; }   /* untouched */
+            if (iy0 > r->y && m < 32) { SDL_Rect a = {r->x, r->y, r->w, iy0 - r->y}; out[m++] = a; }                    /* above */
+            if (iy1 < r->y + r->h && m < 32) { SDL_Rect a = {r->x, iy1, r->w, r->y + r->h - iy1}; out[m++] = a; }      /* below */
+            if (ix0 > r->x && m < 32) { SDL_Rect a = {r->x, iy0, ix0 - r->x, iy1 - iy0}; out[m++] = a; }               /* left */
+            if (ix1 < r->x + r->w && m < 32) { SDL_Rect a = {ix1, iy0, r->x + r->w - ix1, iy1 - iy0}; out[m++] = a; }  /* right */
+        }
+        memcpy(pc, out, sizeof out[0] * (size_t)m);
+        n = m;
+    }
+    return n;
+}
 static void text_layer_draw(SDL_Renderer *rd)
 {
     int i;
     static int grab_frames = -1;
     if (grab_frames < 0) grab_frames = getenv("MW2_SHELL_GRAB_FRAMES") ? atoi(getenv("MW2_SHELL_GRAB_FRAMES")) : 0;
     for (i = 0; i < g_ntext; i++) {
-        const text_item *it = &g_text[i];
-        const char *t;
-        float x = (float)it->x;
-        int fh = it->fo->d[8];
-        if (vec_text(rd, it)) continue;
-        for (t = it->t; *t; t++) {
-            int gw = 4;
-            SDL_Texture *tex = glyph_texture(rd, it, (unsigned char)*t & 127, &gw);
-            if (tex) { SDL_FRect dr = {x, (float)it->y, (float)gw, (float)fh}; SDL_RenderTexture(rd, tex, NULL, &dr); }
-            x += (float)gw;
-        }
+        SDL_Rect pc[32];
+        int np = hole_pieces(g_text[i].hole, pc), k;
+        if (np < 0) { text_item_draw(rd, &g_text[i]); continue; }
+        for (k = 0; k < np; k++) { SDL_SetRenderClipRect(rd, &pc[k]); text_item_draw(rd, &g_text[i]); }
+        SDL_SetRenderClipRect(rd, NULL);
     }
-    for (i = 0; i < g_ntt; i++) tt_draw(rd, &g_tt[i]);
+    for (i = 0; i < g_ntt; i++) {
+        SDL_Rect pc[32];
+        int np = hole_pieces(g_tt[i].hole, pc), k;
+        if (np < 0) { tt_draw(rd, &g_tt[i]); continue; }
+        for (k = 0; k < np; k++) { SDL_SetRenderClipRect(rd, &pc[k]); tt_draw(rd, &g_tt[i]); }
+        SDL_SetRenderClipRect(rd, NULL);
+    }
     if (grab_frames > 0 && --grab_frames == 0 && getenv("MW2_SHELL_GRAB")) {   /* tests: the rendered window, full resolution */
         SDL_Surface *got = SDL_RenderReadPixels(rd, NULL);   /* SDL3: the whole output, as a surface */
         SDL_Surface *rgb = got ? SDL_ConvertSurface(got, SDL_PIXELFORMAT_RGB24) : NULL;
@@ -5880,7 +5933,15 @@ int main(int argc, char **argv)
         running = 0;
     }
     if (getenv("MW2_SHELL_CV_LIVE") && rd) combat_variables(rd, tx, 0);
-    if (getenv("MW2_SHELL_MENU_LIVE") && rd) { load_bg(g_bg_entry < 0 ? 0 : g_bg_entry); global_menu(rd, tx, 0, mx, my); }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */
+    if (getenv("MW2_SHELL_MENU_LIVE") && rd) {
+        load_bg(g_bg_entry < 0 ? 0 : g_bg_entry);
+        if (atoi(getenv("MW2_SHELL_MENU_LIVE")) == 2) {   /* tests: a screen's text crossing the panel (the briefing's) */
+            int k;
+            for (k = 0; k < 6; k++) draw_text(&g_flabel, 100, 140 + 40 * k, "THE FALCON'S POWERFUL ASSAULT CLUSTER HAS PUSHED FAR", (const uint8_t (*)[3])g_bg.pal, -1);
+            tt_text(120, 330, "TrueType line crossing the menu panel here", 0);
+        }
+        global_menu(rd, tx, 0, mx, my);
+    }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */
     if (!g_text_hires) { const char *bp = SDL_GetBasePath(); ttext_init(bp); }
     if (getenv("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
     if (getenv("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */

@@ -462,7 +462,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3], ti_vmin;
                 size_t pfirst;
-                int c0, pidx, ti_flat, tk4, tk2, tik = 0, k2c = 0, k2cls = 0;
+                int c0, pidx, ti_flat, tk4, tk2, tik = 0, k2c = 0, k2cls = 0, ti_fx;
                 const wtb_vertex *v0, *v1, *v2;
                 int slot = q->color & 0xFF, batch = GLR_SLOTS;
                 float ground_lift = 0.0f;
@@ -700,8 +700,13 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     ground_lift = gnd && !part->has_rot ? 3.0f : 0.0f;
                 }
                 ti_flat = ti && batch == GLR_SLOTS && (((q->color >> 12) & 7) <= 1 || ((q->color >> 12) & 7) == 4 || tk2);
+                /* a Titanium effect card (FIR*, SMO*, JET*, DEATH*: the only models with a textured kind 5-7 and light
+                 * nibble 0xf - all 0x7fxx) is unlit: its texel as it is, as the 3D editions draw the same cards (0x8fxx,
+                 * the light 0xf rule above). Lit, a fire card facing the eye took only the ambient and burned dark.
+                 * INFERRED for the Titanium engine (its light-nibble rule not traced) */
+                ti_fx = ti && batch >= GLR_TI && batch < GLR_TB && ((q->color >> 12) & 7) >= 5 && ((q->color >> 8) & 0xf) == 0xf;
                 /* coloured per vertex on the CPU each frame (glr_draw -> ti_colours): the lit polygons, colour kinds 1 / 2 */
-                if (ti && !part->tint && !part->shadow && (batch == GLR_SLOTS || (batch >= GLR_TI && batch < GLR_TB)))
+                if (ti && !ti_fx && !part->tint && !part->shadow && (batch == GLR_SLOTS || (batch >= GLR_TI && batch < GLR_TB)))
                     tik = tk2 ? 3 : !ti_flat ? 1 : ((q->color >> 12) & 7) == 1 ? 2 : 0;
                 if (tik && pass == 1) {
                     glr_tipoly *tp;
@@ -831,7 +836,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         /* the wireframe's edges: this corner (0-2) + 3 x the polygon's own edges in this fan triangle
                          * (bit 0: corner 1 - 2, always; bit 1: corner 2 - 0 when it closes the polygon; bit 2: corner 0 - 1
                          * when it starts it), so the triangulation's diagonals are not drawn (DOS draws polygon outlines) */
-                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || (hi_card && ((q->color >> 12) == 0xb || ((q->color >> 12) == 0x8 && !test_lit8))) ? 512 : 0) + 2048 * dnib + (pit_o >= 0 ? 65536 * (pit_o + 1) : 0));   /* (+ 512: unlit; + 65536 x (1 + n): the DOS cockpit set's polygon n) */
+                        f[12] = (float)(a + 3 * (1 | (j + 2 == q->n ? 2 : 0) | (j == 1 ? 4 : 0)) + 32 * wire_code + (ti ? 256 : 0) + (ti_flat || ti_fx || (hi_card && ((q->color >> 12) == 0xb || ((q->color >> 12) == 0x8 && !test_lit8))) ? 512 : 0) + 2048 * dnib + (pit_o >= 0 ? 65536 * (pit_o + 1) : 0));   /* (+ 512: unlit; + 65536 x (1 + n): the DOS cockpit set's polygon n) */
                         for (c = 0; c < 3; c++) {
                             if (f[c] < mn[c]) mn[c] = f[c];
                             if (f[c] > mx[c]) mx[c] = f[c];

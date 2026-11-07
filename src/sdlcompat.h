@@ -325,6 +325,7 @@ MW2C bool SDL_GetRenderLogicalPresentation(SDL_Renderer *r, int *w, int *h, SDL_
     return true;
 }
 MW2C bool SDL_GetRenderOutputSize(SDL_Renderer *r, int *w, int *h) { return SDL_GetRendererOutputSize(r, w, h) == 0; }
+MW2C bool SDL_SetRenderClipRect(SDL_Renderer *r, const SDL_Rect *rc) { return SDL_RenderSetClipRect(r, rc) == 0; }   /* logical coordinates, as SDL3 */
 MW2C bool SDL_RenderCoordinatesFromWindow(SDL_Renderer *r, float wx, float wy, float *x, float *y) { SDL_RenderWindowToLogical(r, (int)wx, (int)wy, x, y); return true; }
 MW2C bool mw2c_RenderTexture(SDL_Renderer *r, SDL_Texture *t, const SDL_FRect *src, const SDL_FRect *dst)
 {

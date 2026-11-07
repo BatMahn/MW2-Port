@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.11 (2026-11-06)
+
+- **The global menu (Esc / right click) showed the screen's text through its panel.** This was seen over the
+  briefing. The port draws text as a sharp layer above the 640x480 picture. The original draws its panel into the
+  frame over the text, so the text stays visible beside the panel and is hidden under it. Before, the port hid only text
+  lying wholly inside the panel. A line crossing it was drawn in full, over the menu. Each area drawn over earlier text
+  (the menu's panel, a dialog's box) is now a hole in the text layer: earlier text is clipped to outside it. This
+  applies to both renderers and the legacy build. Test hook: `MW2_SHELL_MENU_LIVE=2` with `MW2_SHELL_GRAB`.
+- **Black flames with the Titanium textures.** The Titanium archive's effect cards (FIR*, SMO*, JET*, DEATH*) are
+  colour kind 7 with light nibble 0xf (0x7fxx). They are the only Titanium models with that nibble. The port lit them
+  like any textured polygon, so a fire card facing the eye took only the ambient and burned dark brown. They are now
+  unlit, drawn with their texel as it is, as the 3D editions draw the same cards (0x8fxx, light 0xf unlit). INFERRED:
+  the Titanium engine's own light-nibble rule is not traced.
+
 ## v1.1.10 (2026-11-06)
 
 - FOLDER_SETUP.md: a section on the Windows 95 menu voices. It covers where the Windows 95 CD's `DATABASE.MW2` goes
