@@ -595,6 +595,15 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     /* nav points: every NAVP in the mission tree, keyed by its record name */
     if (bwd_mission_load(a, scene, &m) == 0) {
         s->music_track = m.music_track;
+        for (i = 0; i < m.record_count; i++)   /* the player's star: STAR (24-byte entries per table, +0 the slot offset) */
+            for (k = 0; k < m.records[i].chunk_count; k++) {
+                const bwd_chunk *sc = &m.records[i].chunks[k];
+                if (strcmp(sc->tag, "STAR") == 0 && (size_t)(player_table + 1) * 24 <= sc->size) {
+                    const uint8_t *q = sc->data + player_table * 24;
+                    int v = (int)((uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24);
+                    s->player_tex = v >= 0 && v < 16 ? v : 0;
+                }
+            }
         for (i = 0; i < m.record_count && s->nav_count < MSIM_MAX_NAVS; i++)
             for (k = 0; k < m.records[i].chunk_count; k++) {
                 bwd_navpoint nv;

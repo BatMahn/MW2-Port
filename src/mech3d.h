@@ -262,7 +262,7 @@ typedef struct {
     char     group[17];      /* the record that spawned it (e.g. "CYANENS1") */
     char     skel[17];       /* skeleton record (e.g. "MADDOG"), also the MGEO record name */
     int      ai_skill;       /* GPS: fire interval base */
-    int      tex_offset;     /* its star's camo / insignia slot offset (STAR chunk entry +0; 0 = the player's star) */
+    int      tex_offset;     /* its star's camo / insignia slot offset (STAR chunk entry +0; the player's: msim player_tex) */
     int      ai_level;       /* GPS pilot level 1-4 */
     float    ai_range[3];    /* GPS ranges, cm: [0] code -4, [1] code -1, [2] code -2 */
     unsigned obj_class;      /* GPS +0x18: the class the objective nodes attach the unit by (0x1003f38b / 0x1003ff60) */

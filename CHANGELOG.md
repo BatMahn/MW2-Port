@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.13 (2026-11-09)
+
+- **The player's mech wore the Clan Wolf crest on Jade Falcon missions.** Every unit's insignia (and camouflage) slot
+  is offset by its star's STAR value (entry +0 of its table; engine 0x10042000): the 3D editions' slot 0x114 is the
+  Wolf crest and 0x115 the Jade Falcon's. The port gave the lancemates and enemies their star's value, but always 0 to
+  the player. On the Jade Falcon missions the player's star has value 1 (PINK, GREE, ...). The player's mech now takes
+  its own star's value (msim `player_tex`), as every other unit does. This also moves the player's camouflage to its
+  star's set, as for the other units.
+- **The DOS look drew every unit's crest from slot 0x14, the Wolf.** The DOS decals (colour 0x7814) now add the star
+  value too; the DOS texture map holds the crests in the same order. INFERRED: MW2.EXE itself was not available to
+  trace. The Mercenaries DOS sim, the same engine, adds the star value (its 0x62bf6 / 0x62e74).
+
+## v1.1.12 (2026-11-09)
+
+- KNOWN_ISSUES.md: the S3 VIRGE items are dropped. The texture-cache eviction and the linear alpha blend can't be
+  checked without the real card, so they won't be done. ASSUMPTIONS.md records them as not to be done. No code
+  changes.
+
 ## v1.1.11 (2026-11-06)
 
 - **The global menu (Esc / right click) showed the screen's text through its panel.** This was seen over the

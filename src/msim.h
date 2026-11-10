@@ -140,6 +140,8 @@ typedef struct {
     int          no_player_muzzle;   /* the viewer's cockpit: the player's own flashes would fill the view */
     void        *shot_user;
     unsigned     player_class;   /* USERSTAR GPS +0x18: UserStar's class for the objective nodes */
+    int          player_tex;     /* the player's star's STAR entry +0 (its table, GPS +4): the camo / insignia slot offset,
+                                  * as every unit's (mech3d world_actor.tex_offset) */
     char         player_skel[17], player_loadout[17];   /* from USERSTAR.BWD (shell), else Timber Wolf */
     int32_t      now;            /* ms */
     /* mission end (engine 0x10009f50 / 0x100374e0): the player's star (table 0) result or the player's

@@ -3794,6 +3794,14 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             float kps;
             int first = 0, cnt = 12;
             g_pl_ok = 1;
+            {   /* its star's camouflage and insignia (STAR +0 of its table), as every unit's: the 3D editions' slots 0x00 /
+                 * 0x114 + it (0x10042000), Titanium's 0x3f + it - it had been 0 (Clan Wolf's crest, slot 0x114) for the
+                 * player, so every Jade Falcon mission (whose player star is 1) showed the Wolf on the player's mech */
+                int q;
+                for (q = 0; q < g_pl.part_count; q++) g_pl.parts[q].tex_offset = g_sim.player_tex;
+                if (g_plpit_ok) for (q = 0; q < g_plpit.part_count; q++) g_plpit.parts[q].tex_offset = g_sim.player_tex;
+                if (getenv("MW2_DEBUG_STARALL")) fprintf(stderr, "player star tex %d\n", g_sim.player_tex);
+            }
             g_frame_mech++;
             if (getenv("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
                 float sx0 = 0, sz0 = 0, sy0 = 0;

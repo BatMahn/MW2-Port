@@ -591,6 +591,11 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 if (r->dos && !model->extended) {   /* DOS bitmaps: types 5-7 bitmap = low byte; type 3 (scrub / effect cards,
                                                      * 0x3250 ...) bitmap = (word >> 4) & 0xff, transparent texels */
                     int ty = (q->color >> 12) & 7, bs = ty == 3 ? (q->color >> 4) & 0xff : q->color & 0xff;
+                    /* the insignia slot 0x14 (the decals, 0x7814) + the unit's star value, as the 3D editions (0x10042000):
+                     * the DOS map holds the clans' crests in the same order (0x14 Wolf, 0x15 Jade Falcon ...). The DOS look
+                     * drew every unit with 0x14, the Wolf. INFERRED for MW2.EXE (not available); the Mercenaries DOS sim,
+                     * the same engine, adds the star value (its 0x62bf6 / 0x62e74) */
+                    if (ty >= 5 && bs == GLR_SLOT_INSIGNIA) { int b2 = bs + clan + part->tex_offset + part->world_clan; if (b2 >= 0 && b2 < GLR_SLOTS && slots && slots[b2]) bs = b2; }
                     batch = GLR_SLOTS;
                     if ((ty >= 5 || ty == 3) && !part->flat && slots && slots[bs]) batch = bs;
                 }

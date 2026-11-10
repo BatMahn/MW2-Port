@@ -1123,7 +1123,7 @@ Everything earlier on this list was closed in sessions 14-15 (see §22-§25); wh
 - ATi look (user report 2026-10-21; done: "ATi ground mips", "ATi alpha / perspective (done 2026-10-22)"); the other 3D
   looks (done 2026-10-22: "3D looks: affine / perspective by colour type", "3D looks: alpha test only with the alpha
   flag", "3D looks: colour types 8 and 11 unlit", "3DFX / S3 texture reading by the alpha flag", "3DFX / S3 texture
-  cache: one reading per texture"). Left: none in code - S3 eviction depends on the card's video memory ("S3 texture cache eviction"); the S_BFLAGQ / S_BFLAGB tie depends on the route played (ASSUMED); S3's linear texture-alpha blend not modelled (INFERRED).
+  cache: one reading per texture"). Left: none in code - the S_BFLAGQ / S_BFLAGB tie depends on the route played (ASSUMED). Not to be done (2026-11-09: no S3 hardware to check against, taken off the known issues): S3 eviction, which depends on the card's video memory ("S3 texture cache eviction"), and S3's linear texture-alpha blend (INFERRED).
 
 ### Deliberate (not open)
 30 fps as the frame rate for per-frame engine effects (sky drift, walking heat, dH/dT, display damage, wreck rolls,
