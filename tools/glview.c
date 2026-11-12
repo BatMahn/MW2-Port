@@ -7708,9 +7708,8 @@ int main(int argc, char **argv)
             const combat_unit *pu = &g_sim.player_unit;
             float head = g_pl.heading + g_pl.twist, ppd, centre;
             int q, tgt = g_tgt_sel, l;
-            float yaw = head * 3.14159265f / 180.0f, pit = v.look_pitch * 3.14159265f / 180.0f;
-            float fx = sinf(yaw) * cosf(pit), fy = sinf(pit), fz = cosf(yaw) * cosf(pit), rx = cosf(yaw), rz = -sinf(yaw);
-            float ux = -sinf(pit) * sinf(yaw), uy = cosf(pit), uz = -sinf(pit) * cosf(yaw);
+            float yaw = head * 3.14159265f / 180.0f;
+            float rx = cosf(yaw), rz = -sinf(yaw);
             g_wire_r[0] = rx; g_wire_r[1] = rz; g_wire_f[0] = sinf(yaw); g_wire_f[1] = cosf(yaw);
             float th = tanf(v.vfov * 0.5f * 3.14159265f / 180.0f), aspect = (float)w / (float)(h > 0 ? h : 1);
             float tdist = -1.0f;
@@ -7951,8 +7950,14 @@ int main(int argc, char **argv)
                 if (have && g_tex_kind == 3 && dos_hud_mark(r, w, h, wp, isnav, isthing, side, isthing ? thr : g_sim.radius ? g_sim.radius[tgt] : 545.0f)) {
                     /* the DOS look: MW2.EXE's integers (dos_hud_mark) */
                 } else if (have) {
+                    /* through the view as drawn (its eye, yaw and pitch): the external camera (mode 1) turns after the mech
+                     * through its servos and looks down at it, so the torso's yaw put the nav marker / bracket off the
+                     * point, moving with the aim (user report: DOSBox keeps it on the nav) */
+                    const float cyaw = v.look_yaw * 3.14159265f / 180.0f, cpit = v.look_pitch * 3.14159265f / 180.0f;
+                    const float cfx = sinf(cyaw) * cosf(cpit), cfy = sinf(cpit), cfz = cosf(cyaw) * cosf(cpit), crx = cosf(cyaw), crz = -sinf(cyaw);
+                    const float cux = -sinf(cpit) * sinf(cyaw), cuy = cosf(cpit), cuz = -sinf(cpit) * cosf(cyaw);
                     float tx = wp[0] - v.eye[0], ty = wp[1] - v.eye[1], tz = wp[2] - v.eye[2];
-                    float zf = tx * fx + ty * fy + tz * fz, xr = tx * rx + tz * rz, yu = tx * ux + ty * uy + tz * uz;
+                    float zf = tx * cfx + ty * cfy + tz * cfz, xr = tx * crx + tz * crz, yu = tx * cux + ty * cuy + tz * cuz;
                     float sx = (float)h * 4.0f / 3.0f, kx = 320.0f * (float)w / sx;   /* 640-unit x per unit of nx */
                     float az = fabsf(zf) > 1.0f ? fabsf(zf) : 1.0f;
                     float nx = xr / az / (th * aspect), ny = yu / az / th;

@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.14 (2026-11-11)
+
+- **The nav marker and target brackets slid around in the external view.** The 3D looks projected the marker with the
+  torso's yaw. The external camera (mode 1) turns after the mech through its servos and looks down at it, so while
+  you turned or aimed, the marker left the nav point and moved with the aim. DOSBox keeps it on the point. The
+  marker, brackets and off-screen arrows are now projected through the view as drawn: its eye, yaw and pitch. In the
+  cockpit nothing changes, except that glances now keep them on the point too. The DOS look already used its own
+  projection.
+
 ## v1.1.13 (2026-11-09)
 
 - **The player's mech wore the Clan Wolf crest on Jade Falcon missions.** Every unit's insignia (and camouflage) slot
