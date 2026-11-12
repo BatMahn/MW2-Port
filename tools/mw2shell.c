@@ -922,6 +922,7 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     movie_pace mp = {1.0, 0};
     if (getenv("MW2_SHELL_MOVIE_SCALE")) mp.sc = atof(getenv("MW2_SHELL_MOVIE_SCALE"));   /* TEST ONLY: the picture's starting scale */
     if (!s) return;
+    text_layer_clear();   /* the screen's queued text (e.g. the hovered hotspot's label) is not part of the movie */
     look = movie_look(s, &fit);
     n = headless ? 3 : smk_frames(s);
     if (headless && getenv("MW2_SHELL_MOVIE_FRAME")) n = atoi(getenv("MW2_SHELL_MOVIE_FRAME"));   /* TEST ONLY: frames decoded */

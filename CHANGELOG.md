@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.16 (2026-11-12)
+
+- **Menu text over the in-game videos.** A screen's text queued before a video started was drawn over it, for example
+  "WOLF CLAN HALL" from the main menu's hovered hotspot over the landing cinematic. Shell text is a layer above the
+  picture, and it was not cleared when the video took over. The text layer is now emptied as a video starts. This
+  covers the landing, ending, registration and briefing clips and the intro.
+
 ## v1.1.15 (2026-11-11)
 
 - **A classic Mac OS build - ALPHA.** A PowerPC Carbon application for Mac OS 9 with CarbonLib and Mac OS X
