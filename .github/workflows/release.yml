@@ -172,8 +172,40 @@ jobs:
           name: windows-legacy
           path: dist/*.zip
 
+  build-classic-mac:
+    # ALPHA: the classic Mac OS build (PowerPC, Carbon: Mac OS 9 with CarbonLib, Mac OS X 10.1-10.4), docs/CARBON.md.
+    # Retro68's published toolchain image (Multiversal headers; platform/carbon/carbon_extra.h declares what they lack).
+    # Allowed to fail without holding up the other downloads while the build is new
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container: ghcr.io/autc04/retro68:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools (Python for the Finder flags, zip)
+        run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 zip
+
+      - name: Build
+        run: |
+          cmake -S platform/carbon -B build-carbon \
+            -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/powerpc-apple-macos/cmake/retrocarbon.toolchain.cmake
+          cmake --build build-carbon -j$(nproc)
+          ls -l build-carbon
+
+      - name: Package
+        run: |
+          mkdir -p dist/MW2-Port
+          cp build-carbon/MechWarrior2.bin dist/MW2-Port/
+          cp platform/carbon/mw2.env.sample docs/CARBON.md README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
+          cd dist && zip -r MW2-Port-${{ github.ref_name }}-classic-mac-ppc-ALPHA.zip MW2-Port
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: classic-mac
+          path: dist/*.zip
+
   release:
-    needs: [build-macos, build-linux, build-fedora, build-windows, build-windows-legacy]
+    needs: [build-macos, build-linux, build-fedora, build-windows, build-windows-legacy, build-classic-mac]
     runs-on: ubuntu-latest
     permissions:
       contents: write

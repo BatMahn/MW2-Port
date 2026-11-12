@@ -2,6 +2,17 @@
 #include "cdaudio.h"
 
 #include "../third_party/miniaudio.h"
+#ifdef MW2_CLASSIC_MAC
+/* classic Mac OS / Carbon: miniaudio decodes only (MA_NO_DEVICE_IO, MA_NO_THREADING); the music plays through the
+ * SDL subset's stream, whose callback runs on the main thread with the rest of the game - no lock needed */
+#include <SDL3/SDL.h>
+typedef int cd_lock;
+#define ma_mutex cd_lock
+#define ma_mutex_init(m) (*(m) = 0, MA_SUCCESS)
+#define ma_mutex_uninit(m) ((void)(m))
+#define ma_mutex_lock(m) ((void)(m))
+#define ma_mutex_unlock(m) ((void)(m))
+#endif
 
 #include <ctype.h>
 #include <dirent.h>
@@ -33,7 +44,11 @@ struct cdaudio {
     int        decoder_track;              /* track the decoder has open, 0 = none */
     uint64_t   decoder_frame;              /* decoder read position within that track */
 
+#ifdef MW2_CLASSIC_MAC
+    SDL_AudioStream *stream;
+#else
     ma_device  device;
+#endif
     int        device_running;
 };
 
@@ -333,6 +348,39 @@ size_t cdaudio_render(cdaudio *cd, float *out, size_t frames)
     return done;
 }
 
+#ifdef MW2_CLASSIC_MAC
+static void SDLCALL stream_callback(void *user, SDL_AudioStream *stream, int additional, int total)
+{
+    float buf[1024 * 2];
+    (void)total;
+    while (additional > 0) {
+        int frames = additional / 8 > 1024 ? 1024 : (additional + 7) / 8;
+        cdaudio_render((cdaudio *)user, buf, (ma_uint32)frames);
+        SDL_PutAudioStreamData(stream, buf, frames * 8);
+        additional -= frames * 8;
+    }
+}
+
+int cdaudio_start_device(cdaudio *cd)
+{
+    SDL_AudioSpec spec;
+    if (cd->device_running) return 0;
+    spec.format = SDL_AUDIO_F32; spec.channels = 2; spec.freq = CDA_SAMPLE_RATE;
+    cd->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, stream_callback, cd);
+    if (!cd->stream) return -1;
+    SDL_ResumeAudioStreamDevice(cd->stream);
+    cd->device_running = 1;
+    return 0;
+}
+
+void cdaudio_stop_device(cdaudio *cd)
+{
+    if (!cd->device_running) return;
+    SDL_DestroyAudioStream(cd->stream);
+    cd->stream = NULL;
+    cd->device_running = 0;
+}
+#else
 static void device_callback(ma_device *dev, void *out, const void *in, ma_uint32 frames)
 {
     (void)in;
@@ -361,3 +409,4 @@ void cdaudio_stop_device(cdaudio *cd)
     ma_device_uninit(&cd->device);
     cd->device_running = 0;
 }
+#endif

@@ -8,7 +8,14 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-void portcfg_defaults(portcfg *c) { memset(c, 0, sizeof *c); c->mode = 0; c->aa = 4; c->textures_ati = 1; c->speed = 0.85f; }
+void portcfg_defaults(portcfg *c)
+{
+    memset(c, 0, sizeof *c); c->mode = 0; c->aa = 4; c->textures_ati = 1; c->speed = 0.85f;
+#ifdef MW2_CLASSIC_MAC
+    /* the classic Mac build's first run: fullscreen 640 x 480, the DOS look, no anti-aliasing (a Rage 128 has none) */
+    c->mode = 2; c->w = 640; c->h = 480; c->aa = 0; c->renderer = PORTCFG_ED_DOS;
+#endif
+}
 
 static int exists(const char *p) { struct stat st; return p && p[0] && stat(p, &st) == 0; }
 static int is_dir(const char *p) { struct stat st; return p && p[0] && stat(p, &st) == 0 && S_ISDIR(st.st_mode); }
@@ -43,6 +50,12 @@ const char *portcfg_file(void)
         const char *appdata = getenv("APPDATA");
         if (!appdata || !appdata[0]) appdata = getenv("USERPROFILE");
         snprintf(path, sizeof path, "%s/mw2port/mw2port.cfg", appdata ? appdata : ".");
+        (void)home; (void)xdg;
+    }
+#elif defined(MW2_CLASSIC_MAC)
+    {   /* System Folder:Preferences:MechWarrior 2 Prefs.cfg (OS X: ~/Library/Preferences) - a SimpleText file */
+        extern const char *mw2_mac_prefs_dir(void);
+        snprintf(path, sizeof path, "%sMechWarrior 2 Prefs.cfg", mw2_mac_prefs_dir());
         (void)home; (void)xdg;
     }
 #elif defined(__APPLE__)
@@ -108,6 +121,9 @@ int portcfg_load(const char *unused, portcfg *c)
 #undef STR
     }
     fclose(f);
+#ifdef MW2_CLASSIC_MAC
+    if (c->mode == 1) { c->mode = 2; if (c->w <= 0 || c->h <= 0) { c->w = 640; c->h = 480; } }   /* always fullscreen */
+#endif
     return 0;
 }
 

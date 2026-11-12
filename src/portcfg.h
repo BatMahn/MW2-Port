@@ -1,6 +1,7 @@
 /* The port's configuration: one per-user file,
  *   Linux   $XDG_CONFIG_HOME/mw2port/mw2port.cfg  (~/.config/mw2port/mw2port.cfg)
  *   macOS   ~/Library/Application Support/mw2port/mw2port.cfg
+ *   classic Mac (Carbon)  System Folder:Preferences:MechWarrior 2 Prefs.cfg (a SimpleText file; OS X: ~/Library/Preferences)
  * plain "key=value" lines:
  *   game=<folder>          the game folder: install/ (settings, pilots, saves), cd/ (the disc's files) or an .iso,
  *                          music/ (CD tracks), ultrasnd/ (Gravis patches), 3d/ (3D-edition models, textures, sky)

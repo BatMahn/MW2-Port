@@ -5,9 +5,11 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-11, v1.1.14)
+## Status (2026-11-11, v1.1.15)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
+New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
+almost no testing on real hardware; see "The classic Mac build (ALPHA)".
 
 - **Shell:** clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables, Cockpit Controls,
   Hall of Honor, the roster and both clans' Archives. The pilot-name easter-egg mechs (Elemental, Tarantula, Battle
@@ -70,6 +72,28 @@ draw with SDL's OpenGL renderer (its software renderer if that can't start). It 
 card, the driver's version, the colour / depth bits and the texture limit. Not yet tested on real Windows XP hardware
 (KNOWN_ISSUES.md). The legacy build has no Roland SC-55 menu music (the emulator needs most of a modern CPU core, and it
 keeps that build lean): it plays the menu music on the MT-32 or the Gravis UltraSound patches.
+
+### The classic Mac build (ALPHA)
+
+> **Alpha.** The classic Mac OS build has had almost no testing: it compiles, and its shared code runs on Linux with a
+> stand-in for the Mac layer, but it has barely been run on a real PowerPC Mac. Expect crashes, missing sound or music,
+> and display problems. Reports welcome (the Mac model, system version, graphics card and video memory).
+
+A PowerPC build (`classic-mac-ppc-ALPHA` zip): one Carbon application for **Mac OS 9 with CarbonLib** and **Mac OS X
+10.1-10.4 on PowerPC**, drawn with the legacy build's OpenGL 1.2 renderer. It is built with
+[Retro68](https://github.com/autc04/Retro68); the code that is the Mac's own lives in `platform/carbon/`.
+
+| | Classic Mac build (`classic-mac-ppc-ALPHA`) |
+|---|---|
+| System | Mac OS 9 with CarbonLib 1.6+, or Mac OS X 10.1-10.4 (PowerPC) |
+| Mac | a G3 or newer, 256 MB of RAM (the application asks for 160 MB, 128 MB minimum) |
+| Graphics | an ATI Rage 128 or newer with 8 MB of video memory: 800 x 600 at most with 8 MB, 1024 x 768 with 16 MB or more |
+| Music | no MT-32 or SC-55: the Gravis UltraSound patches, else QuickTime's synthesizer |
+
+It is always fullscreen, starts in 640 x 480 with the DOS look, keeps its settings in System Folder:Preferences:
+MechWarrior 2 Prefs.cfg, and asks for the game folder the first time (hold Option at launch to choose it again).
+Copy `MechWarrior2.bin` to the Mac and expand it there (StuffIt Expander), keeping the resource fork. Everything about
+it, including building it yourself: [docs/CARBON.md](docs/CARBON.md).
 
 ## Build
 Needs a C99 compiler, make, pkg-config and SDL3 3.2.0 or newer (development files; SDL3 brings its GPU API's Direct3D 12,

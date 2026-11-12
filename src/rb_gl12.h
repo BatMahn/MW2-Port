@@ -20,7 +20,9 @@
 #endif
 #include <windows.h>
 #endif
-#if defined(__APPLE__)
+#if defined(MW2_CLASSIC_MAC)
+#include <SDL3/SDL_opengl.h>   /* the classic Mac build: GL loaded by name at start (platform/carbon/gl_dyn.h) */
+#elif defined(__APPLE__)
 #include <OpenGL/gl.h>
 #else
 #include <GL/gl.h>

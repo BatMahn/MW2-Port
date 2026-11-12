@@ -182,6 +182,8 @@ struct gus_song_s {
     int loop_pos[4], loop_cnt[4]; double loop_tick[4]; int nloop;
     voice v[MAXV];
     int ended;
+    gus_sink sink; int has_sink;   /* gus_song_open_sink: messages out, no voices */
+    struct { uint64_t at; uint8_t ch, note; } off[64]; int noff;   /* the sink's pending note-offs (XMIDI durations) */
 };
 
 static uint32_t vlq(const uint8_t *d, size_t len, size_t *i)
@@ -260,7 +262,63 @@ gus_song *gus_song_open(gus_bank *b, const uint8_t *xmi, size_t len, int rate)
     return s;
 }
 
-void gus_song_close(gus_song *s) { if (!s) return; free(s->ev); free(s); }
+void gus_song_close(gus_song *s)
+{
+    int ch, k;
+    if (!s) return;
+    if (s->has_sink) {   /* all notes off */
+        for (k = 0; k < s->noff; k++) s->sink.midi(s->sink.user, 0x80 | s->off[k].ch, s->off[k].note, 0);
+        for (ch = 0; ch < 16; ch++) s->sink.midi(s->sink.user, 0xb0 | ch, 123, 0);
+    }
+    free(s->ev); free(s);
+}
+
+gus_song *gus_song_open_sink(const uint8_t *xmi, size_t len, int rate, const gus_sink *sink)
+{
+    gus_song *s;
+    size_t el;
+    const uint8_t *evnt = find_chunk(xmi, len, "EVNT", &el);
+    if (!evnt || !sink || !sink->midi) return NULL;
+    s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->rate = rate; s->spt = rate / 120.0;
+    s->sink = *sink; s->has_sink = 1;
+    if (parse_evnt(s, evnt, el) <= 0) { free(s->ev); free(s); return NULL; }
+    return s;
+}
+
+static void do_event(gus_song *s, const ev *e);
+/* the sink's event: loops here, everything else out (a note-on with its note-off scheduled) */
+static void sink_event(gus_song *s, const ev *e)
+{
+    int hi = e->st & 0xf0, ch = e->st & 15;
+    if (hi == 0xb0 && (e->a == 116 || e->a == 117)) return;   /* (handled by do_event's loop code) */
+    if (hi == 0xf0) return;
+    if (hi == 0x90) {
+        if (e->b == 0) { s->sink.midi(s->sink.user, 0x80 | ch, e->a, 0); return; }
+        if (s->noff < 64) { s->off[s->noff].at = s->t + (uint64_t)((double)e->dur * s->spt); s->off[s->noff].ch = (uint8_t)ch; s->off[s->noff].note = e->a; s->noff++; }
+        else return;   /* (more than 64 sounding notes: dropped, as a full GF1 would) */
+    }
+    s->sink.midi(s->sink.user, e->st, e->a, e->b);
+}
+static int sink_render(gus_song *s, int frames)
+{
+    uint64_t end = s->t + (uint64_t)frames;
+    while (s->t < end) {
+        int k;
+        double now_tick = (double)s->t / s->spt;
+        while (!s->ended && s->pos < s->nev && (double)s->ev[s->pos].tick + s->tick_base <= now_tick) {
+            const ev *e = &s->ev[s->pos++];
+            sink_event(s, e);
+            if ((e->st & 0xf0) == 0xb0 || (e->st & 0xf0) == 0xf0) do_event(s, e);   /* loops, end of track */
+        }
+        if (s->pos >= s->nev) s->ended = 1;
+        for (k = 0; k < s->noff; k++)
+            if (s->t >= s->off[k].at) { s->sink.midi(s->sink.user, 0x80 | s->off[k].ch, s->off[k].note, 0); s->off[k--] = s->off[--s->noff]; }
+        s->t++;
+    }
+    return !(s->ended && s->noff == 0);
+}
 double gus_song_seconds(const gus_song *s) { return (double)s->t / s->rate; }
 
 /* ULTRA.MDI (MW2 CD SND\, Miles AIL 3.10 "Gravis UltraSound MIDI Synth"; offsets in the file, ndisasm -b16). The voices
@@ -647,6 +705,7 @@ static double gf1_amp(double v)
 int gus_song_render(gus_song *s, float *out, int frames)
 {
     int f, k;
+    if (s->has_sink) return sink_render(s, frames);
     for (f = 0; f < frames; f++) {
         double now_tick = (double)s->t / s->spt;
         while (!s->ended && s->pos < s->nev && (double)s->ev[s->pos].tick + s->tick_base <= now_tick) {

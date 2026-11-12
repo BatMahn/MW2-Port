@@ -33,6 +33,9 @@
 #ifndef MW2_NO_SC55
 #include "sc55mid.h"
 #endif
+#ifdef MW2_CLASSIC_MAC
+#include "qtmidi.h"   /* the classic Mac build: QuickTime's synth as the "built-in" menu music */
+#endif
 #include "bwd.h"
 #include "cockpitcfg.h"
 #include "portcfg.h"
@@ -127,6 +130,9 @@ static uint8_t  *g_song_data;
 static int       g_song_entry = -1;
 static mt32_synth *g_mt32;   /* the MT-32 (the menu music's default); NULL: Gravis patches if present */
 static mt32_song  *g_msong;
+static gus_sink    g_builtin;   /* the classic Mac build's QuickTime synth (g_use_builtin): the GUS song set as MIDI */
+static int         g_use_builtin;
+#define GUS_OPEN(d, n, r) (g_use_builtin ? gus_song_open_sink((d), (n), (r), &g_builtin) : gus_song_open(g_bank, (d), (n), (r)))
 #ifndef MW2_NO_SC55
 static sc55_synth *g_sc55;   /* the SC-55 (the General MIDI set, as MPU401.MDI); its song loops on its own thread */
 #define SC55_STOP() (g_sc55 ? sc55_stop(g_sc55) : (void)0)
@@ -153,7 +159,7 @@ static void music_cb(void *u, float *out, int frames)
     if (g_song && !gus_song_render(g_song, out, frames) && g_song_data && g_song_len > 0) {
         /* ended: the menu music loops (the shell's songs repeat while you stay on a screen) */
         gus_song_close(g_song);
-        g_song = gus_song_open(g_bank, g_song_data, (size_t)g_song_len, g_song_rate);
+        g_song = GUS_OPEN(g_song_data, (size_t)g_song_len, g_song_rate);
     }
 }
 static shelldb g_db;
@@ -979,7 +985,7 @@ static void apply_music(int screen, int clan)
 {
     uint32_t v;
     int entry;
-    if ((!g_bank && !g_mt32 && !g_sc55) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
+    if ((!g_bank && !g_mt32 && !g_sc55 && !g_use_builtin) || !g_sfx || screen < 0 || screen > 16 || clan < 0 || clan > 2) return;
     v = MUSIC[clan][screen];
     if (!v) return;
     if (v & 0x20000000) {   /* 0x35c4c / main loop 0x36700: the song closed and forgotten (0xa6380 = 0, 0xa6384 = 0) */
@@ -1014,7 +1020,7 @@ static void play_entry(int entry, int screen)
             else
 #endif
             if (g_mt32) g_msong = mt32_song_open(g_mt32, g_song_data, (size_t)n);
-            else g_song = gus_song_open(g_bank, g_song_data, (size_t)n, sfx_rate(g_sfx));
+            else g_song = GUS_OPEN(g_song_data, (size_t)n, sfx_rate(g_sfx));
         }
         g_song_entry = entry;
         g_song_len = n; g_song_rate = sfx_rate(g_sfx);
@@ -1073,6 +1079,18 @@ static void music_device_open(int pref, int startup)
         if (dev == PORTCFG_MM_GUS && (g_bank = gus_bank_open(g_mm_gus, 1024))) break;
         g_mm_have[dev] = 0;
     }
+#ifdef MW2_CLASSIC_MAC
+    {   /* the classic Mac build: QuickTime's synthesizer playing the General MIDI song set when no device opened, or
+         * with MW2_MUSIC=builtin (mw2.env) */
+        const char *mm = getenv("MW2_MUSIC");
+        int want = mm && strcmp(mm, "builtin") == 0;
+        if (want && g_bank) { gus_bank_close(g_bank); g_bank = NULL; }
+        if (want && g_mt32) { mt32_close(g_mt32); g_mt32 = NULL; }
+        g_use_builtin = 0;
+        if (g_sfx && !g_mt32 && !g_bank && !g_sc55 && qtmidi_open() == 0) { g_use_builtin = 1; g_builtin.midi = qtmidi_msg; }
+        if (g_use_builtin) fprintf(stderr, "mw2: menu music QuickTime's synthesizer\n");
+    }
+#endif
     if (pref != PORTCFG_MM_AUTO && !g_mm_have[pref])
         fprintf(stderr, "mw2: menu_music=%s: its files are not there%s - using the first device found\n", PORTCFG_MM_NAME[pref],
 #ifdef MW2_NO_SC55
@@ -1101,7 +1119,7 @@ static void music_switch(int pref)
     sc55_close(g_sc55); g_sc55 = NULL;
 #endif
     music_device_open(pref, 0);
-    if (num > 0 && (g_mt32 || g_bank || g_sc55)) play_entry(num + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1, -1);
+    if (num > 0 && (g_mt32 || g_bank || g_sc55 || g_use_builtin)) play_entry(num + (g_mt32 ? 24 : GUS_MUSIC_OFFSET) - 1, -1);
     sfx_unlock(g_sfx);
 }
 
@@ -5627,7 +5645,11 @@ static const screen_def *find_screen(int id, int clan)
 
 /* ---- the game folder when none is found: the system's folder picker (port-only, no library) ---- */
 #define PICK_PROMPT "Select your MechWarrior 2 game folder (MW2-game)"
-#ifndef _WIN32
+#ifdef MW2_CLASSIC_MAC
+int mw2_pick_folder(const char *title, char *out, size_t n);   /* Navigation Services (platform/carbon) */
+int mw2_mac_option_down(void);   /* Option held (at launch: choose the game folder again) */
+#endif
+#if !defined(_WIN32) && !defined(MW2_CLASSIC_MAC)
 /* one picker command through the shell: 1 a folder (out), 0 cancelled, -1 the picker is not available */
 static int run_picker(const char *cmd, char *out, size_t n)
 {
@@ -5649,7 +5671,7 @@ static int run_picker(const char *cmd, char *out, size_t n)
 #endif
 static int pick_folder(char *out, size_t n)
 {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(MW2_CLASSIC_MAC)
     return mw2_pick_folder(PICK_PROMPT, out, n);
 #else
     static const char *const cmds[] = {
@@ -5737,6 +5759,12 @@ int main(int argc, char **argv)
             had_game = g_cfg.install[0] != 0;
         }
         if (argc >= 2) { g_cfg.game[0] = 0; g_cfg.install[0] = 0; g_cfg.cd[0] = 0; g_cfg.models[0] = 0; g_cfg.textures[0] = 0; }   /* this run: as given */
+#ifdef MW2_CLASSIC_MAC
+        if (!headless && mw2_mac_option_down()) {   /* Option held while launching: choose the game folder again */
+            if (ask_game_folder(&g_cfg, g_exe_dir) == 0) { picked = 1; remember_game(g_cfg.game); }
+        }
+        if (!picked)
+#endif
         if (portcfg_resolve(&g_cfg, g_exe_dir, argc >= 2 ? argv[1] : NULL) != 0) {
             /* none found: ask with the system's folder picker (a double-clicked app has no terminal; its current folder
              * is "/"), and remember the choice */
@@ -5853,8 +5881,14 @@ int main(int argc, char **argv)
         SDL_SetStringProperty(wp, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "MechWarrior 2");
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+#ifdef MW2_CLASSIC_MAC   /* fullscreen switches the display to the window's size: the art's own 640 x 480 */
+        wf |= SDL_WINDOW_FULLSCREEN;
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, W);
+        SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, H);
+#else
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, W * 2);
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, H * 2);
+#endif
         SDL_SetNumberProperty(wp, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64)wf);
         win = g_win = SDL_CreateWindowWithProperties(wp);
         SDL_DestroyProperties(wp);

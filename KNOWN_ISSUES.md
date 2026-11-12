@@ -4,6 +4,9 @@ What is still open in the port as of 2026-11-09. Technical detail, engine addres
 [ASSUMPTIONS.md](ASSUMPTIONS.md) under "Open items". None of these blocks play.
 
 ## Open
+- **Classic Mac build (ALPHA)** - new, and has had almost no testing on a real PowerPC Mac: crashes, sound / music
+  (QuickTime's synthesizer is untested) and display problems are expected. docs/CARBON.md lists what still needs
+  checking on real hardware.
 - **3DFX look** - which of the two overlapping training-mission flags shows depends on the route played in the
   original, and the port picks one.
 - **RENDITION look** - anti-aliased lines, the 16-bit screen and the ground's three fog bands aren't reproduced (no

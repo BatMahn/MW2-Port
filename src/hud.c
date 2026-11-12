@@ -83,6 +83,19 @@ int hud_sprite_load(hud *h, prj_archive *a, const char *name, int frame, hud_spr
     return hud_sprite_load_remap(h, a, name, frame, -1, -1, out);
 }
 
+/* the sprites' Scale3x upscale: nine times the texels - left out on the classic Mac build for its 8 - 16 MB cards
+ * (the art at its own size, filtered; the font's small in-between atlas keeps it); MW2_HUD_SCALE3X=0 / 1 overrides */
+static int hud_upscale(void)
+{
+    const char *e = getenv("MW2_HUD_SCALE3X");
+    if (e) return atoi(e) != 0;
+#ifdef MW2_CLASSIC_MAC
+    return 0;
+#else
+    return 1;
+#endif
+}
+
 /* Scale3x (AdvMAME3x): each pixel becomes a 3x3 block whose corners follow matching neighbours - diagonal edges
  * stay sharp, the centre texel is always the original. Returns a malloc'd (3w x 3h) image or NULL. */
 static uint32_t *scale3x(const uint32_t *in, int aw, int ah)
@@ -129,7 +142,7 @@ static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask,
     {   /* the texture is the Scale3x upscale (see bind_sprite); transparent texels are all 0 here, so they match */
         uint8_t *up;
         for (i = 0; i < w * hg; i++) if (!rgba[i * 4 + 3]) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 0;
-        up = (uint8_t *)scale3x((const uint32_t *)rgba, w, hg);
+        up = hud_upscale() ? (uint8_t *)scale3x((const uint32_t *)rgba, w, hg) : NULL;
         if (up) { free(rgba); rgba = up; tw = w * 3; th = hg * 3; }
     }
     {   /* bleed colour into transparent texels so bilinear edges don't darken (alpha stays 0) */
@@ -519,7 +532,7 @@ int hud_font_load(hud *h, prj_archive *a, const char *name)
         rb_tex_filter(h->font_tex, RB_LINEAR, RB_LINEAR);
         rb_tex_wrap(h->font_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
         {   /* in-between scales: Scale3x and linear filtering keep the strokes even and bold */
-            uint32_t *out = scale3x((const uint32_t *)atlas, aw, ah);
+            uint32_t *out = scale3x((const uint32_t *)atlas, aw, ah);   /* (kept on the Mac too: a small atlas, and the 3D looks' text needs it) */
             if (out) {
                 h->font_tex3 = rb_tex_new();
                 rb_tex_image(h->font_tex3, aw * 3, ah * 3, out, 0);

@@ -63,6 +63,7 @@ static void *grow(void *p, int *cap, int need, size_t elem)
 gl12_tex *gl12_T(rb_tex t) { return t > 0 && (int)t < g12_ntex && g12_tex[t].live ? &g12_tex[t] : NULL; }
 static gl12_buf *B(rb_buf b) { return b > 0 && (int)b < g_nbuf && g_buf[b].live ? &g_buf[b] : NULL; }
 static int pot(int v) { int p = 1; while (p < v) p <<= 1; return p; }
+static void tex_gone(GLuint id);   /* (the video-memory count, below) */
 
 /* ---- the GL state cache (the calls made only on a change) */
 static struct {
@@ -232,6 +233,13 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
             if (u < 2 || !p_active || !p_client_active) { p_active = p_client_active = NULL; u = 1; }
         }
         g12_units = u >= 2 ? 2 : 1;
+#ifdef MW2_CLASSIC_MAC
+        if (g12_units < 2 && !getenv("MW2_GL12_ALLOW_ONE_UNIT")) {   /* the classic Mac build's floor: an ATI Rage 128 */
+            if (err && errn) SDL_snprintf(err, errn, "MechWarrior 2 needs an ATI Rage 128 or newer graphics card (this one, %s, has one texture unit)", ren ? ren : "?");
+            SDL_GL_DestroyContext(g_ctx); g_ctx = NULL;
+            return -1;
+        }
+#endif
     }
     g12_trace = getenv("MW2_GL12_TRACE") != NULL;
     g12_nofog = getenv("MW2_GL12_NOFOG") != NULL;
@@ -277,7 +285,7 @@ static void var_free(gl12_var *v)
     while (v) {
         gl12_var *n = v->next;
         int k;
-        for (k = 0; k < v->ntx * v->nty; k++) if (v->t[k].id) glDeleteTextures(1, &v->t[k].id);
+        for (k = 0; k < v->ntx * v->nty; k++) if (v->t[k].id) { tex_gone(v->t[k].id); glDeleteTextures(1, &v->t[k].id); }
         free(v->t);
         free(v);
         v = n;
@@ -470,6 +478,85 @@ static int wrapc(int v, int n, int repeat)
     return v < 0 ? 0 : v >= n ? n - 1 : v;
 }
 
+#ifndef GL_RGB5
+#define GL_RGB5 0x8050
+#endif
+#ifndef GL_RGBA4
+#define GL_RGBA4 0x8056
+#endif
+#ifndef GL_RGB5_A1
+#define GL_RGB5_A1 0x8057
+#endif
+/* 16-bit textures (the classic Mac build's default, for its 8 - 16 MB cards; MW2_GL12_TEX16=0 / 1 overrides): RGB5 for
+ * an opaque image, RGB5_A1 when its alpha is only on / off (the palette art, the HUD), RGBA4 for alpha ramps */
+static int tex16_on(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("MW2_GL12_TEX16");
+#ifdef MW2_CLASSIC_MAC
+        v = 1;
+#else
+        v = 0;
+#endif
+        if (e) v = atoi(e) != 0;
+    }
+    return v;
+}
+static GLint tex_format(const uint8_t *px, size_t n, int *bytes)
+{
+    size_t k;
+    int opaque = 1, binary = 1;
+    *bytes = 4;
+    if (!tex16_on() || !px) return GL_RGBA8;
+    for (k = 0; k < n && (opaque || binary); k++) {
+        uint8_t a = px[k * 4 + 3];
+        if (a != 255) opaque = 0;
+        if (a != 0 && a != 255) binary = 0;
+    }
+    *bytes = 2;
+    return opaque ? GL_RGB5 : binary ? GL_RGB5_A1 : GL_RGBA4;
+}
+
+/* video memory the textures take (at the card's format, mip levels included), live and peak by GL texture name;
+ * MW2_GL12_TRACE reports it at exit - with the frame buffers, what a look needs of the card */
+static unsigned long long g_tex_live, g_tex_peak, *g_tex_of;
+static unsigned g_tex_cap;
+static void tex_report(void) { fprintf(stderr, "gl12: textures in video memory %.1f MB at the peak (%.1f MB at exit)\n", g_tex_peak / 1048576.0, g_tex_live / 1048576.0); }
+static void tex_note(GLuint id, int w, int h, int bytes, int level)
+{
+    static int armed;
+    unsigned long long b = (unsigned long long)w * (unsigned long long)h * (unsigned long long)bytes;
+    if (!armed) { armed = 1; if (getenv("MW2_GL12_TRACE")) atexit(tex_report); }
+    if (id >= g_tex_cap) {
+        unsigned n = g_tex_cap ? g_tex_cap : 256, i;
+        unsigned long long *q;
+        while (n <= id) n *= 2;
+        if (!(q = realloc(g_tex_of, n * sizeof *q))) return;
+        for (i = g_tex_cap; i < n; i++) q[i] = 0;
+        g_tex_of = q; g_tex_cap = n;
+    }
+    if (level == 0) { g_tex_live -= g_tex_of[id]; g_tex_of[id] = 0; }
+    g_tex_of[id] += b; g_tex_live += b;
+    if (g_tex_live > g_tex_peak) g_tex_peak = g_tex_live;
+}
+static void tex_gone(GLuint id) { if (id < g_tex_cap) { g_tex_live -= g_tex_of[id]; g_tex_of[id] = 0; } }
+
+/* a dimension of n texels in tile rows / columns (each a power of two with its one-texel border, the largest the rest
+ * fills - a 640-wide cockpit: 512 + 128 + 8, not 1024): count; x0 / content / texture size per piece */
+static int tile_split(int n, int maxtex, int *x0, int *cw, int *pw)
+{
+    int pos = 0, k = 0;
+    while (pos < n) {
+        int rem = n - pos, P = 16;
+        while (P * 2 <= maxtex && P * 2 - 2 <= rem) P *= 2;
+        if (P - 2 > rem) { P = pot(rem + 2); if (P > maxtex) P = maxtex; }
+        x0[k] = pos; cw[k] = P - 2 < rem ? P - 2 : rem; pw[k] = P;
+        pos += cw[k]; k++;
+    }
+    return k;
+}
+
 /* a variant as one GL texture (the world's textures: a power of two within the card's limit - resampled if not - with
  * its mip chain), or as tiles with a one-texel border (the HUD's and the targets': each texel kept in place) */
 static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
@@ -496,10 +583,14 @@ static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
         if (!v->t) { free(px); free(v); return NULL; }
         glGenTextures(1, &v->t[0].id);
         bind2d(0, v->t[0].id);
+        {
+        int bytes;
+        GLint fmt = tex_format(cur, (size_t)w * (size_t)h, &bytes);
         for (;;) {
             uint8_t *nx;
             int nw, nh;
-            glTexImage2D(GL_TEXTURE_2D, lv, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, cur);
+            glTexImage2D(GL_TEXTURE_2D, lv, fmt, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, cur);
+            tex_note(v->t[0].id, w, h, bytes, lv);
             lv++;
             if (!t->mips || (w == 1 && h == 1)) break;
             nx = half(cur, w, h, &nw, &nh);
@@ -507,44 +598,49 @@ static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
             if (!nx) { cur = px; break; }
             cur = nx; w = nw; h = nh;
         }
+        }
         if (cur != px) free(cur);
         v->t[0].pw = W; v->t[0].ph = H; v->t[0].w = W; v->t[0].h = H; v->t[0].levels = lv;
         v->t[0].min = v->t[0].mag = v->t[0].ws = v->t[0].wt = v->t[0].base = -1;
         C.bound[0] = 0;
     } else {
-        int P[2], cnt[2], k, i, j, x, y, dim[2] = {w, h}, rep[2] = {t->ws == RB_REPEAT, t->wt == RB_REPEAT};
+        int P[2], cnt[2], i, j, x, y, rep[2] = {t->ws == RB_REPEAT, t->wt == RB_REPEAT};
+        int *xs = malloc(sizeof(int) * (size_t)(w / 14 + 2) * 3), *ys = malloc(sizeof(int) * (size_t)(h / 14 + 2) * 3);
         uint8_t *tile;
-        for (k = 0; k < 2; k++) {
-            P[k] = pot(dim[k] + 2);
-            if (P[k] > g12_maxtex) P[k] = g12_maxtex;
-            cnt[k] = (dim[k] + P[k] - 3) / (P[k] - 2);
-        }
+        if (!xs || !ys) { free(xs); free(ys); free(px); free(v); return NULL; }
+        /* (x0, content, texture size) per column and row - tight power-of-two pieces */
+        cnt[0] = tile_split(w, g12_maxtex, xs, xs + (w / 14 + 2), xs + 2 * (w / 14 + 2));
+        cnt[1] = tile_split(h, g12_maxtex, ys, ys + (h / 14 + 2), ys + 2 * (h / 14 + 2));
+        P[0] = xs[2 * (w / 14 + 2)]; P[1] = ys[2 * (h / 14 + 2)];   /* the largest piece (the first) */
         v->ntx = cnt[0]; v->nty = cnt[1];
         v->t = calloc((size_t)(cnt[0] * cnt[1]), sizeof *v->t);
         tile = malloc((size_t)P[0] * (size_t)P[1] * 4);
-        if (!v->t || !tile) { free(v->t); free(tile); free(px); free(v); return NULL; }
+        if (!v->t || !tile) { free(v->t); free(tile); free(xs); free(ys); free(px); free(v); return NULL; }
         if (g12_trace && (cnt[0] * cnt[1] > 1 || P[0] != w || P[1] != h))
-            fprintf(stderr, "gl12: texture %d x %d (variant %d) in %d x %d tile(s) of %d x %d\n", w, h, kind, cnt[0], cnt[1], P[0], P[1]);
+            fprintf(stderr, "gl12: texture %d x %d (variant %d) in %d x %d tile(s), the largest %d x %d\n", w, h, kind, cnt[0], cnt[1], P[0], P[1]);
         for (j = 0; j < cnt[1]; j++)
             for (i = 0; i < cnt[0]; i++) {
                 gl12_tile *g = &v->t[j * cnt[0] + i];
-                g->x0 = i * (P[0] - 2); g->y0 = j * (P[1] - 2);
-                g->w = w - g->x0 < P[0] - 2 ? w - g->x0 : P[0] - 2;
-                g->h = h - g->y0 < P[1] - 2 ? h - g->y0 : P[1] - 2;
-                g->pw = P[0]; g->ph = P[1]; g->levels = 1;
+                int bytes;
+                GLint fmt;
+                g->x0 = xs[i]; g->y0 = ys[j];
+                g->w = xs[(w / 14 + 2) + i]; g->h = ys[(h / 14 + 2) + j];
+                g->pw = xs[2 * (w / 14 + 2) + i]; g->ph = ys[2 * (h / 14 + 2) + j]; g->levels = 1;
                 g->min = g->mag = g->ws = g->wt = g->base = -1;
-                for (y = 0; y < P[1]; y++) {
+                for (y = 0; y < g->ph; y++) {
                     int sy = wrapc(g->y0 - 1 + y, h, rep[1]);
-                    for (x = 0; x < P[0]; x++) {
+                    for (x = 0; x < g->pw; x++) {
                         int sx = wrapc(g->x0 - 1 + x, w, rep[0]);
-                        memcpy(tile + ((size_t)y * (size_t)P[0] + (size_t)x) * 4, px + ((size_t)sy * (size_t)w + (size_t)sx) * 4, 4);
+                        memcpy(tile + ((size_t)y * (size_t)g->pw + (size_t)x) * 4, px + ((size_t)sy * (size_t)w + (size_t)sx) * 4, 4);
                     }
                 }
                 glGenTextures(1, &g->id);
                 bind2d(0, g->id);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, P[0], P[1], 0, GL_RGBA, GL_UNSIGNED_BYTE, tile);
+                fmt = tex_format(tile, (size_t)g->pw * (size_t)g->ph, &bytes);
+                glTexImage2D(GL_TEXTURE_2D, 0, fmt, g->pw, g->ph, 0, GL_RGBA, GL_UNSIGNED_BYTE, tile);
+                tex_note(g->id, g->pw, g->ph, bytes, 0);
             }
-        free(tile);
+        free(tile); free(xs); free(ys);
         C.bound[0] = 0;
         v->param = param | (rep[0] << 16) | (rep[1] << 17);
     }

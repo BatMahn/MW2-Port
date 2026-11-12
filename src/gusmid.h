@@ -27,5 +27,11 @@ void      gus_song_close(gus_song *s);
 /* Render frames of interleaved stereo float (added to out). Returns 0 once the song has ended. */
 int       gus_song_render(gus_song *s, float *out, int frames);
 double    gus_song_seconds(const gus_song *s);   /* elapsed */
+/* The same sequencer driving an external General MIDI synth instead of the GF1 voices (the classic Mac build's
+ * QuickTime synth): the song's channel messages in time order - note-ons, their note-offs when each note's XMIDI
+ * duration ends, program changes, controllers, pitch bend; the AIL loop controllers (116 / 117) are acted on here and
+ * not sent. gus_song_render then only advances time (out untouched). Closing sends all notes off. */
+typedef struct { void (*midi)(void *user, int status, int a, int b); void *user; } gus_sink;
+gus_song *gus_song_open_sink(const uint8_t *xmi, size_t len, int rate, const gus_sink *sink);
 
 #endif

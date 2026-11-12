@@ -24,3 +24,4 @@ sweep_ai
 *.app/
 dist/
 __pycache__/
+build-carbon/

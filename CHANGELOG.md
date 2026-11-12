@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.15 (2026-11-11)
+
+- **A classic Mac OS build - ALPHA.** A PowerPC Carbon application for Mac OS 9 with CarbonLib and Mac OS X
+  10.1-10.4, built with Retro68 (`platform/carbon/`, docs/CARBON.md). It is the same game code with a small SDL3 subset
+  over the Mac Toolbox (windows, AGL, the Sound Manager, the File Manager) and the OpenGL 1.2 renderer. The floor is an
+  ATI Rage 128: 800 x 600 with 8 MB of video memory, 1024 x 768 with 16 MB. It has 16-bit textures, no SC-55 or MT-32
+  emulation, and QuickTime's synthesizer as the fallback menu music. **It has had almost no testing on real
+  hardware.** It builds with Retro68 (checked), and its shared code runs on Linux with an EGL stand-in for the Mac layer; treat it as alpha.
+  The shared files change only inside `#ifdef MW2_CLASSIC_MAC`, plus `gus_song_open_sink` in `src/gusmid.c`, which the
+  other builds don't call. The other builds are unchanged.
+- GitHub Actions builds it on every tagged release (`build-classic-mac`, in Retro68's published toolchain image) as
+  `MW2-Port-<tag>-classic-mac-ppc-ALPHA.zip`. While the build is new, that job is allowed to fail without holding up
+  the other downloads.
+
 ## v1.1.14 (2026-11-11)
 
 - **The nav marker and target brackets slid around in the external view.** The 3D looks projected the marker with the

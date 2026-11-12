@@ -39,6 +39,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp, strncasecmp */
+#ifdef MW2_CLASSIC_MAC
+int mw2_mac_vram_mb(void);   /* platform/carbon: the card's video memory (MB, 0 unknown) */
+#endif
 
 #include "common3d.h"
 #include "datapath.h"
@@ -5241,6 +5245,26 @@ int main(int argc, char **argv)
             if (pc.mode == 0 && dm) { ww = dm->w; wh = dm->h; flags |= SDL_WINDOW_FULLSCREEN; }   /* SDL3: no fullscreen mode set = the desktop's */
             else if (pc.mode == 2) { ww = pc.w; wh = pc.h; }   /* exclusive: the mode is set on the window below */
         }
+#ifdef MW2_CLASSIC_MAC
+        {   /* the floor is an ATI Rage 128 (8 MB, two texture units - rb_init checks the units): every look up to
+             * 800 x 600 with 8 MB of video memory, 1024 x 768 with 16 MB or more (16-bit frame buffers + textures;
+             * docs/CARBON.md). Unknown memory is taken as the floor's 8 MB. */
+            int vram = mw2_mac_vram_mb(), cw = 800, ch = 600;
+            if (vram > 0 && vram < 8) {
+                char msg[256];
+                snprintf(msg, sizeof msg, "MechWarrior 2 needs an ATI Rage 128 or newer graphics card with at least 8 MB of video memory (this one has %d MB).", vram);
+                fprintf(stderr, "%s\n", msg);
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "MechWarrior 2", msg, NULL);
+                return 1;
+            }
+            if (vram >= 16) { cw = 1024; ch = 768; }
+            if (ww > cw || wh > ch) {
+                fprintf(stderr, "display: %d x %d is more than %d MB of video memory takes - %d x %d\n", ww, wh, vram, cw, ch);
+                ww = cw; wh = ch;
+                if (pc.mode == 2) { pc.w = cw; pc.h = ch; }
+            }
+        }
+#endif
         g_win_w = ww; g_win_h = wh;
         aa = pc.aa;
         g_render_w = pc.render_w; g_render_h = pc.render_h;
