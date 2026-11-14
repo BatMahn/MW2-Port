@@ -149,6 +149,13 @@ typedef struct {
     int          outcome;        /* 0 running / none, 2 successful, 3 failed, 4 time exceeded */
     int          ending, over, player_lost;
     int          debug_invulnerable;   /* tests only: the player's destruction is ignored */
+    /* the cheat codes (Win95 MW2.DLL 0x1004b9f3, glview.c cheat_key) */
+    int          hang_around;    /* "hangaround" (DAT_101596c0): a decided mission does not end (0x1000ffa9) - only the
+                                  * player's destruction or Ctrl+Q does */
+    int          cheat_kill;     /* unit + 1 to destroy on the next step ("gankem" / "enolagay"), 0 none */
+    int          cheat_nuke;     /* with it: the nuke at the unit instead ("enolagay", StartNuke) */
+    float        nuke_pos[3], nuke_r, nuke_max, nuke_left;   /* the nuke's blast: centre, radius, its limit (cm), ticks left */
+    int          lairdo;         /* "lairdo" (Win95 g_lairdoCheat, NextTarget 0x10054043): orders to all points reach every unit on the player's side */
     int32_t      end_at, ended_at;   /* ms */
     /* ejection (player_unit.ejected / intact_out, combat.h): state 5 holds the end back 0x389 ticks - the controller
      * (0x1001adf0) sets the end flag DAT_1024c568 only then, the end sequence (0x100374e0) follows */

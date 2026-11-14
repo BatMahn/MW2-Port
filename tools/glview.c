@@ -169,7 +169,9 @@ static float      g_eye_pan, g_eye_tilt, g_zoom = 1.0f;   /* pilot_pan / pilot_t
 #define A(name) (g_im_ok && im_action(&g_im, name, k, e.key.mod))
 /* the port's own development keys in a mission (G free camera, [ ] fog density): only with MW2_DEBUG_KEYS=1 - in play
  * every key belongs to GAMEKEY.MAP / INPUT.MAP (user report 2026-10-23: rebinding to G dropped the piloting) */
-static int dbg_keys(void) { static int v = -1; if (v < 0) v = getenv("MW2_DEBUG_KEYS") && atoi(getenv("MW2_DEBUG_KEYS")) > 0; return v; }
+static void cheat_reset(void);
+static int g_cheat_dbg;   /* the cheat code "hangaround": the debug commands too (Win95 0x1004d321 -> 0x1004af0d) */
+static int dbg_keys(void) { static int v = -1; if (v < 0) v = getenv("MW2_DEBUG_KEYS") && atoi(getenv("MW2_DEBUG_KEYS")) > 0; return v || g_cheat_dbg; }
 #define H(name) (g_im_ok && im_held(&g_im, name, ks))
 
 static mech3d    g_mech;          /* the viewed mech, kept for posing */
@@ -1345,6 +1347,7 @@ static void hud_message_v(const char *m, int voice);
 /* ---- the original resolutions (render=320x200 / 640x480 / 1024x768): an off-screen frame, then shown in blocks */
 /* g_lr_fbo[0]: the frame (colour and depth), [1]: the 320 x 200 frame (colour) - render targets of the backend */
 static rb_tex g_lr_fbo[2];
+static rb_tex g_frame_tgt;   /* the frame's render target: 0 the window, or g_lr_fbo[0] at the original resolutions */
 static int g_aa;   /* the anti-aliasing samples chosen (mw2port.cfg aa=; the viewer's M key toggles them) */
 static int g_lr_w, g_lr_h, g_out_w, g_out_h;
 static int lowres_target(int w, int h)
@@ -2637,6 +2640,36 @@ static void set_weapon_group(int w, int g)
     for (k = 0; k < 3; k++) g_groups[k] &= ~(1u << w);
     g_groups[g] |= 1u << w;
 }   /* selected weapon (boxed in the list) */
+/* The fire groups go by the SELECTED weapon (Win95 MW2.DLL; the slot table unit +0x54, 0x68 bytes a weapon, +0xc its
+ * group): there is no separate "current group". A weapon counts while it is there (slot +4 >= 0, +0 != -1) and not lost
+ * (+8 != -1: the port's state >= 0 and its location intact) */
+static int group_weapon_ok(int w)
+{
+    const combat_unit *pu = &g_sim.player_unit;
+    return w >= 0 && w < pu->weapon_count && w < 32 && pu->weapons[w].state >= 0 && !pu->loc_gone[pu->weapons[w].location];
+}
+static int sel_group(void)   /* the selected weapon's group, -1 none */
+{
+    int g;
+    if (g_sel_weapon < 0 || g_sel_weapon >= 32) return -1;
+    for (g = 0; g < 3; g++) if (g_groups[g] & (1u << g_sel_weapon)) return g;
+    return -1;
+}
+static int group_select(int g)   /* 0x1005eec3: the selected weapon already in group g, else the first one there (slot order) */
+{
+    int w;
+    if (g < 0 || g > 2) return 0;
+    if (sel_group() == g) return 1;
+    for (w = 0; w < g_sim.player_unit.weapon_count && w < 32; w++)
+        if ((g_groups[g] & (1u << w)) && group_weapon_ok(w)) { g_sel_weapon = w; return 1; }
+    return 0;
+}
+static void group_next(void)   /* NEXT_WEAPON_GROUP, 0x1005ed6b: the first weapon of the next group that has one */
+{
+    int g0 = sel_group(), k;
+    if (g0 < 0) g0 = 0;
+    for (k = 1; k < 3; k++) if (group_select((g0 + k) % 3)) return;
+}
 static float     g_throttle_eff;
 static float     g_thr_srv, g_spd_srv;   /* the player's current throttle c[0x13] (fraction of full) and drive speed c[0xb] (cm/s): msim_drive_step */
 static int       g_drive_slow;           /* a walk key flagged 0x10 has run: the drive servo's T is 90.5 ticks (msim_drive_step) */
@@ -3693,6 +3726,359 @@ static void mm_draw(void)
     }
 }
 
+/* ---- the "dorcs" cheat: the MW2 Programmer Dorcs Page (Win95 MW2.DLL ShowDorcs 0x100745b2 -> the frame callback
+ * UpdateDorcs 0x10073af0; the 1.1 DLL only - the 3D editions have "lemmy" in its place). The simulation runs on
+ * throughout (only the MAIN MENU pauses it, 0x10009740); from the mosaic on the HUD is off and the in-game menus are
+ * closed every frame. In clock ticks:
+ *   1  0x389 the picture as it is (the cheat's "You asked for it!" shows)
+ *   2  the view drawn into a rectangle shrinking about the centre to 2 % of the screen and stretched back over it (a
+ *      mosaic, Blit's stretch), 0x279; then back out, 0x279
+ *   3  black, the view collapsing into the centre - its height first, then its width - outlined in colour 10, 0x2d4
+ *   4  vfx\vfxjk.bin (a GIF) at its own size in the centre, the palette blended to its colours over 0xb5; 0x10f
+ *   5  the palette to black over 0x5a, vfx\vfxhd.bin, blended in over 0xb5; 0x10f
+ *   6  the menu (menu 3: MW2 Programmer Dorcs Page) over the picture until closed, then 0x10f, then the game again.
+ * Without both pictures the screen stays black (the palette is set to black for the first) and the menu shows on
+ * black in the game's palette. The pictures are on the BattlePack and Mercenaries discs (VFX folder), not the
+ * Windows 95 MW2 disc. The page's texts are the DLL's own: read from a Windows 95 edition MW2.DLL in the game folder
+ * (none: the sequence plays without its menu). */
+static struct {
+    int state;                 /* 0 off, 1-7 as UpdateDorcs, 8 the closing 0x10f (its -1) */
+    float t;                   /* ticks in the state */
+    int phase;                 /* state 2: 0 shrinking, 1 growing */
+    int gif_ok;                /* both pictures loaded (g_dorcsGifLoaded) */
+    int gif_cur;               /* 0 / 1: the picture shown */
+    hud_sprite gif[2];
+    uint8_t gpal[2][768];      /* the pictures' palettes (8-bit) */
+    int32_t last_now;
+    int hud_was;
+    /* the menu */
+    int open, page, sel;       /* page -1 the root, else the person 0-13 */
+    char *txt[30];             /* title, About, 13 names, about text, 13 texts, exit item */
+    int txt_n;
+    rb_tex fbo; int fbo_w, fbo_h;
+} g_dorcs;
+
+/* GIF87a / 89a, the first image, 8-bit: indices and the palette (8-bit RGB). Returns 0 on success */
+static int gif_decode(const uint8_t *d, size_t n, uint8_t **pix, uint8_t pal[768], int *pw, int *ph)
+{
+    size_t o = 13;
+    int gct, w, h, il, minc, k;
+    uint8_t *out, *data = NULL;
+    size_t dn = 0, dcap = 0;
+    memset(pal, 0, 768);
+    if (n < 13 || memcmp(d, "GIF8", 4) != 0) return -1;
+    gct = d[10] & 0x80 ? 2 << (d[10] & 7) : 0;
+    if (o + (size_t)gct * 3 > n) return -1;
+    memcpy(pal, d + o, (size_t)gct * 3); o += (size_t)gct * 3;
+    while (o < n && d[o] == 0x21) {   /* extensions */
+        o += 2;
+        while (o < n && d[o]) o += (size_t)d[o] + 1;
+        o++;
+    }
+    if (o + 10 > n || d[o] != 0x2c) return -1;
+    w = d[o + 5] | d[o + 6] << 8; h = d[o + 7] | d[o + 8] << 8; il = d[o + 9] & 0x40;
+    if (d[o + 9] & 0x80) {   /* a local palette */
+        int lct = 2 << (d[o + 9] & 7);
+        if (o + 10 + (size_t)lct * 3 > n) return -1;
+        memcpy(pal, d + o + 10, (size_t)lct * 3); o += (size_t)lct * 3;
+    }
+    o += 10;
+    if (o >= n || w <= 0 || h <= 0) return -1;
+    minc = d[o++];
+    while (o < n && d[o]) {   /* the data sub-blocks */
+        size_t b = d[o];
+        if (o + 1 + b > n) break;
+        if (dn + b > dcap) { uint8_t *g = realloc(data, dcap = (dn + b) * 2); if (!g) { free(data); return -1; } data = g; }
+        memcpy(data + dn, d + o + 1, b); dn += b; o += b + 1;
+    }
+    out = calloc((size_t)w * (size_t)h, 1);
+    if (!out || minc < 2 || minc > 8) { free(out); free(data); return -1; }
+    {   /* LZW */
+        static uint16_t pre[4096]; static uint8_t suf[4096], stk[4097];
+        int clr = 1 << minc, eoi = clr + 1, avail = clr + 2, csz = minc + 1, cmask = (1 << csz) - 1, old = -1, first = 0;
+        size_t bit = 0, p = 0, np = (size_t)w * (size_t)h;
+        for (k = 0; k < clr; k++) { pre[k] = 0; suf[k] = (uint8_t)k; }
+        while (p < np && bit + (size_t)csz <= dn * 8) {
+            int code = 0, c, sp = 0, b;
+            for (b = 0; b < csz; b++, bit++) code |= ((data[bit >> 3] >> (bit & 7)) & 1) << b;
+            if (code == clr) { csz = minc + 1; cmask = (1 << csz) - 1; avail = clr + 2; old = -1; continue; }
+            if (code == eoi) break;
+            if (old < 0) { out[p++] = suf[code]; old = code; first = code; continue; }
+            c = code;
+            if (code >= avail) { stk[sp++] = (uint8_t)first; c = old; }
+            while (c >= clr && sp < 4096) { stk[sp++] = suf[c]; c = pre[c]; }
+            first = suf[c]; stk[sp++] = (uint8_t)first;
+            if (avail < 4096) { pre[avail] = (uint16_t)old; suf[avail] = (uint8_t)first; avail++; if ((avail & cmask) == 0 && avail < 4096) { csz++; cmask = (1 << csz) - 1; } }
+            while (sp > 0 && p < np) out[p++] = stk[--sp];
+            old = code;
+        }
+    }
+    free(data);
+    if (il) {   /* interlaced rows: 8 from 0, 8 from 4, 4 from 2, 2 from 1 */
+        uint8_t *de = malloc((size_t)w * (size_t)h);
+        int y, r = 0, pass;
+        static const int st[4] = {0, 4, 2, 1}, sp[4] = {8, 8, 4, 2};
+        if (de) {
+            for (pass = 0; pass < 4; pass++) for (y = st[pass]; y < h; y += sp[pass]) memcpy(de + (size_t)y * (size_t)w, out + (size_t)(r++) * (size_t)w, (size_t)w);
+            free(out); out = de;
+        }
+    }
+    *pix = out; *pw = w; *ph = h;
+    return 0;
+}
+
+static int dorcs_gif(int k, const char *path)
+{
+    unsigned char *d = NULL;
+    size_t n = 0;
+    uint8_t *pix = NULL, *rgba;
+    int w, h, i, rc = -1;
+    if (dp_read_file(path, &d, &n) != 0) return -1;
+    if (gif_decode(d, n, &pix, g_dorcs.gpal[k], &w, &h) == 0 && (rgba = malloc((size_t)w * (size_t)h * 4))) {
+        for (i = 0; i < w * h; i++) {
+            rgba[i * 4] = g_dorcs.gpal[k][pix[i] * 3]; rgba[i * 4 + 1] = g_dorcs.gpal[k][pix[i] * 3 + 1];
+            rgba[i * 4 + 2] = g_dorcs.gpal[k][pix[i] * 3 + 2]; rgba[i * 4 + 3] = 255;
+        }
+        rc = hud_sprite_rgba(&g_dorcs.gif[k], rgba, w, h);
+        free(rgba);
+    }
+    free(pix);
+    free(d);
+    return rc;
+}
+
+/* the page's texts from a Windows 95 edition MW2.DLL (1.0 / 1.1, the BattlePack's): the 30 strings from the page's title
+ * on, in their order in the DLL's data (title, "About Dorcs", the 13 names, the about text, the 13 notes, the exit item) */
+static void dorcs_texts(void)
+{
+    static const char *const PATHS[] = {"MW2.DLL", "MW2/MW2.DLL", "MECH2/MW2.DLL"};
+    static const char ANCHOR[] = "MW2 Programmer Dorcs Page";
+    unsigned char *d = NULL;
+    size_t n = 0, o = 0, q;
+    int k;
+    if (g_dorcs.txt_n) return;
+    for (q = 0; q < sizeof PATHS / sizeof PATHS[0] && !d; q++) if (dp_read_file(PATHS[q], &d, &n) != 0) d = NULL;
+    if (!d) return;
+    for (o = 0; o + sizeof ANCHOR <= n && memcmp(d + o, ANCHOR, sizeof ANCHOR) != 0; o++) {}
+    for (k = 0; k < 30 && o < n; k++) {
+        size_t e = o;
+        while (e < n && d[e]) e++;
+        if (e >= n || e == o) break;
+        g_dorcs.txt[k] = malloc(e - o + 1);
+        if (!g_dorcs.txt[k]) break;
+        memcpy(g_dorcs.txt[k], d + o, e - o); g_dorcs.txt[k][e - o] = 0;
+        o = e;
+        while (o < n && !d[o]) o++;   /* the padding to the next string */
+    }
+    g_dorcs.txt_n = k == 30 ? 30 : -1;
+    if (k != 30) for (k--; k >= 0; k--) { free(g_dorcs.txt[k]); g_dorcs.txt[k] = NULL; }
+    free(d);
+}
+
+static void dorcs_start(void)
+{
+    if (g_dorcs.state) return;
+    g_dorcs.state = 1; g_dorcs.t = 0; g_dorcs.phase = 0; g_dorcs.open = 0;
+    g_dorcs.last_now = g_sim.now;
+}
+static void dorcs_end(void)
+{
+    int k;
+    for (k = 0; k < 2; k++) hud_sprite_free(&g_dorcs.gif[k]);
+    g_dorcs.state = 0; g_dorcs.open = 0; g_dorcs.gif_ok = 0;
+}
+
+/* each frame: the clock's ticks since the last frame move the sequence on */
+static void dorcs_update(void)
+{
+    float dt;
+    if (!g_dorcs.state) return;
+    dt = (float)(g_sim.now - g_dorcs.last_now) * 0.182f;
+    g_dorcs.last_now = g_sim.now;
+    if (dt < 0) dt = 0;
+    g_dorcs.t += dt;
+    if (g_dorcs.state >= 2) {   /* CloseInGameMenus each frame */
+        g_cc_page = -1;
+        if (g_mm_depth) mm_close_all();
+    }
+    switch (g_dorcs.state) {
+    case 1: if (g_dorcs.t >= 0x389) { g_dorcs.state = 2; g_dorcs.t = 0; g_dorcs.phase = 0; } break;
+    case 2: if (g_dorcs.t >= 0x279) { g_dorcs.t = 0; if (++g_dorcs.phase == 2) g_dorcs.state = 3; } break;
+    case 3:
+        if (g_dorcs.t >= 0x2d4) {
+            g_dorcs.state = 4; g_dorcs.t = 0; g_dorcs.gif_cur = 0;
+            g_dorcs.gif_ok = dorcs_gif(0, "VFX/VFXJK.BIN") == 0 && dorcs_gif(1, "VFX/VFXHD.BIN") == 0;
+            dorcs_texts();
+        }
+        break;
+    case 4: if (g_dorcs.t >= 0xb5 + 0x10f) { g_dorcs.state = 5; g_dorcs.t = 0; } break;   /* the blend in, then 0x10f */
+    case 5:
+        if (g_dorcs.t >= 0x5a) g_dorcs.gif_cur = 1;
+        if (g_dorcs.t >= 0x5a + 0xb5 + 0x10f) {   /* RequestMenu(3) */
+            g_dorcs.state = 7; g_dorcs.t = 0;
+            if (g_dorcs.txt_n == 30) { g_dorcs.open = 1; g_dorcs.page = -1; g_dorcs.sel = 0; }
+        }
+        break;
+    case 7: if (!g_dorcs.open) { g_dorcs.state = 8; g_dorcs.t = 0; } break;
+    case 8: if (g_dorcs.t >= 0x10f) dorcs_end(); break;
+    default: break;
+    }
+}
+static int dorcs_hides_hud(void) { return g_dorcs.state >= 2; }
+
+/* the view in states 2 and 3 (the world's draw replaced); 1 if drawn here. target: the frame's render target */
+static int dorcs_world(glr *r, const glr_view *v, int w, int h, rb_tex target)
+{
+    static const float black[4] = {0, 0, 0, 1};
+    float x0, x1, u;
+    if (g_dorcs.state < 2) return 0;
+    rb_viewport(0, 0, w, h);
+    rb_clear(black, 1, 1);
+    if (g_dorcs.state == 2) {
+        /* LerpPaneRect between the screen and (0x7d71, 0x7d71)-(0x828f, 0x828f): shrinking, then (reverse 0) growing */
+        u = g_dorcs.t / 0x279; if (u > 1) u = 1;
+        if (g_dorcs.phase == 1) u = 1.0f - u;
+        x0 = u * (float)0x7d71 / 65536.0f; x1 = 1.0f + u * ((float)0x828f / 65536.0f - 1.0f);
+        {
+            int pw = (int)((x1 - x0) * (float)w + 0.5f), ph = (int)((x1 - x0) * (float)h + 0.5f);
+            if (pw < 1) pw = 1;
+            if (ph < 1) ph = 1;
+            if (!g_dorcs.fbo || g_dorcs.fbo_w != w || g_dorcs.fbo_h != h) {
+                if (g_dorcs.fbo) rb_tex_delete(g_dorcs.fbo);
+                g_dorcs.fbo = rb_target_new(w, h, 1); g_dorcs.fbo_w = w; g_dorcs.fbo_h = h;
+            }
+            if (!g_dorcs.fbo) return 0;
+            rb_target(g_dorcs.fbo);
+            glr_draw_rect(r, v, 0, 0, pw, ph);
+            rb_target(target);
+            rb_viewport(0, 0, w, h);
+            rb_blit(g_dorcs.fbo, 0, 0, pw, ph, target, 0, 0, w, h, 0);   /* Blit's stretch of the pane over the window */
+        }
+        return 1;
+    }
+    if (g_dorcs.state == 3) {
+        /* UpdateRectTransitionByAxis in reverse, the screen to its centre point: the vertical edges in the first half,
+         * the horizontal ones in the second; the view drawn into the rectangle as a pane - the projection scaled by its
+         * width, clipped to its height (as the viewports' power-up, pow_window) */
+        glr_view vv = *v;
+        float t = g_dorcs.t / 0x2d4, fy, fx;
+        int px, py, pw, ph, sph;
+        if (t > 1) t = 1;
+        fy = t <= 0.5f ? 1.0f - t * 2.0f : 0.0f;
+        fx = t <= 0.5f ? 1.0f : 1.0f - (t - 0.5f) * 2.0f;
+        pw = (int)((float)w * fx + 0.5f); ph = (int)((float)h * fy + 0.5f);
+        if (pw < 1) pw = 1;
+        if (ph < 1) ph = 1;
+        sph = (int)((float)h * fx + 0.5f); if (sph < 1) sph = 1;
+        px = (w - pw) / 2; py = (h - sph) / 2;
+        vv.clip[0] = px; vv.clip[1] = (h - ph) / 2; vv.clip[2] = pw; vv.clip[3] = ph;
+        glr_draw_rect(r, &vv, px, py, pw, sph);
+        rb_viewport(0, 0, w, h);
+        return 1;
+    }
+    return 1;   /* 4 on: black */
+}
+
+/* word-wrapped text (DrawWrappedText) in the virtual rectangle from (x, y), w wide; '\n' breaks */
+static void dorcs_wrap(const char *s, float x, float y, float w, const float *col)
+{
+    char line[256];
+    float lh = hud_text_height(g_hud) + 1.0f;
+    while (*s) {
+        int n = 0, brk = -1;
+        while (s[n] && s[n] != '\n' && n < 255) {
+            char tmp[256];
+            memcpy(tmp, s, (size_t)n + 1); tmp[n + 1] = 0;
+            if (s[n] == ' ') brk = n;
+            if (hud_text_width(g_hud, tmp) > w && brk >= 0) break;
+            n++;
+        }
+        if (s[n] && s[n] != '\n' && brk >= 0) n = brk;
+        memcpy(line, s, (size_t)n); line[n] = 0;
+        hud_text(g_hud, x, y, line, col);
+        y += lh;
+        s += n;
+        if (*s == ' ' || *s == '\n') s++;
+    }
+}
+
+/* the overlay: the outline (state 3), the picture, the menu - in the HUD's pass, w x h the window */
+static void dorcs_draw(void)
+{
+    float L = hud_left_x(g_hud), VW = 640.0f - 2.0f * L;
+    if (g_dorcs.state == 3) {   /* OutlinePane(the rectangle, 10) */
+        float t = g_dorcs.t / 0x2d4, fy, fx, cx = 320.0f, cy = 240.0f, hw, hh;
+        if (t > 1) t = 1;
+        fy = t <= 0.5f ? 1.0f - t * 2.0f : 0.0f;
+        fx = t <= 0.5f ? 1.0f : 1.0f - (t - 0.5f) * 2.0f;
+        hw = VW * fx * 0.5f; hh = 240.0f * fy;
+        hud_line(g_hud, cx - hw, cy - hh, cx + hw, cy - hh, 1.0f, HP(10));
+        hud_line(g_hud, cx + hw, cy - hh, cx + hw, cy + hh, 1.0f, HP(10));
+        hud_line(g_hud, cx + hw, cy + hh, cx - hw, cy + hh, 1.0f, HP(10));
+        hud_line(g_hud, cx - hw, cy + hh, cx - hw, cy - hh, 1.0f, HP(10));
+    }
+    if (g_dorcs.state >= 4 && g_dorcs.gif_ok) {   /* the picture at its own size in the 640 x 480 screen's centre */
+        const hud_sprite *gs = &g_dorcs.gif[g_dorcs.gif_cur];
+        float k = 1.0f, tint[4];
+        if (g_dorcs.state == 4) k = g_dorcs.t / 0xb5;
+        else if (g_dorcs.state == 5) k = g_dorcs.t < 0x5a ? 1.0f - g_dorcs.t / 0x5a : (g_dorcs.t - 0x5a) / 0xb5;
+        if (k > 1) k = 1;
+        if (k < 0) k = 0;
+        tint[0] = tint[1] = tint[2] = k; tint[3] = 1;
+        hud_draw_rect_tex(g_hud, gs, 320.0f - (float)gs->w * 0.5f, 240.0f - (float)gs->h * 0.5f, (float)gs->w, (float)gs->h, tint);
+    }
+    if (g_dorcs.open && g_dorcs.txt_n == 30) {
+        /* menu 3: target (0x199a, 0x199a)-(0xe666, 0xe666) of the screen, 15 lines (pitch 1/17 of its height), the
+         * title half a pitch down, underlined; the items from two pitches down, numbers at 0.02 of the width; the exit
+         * item on the last line (flags 0x25 lack 8); text colour 16, the chosen item 1 - the picture's palette when it
+         * shows; a person's page: the text box (0, 0x2666)-(1, 1) of the target */
+        float rx = L + VW * 0.1f, ry = 48.0f, rw = VW * 0.8f, rh = 384.0f, pitch = rh / 17.0f, fh = hud_text_height(g_hud);
+        float lx = hud_text_width(g_hud, ".") + 2.0f * hud_text_width(g_hud, "0");
+        float c16[4] = {0, 0, 0, 1}, c1[4] = {0, 0, 0, 1};
+        const char *title = g_dorcs.page < 0 ? g_dorcs.txt[0] : g_dorcs.page == 0 ? g_dorcs.txt[1] : g_dorcs.txt[1 + g_dorcs.page];
+        int q, nitems = g_dorcs.page < 0 ? 15 : 1;
+        if (g_dorcs.gif_ok) {
+            const uint8_t *gp = g_dorcs.gpal[1];
+            for (q = 0; q < 3; q++) { c16[q] = gp[16 * 3 + q] / 255.0f; c1[q] = gp[1 * 3 + q] / 255.0f; }
+        } else { memcpy(c16, HP(16), sizeof c16); memcpy(c1, HP(1), sizeof c1); }
+        hud_text(g_hud, rx, ry + pitch * 0.5f, title, c16);
+        hud_line(g_hud, rx, ry + pitch * 0.5f + fh, rx + hud_text_width(g_hud, title), ry + pitch * 0.5f + fh, 1.0f, c1);
+        if (g_dorcs.page >= 0) dorcs_wrap(g_dorcs.txt[15 + g_dorcs.page], rx, ry + rh * (float)0x2666 / 65536.0f, rw, c16);
+        for (q = 0; q < nitems; q++) {
+            int exit = g_dorcs.page >= 0 || q == 14, line = exit ? 14 : q;
+            const float *c = (g_dorcs.page < 0 ? g_dorcs.sel == q : 1) ? c1 : c16;
+            char nb[8];
+            float y = ry + pitch * (float)(line + 2);
+            snprintf(nb, sizeof nb, "%d", exit ? 0 : q + 1);
+            hud_text(g_hud, rx + rw * (float)0x51f / 65536.0f, y, nb, c);
+            hud_text(g_hud, rx + rw * (float)0x51f / 65536.0f + lx, y, exit ? g_dorcs.txt[29] : g_dorcs.txt[1 + q], c);
+        }
+    }
+}
+
+/* the menu's keys (0x10065a70 / 0x10065df0: digits, Up / Down / Tab, Enter, Esc) - 1 if taken */
+static int dorcs_key(SDL_Keycode k, Uint16 mod)
+{
+    int prev = g_dorcs.sel;
+    if (!g_dorcs.open) return 0;
+    if (k == SDLK_ESCAPE) { if (g_dorcs.page >= 0) g_dorcs.page = -1; else g_dorcs.open = 0; return 1; }
+    if (g_dorcs.page >= 0) {   /* a person's page: its one item, the exit */
+        if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_0 || k == SDLK_KP_0) g_dorcs.page = -1;
+        return 1;
+    }
+    if (k >= SDLK_0 && k <= SDLK_9) {
+        int d = (int)(k - SDLK_0);
+        g_dorcs.sel = d == 0 ? 14 : d - 1;
+        if (d == 0) g_dorcs.open = 0; else g_dorcs.page = d - 1;
+    } else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (g_dorcs.sel == 14) g_dorcs.open = 0; else g_dorcs.page = g_dorcs.sel; }
+    else if (k == SDLK_UP || k == SDLK_DOWN || k == SDLK_TAB) {
+        int dir = k == SDLK_UP || (k == SDLK_TAB && (mod & SDL_KMOD_SHIFT)) ? -1 : 1;
+        g_dorcs.sel = (g_dorcs.sel + dir + 15) % 15;
+    }
+    if (g_sfx && g_dorcs.sel != prev) { float Lp[3], yaw; snd_listener(Lp, &yaw); sfx_play_at3(g_sfx, 0xdb, 0, 0, 0, yaw, 0); }   /* move sound 219 */
+    return 1;
+}
+
 /* the view distance: the planet record's VIEW chunk {i32 near, i32 far} (DOS MW2.EXE 0x4e741 -> camera +0x3c / +0x40,
  * 3Dfx 0x1003dfbc; YELLPLT1 64 / 50000, GREE 130000, JACK 250000 cm) - objects wholly beyond far are not drawn (0x3f500 /
  * 0x1002fba0), so from high up (the ejection camera) the terrain pieces go and the ground fill alone is left */
@@ -3735,6 +4121,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         combat_jet_fuel_max = g_edition == PORTCFG_ED_DOS ? 1820.0f : 1810.0f;   /* the full jet tank: DOS 0x71c (0x4ce84), 3Dfx 0x712 */
         combat_jet_refill_dos = g_edition == PORTCFG_ED_DOS;   /* DOS: whole ticks >> 2 a 30 fps frame (0x27c63) */
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
+        cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
         g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on; DOS: the integer throttle servo (0x49b80) */
@@ -5210,6 +5597,103 @@ static SDL_Window *sim_window(int w, int h, SDL_WindowFlags flags)
     return win;
 }
 
+/* The cheat codes (HandleCheatInput: Win95 MW2.DLL 0x1005b883, the 3Dfx DLL's 0x10036d80 and the Matrox one's - the
+ * 3D editions with "lemmy" and without "dorcs"; checked against the demech2 decompilation). In the simulation (single
+ * play), with Ctrl, Alt and Shift held
+ * (the key word's high byte 7, 0x1004b930) each key's character goes into a 15-byte buffer, shifted left one (0x10094920);
+ * then 0x1004b9f3 compares the buffer's END with each code - stored XOR 0x1a (0x1004b977) - in this order, the first that
+ * matches acts. The buffer is not cleared, so one code can be typed straight after another. Messages: 0x10003dc4(text, 1,
+ * ticks, priority) - 0x16a ticks at 0x32 unless noted. The switches +0 / +1 / +4 are the Combat Variables block
+ * (*DAT_1015457c, MW2DIF.CFG's bytes): changed for the mission, not saved */
+static char g_cheat_buf[16];
+static float g_time_expand = 1.0f, g_time_compress = 1.0f;   /* "zmak" (DAT_10154474: the frame's ticks >> 2) / CRACK_MODE (DAT_10154470: << 3) */
+static int g_cheat_tc_key, g_cheat_front;   /* "meepmeep" (DAT_101596c4): CRACK_MODE works; "front" (DAT_100f3040): the rear view looks forward */
+static const unsigned char CHEAT_CODES[][13] = {   /* as stored in MW2.DLL (0x101596d8..): each character XOR 0x1a */
+    {0x78,0x76,0x75,0x68,0x78}, {0x76,0x7f,0x77,0x77,0x63}, {0x79,0x73,0x7b}, {0x79,0x75,0x76,0x7e,0x77,0x73,0x69,0x7f,0x68}, {0x7e,0x7f,0x73},
+    {0x7e,0x75,0x68,0x79,0x69}, {0x7f,0x74,0x75,0x76,0x7b,0x7d,0x7b,0x63}, {0x7c,0x76,0x63,0x7d,0x73,0x68,0x76},
+    {0x7c,0x68,0x75,0x74,0x6e}, {0x7c,0x6f,0x79,0x71}, {0x7d,0x7b,0x74,0x71,0x7f,0x77},
+    {0x72,0x7b,0x74,0x7d,0x7b,0x68,0x75,0x6f,0x74,0x7e}, {0x73,0x79,0x7b,0x74,0x6e,0x72,0x7b,0x79,0x71,0x73,0x6e},
+    {0x73,0x7e,0x71,0x7c,0x7b}, {0x76,0x7b,0x73,0x68,0x7e,0x75}, {0x77,0x7f,0x7f,0x6a,0x77,0x7f,0x7f,0x6a},
+    {0x77,0x73,0x79,0x72,0x7f,0x76,0x73,0x74}, {0x77,0x73,0x7d,0x72,0x6e,0x63,0x77,0x75,0x6f,0x69,0x7f},
+    {0x69,0x72,0x73,0x6e}, {0x6e,0x73,0x74,0x71,0x7f,0x68,0x78,0x7f,0x76,0x76}, {0x62,0x68,0x7b,0x63}, {0x60,0x77,0x7b,0x71}};
+enum { CH_BLORB, CH_LEMMY, CH_CIA, CH_COLDMISER, CH_DEI, CH_DORCS, CH_ENOLAGAY, CH_FLYGIRL, CH_FRONT, CH_FUCK, CH_GANKEM, CH_HANGAROUND,
+       CH_ICANTHACKIT, CH_IDKFA, CH_LAIRDO, CH_MEEPMEEP, CH_MICHELIN, CH_MIGHTYMOUSE, CH_SHIT, CH_TINKERBELL, CH_XRAY, CH_ZMAK, CH_N };
+static int cheat_match(int c)   /* 0x1004b977: the buffer's tail against the code */
+{
+    size_t n = 0, b = sizeof g_cheat_buf - 1, i;
+    while (n < sizeof CHEAT_CODES[c] && CHEAT_CODES[c][n]) n++;
+    for (i = 0; i < n; i++) if ((char)(CHEAT_CODES[c][n - 1 - i] ^ 0x1a) != g_cheat_buf[b - 1 - i]) return 0;
+    return 1;
+}
+static void cheat_reset(void)
+{
+    memset(g_cheat_buf, 0, sizeof g_cheat_buf);
+    g_time_expand = g_time_compress = 1.0f;
+    g_cheat_tc_key = g_cheat_front = g_cheat_dbg = 0;
+    dorcs_end();
+}
+static void cheat_msg(const char *m) { hud_message_ex(m, 0x16a, 0x32); }
+static void cheat_key(char ch, SDL_Window *win)
+{
+    combat_unit *pu = &g_sim.player_unit;
+    int c;
+    memmove(g_cheat_buf, g_cheat_buf + 1, sizeof g_cheat_buf - 2);   /* 0x1004b958: 14 bytes left, the new one at +0xe */
+    g_cheat_buf[sizeof g_cheat_buf - 2] = ch;
+    for (c = 0; c < CH_N && !cheat_match(c); c++) {}
+    switch (c) {
+    case CH_BLORB: pu->invulnerable = !pu->invulnerable; cheat_msg(pu->invulnerable ? "Invulnerability ON" : "Invulnerability OFF"); break;
+    case CH_LEMMY:   /* the 3D editions' own code (MW2_ACCEL builds; the Win95 1.1 DLL has "dorcs" instead): all at once */
+        pu->invulnerable = 1; pu->unlimited_ammo = 1; pu->no_heat = 1; pu->grant_jets = 1; pu->infinite_jets = 1;
+        cheat_msg("Invulnerable, Lot's o' Ammo, No Heat, & Jets");
+        break;
+    case CH_CIA: pu->unlimited_ammo = !pu->unlimited_ammo; cheat_msg(pu->unlimited_ammo ? "Unlimited Ammo ON" : "Unlimited Ammo OFF"); break;
+    case CH_COLDMISER: pu->no_heat = !pu->no_heat; cheat_msg(pu->no_heat ? "Heat tracking OFF" : "Heat tracking ON"); break;   /* +4 */
+    case CH_DEI: cheat_msg("F E I F"); break;   /* only the message */
+    case CH_DORCS:   /* ShowDorcs (0x100745b2): the programmers' page (dorcs_start) */
+        dorcs_start();
+        cheat_msg("You asked for it!");
+        break;
+    case CH_ENOLAGAY: case CH_GANKEM:
+        /* the target, if a unit (0x1002b14c): "gankem" destroys it (KillMech, the kill the player's); "enolagay" sets off
+         * the nuke at it (StartNuke, msim) - no message for either */
+        if (g_tgt_sel >= 0 && g_tgt_sel < g_sim.actor_count) { g_sim.cheat_kill = g_tgt_sel + 1; g_sim.cheat_nuke = c == CH_ENOLAGAY; }
+        break;
+    case CH_FLYGIRL: pu->grant_jets = 1; cheat_msg("Jumpjets"); break;   /* the steering's grant flag: a mech without jets gets them (combat_jets) */
+    case CH_FRONT: g_cheat_front = !g_cheat_front; cheat_msg(g_cheat_front ? "forward view instead of rear ON" : "forward view instead of rear OFF"); break;
+    case CH_FUCK: case CH_SHIT: cheat_msg("Freebirth vulgarity will not be tolerated!"); break;
+    case CH_HANGAROUND:
+        g_sim.hang_around = !g_sim.hang_around;
+        g_cheat_dbg = g_sim.hang_around;
+        hud_message_ex(g_sim.hang_around ? "That's better........" : "Now how do I win!", 0xb5, 0x32);
+        break;
+    case CH_ICANTHACKIT: g_sim.logic.force_win = 1; break;   /* DAT_10154a60: every star counts as won - no message */
+    case CH_IDKFA:   /* the message (0x16a ticks at 0x50), then action 0x3b: EJECT */
+        hud_message_ex("This ain't DOOM, Bub.", 0x16a, 0x50);
+        if (!pu->destroyed) player_eject(1);
+        break;
+    case CH_LAIRDO:   /* orders to all points reach every unit on the player's side (msim_command); the message both ways */
+        g_sim.lairdo = !g_sim.lairdo;
+        hud_message_ex("ATTENTION ENEMIES: Don't mess with the blimp.", 0xb5, 0x32);
+        break;
+    case CH_MEEPMEEP:
+        g_cheat_tc_key = !g_cheat_tc_key;
+        if (!g_cheat_tc_key) g_time_compress = 1.0f;
+        hud_message_ex(g_cheat_tc_key ? "Time Compression key enabled" : "Time Compression key disabled", 0xb5, 0x32);
+        break;
+    case CH_MICHELIN: cheat_msg("bounding spheres"); break;   /* the debug drawing of the collision spheres and part frames (DrawBoundingSpheres): not in the port */
+    case CH_MIGHTYMOUSE: pu->infinite_jets = !pu->infinite_jets; cheat_msg(pu->infinite_jets ? "Infinite Jumpjet juice ON" : "Infinite Jumpjet juice OFF"); break;
+    case CH_TINKERBELL:
+        /* camera mode 2 (0x10040c11(2)), the free eye. The port's free camera stands in; typing it again flies back */
+        g_pilot = !g_pilot;
+        SDL_SetWindowRelativeMouseMode(win, g_pilot ? true : false);
+        if (!g_pilot) cheat_msg("Free-eye mode ON");
+        break;
+    case CH_XRAY: g_vision = 2; cheat_msg("X-Ray vision enabled"); break;   /* DAT_101575a4 = 2: the image enhancement view */
+    case CH_ZMAK: g_time_expand = g_time_expand < 1.0f ? 1.0f : 0.25f; cheat_msg(g_time_expand < 1.0f ? "Time expansion enabled" : "Time expansion disabled"); break;
+    default: break;
+    }
+}
+
 int main(int argc, char **argv)
 {
     char err[256], title[256];
@@ -5597,6 +6081,12 @@ int main(int argc, char **argv)
                     }
                     continue;
                 }
+                if (g_world && g_sim_ok && g_dorcs.open && dorcs_key(k, e.key.mod)) continue;   /* the dorcs menu takes its keys (flags 1) */
+                if (g_world && g_sim_ok && (e.key.mod & SDL_KMOD_CTRL) && (e.key.mod & SDL_KMOD_ALT) && (e.key.mod & SDL_KMOD_SHIFT)) {
+                    /* Ctrl + Alt + Shift: the key's character goes to the cheat buffer (0x1004b930 returns 1 - taken) */
+                    if (k > 0 && k < 128 && k != ' ') cheat_key((char)k, win);
+                    continue;
+                }
                 if (g_world && g_sim_ok && g_cc_page >= 0 && (k == SDLK_ESCAPE || (k >= SDLK_0 && k <= SDLK_9))) {
                     /* 0x10065df0: a digit picks the row with that number (0 the Esc row); Esc / the Esc row go back a page
                      * (0x10066330), from the first page close the menu */
@@ -5779,6 +6269,11 @@ int main(int argc, char **argv)
                         else g_sd_at = g_sim.now + 0x16a * 1000 / 182;            /* state 7: 0x16a ticks */
                     }
                 }
+                else if (g_world && g_sim_ok && A("CRACK_MODE") && g_cheat_tc_key) {
+                    /* action 0x92 (Win95 0x1004d21c): only after the cheat "meepmeep"; the frame's ticks x 8 (0x1000c337) */
+                    g_time_compress = g_time_compress > 1.0f ? 1.0f : 8.0f;
+                    hud_message_ex(g_time_compress > 1.0f ? "Time compression enabled" : "Time compression disabled", 0xb50, 0x32);
+                }
                 else if (g_world && g_sim_ok && A("EJECT")) player_eject(1);   /* 0x3b: 0x100174f0(c, 1) */
                 else if (g_world && g_sim_ok && A("TOGGLE_AUTOEJECT")) {   /* 0x3c: only with the mech up (+0x15 & 0x20) */
                     const combat_unit *pu2 = &g_sim.player_unit;
@@ -5838,7 +6333,7 @@ int main(int argc, char **argv)
                     g_group_fire = !g_group_fire;
                     hud_message_v2(g_group_fire ? "Group fire engaged." : "Chain fire engaged.", g_group_fire ? 19 : 18, 80);
                 }
-                else if (g_world && A("NEXT_WEAPON_GROUP")) g_cur_group = (g_cur_group + 1) % 3;
+                else if (g_world && g_sim_ok && A("NEXT_WEAPON_GROUP")) group_next();
                 else if (g_world && A("COCKPIT_VIEW") && !(g_sim_ok && g_sim.player_unit.destroyed)) {   /* action 9: not once dead (+0x14 & 2) */
                     /* 0x10037a96 (action 9): in the cockpit (mode 0) with the satellite map off -> 0x1002df20(1), mode 1: the
                      * external orbit (0x1002e280 enters with message 0x11 "External camera engaged" (66) and zoom 1.0);
@@ -5908,6 +6403,7 @@ int main(int argc, char **argv)
                 }
                 dt *= speed;
             }
+            if (g_world && g_sim_ok) dt *= g_time_expand * g_time_compress;   /* the cheats' time expansion / compression (0x1000c337 / 0x1000c36f) */
             if (g_auto_on && getenv("MW2_TEST_HITCH")) {   /* TEST ONLY: "every_s,ms[,jitter_ms]" - one long frame of ms every
                                                             * every_s seconds, other frames 1/N s +- a random jitter */
                 static float hacc;
@@ -6663,7 +7159,7 @@ int main(int argc, char **argv)
                                 case 0: if (g_sim.player_unit.weapon_count > 0) g_sel_weapon = weapon_next(&g_sim.player_unit, g_sel_weapon, 0, 0);   /* panel order (0x10044030) */
                                         if (g_sfx) sfx_play(g_sfx, 0xfd, SFX_VOL(0x32), 0.0f);   /* engine 0x1001adf0: the selector click (0x1001ae5a / 0x1001ae96: volume 0x32, centred) */
                                         break;
-                                case 1: g_cur_group = (g_cur_group + 1) % 3; break;
+                                case 1: group_next(); break;   /* weapon_cycle_group: as NEXT_WEAPON_GROUP */
                                 case 2: g_group_fire = !g_group_fire; hud_message_v2(g_group_fire ? "Group fire engaged." : "Chain fire engaged.", g_group_fire ? 19 : 18, 80); break;   /* as \ (0x100437d4) */
                                 case 3: case 4: {
                                     int i2, qq, step = q == 3 ? 1 : n2 - 1;
@@ -6699,7 +7195,9 @@ int main(int argc, char **argv)
                      * nothing fires. On the release the selection moves to the next weapon of its fire group (0x10043f80;
                      * stepped in the panel's order, row by row) */
                     if (H("weapon_fire") || (!g_im_mouse && (g_im_dev.mouse_buttons & SDL_BUTTON_MASK(SDL_BUTTON_LEFT)))) {
-                        if (g_group_fire) mask |= g_groups[g_cur_group] ? g_groups[g_cur_group] : 0xFFFFFFFFu;   /* group: all of it */
+                        /* group fire (Win95 0x1005dfc5): the trigger becomes FIRE_WEAPON_GROUP - the SELECTED weapon's group
+                         * (0x1005f3c8 steps through it from the selection) */
+                        if (g_group_fire) { if (sel_group() >= 0) mask |= g_groups[sel_group()]; }
                         else if (g_sel_weapon >= 0 && g_sel_weapon < g_sim.player_unit.weapon_count) {
                             const combat_unit *pu2 = &g_sim.player_unit;
                             const combat_weapon *cw2 = &pu2->weapons[g_sel_weapon];
@@ -6722,10 +7220,14 @@ int main(int argc, char **argv)
                         }
                         g_fire_was = 0;
                     }
-                    if (g_im_ok && im_action_held(&g_im, "FIRE_WEAPON_GROUP", ks)) mask |= g_groups[g_cur_group];
-                    if (H("weapon_fire_group_1")) mask |= g_groups[0];
-                    if (H("weapon_fire_group_2")) mask |= g_groups[1];
-                    if (H("weapon_fire_group_3")) mask |= g_groups[2];
+                    if (g_im_ok && im_action_held(&g_im, "FIRE_WEAPON_GROUP", ks) && sel_group() >= 0) mask |= g_groups[sel_group()];   /* +0x27 -> 0x1005f3c8 */
+                    {   /* weapon_fire_group_1..3 (+0x28..+0x2a): a weapon of that group is selected (0x1005eec3), then the
+                         * group fires; an empty group fires nothing */
+                        static const char *const FG[3] = {"weapon_fire_group_1", "weapon_fire_group_2", "weapon_fire_group_3"};
+                        int fg;
+                        for (fg = 0; fg < 3; fg++) if (H(FG[fg]) && group_select(fg)) mask |= g_groups[fg];
+                    }
+                    g_cur_group = sel_group() < 0 ? 0 : sel_group();   /* (the state dump's "curgrp") */
                     g_sim.player_fire_mask = all ? 0 : mask;
                     g_sim.player_attacks = (all || mask) != 0;   /* the trigger fires with or without a target (along the aim line) */
                     if (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) { g_sim.player_fire_mask = 0; g_sim.player_attacks = 0; }   /* starting up */
@@ -7157,6 +7659,7 @@ int main(int argc, char **argv)
         SDL_GetWindowSizeInPixels(win, &w, &h);   /* real pixels, incl. HiDPI */
         rb_frame(w, h);   /* the window's picture this frame (its size; drawn into from here on) */
         rb_target(0);
+        g_frame_tgt = 0;
         g_out_w = w; g_out_h = h;
         g_win_lines = h; g_win_cols = w;
         if (g_render_w && g_world) {
@@ -7164,7 +7667,7 @@ int main(int argc, char **argv)
              * art and layout are made for - then, for 320 x 200, point-sampled down to 320 x 200; the result is shown
              * scaled up in whole blocks to fill 4:3 (non-square pixels at 320 x 200, as a VGA monitor showed them) */
             int dw = g_render_w == 320 ? 640 : g_render_w, dh = g_render_w == 320 ? 480 : g_render_h;
-            if (lowres_target(dw, dh) == 0) { w = dw; h = dh; rb_target(g_lr_fbo[0]); }
+            if (lowres_target(dw, dh) == 0) { w = dw; h = dh; rb_target(g_lr_fbo[0]); g_frame_tgt = g_lr_fbo[0]; }
         }
         music_poll();
         {   /* TEST ONLY: MW2_TEST_VIDEO=t:look[,t:look] - the GRAPHICS menu's choice at t autopilot seconds; look = a
@@ -7559,7 +8062,8 @@ int main(int argc, char **argv)
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
         if (g_world) scene_anim(r);
         perf_mark(0);
-        glr_draw(r, &v, w, h);
+        dorcs_update();
+        if (!dorcs_world(r, &v, w, h, g_frame_tgt)) glr_draw(r, &v, w, h);
         perf_mark(1);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
@@ -7623,7 +8127,7 @@ int main(int argc, char **argv)
                 vv.look_yaw = atan2f(ms->vx, ms->vz) * 180.0f / 3.14159265f;
                 vv.look_pitch = 0.0f;
                 vv.eye[0] = ms->x; vv.eye[1] = ms->y; vv.eye[2] = ms->z;
-            } else if (g_vport == 1) vv.look_yaw = v.look_yaw + 180.0f; else vv.look_pitch = -89.0f;   /* rear / straight down */
+            } else if (g_vport == 1) vv.look_yaw = v.look_yaw + (g_cheat_front ? 0.0f : 180.0f); else vv.look_pitch = -89.0f;   /* rear / straight down */
             vv.vfov = 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / 2.0f) * 180.0f / 3.14159265f;   /* all three at zoom 2.0 (0x1001bc50) */
             if (g_pit_first >= 0 && g_frame_layer.parts && g_pit_first < g_frame_layer.part_count) {
                 mech3d nopit = g_frame_layer;
@@ -7718,7 +8222,7 @@ int main(int argc, char **argv)
              * by a fade (only reloaded with the same slot when the fade back ends, see pal3_upkeep): no HUD flash */
             hud_set_flash(g_hud, 1.0f, 0.0f, 0.0f, g_tex_kind == 3 ? k : 0.0f);
         }
-        if (g_hud && g_world && g_pl_ok && g_pilot && !g_hud_off && (HUD_VIEW || (getenv("MW2_HUD") && g_camode != 4))) {   /* F11: TOGGLE_HUD */
+        if (g_hud && g_world && g_pl_ok && g_pilot && !g_hud_off && !dorcs_hides_hud() && (HUD_VIEW || (getenv("MW2_HUD") && g_camode != 4))) {   /* F11: TOGGLE_HUD */
             /* The cockpit HUD, laid out as the original (PowerVR edition screenshots): layout values are
              * 320x200 units mapped x2 across and x2.4 down (480 / 200), as the engine scales them (0x10005db0). */
 #define LX(x) ((float)(x) * 2.0f)
@@ -8785,7 +9289,7 @@ int main(int argc, char **argv)
 #undef LX
 #undef LY
             hud_end(g_hud);
-        } else if (g_hud && g_world && ((g_paused && g_hs_paused.tex) || (MSG_ONLY_VIEW && g_msg_t > 0) || (g_cc_page >= 0 && g_sim_ok))) {   /* HUD hidden / external view: PAUSED all the same */
+        } else if (g_hud && g_world && !dorcs_hides_hud() && ((g_paused && g_hs_paused.tex) || (MSG_ONLY_VIEW && g_msg_t > 0) || (g_cc_page >= 0 && g_sim_ok))) {   /* HUD hidden / external view: PAUSED all the same */
             const float *green2 = HP(0xe);
             HUD_BEGIN(g_hud, w, h);
             if (g_cc_page >= 0 && g_sim_ok) cc_draw();   /* the menus are not part of the HUD (SYSTEMS STATUS: HUD Off) */
@@ -8800,6 +9304,14 @@ int main(int argc, char **argv)
                     msg_text(k, w, h, green2);
                 }
             }
+            hud_end(g_hud);
+        }
+        if (g_hud && g_world && dorcs_hides_hud()) {   /* the "dorcs" sequence's outline, pictures and menu (the HUD off) */
+            HUD_BEGIN(g_hud, w, h);
+            if (g_paused && g_hs_paused.tex)
+                hud_draw(g_hud, &g_hs_paused, 320.0f - hud_px_x(g_hud, (float)g_hs_paused.w) * 0.5f,
+                         144.0f - hud_px_y(g_hud, (float)g_hs_paused.h) * 0.5f, NULL);
+            dorcs_draw();
             hud_end(g_hud);
         }
         if (g_hud) hud_set_flash(g_hud, 0, 0, 0, 0);

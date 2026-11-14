@@ -1,5 +1,94 @@
 # Changelog
 
+## v1.1.21 (2026-11-14)
+
+- **Steam Deck: launching a mission could drop back to the Steam UI.** Reported on GitHub; "Resume Game" brought the
+  mission back. The shell and the simulation are two processes. The shell hid its window before the simulation opened
+  its own, and in that moment the game had no visible window. Under gamescope (the Deck's game mode) that can count as
+  the game closing. It happened only some of the time because it was a race. Under gamescope (GAMESCOPE_WAYLAND_DISPLAY
+  set, or XDG_CURRENT_DESKTOP=gamescope) the shell's window now stays up, cleared to black, under the simulation's
+  fullscreen window, and it is raised again when the mission ends. MW2_KEEP_SHELL_WINDOW=1 or 0 forces either way on
+  any system. Elsewhere nothing changes.
+
+## v1.1.20 (2026-11-14)
+
+Checked against the demech2 decompilation of the Windows 95 1.1 and 3Dfx DLLs. It was used as a reference only; none
+of its code is in the port.
+
+- **Cheat codes corrected.** Three were wrong in v1.1.17:
+  - **`flygirl`** gives a mech with no jump jets three, with a full tank and three times gravity's thrust. Its flag is
+    read through the steering record, which a search for the address missed.
+  - **`enolagay`** sets off a nuke at the target. The NUKE effect plays, and a blast grows 200 cm a tick out to 4 km
+    over twice the effect's life. Every unit inside takes ticks / 16 on each location, the player too.
+  - **`lairdo`** widens orders to all points to every unit on the player's side.
+- **`gankem`** now counts the kill for the player.
+- **`lemmy` added.** It is the 3D editions' code: invulnerability, unlimited ammo, no heat, jets and endless jet fuel at
+  once.
+- **`dorcs` is the programmers' easter egg.** It was not the VFX1 headset set-up. The full sequence plays:
+  - the view breaks into blocks and back;
+  - it collapses like an old TV switching off;
+  - the two pictures fade in from the `VFX` folder;
+  - the "MW2 Programmer Dorcs Page" menu of the 13 programmers opens, each with a page of notes.
+
+  The pictures come from the BattlePack or Mercenaries disc. The texts are read from a Windows 95 `MW2.DLL` in the game
+  folder (README, FOLDER_SETUP).
+- **Fires heat mechs.** This was missing until now. With heat tracking on, a mech near a fire or smoke card gains heat,
+  more the closer it is (HeatMechsNearFires, Win95 0x1006c362 / 3Dfx 0x10046e70). YELLSCN1's burning wreck adds about
+  5 heat in 6 s standing in it.
+- **Area damage distance.** The 3D editions measure it with the octagonal estimate, as the DOS edition does
+  (ApproximateVectorLength, 3Dfx 0x10030330). The port had used the exact distance outside the DOS look.
+- **High frame rate bugs.** ReMech2 lists missile self-hits in zero-length frames, jet refill and the overheat random
+  table. The port was checked and is not affected by any of them (ASSUMPTIONS §30).
+
+## v1.1.19 (2026-11-13)
+
+- **Wolf mission 2 (Flame Tongue): the targets of opportunity were missing near Nav Gamma.** The camp there, a tent, a
+  radar, trucks and a 'Mech loader, is the briefing's tertiary objective. The port stood it at the map's origin, far
+  outside the area you play in. The camp is in ORANARE4, which ORANMA03 includes with no BLKX placement of its own. The
+  engine then places the camp where its includer is: ORANWLD1 puts ORANMA03 at (320000, -75000). The port only placed a
+  record that had its own BLKX. Now an included record without one takes its includer's placement. Across every
+  mission and every edition's archive, this is the only record affected.
+
+## v1.1.18 (2026-11-13)
+
+- **Group fire fired the wrong weapons.** Reported on GitHub: with group fire on, the trigger did not fire the weapons
+  you expected, and missiles fired without their group being chosen. The port kept its own "current group". It started
+  at group 1 and changed only with NEXT_WEAPON_GROUP, so the trigger fired group 1 whichever weapon was selected. Group 1
+  is where every weapon starts, so moving lasers to group 2 left the missiles firing.
+- **The original has no separate current group** (Win95 MW2.DLL 0x1005dec0 / 0x1005f3c8). In group fire the trigger
+  becomes FIRE_WEAPON_GROUP and fires the selected weapon's group. The port now does the same:
+  - **Trigger with group fire on, and FIRE_WEAPON_GROUP (;):** fire the group the selected (boxed) weapon is in.
+  - **weapon_fire_group_1..3 (NumLock, keypad /, keypad \*):** select a weapon in that group, keeping the selection if
+    it is already there, then fire the group (0x1005eec3). An empty group fires nothing. The port used to fire
+    everything when the current group was empty.
+  - **NEXT_WEAPON_GROUP (') and weapon_cycle_group:** select the first weapon of the next group that has one
+    (0x1005ed6b).
+
+## v1.1.17 (2026-11-12)
+
+- **The Windows 95 edition's cheat codes.** MW2.DLL keeps 21 codes, stored XOR 0x1a. In a mission, with Ctrl, Alt and
+  Shift held, each key goes into a 15-character buffer, and the end of the buffer is compared with every code in turn
+  (0x1004b930 / 0x1004b977 / 0x1004b9f3). The port does the same, with the original's messages. The codes and what they
+  do are listed under "Cheat codes" in the README.
+  - `blorb`, `cia` and `coldmiser` toggle the Combat Variables switches: invulnerability, unlimited ammo and heat
+    tracking. They change the mission only. MW2DIF.CFG is not written.
+  - `mightymouse`: jetting burns no fuel (0x10026f30).
+  - `zmak`: the frame's time is divided by 4.
+  - `meepmeep`: unlocks CRACK_MODE (Ctrl+Alt+F, action 0x92), which multiplies the frame's time by 8.
+  - `gankem`: destroys the target.
+  - `enolagay`: destroys the target with a blast. The port uses explosion 7 for the blast; the original's own effect
+    (0x100620f2) is INFERRED.
+  - `icanthackit`: every star succeeds.
+  - `hangaround`: a decided mission does not end (0x1000ffa9), and the debug keys work.
+  - `idkfa`: shows its message, then ejects (action 0x3b).
+  - `xray`: the image enhancement view.
+  - `front`: the rear view looks forward.
+  - `tinkerbell`: free-eye mode. The port's free camera stands in for it.
+  - `flygirl`, `dei`, `dorcs`, `lairdo` and `michelin` only show their messages. In MW2.DLL, `flygirl`'s flag is never
+    read, `dorcs` starts the VFX1 headset set-up, `michelin` draws the debug collision spheres, and `lairdo` changes a
+    unit search for the blimp.
+  - Two rude words get "Freebirth vulgarity will not be tolerated!".
+
 ## v1.1.16 (2026-11-12)
 
 - **Menu text over the in-game videos.** A screen's text queued before a video started was drawn over it, for example

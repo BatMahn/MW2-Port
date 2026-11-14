@@ -1396,6 +1396,37 @@ static int load_shp_pal(const char *name, shp_frame *fr, uint8_t pal[256][3])
     free(d);
     return 0;
 }
+/* The shell's window while the simulation (a second process) runs. Normally hidden, and shown again when it returns.
+ * Under gamescope (the Steam Deck's game mode, and gamescope sessions elsewhere: GAMESCOPE_WAYLAND_DISPLAY set, or
+ * XDG_CURRENT_DESKTOP=gamescope) a game with no visible window - the moment between the shell hiding its window and the
+ * simulation opening its own - can be taken as closed: Steam's UI comes up, and "Resume Game" brings the simulation
+ * back (GitHub report, "only some times": the race). There the window stays up, cleared to black, under the
+ * simulation's fullscreen window. MW2_KEEP_SHELL_WINDOW=1 / 0 forces either way */
+static int shell_keep_window(void)
+{
+    const char *e = getenv("MW2_KEEP_SHELL_WINDOW"), *d = getenv("XDG_CURRENT_DESKTOP");
+    if (e) return atoi(e) != 0;
+    return getenv("GAMESCOPE_WAYLAND_DISPLAY") != NULL || (d && strstr(d, "gamescope") != NULL);
+}
+static void shell_hide_for_sim(void)
+{
+    if (!g_win) return;
+#ifndef MW2_CLASSIC_MAC   /* (no gamescope there) */
+    if (shell_keep_window() && g_rd) {
+        SDL_SetRenderDrawColor(g_rd, 0, 0, 0, 255);
+        SDL_RenderClear(g_rd);
+        SDL_RenderPresent(g_rd);
+        return;
+    }
+#endif
+    SDL_HideWindow(g_win);
+}
+static void shell_show_after_sim(void)
+{
+    if (!g_win) return;
+    if (!shell_keep_window()) SDL_ShowWindow(g_win);
+    SDL_RaiseWindow(g_win);
+}
 static void loading_screen(int clan)
 {
     char brf[16], sups[16] = "";
@@ -1505,14 +1536,14 @@ static int launch_ia(void)
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
-    if (g_win) SDL_HideWindow(g_win);
+    shell_hide_for_sim();
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
     remove(path);   /* a stale result must not be mistaken for this mission's */
     loading_screen(g_load_clan);
     rc = system(line);
     read_results(save);
     sim_returned(rc);
-    if (g_win) { SDL_ShowWindow(g_win); SDL_RaiseWindow(g_win); }
+    shell_show_after_sim();
     printf("launch: mission returned %d\n", rc);
     return 0;
 }
@@ -3691,14 +3722,14 @@ static int launch_campaign_m(int clan, int reg, int m)
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
-    if (g_win) SDL_HideWindow(g_win);
+    shell_hide_for_sim();
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
     remove(path);
     loading_screen(g_load_clan);
     rc = system(line);
     read_results(save);
     sim_returned(rc);
-    if (g_win) { SDL_ShowWindow(g_win); SDL_RaiseWindow(g_win); }
+    shell_show_after_sim();
     (void)b; (void)f;   /* the debriefing (screen 3) scores the mission and updates the pilot */
     return 0;
 }
@@ -4816,12 +4847,12 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
-    if (g_win) SDL_HideWindow(g_win);
+    shell_hide_for_sim();
     loading_screen(g_load_clan);
     rc = system(line);
     read_results(save);
     sim_returned(rc);
-    if (g_win) { SDL_ShowWindow(g_win); SDL_RaiseWindow(g_win); }
+    shell_show_after_sim();
     return 0;
 }
 /* an overlay clip's own sound (e.g. the training hall's panel switching on, AWOTRNWN: 3 s at 22 kHz): decoded once

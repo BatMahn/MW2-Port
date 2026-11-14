@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-12, v1.1.16)
+## Status (2026-11-14, v1.1.21)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
@@ -30,6 +30,8 @@ almost no testing on real hardware; see "The classic Mac build (ALPHA)".
   follows the original ULTRA.MDI driver).
 - **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
   every view control as in the original.
+- **Cheat codes (from v1.1.17):** the Windows 95 edition's codes, typed in a mission with Ctrl, Alt and Shift held
+  (see "Cheat codes" under "Playing").
 
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
@@ -377,6 +379,40 @@ and Flee to Windows (leaves the game). Digits pick an item, arrows / Space chang
 backs out. Ctrl+Q still aborts the mission directly. The DOS renderer keeps its own archive: choose it in the shell
 (in a DOS mission Renderer and Textures stay as they are).
 The MW2_* environment variables remain for development and tests only.
+
+### Cheat codes
+The Windows 95 edition and the 3D editions have cheat codes (the DOS edition has none); the port takes them in every
+look. In a mission, hold **Ctrl + Alt + Shift** and type the code in lower case. They last for that mission.
+
+| Code | Effect |
+|---|---|
+| `blorb` | Invulnerability on / off |
+| `cia` | Unlimited ammo on / off |
+| `coldmiser` | Heat tracking on / off (off: no heat builds up) |
+| `mightymouse` | Infinite jump jet fuel on / off |
+| `flygirl` | A mech without jump jets gets three, with a full tank |
+| `lemmy` | All of the above at once (the 3D editions' code) |
+| `gankem` | Destroys the targeted unit (the kill is yours) |
+| `enolagay` | A nuke at the targeted unit: a blast that grows out to 4 km over a minute and wrecks everything in it - you included, unless invulnerable |
+| `icanthackit` | Every objective counts as done: the mission is won |
+| `hangaround` | A won or lost mission does not end (leave with Ctrl+Q); the debug keys work too |
+| `zmak` | Time expansion (a quarter speed) on / off |
+| `meepmeep` | Enables Ctrl+Alt+F (CRACK_MODE): time compression, 8x speed, on / off |
+| `xray` | Image enhancement (wireframe) view |
+| `tinkerbell` | Free-eye camera (the port's free camera stands in); type it again to fly back |
+| `front` | The rear view (F7) looks forward instead |
+| `lairdo` | Orders to all your lancemates reach every unit on your side |
+| `idkfa` | "This ain't DOOM, Bub." - and you eject |
+| `dorcs` | The programmers' easter egg (below) |
+| `dei`, `michelin`, two rude words | Messages only (`michelin` draws the collision spheres in the original, a debug view the port lacks) |
+
+**dorcs** - the "MW2 Programmer Dorcs Page". After about five seconds the view breaks up into blocks and back, collapses
+like an old TV switching off, then two pictures show - a "MechWarrior 2 Mercenaries - Production Team" card and the team
+photo - followed by a menu of the programmers, each with a page of notes. The game keeps running underneath. The
+pictures are not on the Windows 95 MW2 disc: copy the `VFX` folder (`VFXJK.BIN`, `VFXHD.BIN`) from the **BattlePack**
+or **Mercenaries** disc into your game folder. The menu's texts are read from a Windows 95 edition `MW2.DLL` (the
+Windows 95 disc's root, or the BattlePack's `MW2` folder) copied into the game folder; without one the sequence plays
+without its menu.
 
 ## Customising controls
 

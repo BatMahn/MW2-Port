@@ -1059,6 +1059,32 @@ confirmed in MW2's own code (or plain robustness fixes) were taken. Rejected lea
 | Menu music device (supersedes "Menu music device") | menu_music=auto (default): the first present of the MT-32 (its ROM files in mt32/), the Roland SC-55 (a complete ROM set in sc55/, Nuked SC-55; not in the legacy build), the Gravis patches (ultrasnd/); menu_music=mt32\|sc55\|gus picks one if its files are there, else auto's choice. Combat Variables: DIFFICULTY row's right part (x 495+) cycles AUTO and the present devices, saved to menu_music=, applied on leaving the screen (song stopped, device reopened, the playing song restarted in the new device's set) | user choice (Mike, 2026-11-03); tests test_sc55, shell_sc55_menu_music, shell_menu_music_setting |
 | SC-55 music (MPU401.MDI) | the General MIDI set: entry = number + 32 - 1 (entries 66-72, as ULTRA.MDI; no SysEx in them); XMI played as in mt32mid (120 Hz, note durations, AIL loop controllers 116/117), CC121 + CC123 on all channels at each song start; unit boots 1000 ms (emulated), GS reset F0 41 10 42 12 40 00 7F 00 41 F7, 250 ms before the first song - ASSUMED (MPU401.MDI sends only 0xFF / 0x3F; the Miles library's start-up messages not traced; boot time not measured, no ROMs); 66207 / 64000 Hz resampled by SDL_AudioStream; gain 1.0 ASSUMED | **shell** table 0x83e14 (strcmp FUN_00049450 on the MDI.INI DRIVER name, FUN_00053a42 +0x80); MPU401.MDI disassembly; DATABASE scan; Nuked-SC55 README / MCU_OpenAudio. DOSBox capture: no MIDI bytes reached its MPU-401 (unresolved) |
 
+## 29. Cheat codes (Win95 MW2.DLL, 2026-11-12; corrected 2026-11-14)
+Traced: the buffer and match (0x1004b930 / 0x1004b977), the codes and their order, messages, tick counts and
+priorities (0x1004b9f3), and the switches each one changes. Checked on 2026-11-14 against the demech2 decompilation of
+the Windows 95 1.1 and 3Dfx DLLs (used as a reference only - none of its code is in the port), which corrected three
+codes: `flygirl` grants jump jets (its flag is read through the steering record, which a search for the address missed),
+`dorcs` is the programmers' page (vfx\vfxjk.bin / vfxhd.bin are GIF pictures, not the VFX1 headset), `enolagay` sets
+off the nuke (StartNuke / UpdateNuke), and `lairdo` widens orders to all points to every unit of the player's side.
+The 3D editions add `lemmy`. INFERRED:
+- `tinkerbell` (camera mode 2) uses the port's free camera.
+- The cheats are reset with each mission. Whether MW2.DLL's globals survive from one mission to the next is not known.
+- `dorcs`: the palette blends (0xb5 / 0x5a ticks) taken as running before the 0x10f-tick holds; the menu's look as the
+  port's other in-game menus (its font, the 640 x 480 layout); the texts are read from the player's MW2.DLL.
+- The nuke's palette flash (slot 0x12) and its structure / debris passes are not drawn or applied: in the 3D editions
+  the flash changes no colour, and the passes' damage (rate x ticks truncated to whole points) is 0 at a frame's ticks.
+
+## 30. From the demech2 decompilation (2026-11-14)
+- Fire and smoke cards heat mechs (HeatMechsNearFires, Win95 0x1006c362 / 3Dfx 0x10046e70), with heat tracking on:
+  every card of class 0x10 heats each mech within twice its bounding radius r plus the mech's radius by (r - r d /
+  reach) / 8 (1.1) or x 0.25 (3D editions) per tick, in 16.16 heat (d the octagonal distance estimate). Missing from the
+  port until now. The DOS look takes the 1.1 rate (INFERRED: MW2.EXE not read).
+- Area damage measures distance with the octagonal estimate (4 x max + mid + min) / 4 in the 3D editions too
+  (ApproximateVectorLength, 3Dfx 0x10030330); the port had the exact distance outside the DOS look.
+- The port is not affected by the high-frame-rate bugs ReMech2 lists (a missile detonating on its shooter in a
+  zero-length frame, jet refill below 4 ticks a frame, the overheat explosion's random table): the port moves shots in
+  sub-steps with the owner always skipped, refills by the frame's ticks and rolls its own random numbers.
+
 ## Open items (as of 2026-11-02)
 
 Everything earlier on this list was closed in sessions 14-15 (see §22-§25); what is left after those passes:

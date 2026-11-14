@@ -274,7 +274,7 @@ void mtbl_logic_step(mtbl_logic *ml, int32_t now, const mtbl_world *w)
             all = 0;
             if (ml->state[t][i] == MTBL_FAILED) failed = 1;
         }
-        if (all) ml->result[t] = 2;
+        if (all || ml->force_win) ml->result[t] = 2;
         else if (failed) ml->result[t] = 3;
         /* the time limit (0x1000a9b0: limit <= now_s - star start, now_s = clock / 181; DOS 0x16e80 the same, clock / 182): the star's
          * start (+4) is -1 from the load (0x1003f97e; DOS 0x4d10e) and set to the clock only by 0x1000acd0 in a network

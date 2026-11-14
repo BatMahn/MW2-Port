@@ -352,6 +352,31 @@ void hud_draw_f(hud *h, const hud_sprite *s, float x, float y, float k)
     }
 }
 
+/* a sprite drawn into the virtual rectangle (x, y, w, hgt), tinted (NULL: white) - point-sampled */
+void hud_draw_rect_tex(hud *h, const hud_sprite *s, float x, float y, float w, float hgt, const float tint[4])
+{
+    static const float one[4] = {1, 1, 1, 1};
+    if (!s->tex) return;
+    rb_texture(0, s->tex);
+    rb_tex_filter(s->tex, RB_NEAREST, RB_NEAREST);
+    h->U.u_textured = 1;
+    h->U.u_smooth = 0;
+    memcpy(h->U.u_tint, tint ? tint : one, sizeof h->U.u_tint);
+    quad_px(h, sx_(h, x), sy_(h, y), sx_(h, x + w), sy_(h, y + hgt), 0, 0, 1, 1);
+}
+/* a sprite from an RGBA image (w x hgt, rows top down), not redrawn by palette changes */
+int hud_sprite_rgba(hud_sprite *out, const uint8_t *rgba, int w, int hgt)
+{
+    memset(out, 0, sizeof *out);
+    if (!rgba || w <= 0 || hgt <= 0) return -1;
+    out->tex = rb_tex_new();
+    rb_tex_image(out->tex, w, hgt, rgba, 0);
+    rb_tex_filter(out->tex, RB_NEAREST, RB_NEAREST);
+    rb_tex_wrap(out->tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
+    out->w = w; out->h = hgt;
+    return 0;
+}
+
 void hud_draw_stretch_top(hud *h, const hud_sprite *s, float height_px) { hud_draw_stretch_row(h, s, height_px, 0); }
 
 void hud_draw_stretch_row(hud *h, const hud_sprite *s, float height_px, int bottom)

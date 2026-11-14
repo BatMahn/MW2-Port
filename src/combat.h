@@ -113,6 +113,9 @@ typedef struct {
     int           invulnerable;      /* +1: no damage taken (0x10016280) */
     int           no_heat;           /* +4 heat tracking off: heat held at 0 (0x10015f50) */
     int           no_collision_damage;   /* +3 = 0: collision damage off (0x1000c160 / 0x1000c3c0) */
+    int           infinite_jets;     /* cheat "mightymouse" (Win95 g_infiniteJumpFuel, 0x10026f30): jetting burns no fuel */
+    int           grant_jets;        /* cheat "flygirl" (the steering's grant flag, read by the mech update 0x10026f00): a
+                                        mech with no jets gets three, a full tank and three times gravity's thrust */
     float         seq_ticks;         /* ticks since the sequence / shutdown began (engine c[0x23]) */
     unsigned      rng;
     int           ammo_blown;        /* set when an overheat ammo explosion happened (for messages) */

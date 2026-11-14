@@ -793,12 +793,15 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
     /* engine 0x1001a58a: with the input held (and the mech up) the tank only drains - to 0, never refilling while
      * held; it refills a quarter tick per tick only with the input released; thrust (and jet heat) only while the
      * tank holds fuel after this frame's burn. A tank at -2 (no jets: gyro / last jet lost) does neither */
-    int held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0;
-    int jet;
+    int held, jet;
+    if (u->grant_jets && (u->jets <= 0 || u->jet_fuel == -2)) {   /* "flygirl": tank -2 (no jets) -> 0x712, 3 jets, thrust 3 g */
+        u->jet_fuel = combat_jet_fuel_max; u->jets = 3; u->jet_ddy = 3.0f * g; u->no_jump = 0;
+    }
+    held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0;
     u->landed_vy = 0;
     if (u->jets > 0 && u->jet_fuel >= 0) {
         if (held) {
-            u->jet_fuel -= ticks;
+            if (!u->infinite_jets) u->jet_fuel -= ticks;   /* Win95 0x10026f30: the cheat skips the burn */
             if (u->jet_fuel <= 0) u->jet_fuel = 0;
         } else if (combat_jet_refill_dos) {   /* DOS 0x27c57..0x27c7d, one step per 30 fps frame */
             int n;

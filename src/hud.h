@@ -59,6 +59,10 @@ void hud_draw_scaled(hud *h, const hud_sprite *s, float x, float y, int k);
 void hud_draw_f(hud *h, const hud_sprite *s, float x, float y, float k);
 /* the sprite stretched across the whole viewport width at the top, height_px tall (screen pixels; <= 0: its height on
  * a 4:3 screen it spans) */
+/* a sprite stretched into the virtual rectangle (x, y, w, hgt), tinted (NULL: white), point-sampled */
+void hud_draw_rect_tex(hud *h, const hud_sprite *s, float x, float y, float w, float hgt, const float tint[4]);
+/* a sprite from an RGBA image (w x hgt, rows top down); free with hud_sprite_free */
+int  hud_sprite_rgba(hud_sprite *out, const uint8_t *rgba, int w, int hgt);
 void hud_draw_stretch_top(hud *h, const hud_sprite *s, float height_px);
 /* the same at the top (bottom = 0) or the bottom edge of the window (engine 0x10002e40: message line 1) */
 void hud_draw_stretch_row(hud *h, const hud_sprite *s, float height_px, int bottom);

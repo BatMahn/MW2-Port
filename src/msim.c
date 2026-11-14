@@ -63,6 +63,16 @@ static int star_member(const msim *s, int point)
         if (s->actors[i].friendly && s->actors[i].table == 0 && ++n == point) return i;
     return -1;
 }
+/* the units an order to all points reaches: the star (the player's group); with the cheat "lairdo" every unit on the
+ * player's side (NextTarget's c_aiTargetFriendly, Win95 0x10054043: also any player of side 0) */
+static int order_member(const msim *s, int point)
+{
+    int i, n = 0;
+    if (!s->lairdo) return star_member(s, point);
+    for (i = 0; i < s->actor_count; i++)
+        if (s->actors[i].friendly && ++n == point) return i;
+    return -1;
+}
 static int star_point(const msim *s, int actor)
 {
     int i, n = 0;
@@ -116,7 +126,7 @@ int msim_command(msim *s, int point, int order, int target)
     if ((order == MSIM_CMD_ATTACK || order == MSIM_CMD_DEFEND) &&
         (target < 0 || target >= s->actor_count || !s->armed[target] || s->units[target].destroyed)) return 0;   /* 0x1000: no target */
     for (i = first; i <= last; i++) {
-        int a = star_member(s, i);
+        int a = point ? star_member(s, i) : order_member(s, i);
         ai_mind *m;
         if (a < 0) break;
         if (s->armed[a] && s->units[a].destroyed) continue;            /* state 12: cannot */
@@ -1130,29 +1140,86 @@ static void effect(msim *s, int type, const float p[3], int chunks)
  * locations (blown off) and its bins cook off. Skipped: controller +0x10c bit 0x100 (a wreck blown apart on landing,
  * 0x1000c4d0 - not modelled) and state 5 counts once (an ejected unit stands intact). Then the effect's life runs down
  * by the ticks (it ends at <= 0) */
+/* the units within r (+ each one's contact radius) of pos take base on each location 2-8 and half (DOS a quarter) on the
+ * head, a wreck twice that - 0x10046700's loop (see area_damage) */
+static void units_in_radius(msim *s, const float pos[3], float r, float base)
+{
+    int u, l;
+    for (u = -1; u < s->actor_count; u++) {
+        combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
+        float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
+        float y = cu->y + (u < 0 ? s->player_centre_h : s->centre_h ? s->centre_h[u] : 550.0f), rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), dx = x - pos[0], dy = y - pos[1], dz = z - pos[2];
+        float d = base * (cu->destroyed && !cu->intact_out ? 2.0f : 1.0f);
+        if (u >= 0 && !s->armed[u]) continue;
+        {   /* the octagonal estimate (4 x max + mid + min) / 4 of |dx|, |dy|, |dz| - DOS 0x517c0 (>> 2) and the 3D
+             * editions' ApproximateVectorLength alike (3Dfx 0x10030330, called by 0x10046700: demech2's reading - the
+             * port had the exact distance there) */
+            float p0 = fabsf(dx), p1 = fabsf(dy), p2 = fabsf(dz), q;
+            if (p0 < p1) { q = p0; p0 = p1; p1 = q; }
+            if (p0 < p2) { q = p0; p0 = p2; p2 = q; }
+            if ((p0 * 4.0f + p1 + p2) * 0.25f >= rr + r) continue;
+        }
+        /* the head: half (3Dfx 0x10046700: / DAT_102485f8 = 2.0); a quarter in DOS (MW2.EXE 0x517c0: 0x26270(iVar4 >> 2, 1)) */
+        combat_damage_at(cu, msim_dos_int ? d / 4.0f : d / 2.0f, 1, &s->rng);
+        for (l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
+    }
+}
+static void part_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3]);
+static int part_box(const mech3d_part *p, float mn[3], float mx[3]);
+/* a part's bounding sphere as placed now (ComputeShapeBounds 0x10029890: the vertex box's centre, the farthest vertex) */
+static int part_sphere(const mech3d_part *p, float c[3], float *r)
+{
+    float mn[3], mx[3], best = 0;
+    int v, j;
+    if (part_box(p, mn, mx) != 0) return -1;
+    for (j = 0; j < 3; j++) c[j] = (mn[j] + mx[j]) * 0.5f;
+    for (v = 0; v < p->model.objects[0].vert_count; v++) {
+        float q[3], d;
+        part_vertex(p, &p->model.objects[0].verts[v], q);
+        d = (q[0] - c[0]) * (q[0] - c[0]) + (q[1] - c[1]) * (q[1] - c[1]) + (q[2] - c[2]) * (q[2] - c[2]);
+        if (d > best) best = d;
+    }
+    *r = sqrtf(best);
+    return 0;
+}
+/* HeatMechsNearFires (Win95 0x1006c362, 3Dfx 0x10046e70; with heat tracking on, every frame before the effects): each
+ * fire / smoke card in the scene (shape kind 0xf0 == 0x10: the OBJ type word's class - 73 objects in the missions, the
+ * YELLSMO1 smoke, the burning wrecks of TEAL / TAUP / PLUM / PINK ...) heats every mech within twice its bounding radius
+ * r plus the mech's own: (r - r d / reach) / 8 (1.1, 16.16 heat) or x 0.25 (the 3D editions' floats) a tick, d the
+ * octagonal distance estimate from the mech's position (its feet) to the card's centre. A port addition until now
+ * (missing): traced from the demech2 decompilation's reading of these addresses */
+static void fires_heat(msim *s, float ticks)
+{
+    int q, u;
+    if (!s->world || ticks <= 0) return;
+    for (q = 0; q < s->world->part_count; q++) {
+        const mech3d_part *p = &s->world->parts[q];
+        float c[3], r;
+        if ((p->objtype & 0xf0) != 0x10 || p->hidden || part_sphere(p, c, &r) != 0) continue;
+        r *= 2.0f;
+        if (getenv("MW2_FIRE_TRACE")) { static int said; if (said++ < 10) { fprintf(stderr, "fire %d %s at %.0f,%.0f,%.0f r %.0f\n", q, p->model_name, c[0], c[1], c[2], r); } }   /* TEST ONLY */
+        for (u = -1; u < s->actor_count; u++) {
+            combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
+            float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
+            float rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), reach = rr + r;
+            float p0 = fabsf(x - c[0]), p1 = fabsf(cu->y - c[1]), p2 = fabsf(z - c[2]), t, d;
+            if ((u >= 0 && !s->armed[u]) || cu->destroyed || cu->no_heat) continue;
+            if (p0 < p1) { t = p0; p0 = p1; p1 = t; }
+            if (p0 < p2) { t = p0; p0 = p2; p2 = t; }
+            d = (p0 * 4.0f + p1 + p2) * 0.25f;
+            if (d >= reach) continue;
+            cu->heat += (r - r * d / reach) * (msim_dos_int ? 0.125f : 0.25f) / 65536.0f * ticks;
+        }
+    }
+}
 static void area_damage(msim *s, float ticks)
 {
     int32_t now = (int32_t)((int64_t)s->now * 182 / 1000);
-    int k, u, l;
+    int k;
     for (k = 0; k < s->area_count; ) {
         struct msim_area *a = &s->area[k];
         if (now >= a->end) { s->area[k] = s->area[--s->area_count]; continue; }
-        for (u = -1; s->splash && u < s->actor_count; u++) {
-            combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
-            float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
-            float y = cu->y + (u < 0 ? s->player_centre_h : s->centre_h ? s->centre_h[u] : 550.0f), rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), dx = x - a->pos[0], dy = y - a->pos[1], dz = z - a->pos[2];
-            float d = ticks / 256.0f * (cu->destroyed && !cu->intact_out ? 2.0f : 1.0f);
-            if (u >= 0 && !s->armed[u]) continue;
-            if (msim_dos_int) {   /* DOS 0x517c0: the octagonal estimate (4 x max + mid + min) >> 2 of |dx|, |dy|, |dz| */
-                float p0 = fabsf(dx), p1 = fabsf(dy), p2 = fabsf(dz), q;
-                if (p0 < p1) { q = p0; p0 = p1; p1 = q; }
-                if (p0 < p2) { q = p0; p0 = p2; p2 = q; }
-                if ((p0 * 4.0f + p1 + p2) * 0.25f >= rr + a->r) continue;
-            } else if (dx * dx + dy * dy + dz * dz >= (rr + a->r) * (rr + a->r)) continue;
-            /* the head: half (3Dfx 0x10046700: / DAT_102485f8 = 2.0); a quarter in DOS (MW2.EXE 0x517c0: 0x26270(iVar4 >> 2, 1)) */
-            combat_damage_at(cu, msim_dos_int ? d / 4.0f : d / 2.0f, 1, &s->rng);
-            for (l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
-        }
+        if (s->splash) units_in_radius(s, a->pos, a->r, ticks / 256.0f);
         k++;
     }
 }
@@ -1452,7 +1519,7 @@ void msim_step(msim *s, int32_t dt_ms)
          * play out first; a destroyed player ends at once (0x10019131); an ejected one (state 5) 0x389 ticks later
          * (0x1001adf0 - DOSBox: "Press CTRL-Q to exit..." 5-6 s after Ctrl+Alt+e) */
         if (s->eject_at && s->now - s->eject_at < 0x389 * 1000 / 182) { /* the ejection camera runs */ }
-        else if ((s->logic.result[0] && !s->radio_busy) || s->player_unit.destroyed) {
+        else if ((s->logic.result[0] && !s->radio_busy && !s->hang_around) || s->player_unit.destroyed) {
             char line[96];
             /* DOS MW2.EXE 0x16e80 (the star results): with the end flag set (DAT_0009620c: the player destroyed, state 4,
              * at once; ejected, state 5, 0x38e ticks on) the player's star still unresolved fails - "Mission failed" and
@@ -2891,6 +2958,41 @@ static void combat_step(msim *s, float dt)
         if (s->minds && s->ai_ok) combat_ai_trigger(&s->units[i]);
         combat_tick(&s->units[i], dt);
     }
+    if (s->cheat_kill > 0 && s->cheat_kill <= s->actor_count) {   /* the cheat codes "gankem" / "enolagay" */
+        int u = s->cheat_kill - 1;
+        combat_unit *cu = &s->units[u];
+        if (s->cheat_nuke) {
+            /* StartNuke (Win95 0x1006c4e2, 3Dfx 0x10047020): the effect 0x16 (NUKE) at the target's position and a blast
+             * that grows 200 cm a tick to 4 km - or 100 x the shape radius of a 0x16 effect already burning - for twice the
+             * effect's life, every unit inside taking ticks / 16 a location (UpdateNuke 0x10047130 -> 0x10046700). Its
+             * structures and debris passes (rate 0x1000 x ticks, truncated to whole points) take nothing at a frame's
+             * ticks; its palette flash (slot 0x12) changes no colour in the 3D editions (0x1002ad50's fog colour only
+             * for slots 0xc / 0x10 / 0x11) - neither is drawn */
+            int k;
+            s->nuke_max = 400000.0f;
+            for (k = 0; k < s->area_count; k++) if (s->area[k].type == 0x16) { s->nuke_max = s->fx_radius[0x16] * 100.0f; break; }
+            s->nuke_pos[0] = (float)s->actors[u].mech.origin[0]; s->nuke_pos[1] = cu->y; s->nuke_pos[2] = (float)s->actors[u].mech.origin[2];
+            s->nuke_left = (float)fx_duration(0x16) * 2.0f;
+            s->nuke_r = 0;
+            effect(s, 0x16, s->nuke_pos, 0);
+        } else if (!cu->destroyed && s->armed[u]) {
+            /* KillMech(player, its mech) (0x10016280): destroyed, the kill counted for the player */
+            int side = s->actors[u].friendly ? 2 : s->actors[u].alliance == 2 ? 1 : 0;
+            static const int KILLED_BY_PLAYER[3] = {0x07, 0x09, 0x0b}, KILLED[3] = {0x1e, 0x20, 0x22};
+            cu->destroyed = 1;
+            car_inc(s, KILLED_BY_PLAYER[side]);
+            car_inc(s, KILLED[side]);
+            if (side == 2) car_inc(s, 0x34);
+        }
+    }
+    s->cheat_kill = 0; s->cheat_nuke = 0;
+    if (s->nuke_left > 0) {   /* UpdateNuke */
+        s->nuke_r += ticks * 200.0f;
+        if (s->nuke_r > s->nuke_max) s->nuke_r = s->nuke_max;
+        units_in_radius(s, s->nuke_pos, s->nuke_r, ticks / 16.0f);
+        s->nuke_left -= ticks;
+    }
+    fires_heat(s, ticks);
     area_damage(s, ticks);
     ammo_booms(s);
     /* the heat restart sets state 0 (0x10016201), which runs the start-up again (0x1001ab71: online 0x43e + rand(0x16a)

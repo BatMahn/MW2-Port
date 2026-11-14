@@ -39,6 +39,8 @@ MW2-game/
 │   ├── EN01STAR.BWD ... EN05STAR.BWD   USERSTAR.BWD
 │   ├── MW2.ADV  MW2.PHX
 │   ├── DATABASE.MW2         optional - from the ROOT of the Windows 95 CD: adds two menu voices (a superset of the DOS file)
+│   ├── MW2.DLL              optional - from the ROOT of the Windows 95 CD (or the BattlePack's MW2 folder): the "dorcs" page's texts
+│   ├── VFX/VFXJK.BIN  VFX/VFXHD.BIN   optional - from the BattlePack or Mercenaries CD: the "dorcs" pictures
 │   ├── MW2CAR.CFG  MW2DIF.CFG  MW2MSN.CFG  MW2PRM.CFG  MW2REG.CFG  MW2SND.CFG  STAR0.CFG
 │   └── SYMLOG.TXT  TMP.OUT
 │
@@ -91,6 +93,12 @@ at a disc image. Without it, the menus behave as the DOS game: no main-menu voic
 |---|---|---|---|
 | DOS CD (1995) | `MECH2\DATABASE.MW2` | 3,989,669 bytes | 103 |
 | Windows 95 CD | `DATABASE.MW2` (disc root) | 4,037,479 bytes | 105 |
+
+## The "dorcs" easter egg (install/MW2.DLL, install/VFX/)
+The `dorcs` cheat code (see README, "Cheat codes") shows the programmers' page from the Windows 95 edition. The port
+reads the page's texts from that edition's `MW2.DLL` and its two pictures from a `VFX` folder, neither of which is in
+the DOS install. Copy `MW2.DLL` from the root of the Windows 95 CD (or `MW2\MW2.DLL` from the BattlePack CD), and the
+`VFX` folder from the BattlePack or Mercenaries CD, into `install/`. The port only reads them; nothing runs.
 
 ## The SC-55 ROM files (sc55/)
 

@@ -117,6 +117,7 @@ typedef struct {
      * exceeded; set by STAR_WIN / STAR_LOSE nodes or: all main ('M') nodes done -> 2, any failed -> 3,
      * time limit (table header +0x0c, seconds) passed -> 4 */
     int        result[MTBL_MAX_TABLES];
+    int        force_win;      /* cheat "icanthackit" (Win95 DAT_10154a60, 0x1000fedc): every undecided star succeeds */
     int32_t    result_time[MTBL_MAX_TABLES];
     int        current[MTBL_MAX_TABLES];                   /* the group's current order node, -1 */
     /* radio announce flags, per node INDEX (engine 0x10208040 - one array for all tables): a node's success / failure

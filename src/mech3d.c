@@ -445,7 +445,8 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
         float pyaw = 0, pt[3] = {0, 0, 0};
         int have = 0, q;
         const uint8_t *bx = NULL;
-        for (q = 0; q < nb; q++) if (strcasecmp(bp[q].name, r->name) == 0) { pyaw = bp[q].yaw; memcpy(pt, bp[q].t, sizeof pt); break; }
+        int placed = 0;   /* this record has a placement of its own (from its includer) */
+        for (q = 0; q < nb; q++) if (strcasecmp(bp[q].name, r->name) == 0) { pyaw = bp[q].yaw; memcpy(pt, bp[q].t, sizeof pt); placed = 1; break; }
         for (k = 0; k < r->chunk_count; k++) {
             const bwd_chunk *c = &r->chunks[k];
             if (strcmp(c->tag, "BLKX") == 0 && c->size >= 36) { bx = c->data; have = 1; }
@@ -474,6 +475,18 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
                     e->t[1] = pt[1] + y;
                     e->t[2] = pt[2] - sinf(h) * x + cosf(h) * z;
                     e->set = 1;
+                }
+                else if (bwd_incl(c, &id, nm) == 0 && !have && placed && nb < m.record_count * 8 && blk_centre(&m, nm, cc)) {
+                    /* no BLKX before this INCL: the included record's BLK takes the reset placement (identity), and the
+                     * enclosing block's matrix still applies - it sits where its includer was put. ORANMA03 (Wolf mission
+                     * 2) includes ORANARE4, the targets of opportunity, this way: placed by ORANWLD1's BLKX at
+                     * (320000, -75000), near Nav Gamma; left out, they stood at the map's origin */
+                    blk_place *e = &bp[nb++];
+                    snprintf(e->name, sizeof e->name, "%s", nm);
+                    e->yaw = pyaw;
+                    memcpy(e->t, pt, sizeof e->t);
+                    e->set = 1;
+                    if (getenv("MW2_BLK_TRACE")) fprintf(stderr, "blk %s: %s inherits %s (%.0f, %.0f, %.0f, yaw %.1f)\n", scene, nm, r->name, (double)pt[0], (double)pt[1], (double)pt[2], (double)pyaw);   /* TEST ONLY */
                 }
                 have = 0;
             }
