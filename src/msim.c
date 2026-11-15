@@ -2889,7 +2889,18 @@ static void shot_units(msim *s, int owner, const float o[3], const float dv[3], 
         if (u < 0) u = 0;
         if (u > 1) u = 1;
         px = o[0] + ex * u - cx; pz = o[2] + ez * u - cz;
-        if (px * px + pz * pz > 2000.0f * 2000.0f) continue;
+        {   /* the port's coarse cull (the engine tests the whole collision list): 20 m, or as far as the unit's pieces reach
+             * - RED_SCN1's dropship (TURRETE) hangs its hull 93 m off the unit's origin (its OBJ 1: -8382, 1805, 4020),
+             * which a fixed 20 m left unhittable (GitHub report: the lasers passed through it) */
+            float reach = 2000.0f;
+            int q;
+            for (q = 0; q < m->part_count; q++) {
+                const mech3d_part *pp = &m->parts[q];
+                float qx = (float)pp->pos[0] - cx, qz = (float)pp->pos[2] - cz, rq = sqrtf(qx * qx + qz * qz) + (pp->sphere_ok ? pp->hull_radius : 1500.0f);
+                if (rq > reach) reach = rq;
+            }
+            if (px * px + pz * pz > reach * reach) continue;
+        }
         /* engine 0x100103e0: the pieces' spheres (type 6, no test of their own), the nearest entry; the piece's
          * location (+0x16) takes the damage */
         if (mech3d_hull_hit((mech3d *)m, o, dv, mech3d_fly_mask(i < 0 ? s->player_unit.loc_gone : s->units[i].loc_gone), &t, &g) && t < *tbest) {

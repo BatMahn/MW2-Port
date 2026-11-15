@@ -4114,7 +4114,8 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         world3d_actors(ma, scene, &g_actors, &g_actor_count);   /* posable, drawn on the actor layer */
         if (getenv("MW2_LIST_ACTORS")) {   /* TEST ONLY: "actor <k> <group> <skeleton> flags <GPS +0x1a> at <x> <z>" */
             int k;
-            for (k = 0; k < g_actor_count; k++) printf("actor %d %s %s flags %#x at %d %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2]);
+            for (k = 0; k < g_actor_count; k++) { printf("actor %d %s %s flags %#x at %d %d parts %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2], g_actors[k].mech.part_count);
+            if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
         }
         load_view_far(ma, scene);
         g_exit_fade_t0 = -1;

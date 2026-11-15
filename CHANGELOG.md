@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.22 (2026-11-15)
+
+- **Jade Falcon mission 3 (Mirror Cage): the dropship could not be hit.** Reported on GitHub: the lasers passed
+  straight through it. The dropship is a unit, TURRETE, whose model hangs its hull 93 m off the unit's position (the
+  skeleton's OBJ 1: -8382, 1805, 4020). The model is drawn there, and the engine tests a shot against the pieces where
+  they are. The port first culled units whose position was more than 20 m from the shot's path, so the hull was never
+  tested. The cull now reaches as far as the unit's pieces do. TURRETE is the only unit model built this way.
+- **Flickering ground with TEXTURES TITANIUM (same mission, reported on GitHub).** The Titanium terrain tiles have flat
+  polygons lying on the ground plane, and they fought the ground fill in the depth buffer as the view moved. The original
+  tiles have no such polygons. With Titanium textures the ground fill now writes no depth, so the terrain drawn over it
+  always wins. The Titanium engine draws the ground first and has no working depth test of its own.
+
 ## v1.1.21 (2026-11-14)
 
 - **Steam Deck: launching a mission could drop back to the Steam UI.** Reported on GitHub; "Resume Game" brought the

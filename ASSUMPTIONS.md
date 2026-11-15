@@ -1085,6 +1085,15 @@ The 3D editions add `lemmy`. INFERRED:
   zero-length frame, jet refill below 4 ticks a frame, the overheat explosion's random table): the port moves shots in
   sub-steps with the owner always skipped, refills by the frame's ticks and rolls its own random numbers.
 
+## 31. Shots and far-flung pieces; the Titanium ground fill (2026-11-15)
+- The shot test's coarse cull (a port shortcut; the engine runs the whole collision list, 0x100103e0) now covers the
+  unit's pieces, not 20 m round its position: RED_SCN1's TURRETE dropship hangs its hull 93 m off its origin.
+  Everything else that uses the unit's position (missile aim point, target bracket, radar, contact sphere) stays at
+  the position, as the engine's do (INFERRED for the contact sphere: the engine's mech-to-mech test not re-read).
+- TEXTURES TITANIUM: the ground fill writes no depth (painter's order, as the 16-bit engine with no working depth test),
+  so a Titanium tile's polygons on y 0 always cover it; an object below y 0 now shows through the ground there (INFERRED
+  to match the Titanium engine, which sorts and draws without depth).
+
 ## Open items (as of 2026-11-02)
 
 Everything earlier on this list was closed in sessions 14-15 (see §22-§25); what is left after those passes:

@@ -2086,7 +2086,14 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             glr_bind(v->flat_ground && r->ground_flat ? r->ground_flat : r->env_tex[0], eminf, emagf);   /* TERRAIN TEXTURES: objects of type 0x800 only */
             r->D.u_mga_lod = v->mga_mip;
             if (v->ti_light) r->D.u_tilit = 2;   /* Titanium: the ground's one colour (0x1005527e) */
-            glr_draw_arrays(r, 30, 6);
+            /* TEXTURES TITANIUM: the ground fill writes no depth, so the terrain drawn after it always covers it. The
+             * Titanium terrain tiles have flat polygons lying on y 0 (RED_SCN1's T_ARLL* - the original ones have
+             * none), which fought the fill in the depth buffer as the eye moved (GitHub report: flickering ground,
+             * Jade Falcon mission 3). The Titanium engine itself has no working depth test (above) and draws in its
+             * depth sort's order, the ground before the objects on it */
+            if (r->ti_slots) rb_depth_write(0);
+            if (!getenv("MW2_TEST_NO_GROUND")) glr_draw_arrays(r, 30, 6);   /* (TEST ONLY: MW2_TEST_NO_GROUND) */
+            if (r->ti_slots) rb_depth_write(1);
             r->D.u_tilit = 0;
             r->D.u_mga_lod = 0;
         }
