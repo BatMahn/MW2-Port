@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.23 (2026-11-15)
+
+- **PPC ground hits sometimes showed a black square (TEXTURES TITANIUM, reported on GitHub).** A PPC that hits the
+  ground plays a 28-frame blue explosion, A9EXP401-428. The Titanium archive stores frames 423-432 as type 0: no alpha
+  channel, a blue cloud on solid black. The port took the Titanium frame whenever the archive had one, so the last six
+  frames of the explosion were drawn as an opaque black card. Effect frames of type 0 now fall back to the 3D archive's
+  frame of the same name, as the frames Titanium lacks already did. In the 3D archive those frames are fully
+  transparent, so the explosion fades out as it does in the Win95 editions. The other looks were not affected.
+
 ## v1.1.22 (2026-11-15)
 
 - **Jade Falcon mission 3 (Mirror Cage): the dropship could not be hit.** Reported on GitHub: the lasers passed

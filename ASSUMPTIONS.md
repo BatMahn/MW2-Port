@@ -1093,6 +1093,10 @@ The 3D editions add `lemmy`. INFERRED:
 - TEXTURES TITANIUM: the ground fill writes no depth (painter's order, as the 16-bit engine with no working depth test),
   so a Titanium tile's polygons on y 0 always cover it; an object below y 0 now shows through the ground there (INFERRED
   to match the Titanium engine, which sorts and draws without depth).
+- TEXTURES TITANIUM effect frames: a Titanium CEL of type 0 (A9EXP423-432: no alpha, black background) is not used for
+  an effect; the 3D archive's frame of that name is used instead (fully transparent for 423-428). INFERRED: mercsw would
+  draw a type 0 texture unblended (Render type 2), and the original's effect table was not checked for whether it ever
+  reaches those frames.
 
 ## Open items (as of 2026-11-02)
 

@@ -814,9 +814,12 @@ static texture *fx_texture(int cel)
         prj_record tr;
         /* the Titanium look: the frame of this name in its archive (the effect frames are among the names it has) */
         if (c3d_ti && g_fx_ati != 3 && prj_read_named(c3d_ti, "CEL", r.name, &tr) == PRJ_OK) {
+            /* (a type 0 frame - A9EXP423-432, the PPC hit's last ten - has no alpha: drawn as a black square; those
+             * take the 3D archive's frame below, as the frames Titanium lacks do) */
             int ok = tex_decode(tr.data, tr.size, TEX_TITANIUM, t) == 0;
             prj_record_free(&tr);
-            if (ok) { prj_record_free(&r); return t; }
+            if (ok && t->type != 0) { prj_record_free(&r); return t; }
+            if (ok) { tex_free(t); memset(t, 0, sizeof *t); }
         }
         /* ATi: one format; 3dfx/S3: effect frames carry transparency (ARGB4444) */
         if (tex_decode(r.data, r.size, g_fx_ati == 1 ? TEX_ATI : g_fx_ati == 2 ? TEX_PVR : g_fx_ati == 3 ? TEX_DOS : g_fx_ati == 4 ? TEX_MGA : TEX_3DFX_4444, t) != 0) t->rgba = NULL;
