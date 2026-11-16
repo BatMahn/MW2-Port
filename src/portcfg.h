@@ -57,6 +57,20 @@
 #define PORTCFG_H
 #include <stddef.h>
 #define PORTCFG_PATH 1024
+/* the system the port runs on, for the menus' "Flee to ..." (the DOS shell said DOS, the Windows 95 game Windows) */
+#if defined(MW2_CLASSIC_MAC)
+#define PORTCFG_OS_NAME "Mac OS"
+#define PORTCFG_OS_UPPER "MAC OS"
+#elif defined(_WIN32)
+#define PORTCFG_OS_NAME "Windows"
+#define PORTCFG_OS_UPPER "WINDOWS"
+#elif defined(__APPLE__)
+#define PORTCFG_OS_NAME "macOS"
+#define PORTCFG_OS_UPPER "MACOS"
+#else
+#define PORTCFG_OS_NAME "Linux"
+#define PORTCFG_OS_UPPER "LINUX"
+#endif
 typedef struct {
     int mode;        /* 0 desktop fullscreen, 1 windowed, 2 exclusive fullscreen at w x h */
     int w, h;

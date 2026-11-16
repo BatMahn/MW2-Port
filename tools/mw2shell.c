@@ -4772,7 +4772,7 @@ static void pointer_now(SDL_Renderer *rd, int *x, int *y)
  * stay, -3 to quit. Port: the grey arrows move too (in DOS they read as 0xe0 and do nothing). */
 static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, int py)
 {
-    static const char *ITEM[6] = {"NEW ALLEGIANCE", "COMBAT VARIABLES", "COCKPIT CONTROLS", "HALL OF HONOR", "THE KESHIK", "FLEE TO DOS"};
+    static const char *ITEM[6] = {"NEW ALLEGIANCE", "COMBAT VARIABLES", "COCKPIT CONTROLS", "HALL OF HONOR", "THE KESHIK", "FLEE TO " PORTCFG_OS_UPPER};   /* the DOS shell's FLEE TO DOS: the system it runs on */
     static uint8_t saved[W * H * 3];
     static text_item tsaved[256];
     const char *script = headless ? getenv("MW2_SHELL_MENU_EVENTS") : NULL;

@@ -3707,7 +3707,7 @@ typedef struct { int type; const char *text; int arg; } mm_item;
 typedef struct { const char *title; int n; mm_item it[6]; } mm_page;
 static const mm_page MM_PAGE[MP_COUNT] = {
     {"MAIN MENU", 6, {{MI_SUB, "Abort Mission", MP_ABORT}, {MI_SUB, "Graphics", MP_GRAPHICS}, {MI_SUB, "Audio Ctrl", MP_AUDIO},
-                      {MI_SUB, "Combat Variables", MP_COMBAT}, {MI_SUB, "Flee to Windows", MP_FLEE}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
+                      {MI_SUB, "Combat Variables", MP_COMBAT}, {MI_SUB, "Flee to " PORTCFG_OS_NAME, MP_FLEE}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"ABORT MISSION", 2, {{MI_LABEL, "Confirmation requested", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 0}}},
     {"GRAPHICS", 6, {{MI_VAL, "Textured Sky", MV_SKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},
                      {MI_VAL, "Textures", MV_TEXSET}, {MI_VAL, "HUD layout", MV_HUDLAYOUT}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
@@ -3715,7 +3715,7 @@ static const mm_page MM_PAGE[MP_COUNT] = {
                              {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
     {"COMBAT VARIABLES", 6, {{MI_VAL, "Object textmaps", MV_OBJTEX}, {MI_VAL, "Terrain textmaps", MV_TERTEX}, {MI_VAL, "Display detail", MV_DETAIL},
                              {MI_VAL, "Object density", MV_DENSITY}, {MI_VAL, "Explosion chunks", MV_CHUNKS}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
-    {"FLEE TO WINDOWS", 2, {{MI_LABEL, "Confirm your cowardice", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 1}}},
+    {"FLEE TO " PORTCFG_OS_UPPER, 2, {{MI_LABEL, "Confirm your cowardice", 0}, {MI_CONFIRM, "Accept (Esc to cancel)", 1}}},
     {"GRAPHICS", 6, {{MI_VAL, "DOS shading", MV_DOSSKY}, {MI_VAL, "Textured Ground", MV_GROUND}, {MI_VAL, "Renderer", MV_VIDEO},   /* a DOS mission's */
                      {MI_VAL, "Textures", MV_TEXSET}, {MI_VAL, "HUD layout", MV_HUDLAYOUT}, {MI_ACCEPT, "Accept (Esc to cancel)", 0}}},
 };

@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.28 (2026-11-16)
+
+- **"Flee to ..." names the system you're on.** The main menu said FLEE TO DOS (from the DOS shell) and the in-game
+  menu said Flee to Windows (from the Windows 95 game). Both now say Windows, macOS or Linux, by build (Mac OS on the
+  classic Mac build).
+
 ## v1.1.27 (2026-11-16)
 
 After v1.1.26, every mission was checked for the same kinds of fault, not only the ones players reported: all 59
