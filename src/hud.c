@@ -25,7 +25,13 @@ struct hud_s {
 };
 
 /* every loaded sprite's indices, kept so a palette change (hud_repalette) can redraw its texture */
-typedef struct { unsigned tex; int w, h, from, to; uint8_t *pix, *mask; uint32_t used[8]; } hud_src;
+typedef struct {
+    unsigned tex; int w, h, from, to; uint8_t *pix, *mask; uint32_t used[8];
+    /* the texture's last two readings (the sprite's colours as a key, its upscaled RGBA): light amplification switches
+     * between two palettes, and rebuilding every sprite (Scale3x and the edge bleed) each time stalled a frame */
+    uint32_t ckey[2]; uint8_t *crgba[2]; int cw[2], ch[2], cnext;
+} hud_src;
+static void src_free(hud_src *e);
 static hud_src *g_src;
 static int      g_src_n, g_src_cap;
 static uint8_t  g_src_used[256];   /* the palette indices the loaded sprites use */
@@ -74,7 +80,7 @@ void hud_destroy(hud *h)
     if (h->font_tex) rb_tex_delete(h->font_tex);
     if (h->font_tex3) rb_tex_delete(h->font_tex3);
     free(h);
-    while (g_src_n > 0) { g_src_n--; free(g_src[g_src_n].pix); free(g_src[g_src_n].mask); }
+    while (g_src_n > 0) { g_src_n--; src_free(&g_src[g_src_n]); }
     memset(g_src_used, 0, sizeof g_src_used);
 }
 
@@ -126,12 +132,18 @@ static uint32_t *scale3x(const uint32_t *in, int aw, int ah)
     return out;
 }
 
-/* the sprite's indices through the current palette into texture `tex` (the Scale3x upscale, see bind_sprite) */
-static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask, int w, int hg, int from, int to, unsigned tex)
+static void src_free(hud_src *e)
+{
+    free(e->pix); free(e->mask); free(e->crgba[0]); free(e->crgba[1]);
+    e->pix = e->mask = e->crgba[0] = e->crgba[1] = NULL;
+}
+
+/* the sprite's indices through the current palette (the Scale3x upscale, see bind_sprite): a malloc'd image */
+static uint8_t *build_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask, int w, int hg, int from, int to, int *otw, int *oth)
 {
     uint8_t *rgba = malloc((size_t)w * (size_t)hg * 4);
     int i, tw = w, th = hg;
-    if (!rgba) return;
+    if (!rgba) return NULL;
     for (i = 0; i < w * hg; i++) {
         int c = (from >= 0 && pix[i] == from) ? to : pix[i];
         rgba[i * 4 + 0] = h->pal[c][0];
@@ -163,8 +175,42 @@ static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask,
                     if (n) { t[0] = (uint8_t)(acc[0] / n); t[1] = (uint8_t)(acc[1] / n); t[2] = (uint8_t)(acc[2] / n); }
                 }
     }
+    *otw = tw; *oth = th;
+    return rgba;
+}
+
+/* ... into texture `tex` */
+static void upload_sprite(const hud *h, const uint8_t *pix, const uint8_t *mask, int w, int hg, int from, int to, unsigned tex)
+{
+    int tw, th;
+    uint8_t *rgba = build_sprite(h, pix, mask, w, hg, from, to, &tw, &th);
+    if (!rgba) return;
     rb_tex_image(tex, tw, th, rgba, 0);
     free(rgba);
+}
+
+/* the colours a sprite uses, as a key (FNV-1a over its used indices' RGB) */
+static uint32_t src_key(const hud *h, const hud_src *e)
+{
+    uint32_t x = 2166136261u;
+    int i;
+    for (i = 0; i < 256; i++)
+        if (e->used[i >> 5] & (1u << (i & 31))) { x = (x ^ h->pal[i][0]) * 16777619u; x = (x ^ h->pal[i][1]) * 16777619u; x = (x ^ h->pal[i][2]) * 16777619u; }
+    return x | 1u;   /* (0: no reading) */
+}
+
+/* sprite e in the current palette: a kept reading, or built and kept (upload: also into its texture) */
+static void src_reading(const hud *h, hud_src *e, int upload)
+{
+    uint32_t key = src_key(h, e);
+    int q;
+    for (q = 0; q < 2; q++)
+        if (e->ckey[q] == key && e->crgba[q]) { if (upload) rb_tex_image(e->tex, e->cw[q], e->ch[q], e->crgba[q], 0); return; }
+    q = e->cnext; e->cnext ^= 1;
+    free(e->crgba[q]);
+    e->crgba[q] = build_sprite(h, e->pix, e->mask, e->w, e->h, e->from, e->to, &e->cw[q], &e->ch[q]);
+    e->ckey[q] = e->crgba[q] ? key : 0;
+    if (upload && e->crgba[q]) rb_tex_image(e->tex, e->cw[q], e->ch[q], e->crgba[q], 0);
 }
 
 int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, int from, int to, hud_sprite *out)
@@ -179,7 +225,9 @@ int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, i
     out->tex = rb_tex_new();
     upload_sprite(h, f.pix, f.mask, f.w, f.h, from, to, out->tex);
     rb_tex_filter(out->tex, RB_NEAREST, RB_NEAREST);
-    rb_tex_wrap(out->tex, RB_REPEAT, RB_CLAMP_TO_EDGE);
+    /* clamped both ways: wrapping across had the far column bleed into the last pixels at some scales - a slim red line
+     * beside the enemy brackets (user report); the compass band, which hud_draw_window wraps, sets REPEAT (hud_sprite_wrap) */
+    rb_tex_wrap(out->tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
     out->w = f.w; out->h = f.h; out->left = f.left; out->top = f.top;
     if (g_src_n == g_src_cap) {
         hud_src *g = realloc(g_src, (size_t)(g_src_cap ? g_src_cap * 2 : 64) * sizeof *g);
@@ -187,6 +235,7 @@ int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, i
     }
     if (g_src_n < g_src_cap) {   /* keeps the frame's buffers */
         hud_src *e = &g_src[g_src_n++];
+        memset(e, 0, sizeof *e);
         e->tex = out->tex; e->w = f.w; e->h = f.h; e->from = from; e->to = to; e->pix = f.pix; e->mask = f.mask;
         memset(e->used, 0, sizeof e->used);
         for (i = 0; i < f.w * f.h; i++)
@@ -195,12 +244,14 @@ int hud_sprite_load_remap(hud *h, prj_archive *a, const char *name, int frame, i
     return 0;
 }
 
+void hud_sprite_wrap(const hud_sprite *s) { if (s && s->tex) rb_tex_wrap(s->tex, RB_REPEAT, RB_CLAMP_TO_EDGE); }
+
 void hud_sprite_free(hud_sprite *s)
 {
     int k;
     if (s->tex) {
         for (k = 0; k < g_src_n; k++)
-            if (g_src[k].tex == s->tex) { free(g_src[k].pix); free(g_src[k].mask); g_src[k] = g_src[--g_src_n]; break; }
+            if (g_src[k].tex == s->tex) { src_free(&g_src[k]); g_src[k] = g_src[--g_src_n]; break; }
         rb_tex_delete(s->tex);
     }
     memset(s, 0, sizeof *s);
@@ -225,9 +276,23 @@ int hud_repalette(hud *h, const uint8_t *p6)
         for (k = 0; k < g_src_n; k++) {
             int q, hit = 0;
             for (q = 0; q < 8 && !hit; q++) hit = (g_src[k].used[q] & diff[q]) != 0;
-            if (hit) upload_sprite(h, g_src[k].pix, g_src[k].mask, g_src[k].w, g_src[k].h, g_src[k].from, g_src[k].to, g_src[k].tex);
+            if (hit) src_reading(h, &g_src[k], 1);
         }
     return 1;
+}
+
+/* builds (and keeps) the sprites' readings in palette p6 without showing it - so the first switch to it does not stall */
+void hud_prewarm(hud *h, const uint8_t *p6)
+{
+    uint8_t keep[256][3];
+    int i, k, j;
+    if (!h || !p6) return;
+    memcpy(keep, h->pal, sizeof keep);
+    for (k = 0; k < g_src_n; k++) src_reading(h, &g_src[k], 0);   /* (the current one kept too) */
+    for (i = 0; i < 256; i++)
+        for (j = 0; j < 3; j++) { int v = p6[i * 3 + j] & 63; h->pal[i][j] = (uint8_t)((v << 2) | (v >> 4)); }
+    for (k = 0; k < g_src_n; k++) src_reading(h, &g_src[k], 0);
+    memcpy(h->pal, keep, sizeof keep);
 }
 
 void hud_begin_stretched(hud *h, int w, int hp)
@@ -448,6 +513,26 @@ void hud_poly(hud *h, const float *xy, int n, const float rgba[4])
         }
         hud_put(h, v, 3);
     }
+}
+
+/* triangles (xy: 6 floats each, virtual pixels) in one colour, as few draws as the ring allows */
+void hud_tris(hud *h, const float *xy, int ntri, const float rgba[4])
+{
+    float buf[3 * 4 * 256];
+    int i, k, n = 0;
+    h->U.u_textured = 0;
+    h->U.u_smooth = 0;
+    memcpy(h->U.u_tint, rgba, sizeof h->U.u_tint);
+    for (i = 0; i < ntri; i++) {
+        for (k = 0; k < 3; k++) {
+            float *v = buf + (n * 3 + k) * 4;
+            v[0] = (h->ox + xy[i * 6 + k * 2] * h->k) / (float)h->vw * 2.0f - 1.0f;
+            v[1] = 1.0f - xy[i * 6 + k * 2 + 1] * h->ky / (float)h->vh * 2.0f;
+            v[2] = v[3] = 0;
+        }
+        if (++n == 256) { hud_put(h, buf, n * 3); n = 0; }
+    }
+    if (n) hud_put(h, buf, n * 3);
 }
 
 void hud_clip(hud *h, float x, float y, float w, float hg)

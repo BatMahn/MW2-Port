@@ -180,13 +180,20 @@ int msim_set_formation(msim *s, int formation)
 }
 
 /* position of a named target: nav point, a group (by its spawn record), or the player */
+/* a node's target naming the player: "UserStar" (the shell's star), or the record its GPS came from - a trial's own star
+ * record (JENNSTAR: Trial 1's stars are ordered to destroy "jennstar", which had matched nothing, so they stood idle until
+ * they saw the player - user report), Cadet Training's TNx#USS1 */
+static int is_player_rec(const msim *s, const char *t)
+{
+    return t && (strcasecmp(t, "UserStar") == 0 || (s->player_rec[0] && strcasecmp(t, s->player_rec) == 0));
+}
 static int target_pos(msim *s, const char *name, float *x, float *z, float *radius)
 {
     const msim_nav *n = find_nav(s, name);
     int i;
     *radius = 20000.0f;
     /* objects and groups: 200 m (engine 0x10009b80 compares squared distance with 4e8) */
-    if (strcasecmp(name, "UserStar") == 0) { *x = s->player[0]; *z = s->player[2]; *radius = 20000.0f; return 0; }
+    if (is_player_rec(s, name)) { *x = s->player[0]; *z = s->player[2]; *radius = 20000.0f; return 0; }
     if (n) { *x = n->x; *z = n->z; *radius = n->radius; return 0; }
     for (i = 0; i < s->actor_count; i++)
         if (s->actors[i].leader && strcasecmp(s->actors[i].group, name) == 0) {
@@ -254,7 +261,7 @@ static int cb_targets(void *u, int table, int node, uint32_t kind, const char *t
     (void)node;
     *n_ok = 0;
     if (!t) return 0;
-    if (strcasecmp(t, "UserStar") == 0 && (class_widen(s->player_class) & kind)) { n++; ok += tgt_test(s, table, kind, 2, -1); }
+    if (is_player_rec(s, t) && (class_widen(s->player_class) & kind)) { n++; ok += tgt_test(s, table, kind, 2, -1); }
     for (i = 0; i < s->actor_count && n < 40; i++)
         if (strcasecmp(s->actors[i].group, t) == 0 && (class_widen(s->actors[i].obj_class) & kind)) { n++; ok += tgt_test(s, table, kind, 2, i); }
     for (i = 0; i < s->nav_count && n < 40; i++)
@@ -385,6 +392,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     snprintf(s->player_skel, sizeof s->player_skel, "TIMBRWLF");
     snprintf(s->player_loadout, sizeof s->player_loadout, "TBR00STD");
     s->player_class = 6;   /* the usual GPS class (destroy / protect) when there is no USERSTAR */
+    snprintf(s->player_rec, sizeof s->player_rec, "UserStar");
     player_table = 0;
     {
         unsigned char *d = NULL;
@@ -410,6 +418,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                         snprintf(s->player_loadout, sizeof s->player_loadout, "%s", g.loadout);
                         for (k = 0; s->player_skel[k]; k++) s->player_skel[k] = (char)toupper((unsigned char)s->player_skel[k]);
                         for (k = 0; s->player_loadout[k]; k++) s->player_loadout[k] = (char)toupper((unsigned char)s->player_loadout[k]);
+                        snprintf(s->player_rec, sizeof s->player_rec, "%s", pm.records[r].name);
                         from_tree = 1;
                     }
                 bwd_mission_free(&pm);
@@ -440,6 +449,13 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                 o += sz;
             }
             free(d);
+        }
+    }
+    if (getenv("MW2_TEST_PLAYER_MECH")) {   /* TEST ONLY: "SKELETON,LOADOUT" for the player (e.g. MADDOG,MDG00STD) */
+        char sk[32] = "", lo[32] = "";
+        if (sscanf(getenv("MW2_TEST_PLAYER_MECH"), "%31[^,],%31s", sk, lo) == 2) {
+            snprintf(s->player_skel, sizeof s->player_skel, "%s", sk);
+            snprintf(s->player_loadout, sizeof s->player_loadout, "%s", lo);
         }
     }
     if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "player loadout %s\n", s->player_loadout);   /* tests */
@@ -949,7 +965,7 @@ static int node_target_list(const msim *s, const mtbl_node *n, int *code, int ma
     int i, c = 0;
     const char *t = n->target;
     if (!t[0] || strcasecmp(t, "NULL") == 0) return 0;
-    if (strcasecmp(t, "UserStar") == 0 && (class_widen(s->player_class) & n->kind) && c < max) code[c++] = 0x20000;
+    if (is_player_rec(s, t) && (class_widen(s->player_class) & n->kind) && c < max) code[c++] = 0x20000;
     for (i = 0; i < s->actor_count && c < max; i++)
         if (strcasecmp(s->actors[i].group, t) == 0 && (class_widen(s->actors[i].obj_class) & n->kind)) code[c++] = 0x20000 | (i + 1);
     for (i = 0; i < s->nav_count && c < max; i++)
@@ -1823,7 +1839,7 @@ void msim_step(msim *s, int32_t dt_ms)
         } else if (cur >= 0) {
             const mtbl_node *n = &s->logic.tables[ac->table].nodes[cur];
             float tx, tz, r;
-            if (strcasecmp(n->target, "UserStar") == 0 && !s->player_unit.destroyed) {
+            if (is_player_rec(s, n->target) && !s->player_unit.destroyed) {
                 /* attack order: the goal is the player */
                 v.has_goal = 1; v.goal_radius = 10000.0f; v.goal_dist = v.enemy_dist; v.goal_bearing = v.enemy_bearing;
             } else if (target_pos(s, n->target, &tx, &tz, &r) == 0) {
@@ -1916,6 +1932,10 @@ void msim_step(msim *s, int32_t dt_ms)
             m->twist += (tw - m->twist) * (kt < 1.0f ? kt : 1.0f);
             m->pitch += (m->pitch_demand - m->pitch) * (kp < 1.0f ? kp : 1.0f);
             ac->mech.twist = m->twist;   /* drawn, and the weapon mounts follow it */
+            /* the pitch object (the record's second THNG node: arms, a turret's guns) turned to the aim's pitch
+             * (0x10019310: -asin of the aim ray's rise from it, less the torso's pitch - left at 0 here, the torso's
+             * own pitch taken for the player only) */
+            ac->mech.pitch = -m->pitch;
         }
         {
             float kmh, rate, h, spd, top = ac->speed * s->units[i].speed_gain;
@@ -2614,7 +2634,7 @@ static int order_attacks_player(const msim *s, int i)
     const mtbl_node *n;
     if (cur < 0) return 0;
     n = &s->logic.tables[s->actors[i].table].nodes[cur];
-    return (n->kind == MTBL_K_DESTROY1 || n->kind == MTBL_K_DESTROY2) && strcasecmp(n->target, "UserStar") == 0;
+    return (n->kind == MTBL_K_DESTROY1 || n->kind == MTBL_K_DESTROY2) && is_player_rec(s, n->target);
 }
 
 /* world part q is the intact object of a destroyed thing: its object entry carries 0x200 (0x10025180: +0xc |= 0xa00),
@@ -3334,7 +3354,11 @@ static void combat_step(msim *s, float dt)
                                                                          * unit's piece wins */
                     hit_unit = -2;
                     float hp3[3] = {o[0] + dv[0] * tb, o[1] + dv[1] * tb, o[2] + dv[2] * tb};
-                    int ft = fx_impact_type(combat_weapon_visual(sh->weapon), FX_HIT_GROUND), b2 = shot_thing(s, part);
+                    /* the impact's flags by the object struck (0x10044f60): a thing's (+2 flags 0x200) or the projectile pool's
+                     * (0x400) - c_impactThing, so a laser shows its own splash, a missile its structure blast; any other
+                     * object - c_impactGround, the dust puff (the port had given every object the ground's) */
+                    const int b2 = shot_thing(s, part);
+                    const int ft = fx_impact_type(combat_weapon_visual(sh->weapon), b2 >= 0 || (s->world->parts[part].objtype & 0x600) ? FX_HIT_STRUCT : FX_HIT_GROUND);
                     if (ft >= 0) effect(s, ft, hp3, missile_fx(sh->weapon));
                     if (b2 >= 0) building_damage(s, b2, combat_weapon_damage(sh->weapon), sh->owner, hp3);
                     if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
@@ -4796,6 +4820,34 @@ static void buildings_init(msim *s, const mech3d *w)
                 if (strcmp(c[k].tag, "AFFL") == 0 && c[k].size >= 4) { affl = (int32_t)((uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 | (uint32_t)d[3] << 24); continue; }
                 if (strcmp(c[k].tag, "GT") != 0 || c[k].size < 68) continue;
                 a = (int16_t)(d[0] | d[1] << 8); b = (int16_t)(d[2] | d[3] << 8); hp = (int16_t)(d[16] | d[17] << 8);
+                /* the destroyed variant (b) is not created until the swap (the thing table's entries, 0x10024fe0 -> 0x10025450:
+                 * flagged 0x800, they wait), nor are its children: hidden here whatever its model is called - the port hid
+                 * only the SA* models, so GREYSCN1's wrecked Wolf dropship (VA1DROPA / VA1DRPWS, the destroyed variants of
+                 * the V_B* dropship that GREYDRP1 carries to the drop site) and GREYFLF1's crashed Aerotechs stood at the
+                 * records' own origin, mid-map, from the start (user report: a disassembled dropship one walks through) */
+                if (b >= 0 && b != a && w->part_count > 0) {
+                    char *mark = calloc((size_t)w->part_count, 1);   /* the variant and everything under it */
+                    int changed = 1;
+                    if (mark) {
+                        /* by object index (a dummy node in between - GREYFLF1's 0x70 nodes - has no part of its own) */
+                        int objs[64], no = 0, j;
+                        objs[no++] = b;
+                        while (changed) {
+                            changed = 0;
+                            for (q = 0; q < w->part_count; q++) {
+                                if (mark[q] || strcmp(w->parts[q].rec, w->parts[i].rec) != 0) continue;
+                                for (j = 0; j < no; j++)
+                                    if (w->parts[q].obj_index == objs[j] || w->parts[q].parent_obj == objs[j]) {
+                                        mark[q] = 1; changed = 1;
+                                        if (no < 64) objs[no++] = w->parts[q].obj_index;
+                                        break;
+                                    }
+                            }
+                        }
+                        for (q = 0; q < w->part_count; q++) if (mark[q]) ((mech3d_part *)&w->parts[q])->hidden = 1;
+                        free(mark);
+                    }
+                }
                 if (((d[20] | d[21] << 8) & 0x8000) && (d[18] & 0xf0) != 0x70)   /* a debris node (0x10025450 / 0x10015530) */
                     for (q = 0; q < w->part_count; q++)
                         if (w->parts[q].obj_index == a && strcmp(w->parts[q].rec, w->parts[i].rec) == 0) w->parts[q].gt_debris = 1;

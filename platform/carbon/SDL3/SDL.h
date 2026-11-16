@@ -549,6 +549,7 @@ bool SDL_SetRenderVSync(SDL_Renderer *renderer, int vsync);
 bool SDL_SetStringProperty(SDL_PropertiesID props, const char *name, const char *value);
 bool SDL_SetTextureBlendMode(SDL_Texture *texture, SDL_BlendMode blendMode);
 bool SDL_SetTextureScaleMode(SDL_Texture *texture, SDL_ScaleMode scaleMode);
+bool SDL_HideCursor(void);
 bool SDL_SetWindowFullscreen(SDL_Window *window, bool fullscreen);
 bool SDL_SetWindowFullscreenMode(SDL_Window *window, const SDL_DisplayMode *mode);
 bool SDL_SetWindowRelativeMouseMode(SDL_Window *window, bool enabled);

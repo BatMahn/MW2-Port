@@ -56,7 +56,7 @@ void mech3d_use_skeleton(mech3d *dst, const mech3d *src)
     dst->bind_count = src->bind_count;
     memcpy(dst->bind_node, src->bind_node, sizeof src->bind_node);
     memcpy(dst->bind_track, src->bind_track, sizeof src->bind_track);
-    dst->eye_node = src->eye_node; dst->twist_node = src->twist_node;
+    dst->eye_node = src->eye_node; dst->twist_node = src->twist_node; dst->pitch_node = src->pitch_node;
     dst->centre_h = src->centre_h;
     memcpy(dst->pofo_node, src->pofo_node, sizeof src->pofo_node);
 }
@@ -192,12 +192,27 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
             nd = par;
         }
     }
-    /* torso node for twisting: the node carrying the cockpit/torso part (*_HEAD) */
-    out->twist_node = -1;
-    for (i = 0; i < out->part_count; i++) {
-        size_t nl = strlen(out->parts[i].model_name);
-        if (nl >= 5 && strcasecmp(out->parts[i].model_name + nl - 5, "_HEAD") == 0) { out->twist_node = out->parts[i].node; break; }
+    /* torso node for twisting: the record's first THNG node (the engine's torso object, which the controller turns by the
+     * twist and pitch: 0x10019310 -> SetObjRotation(torso, pitch, twist, 0)), its second the pitch object (arms, a turret's
+     * guns). Mechs: the node of the *_HEAD part either way; turrets have no *_HEAD (TURRETB's THNG 2, the body), so the port
+     * never turned them - they fired from guns facing the way they were placed (user report, Wolf mission 2) */
+    out->twist_node = out->pitch_node = -1;
+    {
+        int th = 0;
+        for (k = 0; k < n; k++)
+            if (strcmp(chunks[k].tag, "THNG") == 0 && chunks[k].size >= 2) {
+                const int nd = (int16_t)(chunks[k].data[0] | (chunks[k].data[1] << 8));
+                int q, ok = 0;
+                for (q = 0; q < out->skel_count; q++) if (out->skel_index[q] == nd) ok = 1;
+                if (ok) { if (th == 0) out->twist_node = nd; else if (th == 1) out->pitch_node = nd; }
+                th++;
+            }
     }
+    if (out->twist_node < 0)
+        for (i = 0; i < out->part_count; i++) {
+            size_t nl = strlen(out->parts[i].model_name);
+            if (nl >= 5 && strcasecmp(out->parts[i].model_name + nl - 5, "_HEAD") == 0) { out->twist_node = out->parts[i].node; break; }
+        }
     /* animation id and the TSK bindings "node;70,flags,track" */
     for (k = 0; k < n; k++) {
         const bwd_chunk *c = &chunks[k];
@@ -545,13 +560,23 @@ static int ftbl_match(const bwd_chunk *c, const char *name, formation *f)
     if (strcasecmp(nm, name) != 0) return 0;
     f->found = 1;
     f->leader_yaw = (float)(int32_t)((uint32_t)c->data[24] | ((uint32_t)c->data[25] << 8) | ((uint32_t)c->data[26] << 16) | ((uint32_t)c->data[27] << 24)) / 65536.0f;
+    /* The record is a 16-byte name and then slots of 12 bytes {x, z, heading 16.16}, the leader's first (resource.c
+     * LoadFormationTable: (size - 0x18) / 12 slots after the name); the port reads the leader's heading as leader_yaw
+     * and its slots from 1. Making a player the leader moves the formation's origin to the leader's slot (team.c
+     * SetTeamLeader: every slot less the leader's x / z). The leader's slot is 0,0 in the stock formations, but not in a
+     * mission's own: GREYSCN1's greytur1 gives the leader -63978,49306, the turrets' places on the map, so its four
+     * followers stood 700 m off, one beyond the ice wall (user report) */
+    {
+        const int32_t x0 = (int32_t)((uint32_t)c->data[16] | ((uint32_t)c->data[17] << 8) | ((uint32_t)c->data[18] << 16) | ((uint32_t)c->data[19] << 24));
+        const int32_t z0 = (int32_t)((uint32_t)c->data[20] | ((uint32_t)c->data[21] << 8) | ((uint32_t)c->data[22] << 16) | ((uint32_t)c->data[23] << 24));
     n = (c->size - 28) / 12;
     if (n > 16) n = 16;
     for (k = 0; k < n; k++) {
         const uint8_t *q = c->data + 28 + k * 12;
-        f->x[k] = (int32_t)((uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24));
-        f->z[k] = (int32_t)((uint32_t)q[4] | ((uint32_t)q[5] << 8) | ((uint32_t)q[6] << 16) | ((uint32_t)q[7] << 24));
+        f->x[k] = (int32_t)((uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24)) - x0;
+        f->z[k] = (int32_t)((uint32_t)q[4] | ((uint32_t)q[5] << 8) | ((uint32_t)q[6] << 16) | ((uint32_t)q[7] << 24)) - z0;
         f->yaw[k] = (float)(int32_t)((uint32_t)q[8] | ((uint32_t)q[9] << 8) | ((uint32_t)q[10] << 16) | ((uint32_t)q[11] << 24)) / 65536.0f;
+    }
     }
     f->count = (int)n;
     return 1;
@@ -597,7 +622,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
     *count = 0;
     bwd_mission m;
     const bwd_record *scn = NULL;
-    const bwd_chunk *tables[64];
+    const bwd_chunk *tables[64] = {0};
     int ntables = 0, i, k, per_table[64], bwd_type = prj_find_type(a, "BWD");
 
     if (bwd_mission_load(a, scene, &m) != 0) return -1;
@@ -609,7 +634,15 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
     memset(star_tex, 0, sizeof star_tex);
     if (scn)
         for (k = 0; k < scn->chunk_count; k++) {
-            if (strcmp(scn->chunks[k].tag, "MTBL") == 0 && ntables < 64) tables[ntables++] = &scn->chunks[k];
+            /* MTBL: by the table's own number (+0, as mtbl_logic_init keeps them), not the chunk's place - SABLSCN1 stores
+             * table 6 (the friendly dropship) second, so every star from 1 on took the start point of the table before it:
+             * the dome's guards stood 3.7 km away at the dropship's, the second star at the dome... (user report: the
+             * groups mixed up, the third distracted by the Wolf dropship) */
+            if (strcmp(scn->chunks[k].tag, "MTBL") == 0 && scn->chunks[k].size >= 4) {
+                const uint8_t *q = scn->chunks[k].data;
+                const uint32_t ti = (uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24;
+                if (ti < 64) { tables[ti] = &scn->chunks[k]; if ((int)ti + 1 > ntables) ntables = (int)ti + 1; }
+            }
             /* STAR: per state table, 24-byte entries { u32, u32, char formation[16] } */
             if (strcmp(scn->chunks[k].tag, "STAR") == 0) {
                 size_t e;
@@ -641,7 +674,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                 if (g.table >= 0 && g.table < 64) per_table[g.table]++;
                 continue;
             }
-            if (g.table < 0 || g.table >= ntables || tables[g.table]->size < 106) continue;
+            if (g.table < 0 || g.table >= ntables || !tables[g.table] || tables[g.table]->size < 106) continue;
             start_id = (uint16_t)(tables[g.table]->data[102] | (tables[g.table]->data[103] << 8));
             start_name = prj_symbol_name(a, bwd_type, -1); /* placeholder, resolved below */
             start_name = NULL;
@@ -694,6 +727,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     *actors = grown;
                     ac = &(*actors)[(*count)++];
                     memset(ac, 0, sizeof *ac);
+                    if (getenv("MW2_DEBUG_SPAWN") && slot > 0 && f.found && slot - 1 < f.count) fprintf(stderr, "  slot raw %d,%d yaw %.1f leader_yaw %.1f nav heading %.1f\n", f.x[slot - 1], f.z[slot - 1], (double)f.yaw[slot - 1], (double)f.leader_yaw, (double)nav.heading);
                     if (getenv("MW2_DEBUG_SPAWN")) fprintf(stderr, "spawn %s table %d slot %d formation %s (found %d, %d slots) start %s %d,%d off %.0f,%.0f %s\n", m.records[i].name, g.table, slot,
                                                             star[g.table][0] ? star[g.table] : "star", f.found, f.count, start_name, nav.x, nav.z, (double)fx, (double)fz, skel);   /* tests */
                     piece.origin[0] += (int32_t)lrintf(fx);
@@ -848,6 +882,14 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
                 mat3_axis(tmp, 1, m->twist);
                 mat3_mul(lrot, lrot, tmp);
             }
+            if (m->twist_node >= 0 && m->skel_index[i] == m->twist_node && m->tilt != 0) {   /* then the pitch (+ forward, down) */
+                mat3_axis(tmp, 0, m->tilt);
+                mat3_mul(lrot, lrot, tmp);
+            }
+            if (m->pitch_node >= 0 && m->skel_index[i] == m->pitch_node && m->pitch != 0) {   /* the pitch object */
+                mat3_axis(tmp, 0, m->pitch);
+                mat3_mul(lrot, lrot, tmp);
+            }
             if (anim)
                 for (k = 0; k < m->bind_count; k++) {
                     int tr = m->bind_track[k];
@@ -859,7 +901,8 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
                      * roll 0), so the walk's rotation keys on it (0x1000dec0 -> 0x1000f9d0, small relative turns) never
                      * add up: no torso sway (Gargoyle +-4 deg yaw, Battlemaster / Hellbringer / Summoner +-2.6, Firemoth
                      * pitch). Its translation keys stay */
-                    if (anim->tracks[tr].type > 2 && m->skel_index[i] == m->twist_node) continue;
+                    if (anim->tracks[tr].type > 2 && (m->skel_index[i] == m->twist_node || m->skel_index[i] == m->pitch_node)) continue;   /* (the
+                     * pitch object's whole rotation too: 0x10019310 -> SetObjRotation(pitch object, angle, 0, 0) every frame) */
                     if (anim->tracks[tr].type <= 2) lpos[anim->tracks[tr].type] += v;
                     else { mat3_axis(tmp, anim->tracks[tr].type - 3, v); mat3_mul(lrot, lrot, tmp); }
                 }

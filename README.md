@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-15, v1.1.23)
+## Status (2026-11-16, v1.1.26)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
@@ -159,7 +159,9 @@ Only the 3D editions' data (`3d/`) is included in this repository; everything el
       mt32/       REQUIRED for the menu music - the Roland MT-32 ROMs: MT32_CONTROL.ROM and MT32_PCM.ROM
                   (without them the menus fall back to an SC-55 in sc55/ or Gravis UltraSound patches in
                   ultrasnd/, if present)
-      music/      optional - the CD soundtrack (Track02..Track27 as FLAC, MP3 or WAV; see "CD music")
+      music/      optional - the CD soundtrack: ripped tracks (Track02..Track27 as FLAC, MP3, WAV or AIFF), or a
+                  BIN/CUE image of the CD (MECH2.CUE + MECH2.BIN). Without it the game looks for a .cue in cd/ and
+                  the game folder, then for the CD in a drive (see "CD music")
       sc55/       optional - Roland SC-55 ROM dumps (menu music on an emulated Sound Canvas; see below)
       ultrasnd/   optional - Gravis UltraSound patches (menu music without the MT-32 ROMs; see below)
       3d/         the 3D editions' data - included in this repository under gamedata/3d/: copy that folder here
@@ -287,7 +289,7 @@ or MP3 if you like; the drive plays any of the three.
 Filenames match case-insensitively.
 
 ## CD music
-Put your rip in one folder as FLAC, MP3 or WAV. Track numbers come from the
+Put your rip in one folder as FLAC, MP3, WAV or AIFF. Track numbers come from the
 filenames (`Track02.flac`, `02 - Title.mp3`, `mw2_02.wav` all mean track 2).
 On the retail disc the music starts at track 2, because track 1 is data.
 If your rip renumbered the music from 1, set `MW2_CDA_TRACK_OFFSET=1`.
@@ -298,11 +300,31 @@ the value cdrip prints (56187 for the MECH2_16B pressing).
     ./cdtool toc  ~/mw2-music          # show the TOC the game will see
     ./cdtool play ~/mw2-music 2        # listen to a track
 
-The game plays music by sector address from the TOC, not by track number.
-cdaudio builds a disc-accurate TOC from the files' lengths, so those requests
-land on the right music. Play/pause/resume, track-to-track continuation,
-the "busy" flag the game polls to loop music, and per-channel volume all
-behave as MSCDEX does.
+**The original CD, without ripping it to tracks.** The game looks for its music in this order and uses the first it
+finds:
+
+1. **Ripped tracks** in `music/` (above).
+2. **A BIN/CUE image of the CD** - the `.cue` file and the `.bin` file(s) it names, side by side, in any of:
+
+        MW2-game/music/MECH2.CUE + MECH2.BIN     (preferred)
+        MW2-game/cd/MECH2.CUE + MECH2.BIN
+        MW2-game/MECH2.CUE + MECH2.BIN
+
+   or anywhere, with `music=/path/to/MECH2.CUE` in the settings file (or `MW2_MUSIC_DIR`). If `cd=` points at a disc
+   image file, its folder is searched too. Make the image with any ripper that writes raw 2352-byte sectors (ImgBurn,
+   cdrdao, IsoBuster, Toast...); a plain .iso holds only the data track, so it has no music. Single-file and
+   one-file-per-track images both work, and the table of contents (pregaps included) comes from the cue sheet.
+3. **The CD in a drive.** Put the original disc in any drive, USB ones included. The game reads the music digitally
+   (as a ripper does) while it plays: Windows (XP and newer), Linux (`/dev/sr0`...; your user needs read access,
+   usually the `cdrom` or `optical` group) and macOS. The first drive holding a disc with audio tracks is used; to
+   pick one, set `MW2_CD_DRIVE=E:` (Windows) or `MW2_CD_DRIVE=/dev/sr1` (Linux), or put `music=cd:E:` in the settings
+   file. On macOS the game uses the audio tracks Finder shows for the disc, then the drive itself. Like the real
+   thing, a track can take a moment to start while the drive spins up and seeks. Not on the classic Mac build.
+
+macOS also shows an audio CD's tracks as `1 Audio Track.aiff`, `2 Audio Track.aiff`...; those can be copied into
+`music/` as they are, like any rip.
+
+`./cdtool toc MECH2.CUE` or `./cdtool toc cd:` shows the table of contents the game will see.
 
 ## Tools
 - `glview 3DFX.PRJ ATI.PRJ ati @ CYAN` plays the mission in a Timber Wolf with the game's controls (GAMEKEY.MAP /

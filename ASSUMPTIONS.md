@@ -1098,6 +1098,42 @@ The 3D editions add `lemmy`. INFERRED:
   draw a type 0 texture unblended (Render type 2), and the original's effect table was not checked for whether it ever
   reaches those frames.
 
+## 32. Feedback list: satellite view, aim, turrets, mission tables, CD images (2026-11-15)
+- MTBL tables are indexed by the number in each chunk (its first dword), not by file order (SABL differs).
+- The player's star record is the one holding the player's GPS position (JENN's is `jennstar`); default `UserStar`.
+- The eyepoint follows half the torso pitch (mechclass.c `m_torsoPitch = pitch >> 1`); the aim ray uses the full pitch.
+  Pilot tilt: positive looks down (eyepoint.c), so Ctrl+Up looks down.
+- Twist / pitch nodes: the first and second THNG chunks name them (fallback: the `_HEAD` part for pitch). Animation
+  rotation keys on those nodes are ignored. AI units apply their pitch on the pitch node.
+- Colour kind 2 polygons (faceshade.c 0x2000) are outlines in the 3D looks (non-Titanium, non-DOS): edges as ~1 px
+  camera-facing ribbons, unlit, palette colour (color >> 4) & 0xff. INFERRED: line width.
+- Satellite view per cockpit.c DrawMapView / SatelliteFaceColor (MW2.DLL table at 0x10153540), LOD 4 regardless of
+  zoom (classtable.c). INFERRED: the exact height-shade steps of the ground.
+- F5-F9: `mode == want ? 0 : want` (gamekeys.c). The cockpit frame is drawn while zoomed (INFERRED from the Win95 build).
+- Impacts on things or objtype & 0x600 parts use the structure hit effect (shots.c c_impactThing).
+- Visited navs: colour 1, icon 0x109 (targetpanel.c).
+- Shell cursor: DATABASE item 24 (shellmain.cpp uses 0x19 one-based), drawn in the grey ramp.
+- Holoprojector clips: awoholop at 0x14c,0xe8, ajfholop at 0xd1,0xca (clanhall.cpp).
+- CD images: .cue FILE/TRACK/INDEX/PREGAP; audio tracks read raw (2352-byte sectors, little-endian). PREGAP adds disc
+  sectors not in the file. AIFF: 16-bit stereo 44.1 kHz, big-endian, read raw. A track runs to the next track's INDEX 00.
+
+- CD drive (v1.1.25): CD-DA extraction (Linux CDROMREADAUDIO, Windows IOCTL_CDROM_RAW_READ, macOS DKIOCCDREAD on
+  /dev/rdiskN after the cddafs AIFF volume). The TOC is the drive's (first session on macOS). A track runs to the next
+  track's start, gap included, as on the disc. While the drive seeks, the play position is held (busy stays set) and
+  silence plays. INFERRED: the original drive's seek time is not modelled beyond the real drive's own. Untested on a
+  real drive in this environment (a mock drive over a BIN matched the image path bit for bit).
+- The satellite view's two lines from the player are the field of view (cockpit.c DrawMapFieldOfView, colour 11),
+  as in the original; not drawn when the player is down / ejected / dead (flags & 0x16).
+
+## 33. Destroyed variants, formation origin, Mech Lab mass (2026-11-16)
+- A GT entry's destroyed object (b) and its whole subtree are hidden at load, whatever the model's name (the engine
+  creates the thing table's destroyed variants only at the swap, 0x10024fe0 -> 0x10025450). Before, only SA* models
+  waited. The subtree is followed by OBJ index, through dummy nodes that have no part.
+- FTBL: a 16-byte name, then 12-byte slots with the leader's first (resource.c LoadFormationTable). SetTeamLeader
+  subtracts the leader slot's x / z from every slot; the port now does the same (GREY greytur1, BROW turret, GOLD).
+- Mech Lab mass: Endo-steel / Ferro-fibrous count once chosen (slots placed or in the pool).
+- Weapon list colour: state -1 (destroyed / out of ammunition) is dark first (weaponpanel.c DrawWeaponPanel).
+
 ## Open items (as of 2026-11-02)
 
 Everything earlier on this list was closed in sessions 14-15 (see §22-§25); what is left after those passes:

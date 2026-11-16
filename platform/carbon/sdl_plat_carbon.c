@@ -402,6 +402,12 @@ void plat_pump(void)
     }
     g_last = gp;
 }
+void plat_hide_cursor(void)
+{
+    static int hidden;
+    if (!hidden) { hidden = 1; HideCursor(); }
+}
+
 void plat_relative_mouse(plat_window *w, int on)
 {
     (void)w;

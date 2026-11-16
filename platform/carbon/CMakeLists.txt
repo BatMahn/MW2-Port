@@ -12,7 +12,7 @@ set(GAME_SRC
     ${ROOT}/src/rb_gl12.c ${ROOT}/src/rb_gl12_world.c ${ROOT}/src/hud.c ${ROOT}/src/shp.c ${ROOT}/src/glr.c
     ${ROOT}/src/skygnd.c ${ROOT}/src/anim.c ${ROOT}/src/mek.c ${ROOT}/src/mtbl.c ${ROOT}/src/msim.c ${ROOT}/src/fx.c
     ${ROOT}/src/combat.c ${ROOT}/src/ai.c ${ROOT}/src/mech3d.c ${ROOT}/src/render.c ${ROOT}/src/tex.c ${ROOT}/src/wtb.c
-    ${ROOT}/src/bwd.c ${ROOT}/src/prj.c ${ROOT}/src/datapath.c ${ROOT}/src/sfx.c ${ROOT}/src/portcfg.c ${ROOT}/src/cdaudio.c
+    ${ROOT}/src/bwd.c ${ROOT}/src/prj.c ${ROOT}/src/datapath.c ${ROOT}/src/sfx.c ${ROOT}/src/portcfg.c ${ROOT}/src/cdaudio.c ${ROOT}/src/cddrive.c
     ${ROOT}/src/gusmid.c ${ROOT}/src/shelldb.c ${ROOT}/src/smk.c ${ROOT}/src/vidfx.c ${ROOT}/src/lance.c ${ROOT}/src/ttext.c
     ${ROOT}/src/cockpitcfg.c)
 # (no MT-32 emulator on this build: menu music is Gravis patches or QuickTime's synth - mt32_none.c, qtmidi.c)

@@ -533,11 +533,34 @@ static void music_start(int track)
         portcfg_resolve(&pc, bp, NULL);
         dir = pc.music[0] ? pc.music : NULL;
     }
-    if (!dir || !g_sfx) return;
+    if (!g_sfx) return;
     if (!g_cd) {
         cdaudio_options o;
         memset(&o, 0, sizeof o);
-        if (cdaudio_open(&g_cd, dir, &o) != 0) { fprintf(stderr, "music: no CD tracks in %s\n", dir); g_cd = NULL; return; }
+        if (!dir || cdaudio_open(&g_cd, dir, &o) != 0) {
+            /* no ripped tracks: the original CD as a disc image (a .cue + its BIN) in the cd/ or game folder */
+            const char *bp = SDL_GetBasePath();
+            g_cd = NULL;
+            portcfg_load(NULL, &pc);
+            portcfg_resolve(&pc, bp, NULL);
+            char drive[80];
+            /* last: the original disc in a drive (MW2_CD_DRIVE names one: a device or a drive letter; else the first
+             * drive with an audio CD) */
+            snprintf(drive, sizeof drive, "cd:%s", getenv("MW2_CD_DRIVE") ? getenv("MW2_CD_DRIVE") : "auto");
+            char cdfolder[sizeof pc.cd];
+            const char *sl = strrchr(pc.cd, '/');
+#ifdef _WIN32
+            if (strrchr(pc.cd, '\\') > sl) sl = strrchr(pc.cd, '\\');
+#endif
+            /* cd= naming a disc image file (MECH2.BIN / .iso): its folder, where the image's .cue sits */
+            snprintf(cdfolder, sizeof cdfolder, "%.*s", sl ? (int)(sl - pc.cd) : 0, pc.cd);
+            if (!((pc.cd[0] && cdaudio_open(&g_cd, pc.cd, &o) == 0) || (cdfolder[0] && cdaudio_open(&g_cd, cdfolder, &o) == 0) ||
+                  (pc.game[0] && cdaudio_open(&g_cd, pc.game, &o) == 0) || cdaudio_open(&g_cd, drive, &o) == 0)) {
+                fprintf(stderr, "music: no CD tracks in %s\n", dir ? dir : "(no music folder)");
+                g_cd = NULL;
+                return;
+            }
+        }
         {   /* the MUSIC slider (MW2SND.CFG +0xc, 16.16) */
             unsigned char snd[60];
             char p[1100];
@@ -1010,6 +1033,9 @@ static void obj_sounds(void)
  * click with sound 0xdc at volume 0x64, centred (0x10032b60(0xdc, 0x64, 0x40, n, 0x32); n 0-8 the rate-table index,
  * unused by 0x100328e0 - DOS 0x40c50 the same), only with the mech up (unit +0x15 & 0x20: set at the first online,
  * kept while shut down) */
+/* the lower display's one mode (0 off, 1 damage, 2 H T A L, 3 rear, 4 down, 5 weapon view) as the port's three flags */
+static int lower_mode(void) { return g_vport ? g_vport + 2 : g_dmg_off ? 0 : g_htal ? 2 : 1; }
+static void lower_mode_set(int m) { g_vport = m >= 3 ? m - 2 : 0; g_htal = m == 2; g_dmg_off = m == 0; }
 static int ui_click(void)
 {
     if (g_sfx && g_sim_ok && !g_sim.player_unit.destroyed && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")))
@@ -1908,7 +1934,11 @@ static void hud_slot(int slot)    /* the engine's 0x1002ac40: the HUD table (and
 {
     int k;
     if (slot < 0 || slot >= 20 || !g_pal_slot_ok[slot] || !g_hud) return;
-    hud_repalette(g_hud, g_pal_slot[slot]);
+    {
+        Uint64 t0 = SDL_GetPerformanceCounter();
+        hud_repalette(g_hud, g_pal_slot[slot]);
+        if (getenv("MW2_PERF")) printf("perf: HUD palette slot %d: %.1f ms\n", slot, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+    }
     for (k = 0; k < 256; k++) hud_pal_color(g_hud, k, g_hp[k]);
     g_hud_slot = slot;
 }
@@ -1992,6 +2022,8 @@ static void world_fade(glr *r)
         amp = 0;
         g_pal3.cur = g_pal3.want = g_hud_slot >= 0 ? g_hud_slot : 0;
         g_pal3.reload_at = -1; g_pal3.flash_t0 = -1; g_pal3.flash_green = 0;
+        /* the HUD's readings in the INFRARED slot built now, so light amplification's reload does not stall a frame */
+        if (g_hud && g_pal_slot_ok[0xc]) hud_prewarm(g_hud, g_pal_slot[0xc]);
     }
     prev = g_sim.now;
     pal3_upkeep(want, amp);
@@ -2079,6 +2111,238 @@ static void scene_anim(glr *r)
         if (getenv("MW2_ANIM_LOG") && i == (int)strtol(getenv("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
             static int last = -1;
             if (f != last) { last = f; printf("ANIM t=%.3f slot %#x frame %d of %d rate %d\n", g_sim.now / 1000.0, i, f, g_scene.nfr[i], g_scene.rate[i]); }
+        }
+    }
+}
+/* The satellite view (F3, cockpit view 4: engine 0x10003620 DrawMapView with the hooks 0x100040b0 / 0x10004100 /
+ * 0x100042e0) is not the 3D picture from above: a map drawn from the scene's polygons, straight down, north up, the
+ * view's width the range. The view is wiped to the ground colour (0xef: the ground texture's average colour,
+ * 0x100519b0(0x108)), the sky and ground are not drawn, and each polygon takes a colour by its object's type word
+ * (SatelliteFaceColor) from the layout's colour table (MW2.DLL 0x10153868 +0x74 -> 0x10153540: e a 6 | f b f5 | 2 | 3
+ * f9 ff | f0 | 1 2, palette indices):
+ *  - units (0x100) the side's colour [0..2], structures (things, 0x200) [3 + side], the projectile pool (0x400) [6],
+ *    types 0x40 / 0x50 / 0x80 [7] / [8] / [9]: drawn black with their edges in that colour (0x100042e0, kind 0: twice,
+ *    the second time outlined) - so the enemy buildings show as red outlines and incoming fire in yellow;
+ *  - types 0x10 / 0x20 / 0x60 (fire and smoke cards, effects): as they are - their bitmaps;
+ *  - the rest (terrain and plain objects): the face's colour group ((colour & 0xf00) >> 4; a textured face's [10] 0xf0)
+ *    shaded by height, group | 16 x height / 6400 clamped to 0..15 (0x10004440: g_mapShadeRange 0x1900, base 0) -
+ *    per vertex in the 3D editions (Gouraud), flat here per polygon at its mean height.
+ * Types 0x30 / 0x70 are skipped (0x100040b0), as are destroyed units. Drawn by the HUD's 2D primitives, lowest first. */
+static const int SAT_COL[13] = {0xe, 0xa, 0x6, 0xf, 0xb, 0xf5, 0x2, 0x3, 0xf9, 0xff, 0xf0, 0x1, 0x2};
+typedef struct { float y; int part_src, part; int side_col; } sat_item;   /* side_col: -1 shaded, -2 bitmap, else a palette index */
+static float g_sat_gnd[4] = {0.3f, 0.3f, 0.3f, 1.0f};
+static const texture *g_sat_gnd_tex;
+static void sat_ground_colour(void)
+{
+    const texture *t = g_scene.slot[SKYGND_GROUND_SLOT];
+    if (t == g_sat_gnd_tex) return;
+    g_sat_gnd_tex = t;
+    if (t && t->rgba && t->w > 0 && t->h > 0) {
+        double acc[3] = {0, 0, 0};
+        size_t i, n = (size_t)t->w * (size_t)t->h;
+        for (i = 0; i < n; i++) {
+            uint32_t px = t->rgba[i];
+            if (g_tex_kind == 3) { const uint8_t *pc = g_scene.palette[px & 0xff]; acc[0] += pc[0]; acc[1] += pc[1]; acc[2] += pc[2]; }
+            else { acc[0] += px & 0xff; acc[1] += (px >> 8) & 0xff; acc[2] += (px >> 16) & 0xff; }
+        }
+        g_sat_gnd[0] = (float)(acc[0] / n / 255.0); g_sat_gnd[1] = (float)(acc[1] / n / 255.0); g_sat_gnd[2] = (float)(acc[2] / n / 255.0);
+    }
+}
+/* a part's vertex in the world (as msim's part_vertex) */
+static void sat_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3])
+{
+    if (p->has_rot) {
+        const float *R = p->rot;
+        out[0] = R[0] * v->x + R[1] * v->y + R[2] * v->z + (float)p->pos[0];
+        out[1] = R[3] * v->x + R[4] * v->y + R[5] * v->z + (float)p->pos[1];
+        out[2] = R[6] * v->x + R[7] * v->y + R[8] * v->z + (float)p->pos[2];
+    } else {
+        float c = cosf(p->yaw * 3.14159265f / 180.0f), sn = sinf(p->yaw * 3.14159265f / 180.0f);
+        out[0] = c * v->x + sn * v->z + (float)p->pos[0];
+        out[1] = (float)v->y + (float)p->pos[1];
+        out[2] = -sn * v->x + c * v->z + (float)p->pos[2];
+    }
+}
+static const mech3d *sat_src(int k)   /* -2 the world, -1 the player's mech, else unit k */
+{
+    return k == -2 ? g_sim.world : k == -1 ? &g_pl : &g_actors[k].mech;
+}
+static struct { const texture *t; hud_sprite s; } g_sat_spr[64];
+static int g_sat_spr_next;
+static const hud_sprite *sat_sprite(const texture *t)
+{
+    int k;
+    if (!t || !t->rgba || t->w <= 0 || t->h <= 0 || g_tex_kind == 3) return NULL;
+    for (k = 0; k < 64; k++) if (g_sat_spr[k].t == t && g_sat_spr[k].s.tex) return &g_sat_spr[k].s;
+    k = g_sat_spr_next; g_sat_spr_next = (g_sat_spr_next + 1) & 63;
+    hud_sprite_free(&g_sat_spr[k].s);
+    g_sat_spr[k].t = t;
+    if (hud_sprite_rgba(&g_sat_spr[k].s, (const uint8_t *)t->rgba, t->w, t->h) != 0) return NULL;
+    return &g_sat_spr[k].s;
+}
+static const texture *sat_poly_texture(const wtb_poly *q)
+{
+    const int kind = (q->color >> 12) & 7;
+    if (kind == 3) return g_scene.bank0[(q->color >> 4) & 0xff];
+    {
+        const int sl = q->color & 0xff;
+        long t = (long)((int64_t)g_sim.now * 182 / 1000);
+        if (g_scene.nfr[sl] >= 2 && g_scene.rate[sl] > 0 && g_scene.mode[sl] != 0) {
+            long st = t / g_scene.rate[sl];
+            int f = g_scene.mode[sl] == 2 && st >= g_scene.nfr[sl] ? 0 : (int)(st % g_scene.nfr[sl]);
+            if (g_scene.fr[sl][f]) return g_scene.fr[sl][f];
+        }
+        return g_scene.slot[sl];
+    }
+}
+static int sat_cmp(const void *a, const void *b)
+{
+    const float d = ((const sat_item *)a)->y - ((const sat_item *)b)->y;
+    return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+static void sat_draw(int w, int h)
+{
+    static sat_item *it;
+    static int cap;
+    static float *tri, *seg;
+    static int tcap, scap;
+    const float range = 100000.0f / (float)(1 << g_sat_i), sc = 640.0f / range;
+    const float ex = (float)g_pl.origin[0], ez = (float)g_pl.origin[2];
+    /* the view's half extents in world units (the window can be wider than 4:3) */
+    const float hx = (float)w / ((float)h * 4.0f / 3.0f) * range * 0.5f + 2000.0f, hz = range * 0.375f + 2000.0f;
+    int n = 0, src, i, k;
+    static const float black[4] = {0, 0, 0, 1};
+    sat_ground_colour();
+    for (src = -2; src < g_actor_count; src++) {
+        const mech3d *m = sat_src(src);
+        int sd = 0;
+        if (!m || !m->parts) continue;
+        if (src == -1 && (!g_pl_ok || g_sim.player_unit.destroyed)) continue;
+        if (src >= 0) {
+            if (g_sim.units && g_sim.units[src].destroyed) continue;
+            sd = g_actors[src].friendly ? 0 : g_actors[src].alliance == 2 ? 2 : 1;
+        }
+        for (k = 0; k < m->part_count; k++) {
+            const mech3d_part *pp = &m->parts[k];
+            const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
+            float c[3] = {0, 0, 0}, top = -1e30f;
+            int col, ty = pp->objtype & 0xf0, kd = pp->objtype & 0xf00, v;
+            if (!o || o->vert_count <= 0 || pp->hidden) continue;
+            if (src == -2 && (ty == 0x30 || ty == 0x70)) continue;
+            /* (a quick reject on the part's origin: the world's parts are small next to the view) */
+            if (fabsf((float)pp->pos[0] - ex) > hx + 20000.0f || fabsf((float)pp->pos[2] - ez) > hz + 20000.0f) continue;
+            for (v = 0; v < o->vert_count; v++) { float q[3]; sat_vertex(pp, &o->verts[v], q); c[0] += q[0]; c[2] += q[2]; if (q[1] > top) top = q[1]; }
+            if (src != -2) col = SAT_COL[sd];   /* a unit: its side */
+            else {
+                int b, thing = -1;
+                for (b = 0; b < g_sim.bld_count; b++) if (g_sim.bld[b].intact == k || g_sim.bld[b].destroyed == k) { thing = b; break; }
+                if (thing >= 0 && (kd & 0x200)) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
+                else if (kd & 0x200) col = SAT_COL[5];
+                else if (kd & 0x100) col = SAT_COL[1];
+                else if (kd & 0x400) col = SAT_COL[6];
+                else if (ty == 0x40) col = SAT_COL[7];
+                else if (ty == 0x50) col = SAT_COL[8];
+                else if (ty == 0x80) col = SAT_COL[9];
+                else if (ty == 0x10 || ty == 0x20 || ty == 0x60 || pp->facing) col = -2;
+                else col = -1;
+            }
+            if (n == cap) { sat_item *g = realloc(it, (size_t)(cap ? cap * 2 : 1024) * sizeof *g); if (!g) break; it = g; cap = cap ? cap * 2 : 1024; }
+            it[n].y = top; it[n].part_src = src; it[n].part = k; it[n].side_col = col;
+            n++;
+        }
+    }
+    qsort(it, (size_t)n, sizeof *it, sat_cmp);
+    if (getenv("MW2_SAT_TRACE")) {   /* TEST hook: the items by colour, once */
+        static int once;
+        if (!once++) {
+            for (i = 0; i < n; i++) if (it[i].part_src != -2 || it[i].side_col >= 0) printf("SATITEM src %d part %d col %d y %.0f type %#x\n", it[i].part_src, it[i].part, it[i].side_col, (double)it[i].y, sat_src(it[i].part_src)->parts[it[i].part].objtype);
+            for (i = 0; i < 13; i++) printf("SATCOL %d idx %#x = %.2f %.2f %.2f\n", i, SAT_COL[i], (double)HP(SAT_COL[i])[0], (double)HP(SAT_COL[i])[1], (double)HP(SAT_COL[i])[2]);
+            printf("SATN %d\n", n);
+        }
+    }
+    for (i = 0; i < n; i++) {
+        const mech3d_part *pp = &sat_src(it[i].part_src)->parts[it[i].part];
+        const wtb_object *o = &pp->model.objects[0];
+        int nt = 0, ns = 0, col = it[i].side_col, j;
+        if (col == -2) {   /* a card: its bitmap, upright on the map at its centre (the engine draws its polygon as it is) */
+            float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f}, wd, hg;
+            const hud_sprite *spr = NULL;
+            for (j = 0; j < o->vert_count; j++) { float q[3]; int c3; sat_vertex(pp, &o->verts[j], q); for (c3 = 0; c3 < 3; c3++) { if (q[c3] < mn[c3]) mn[c3] = q[c3]; if (q[c3] > mx[c3]) mx[c3] = q[c3]; } }
+            for (j = 0; j < o->poly_count && !spr; j++) if (o->polys[j].n >= 3) spr = sat_sprite(sat_poly_texture(&o->polys[j]));
+            if (!spr) continue;
+            wd = fmaxf(mx[0] - mn[0], mx[2] - mn[2]) * sc; hg = (mx[1] - mn[1]) * sc;
+            if (wd < 2.0f) wd = 2.0f;
+            if (hg < 2.0f) hg = wd;
+            hud_draw_rect_tex(g_hud, spr, 320.0f + ((mn[0] + mx[0]) * 0.5f - ex) * sc - wd * 0.5f, 240.0f - ((mn[2] + mx[2]) * 0.5f - ez) * sc - hg * 0.5f, wd, hg, NULL);
+            continue;
+        }
+        for (j = 0; j < o->poly_count; j++) {
+            const wtb_poly *q = &o->polys[j];
+            float pv[WTB_MAX_POLY_VERTS][3], e1[3], e2[3], ny, my = 0;
+            int c3, t;
+            if (q->n < 3) continue;
+            for (c3 = 0; c3 < q->n; c3++) { sat_vertex(pp, &o->verts[q->idx[c3]], pv[c3]); my += pv[c3][1]; }
+            for (c3 = 0; c3 < 3; c3++) { e1[c3] = pv[1][c3] - pv[0][c3]; e2[c3] = pv[2][c3] - pv[0][c3]; }
+            ny = e1[2] * e2[0] - e1[0] * e2[2];
+            if (ny >= 0) continue;   /* faces turned away from the sky (the port's winding: as the cockpit frame's cull) */
+            if (col == -1) {   /* shaded by height: one polygon at a time (its own colour) */
+                int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : (q->color & 0xf00) >> 4, shade;
+                float xy[6];
+                my /= (float)q->n;
+                shade = (int)floorf(16.0f * my / 6400.0f);
+                if (shade < 0) shade = 0; else if (shade > 15) shade = 15;
+                for (t = 1; t + 1 < q->n; t++) {
+                    const int id[3] = {0, t, t + 1};
+                    for (c3 = 0; c3 < 3; c3++) { xy[c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; xy[c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
+                    hud_tris(g_hud, xy, 1, HP((grp & 0xf0) | shade));
+                }
+                continue;
+            }
+            if (nt + q->n > tcap) { float *g = realloc(tri, (size_t)(tcap + q->n + 1024) * 6 * sizeof *g); if (!g) break; tri = g; tcap += q->n + 1024; }
+            if (ns + q->n > scap) { float *g = realloc(seg, (size_t)(scap + q->n + 1024) * 4 * sizeof *g); if (!g) break; seg = g; scap += q->n + 1024; }
+            for (t = 1; t + 1 < q->n; t++) {
+                const int id[3] = {0, t, t + 1};
+                for (c3 = 0; c3 < 3; c3++) { tri[nt * 6 + c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; tri[nt * 6 + c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
+                nt++;
+            }
+            for (t = 0; t < q->n; t++) {
+                const float *a = pv[t], *b = pv[(t + 1) % q->n];
+                seg[ns * 4] = 320.0f + (a[0] - ex) * sc; seg[ns * 4 + 1] = 240.0f - (a[2] - ez) * sc;
+                seg[ns * 4 + 2] = 320.0f + (b[0] - ex) * sc; seg[ns * 4 + 3] = 240.0f - (b[2] - ez) * sc;
+                ns++;
+            }
+        }
+        if (col >= 0) {   /* black, then its edges in the colour */
+            if (nt) hud_tris(g_hud, tri, nt, black);
+            if (ns) hud_lines(g_hud, seg, ns, 1.0f, HP(col));
+        }
+    }
+    /* the projectile pool (type word 0x400: [6]) - each shot a short line along its flight, in colour 2 */
+    if (g_sim_ok) {
+        int ns = 0;
+        for (i = 0; i < g_sim.shot_count; i++) {
+            const msim_shot *sh = &g_sim.shots[i];
+            float sp = sqrtf(sh->vx * sh->vx + sh->vz * sh->vz), l = 400.0f;
+            if (ns + 1 > scap) { float *g = realloc(seg, (size_t)(scap + 1024) * 4 * sizeof *g); if (!g) break; seg = g; scap += 1024; }
+            seg[ns * 4] = 320.0f + (sh->x - ex) * sc; seg[ns * 4 + 1] = 240.0f - (sh->z - ez) * sc;
+            if (sp > 1e-3f) { seg[ns * 4 + 2] = seg[ns * 4] - sh->vx / sp * l * sc; seg[ns * 4 + 3] = seg[ns * 4 + 1] + sh->vz / sp * l * sc; }
+            else { seg[ns * 4 + 2] = seg[ns * 4] + 1.0f; seg[ns * 4 + 3] = seg[ns * 4 + 1]; }
+            ns++;
+        }
+        if (ns) hud_lines(g_hud, seg, ns, 1.0f, HP(SAT_COL[6]));
+    }
+    /* the live effects (the effect pool, type 0x20: as they are) - their bitmaps */
+    if (g_fx_ok) {
+        int32_t now = (int32_t)((int64_t)g_sim.now * 182 / 1000);
+        for (i = 0; i < FX_LIVE; i++) {
+            const fx_live *e = &g_fxw.e[i];
+            texture *t;
+            const hud_sprite *spr;
+            float wd;
+            if (!e->alive || !(t = fx_texture(fx_frame(&g_fxd, e, now))) || !(spr = sat_sprite(t))) continue;
+            wd = 2.0f * g_fxd.half_w[e->type] * sc;
+            if (wd < 3.0f) wd = 3.0f;
+            hud_draw_rect_tex(g_hud, spr, 320.0f + (e->pos[0] - ex) * sc - wd * 0.5f, 240.0f - (e->pos[2] - ez) * sc - wd * 0.5f, wd, wd, NULL);
         }
     }
 }
@@ -2413,7 +2677,7 @@ static int       g_dmg_regions[15][4];
 /* damage outlines of other mechs (the target viewer shows the target's): xxxxDMG6 remapped per level */
 typedef struct { char skel[17]; hud_sprite lvl[4]; int regions[15][4]; int ok; } dmg_set;
 static dmg_set    g_tdmg[16];
-static hud_sprite g_hs_vtgt_nav;   /* VTGT_NP6: the nav point emblem in the target viewer */
+static hud_sprite g_hs_vtgt_nav, g_hs_vtgt_navr;   /* VTGT_NP6 / VTGT_NR6: the nav point emblem in the target viewer (NR: reached, 0x109) */
 static hud_sprite g_hs_navmk, g_hs_edge[4];   /* TGTNP6 ("NAV" marker); CRTLFT6 / CRTRGHT6 / CRTUP6 / CRTDOWN6 (red, a nav too) */
 /* the current nav point: the first visible reach objective not yet done; returns the nav index, -1 none */
 /* The cockpit frame: the flat-coloured polygons (material 0x61xx) of the piece carrying the eye (EYEO's
@@ -2992,6 +3256,7 @@ static void draw_target_view(const mech3d *m, int part_lo, int part_hi, float bx
         if (pt->hidden || pt->model.object_count <= 0) continue;
         if (g_wire_unit && pt->group >= 1 && pt->group <= 8 && pt->group != 3 && g_wire_unit->loc_gone[pt->group - 1]) continue;
         lvl = loc_level(g_wire_unit, pt->group);
+        if (!g_wire_unit && (pt->objtype & 0x400)) lvl = 2;   /* a thing's projectile-pool object (a rotor): red */
         o = &pt->model.objects[0];
         for (q = 0; q < o->poly_count; q++) {
             const wtb_poly *pg = &o->polys[q];
@@ -4100,6 +4365,7 @@ static void load_view_far(prj_archive *ma, const char *scene)
         }
     bwd_mission_free(&bm);
     if (getenv("MW2_NO_FAR_CULL")) g_view_far = 0;   /* comparison shots */
+    if (getenv("MW2_DEBUG_VIEW")) fprintf(stderr, "view far %.0f (%s)\n", (double)g_view_far, scene);   /* tests */
 }
 
 static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *rec, const char *mission, int camo, int clan)
@@ -4114,11 +4380,33 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         memset(&m, 0, sizeof m);
         snprintf(scene, sizeof scene, "%.4sSCN1", mission);
         if (world3d_mission(ma, scene, 1, &m) <= 0 || m.part_count == 0) { fprintf(stderr, "no world for %s\n", mission); return -1; }
+        if (getenv("MW2_DEBUG_POLYS")) {   /* TEST hook: the colour words of the world parts whose model name starts so */
+            int q, k3;
+            for (q = 0; q < m.part_count; q++) {
+                const mech3d_part *pp = &m.parts[q];
+                if (!pp->model.object_count || strncmp(pp->model_name, getenv("MW2_DEBUG_POLYS"), strlen(getenv("MW2_DEBUG_POLYS"))) != 0) continue;
+                fprintf(stderr, "polys %s type %#x:", pp->model_name, pp->objtype);
+                for (k3 = 0; k3 < pp->model.objects[0].poly_count; k3++) fprintf(stderr, " %04x/%04x", pp->model.objects[0].polys[k3].color, pp->model.objects[0].polys[k3].material);
+                fprintf(stderr, "\n");
+            }
+        }
+        if (getenv("MW2_DEBUG_SPHERES")) {   /* TEST hook: each world part's bounding sphere (box centre, farthest vertex) */
+            int q, v3;
+            for (q = 0; q < m.part_count; q++) {
+                const mech3d_part *pp = &m.parts[q];
+                float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f}, c[3], rr = 0;
+                if (!pp->model.object_count) continue;
+                for (v3 = 0; v3 < pp->model.objects[0].vert_count; v3++) { float qv[3]; int k3; sat_vertex(pp, &pp->model.objects[0].verts[v3], qv); for (k3 = 0; k3 < 3; k3++) { if (qv[k3] < mn[k3]) mn[k3] = qv[k3]; if (qv[k3] > mx[k3]) mx[k3] = qv[k3]; } }
+                for (v3 = 0; v3 < 3; v3++) c[v3] = (mn[v3] + mx[v3]) * 0.5f;
+                for (v3 = 0; v3 < pp->model.objects[0].vert_count; v3++) { float qv[3]; sat_vertex(pp, &pp->model.objects[0].verts[v3], qv); rr = fmaxf(rr, sqrtf((qv[0]-c[0])*(qv[0]-c[0])+(qv[1]-c[1])*(qv[1]-c[1])+(qv[2]-c[2])*(qv[2]-c[2]))); }
+                fprintf(stderr, "sphere %s %s c %.0f %.0f %.0f r %.0f\n", pp->rec, pp->model_name, c[0], c[1], c[2], rr);
+            }
+        }
         world3d_actors(ma, scene, &g_actors, &g_actor_count);   /* posable, drawn on the actor layer */
         if (getenv("MW2_LIST_ACTORS")) {   /* TEST ONLY: "actor <k> <group> <skeleton> flags <GPS +0x1a> at <x> <z>" */
             int k;
-            for (k = 0; k < g_actor_count; k++) { printf("actor %d %s %s flags %#x at %d %d parts %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2], g_actors[k].mech.part_count);
-            if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
+            for (k = 0; k < g_actor_count; k++) { printf("actor %d %s %s flags %#x at %d %d parts %d table %d leader %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2], g_actors[k].mech.part_count, g_actors[k].table, g_actors[k].leader);
+            if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s node %d pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->node, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
         }
         load_view_far(ma, scene);
         g_exit_fade_t0 = -1;
@@ -4183,7 +4471,23 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
          * record's fifth representation - KF5_HEAD, the upper legs and arms - drawn like any object from the eye) */
         if (pl_loaded) g_plpit_ok = mech3d_load(ma, g_sim.player_skel, 4, &g_plpit) == 0 && g_plpit.part_count > 0;
         if (g_plpit_ok && !getenv("MW2_PIT_OWN_SKEL")) mech3d_use_skeleton(&g_plpit, &g_pl);   /* the engine's single skeleton (mech3d.c) */
-        if (getenv("MW2_DEBUG_PIT")) fprintf(stderr, "cockpit repr 4: %d (%d parts, repr_count %d)\n", g_plpit_ok, g_plpit.part_count, g_pl.repr_count);
+        if (getenv("MW2_DEBUG_PIT")) {
+            int q;
+            fprintf(stderr, "cockpit repr 4: %d (%d parts, repr_count %d)\n", g_plpit_ok, g_plpit.part_count, g_pl.repr_count);
+            for (q = 0; q < g_plpit.part_count; q++) {
+                const wtb_object *po = g_plpit.parts[q].model.object_count ? &g_plpit.parts[q].model.objects[0] : NULL;
+                fprintf(stderr, "  pit part %s node %d polys %d flags %#x\n", g_plpit.parts[q].model_name, g_plpit.parts[q].node, po ? po->poly_count : 0, po ? po->flags : 0);
+                if (po && po->poly_count < 3) {
+                    int k3, j3;
+                    for (k3 = 0; k3 < po->poly_count; k3++) {
+                        const wtb_poly *pg = &po->polys[k3];
+                        fprintf(stderr, "    poly color %#x mat %#x unk %#x n %d nrm %.2f %.2f %.2f:", pg->color, pg->material, pg->unknown, pg->n, pg->normal[0], pg->normal[1], pg->normal[2]);
+                        for (j3 = 0; j3 < pg->n; j3++) fprintf(stderr, " (%d %d %d)", po->verts[pg->idx[j3]].x, po->verts[pg->idx[j3]].y, po->verts[pg->idx[j3]].z);
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
+        }
         mech3d_lod = lod_keep;
         if (pl_loaded) {   /* the player's mech (USERSTAR.BWD) */
             float kps;
@@ -4240,6 +4544,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 if (g_hud) {
                     hud_sprite_free(&g_hs_compass); hud_sprite_free(&g_hs_reticle); hud_sprite_free(&g_hs_damage);
                     hud_sprite_load(g_hud, ma, HN("COMPASS"), 0, &g_hs_compass);
+                    hud_sprite_wrap(&g_hs_compass);
                     hud_sprite_load(g_hud, ma, HN("RETICLE"), 0, &g_hs_reticle);
                     {   /* the reticle's states (engine 0x10022710 picks one per frame) */
                         static const char *const RN[6] = {"RCLINOP", "RCLLOCK", "RCLNOLK", "RCLPLOC", "RCLTGT", "RCLGLOC"};
@@ -4277,6 +4582,8 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                     g_layout_n = hud_layout(ma, g_layout, 24);
                     hud_sprite_free(&g_hs_vtgt_nav);
                     hud_sprite_load(g_hud, ma, HN("VTGT_NP"), 0, &g_hs_vtgt_nav);
+                    hud_sprite_free(&g_hs_vtgt_navr);
+                    hud_sprite_load(g_hud, ma, HN("VTGT_NR"), 0, &g_hs_vtgt_navr);
                     hud_sprite_free(&g_hs_paused);
                     hud_sprite_load(g_hud, ma, HN("PAUSED"), 0, &g_hs_paused);
                     { int sq; for (sq = 0; sq < 10; sq++) { hud_sprite_free(&g_hs_snow[sq]); hud_sprite_load(g_hud, ma, HN("SNOWCLR"), sq, &g_hs_snow[sq]); } }
@@ -6210,8 +6517,13 @@ int main(int argc, char **argv)
                     if (g_radar_mode != 0) g_radar_i = (g_radar_i + (A("RADAR_ZOOM_OUT") ? 1 : 3)) % 4;
                 }
                 else if (g_world && (A("TOGGLE_HUD") && ui_click())) g_hud_off = !g_hud_off;
-                else if (g_world && (A("TOGGLE_DAMAGE_DISPLAY") && ui_click())) g_dmg_off = !g_dmg_off;
-                else if (g_world && (A("TOGGLE_HTAL") && ui_click())) g_htal = !g_htal;
+                else if (g_world && ((A("TOGGLE_DAMAGE_DISPLAY") && ui_click()) || (A("TOGGLE_HTAL") && ui_click()))) {
+                    /* F5-F9 share one lower-display mode (Win95 g_mechViewMode, 0x10250520): each key selects its mode,
+                     * or turns the display off when it is already showing (actions 3-7: mode == m ? 0 : m) - F8 then F5
+                     * goes back to the damage outline */
+                    int want = A("TOGGLE_DAMAGE_DISPLAY") ? 1 : 2;
+                    lower_mode_set(lower_mode() == want ? 0 : want);
+                }
                 else if (g_world && A("NEXT_RADAR_MODE") && !g_satmap) { g_radar_mode = (g_radar_mode + 1) % 3; g_radar_big = g_radar_mode == 2; }   /* 0x10003fb0 / DOS 0x12330: only
                     * while the radar mode is below 3 - F2 in the satellite map does nothing (DOSBox YELLSCN1: F3, F2, F3 -> the small radar) */
                 else if (g_world && g_sim_ok && (A("SHUTDOWN_MECH") || A("STARTUP_MECH")) && g_pilot) {
@@ -6256,8 +6568,8 @@ int main(int argc, char **argv)
                     if (g_sfx) sfx_play(g_sfx, 0xe8, SFX_V64, 0.0f);
                 }
                 else if (g_world && ((A("TOGGLE_REAR_VIEW") && ui_click()) || (A("TOGGLE_DOWN_VIEW") && ui_click()) || (A("TOGGLE_WEAPON_DISPLAY") && ui_click()))) {
-                    int want = A("TOGGLE_REAR_VIEW") ? 1 : A("TOGGLE_DOWN_VIEW") ? 2 : 3;
-                    g_vport = g_vport == want ? 0 : want;
+                    int want = A("TOGGLE_REAR_VIEW") ? 3 : A("TOGGLE_DOWN_VIEW") ? 4 : 5;   /* (the same mode as F5 / F6) */
+                    lower_mode_set(lower_mode() == want ? 0 : want);
                 }
                 else if (g_world && (A("TOGGLE_TARGET_DISPLAY") && ui_click())) { g_tgtdisp = (g_tgtdisp + 1) % 3; g_tgtdisp_off = g_tgtdisp == 0; }   /* 1 -> 2 -> 0 */
                 else if (g_world && A("COCKPIT_RESET_ZOOM")) g_zoom = 1.0f;
@@ -6289,11 +6601,9 @@ int main(int argc, char **argv)
                 else if (g_world && A("MFD_CYCLE")) {
                     /* action 2 (0x10011700): the lower display's mode DAT_10250520 + 1, 6 -> 1 (1 damage, 2 heat / HTAL,
                      * 3 rear, 4 down, 5 weapon view; 0 off), then the click (sound 0xdc) with the mech up */
-                    int mode = g_vport ? g_vport + 2 : g_htal ? 2 : g_dmg_off ? 0 : 1;
+                    int mode = lower_mode();
                     if (++mode == 6) mode = 1;
-                    g_vport = mode >= 3 ? mode - 2 : 0;
-                    g_htal = mode == 2;
-                    g_dmg_off = 0;
+                    lower_mode_set(mode);
                     ui_click();
                 }
                 else if (g_world && A("RESET_INPUTS")) {
@@ -6929,10 +7239,15 @@ int main(int argc, char **argv)
                     }
                 }
                 g_pl.pose_off = getenv("MW2_NO_POSE_OFF") ? NULL : g_pl_ap.off;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
+                /* the torso object turned by half the servo's pitch (0x10019310: the player's torso pitch = value >> 1,
+                 * SetObjRotation(torso, pitch, twist, 0)) - the eye and the cockpit frame ride on it, so the frame
+                 * stays put in the view, which takes the same half */
+                g_pl.tilt = -0.5f * g_pitch;
+                g_pl.pitch = -0.5f * g_pitch;   /* the pitch object: the aim's whole pitch less the torso's half */
                 mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);   /* g_pl_t: the absolute key time (anim_player) */
                 if (g_plpit_ok) {
                     memcpy(g_plpit.origin, g_pl.origin, sizeof g_pl.origin);
-                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.pose_off = g_pl_ap.off;
+                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.tilt = g_pl.tilt; g_plpit.pitch = g_pl.pitch; g_plpit.pose_off = g_pl_ap.off;
                     mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
                 }
                 if (g_sim_ok) {   /* the mounts as drawn (walk animation, torso twist) for the shots and jet flames */
@@ -7322,10 +7637,17 @@ int main(int argc, char **argv)
                         int gl = H("glance_left") || H("glance_right") || H("glance_up") || H("glance_down");
                         float gp = H("glance_left") ? -70.0f : H("glance_right") ? 70.0f : 0;
                         float gt = H("glance_up") ? 50.0f : H("glance_down") ? -40.0f : 0;
+                        /* (pilot tilt as the engine's: + is down - pilot_tilt_plus, Ctrl+Up, looks down, as the torso's
+                         * UpArrow aims down; 0x1002e750 adds it to the eye's pitch, which is + down) */
+                        /* (the eye takes HALF the torso's pitch: 0x10019310 sets the player's torso pitch, which the
+                         * eye view adds (0x1002e0f0), to the servo's value >> 1 and turns the torso object by it, while
+                         * the aim ray (0x100449d0) pitches by the whole value - so the reticle, the aim ray's end
+                         * projected (0x10022c40), leaves the centre as the torso tilts and drifts after the keys with
+                         * the servo: DOSBox YELLSCN1, Up held - the horizon rises and the reticle drops) */
                         if (gl) { glanced = 1; if (gp != 0) g_eye_pan = 0; if (gt != 0) g_eye_tilt = 0; }
                         else if (glanced) { glanced = 0; g_eye_pan = g_eye_tilt = 0; }
                         v.look_yaw += g_eye_pan + gp;
-                        v.look_pitch = g_pitch + g_eye_tilt + gt + (getenv("MW2_EYE_PITCH") ? (float)atof(getenv("MW2_EYE_PITCH")) : 0.0f);
+                        v.look_pitch = 0.5f * g_pitch - g_eye_tilt + gt + (getenv("MW2_EYE_PITCH") ? (float)atof(getenv("MW2_EYE_PITCH")) : 0.0f);
                     }
                 } else {
                     v.eye[0] = (float)g_pl.origin[0] - sinf(aim) * 2600.0f;
@@ -7556,9 +7878,11 @@ int main(int argc, char **argv)
                     }
                 }
                 g_pit_first = all.part_count;   /* the cockpit piece goes last (left out of viewport views) */
-                if (!show_pl && VIEW_IN_COCKPIT && !g_satmap && g_pl_ok && all.parts && !g_sim.player_unit.destroyed && g_zoom <= 1.0f) {
+                if (!show_pl && VIEW_IN_COCKPIT && !g_satmap && g_pl_ok && all.parts && !g_sim.player_unit.destroyed) {
                     /* the cockpit frame: the player's representation 4 (engine 0x100267d0 / 0x10026330), posed as the
-                     * mech, drawn whole from the eye (both faces); the original drops it while zoomed (DOS capture) */
+                     * mech, drawn whole from the eye (both faces) - zoomed too: 0x100267d0 gives the player level 4
+                     * whenever the view is the cockpit, whatever the zoom (user report against DOS 1.1: the frame stays
+                     * while zoomed; the port had dropped it from an earlier capture) */
                     int q;
                     if (g_plpit_ok && g_cockpit_frame == 0) {
                         /* back faces culled by vertex winding, as the hardware draws any object (the same test as the
@@ -7714,9 +8038,17 @@ int main(int argc, char **argv)
             write_results();
             running = 0;
         }
-        if (g_world && g_sim_ok && getenv("MW2_DEBUG_KILL") && g_sim.now >= 1000) {   /* test: destroy actor n at 1 s */
-            int q = atoi(getenv("MW2_DEBUG_KILL"));
-            if (q >= 0 && q < g_actor_count) g_sim.units[q].destroyed = 1;
+        if (g_world && g_sim_ok && getenv("MW2_DEBUG_KILL") && g_sim.now >= 1000) {   /* test: destroy actors "n[,n...][@secs]" at 1 s (or secs) */
+            const char *q0 = getenv("MW2_DEBUG_KILL"), *at = strchr(q0, '@');
+            if (!at || g_sim.now >= (int32_t)(atof(at + 1) * 1000.0)) {
+                const char *q1 = q0;
+                while (*q1 && *q1 != '@') {
+                    int q = atoi(q1);
+                    if (q >= 0 && q < g_actor_count) g_sim.units[q].destroyed = 1;
+                    while (*q1 && *q1 != ',' && *q1 != '@') q1++;
+                    if (*q1 == ',') q1++;
+                }
+            }
         }
         if (g_world && g_fx_ok && getenv("MW2_FX_TEST")) {   /* test: spawn an effect 30 m ahead of the player at 1 s ("type[:secs[:n]]":
                                                                 * n - 1 of the type first, 200 m behind the player, so the
@@ -8067,7 +8399,13 @@ int main(int argc, char **argv)
         if (g_world) scene_anim(r);
         perf_mark(0);
         dorcs_update();
-        if (!dorcs_world(r, &v, w, h, g_frame_tgt)) glr_draw(r, &v, w, h);
+        if (dorcs_world(r, &v, w, h, g_frame_tgt)) ;
+        else if (g_world && g_satmap && g_pl_ok && g_hud && g_sim_ok) {   /* the satellite map: no 3D picture - the view wiped to the
+                                                                          * ground colour (sat_draw draws the map in the HUD pass) */
+            sat_ground_colour();
+            rb_viewport(0, 0, w, h);
+            rb_clear(g_sat_gnd, 1, 1);
+        } else glr_draw(r, &v, w, h);
         perf_mark(1);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
@@ -8253,6 +8591,7 @@ int main(int argc, char **argv)
             float rad_wf = 1, rad_hf = 1;
             const int rad_on = pow_window(0, &rad_wf, &rad_hf) && rad_wf > 0;
             HUD_BEGIN(g_hud, w, h);
+            if (g_satmap && g_sim_ok) sat_draw(w, h);   /* the satellite map first (its own picture, then the readouts) */
             if (g_vision == 1 && g_inst_lvl[INST_RADAR] > 0) g_vision = 0;   /* 0x10007900: off when the radar (instrument 0) is damaged */
             /* light amplification, 3D editions: the world's fade (world_fade); the DOS edition fades its palette
              * (dos_time_of_day) */
@@ -8426,15 +8765,34 @@ int main(int argc, char **argv)
                 /* only from the cockpit camera: the HUD pass (0x1001e5f2 -> 0x10022230) draws it while DAT_1024e674 is set,
                  * which only mode 0 sets (0x1002e750); the external orbit, ordnance and ejection cameras clear it
                  * (0x1002dca5). DOSBox YELLSCN1 'c': the HUD without the reticle */
-                if (g_camode == 0) {
+                if (g_camode == 0 && !g_satmap) {   /* (the satellite view: off, 0x10003380 case 4 saves and clears g_showCrosshair) */
                     /* at the aim point's projection (DOS 0x29860 -> 0x3f320, 3Dfx 0x10022c40 -> 0x1002f9f0): x = centre + q,
                      * y = (y1 - y0) - centre - q with the view's centre (y0 + y1 + 1) >> 1 (DOS 0x3ef30, 3Dfx 0x1002f779) -
                      * one row above the middle: 640 x 480 (320, 239), 1024 x 768 (512, 383) (DOSBox YELLSCN1: the reticle
                      * 1 px higher than the port's (320, 240) at both) */
                     const float ux = hud_px_x(g_hud, 1.0f), uy = hud_px_y(g_hud, 1.0f);
                     const int W1 = (int)lrintf(640.0f / ux) - 1, H1 = (int)lrintf(480.0f / uy) - 1;
-                    const float rx = (float)((W1 + 1) >> 1) * ux, ry = (float)(H1 - ((H1 + 1) >> 1)) * uy;
-                    if (dos) hud_draw_f(g_hud, rs, rx, ry, -1.0f);
+                    float rx = (float)((W1 + 1) >> 1) * ux, ry = (float)(H1 - ((H1 + 1) >> 1)) * uy;
+                    /* the aim ray (from the eye: the camera's own point) along the torso's heading and whole pitch,
+                     * through the view as drawn - half the pitch, pilot pan / tilt, glances: off the view, no reticle
+                     * (ProjectWorldPoint's result, 0x10022710) */
+                    int on = 1;
+                    {
+                        const float ay = (g_pl.heading + g_pl.twist) * 3.14159265f / 180.0f, ap = g_pitch * 3.14159265f / 180.0f;
+                        const float tx = sinf(ay) * cosf(ap), ty = sinf(ap), tz = cosf(ay) * cosf(ap);
+                        const float cyaw = v.look_yaw * 3.14159265f / 180.0f, cpit = v.look_pitch * 3.14159265f / 180.0f;
+                        const float cfx = sinf(cyaw) * cosf(cpit), cfy = sinf(cpit), cfz = cosf(cyaw) * cosf(cpit), crx = cosf(cyaw), crz = -sinf(cyaw);
+                        const float cux = -sinf(cpit) * sinf(cyaw), cuy = cosf(cpit), cuz = -sinf(cpit) * cosf(cyaw);
+                        const float zf = tx * cfx + ty * cfy + tz * cfz, xr = tx * crx + tz * crz, yu = tx * cux + ty * cuy + tz * cuz;
+                        const float sx = (float)h * 4.0f / 3.0f, kx = 320.0f * (float)w / sx;
+                        if (zf > 1e-3f) {
+                            const float ox = xr / zf / (th * aspect) * kx, oy = -yu / zf / th * 240.0f;
+                            rx += ox; ry += oy;
+                            on = fabsf(ox) < kx && fabsf(oy) < 240.0f;
+                        } else on = 0;
+                    }
+                    if (!on) ;
+                    else if (dos) hud_draw_f(g_hud, rs, rx, ry, -1.0f);
                     else hud_draw(g_hud, rs, rx, ry, NULL);
                 }
             }
@@ -8443,7 +8801,7 @@ int main(int argc, char **argv)
              * length, the point its centre (MGEO int[0] above the feet), no minimum or cap; a nav point TGTNP. Off
              * screen (behind: |depth|): the ray from the screen centre through the point clipped to the view, TGTOFFF /
              * E / N (an X) there - TGTOFFF for a nav point. */
-            {
+            if (!g_satmap) {   /* (the satellite view: off - g_showTargetMarker saved and cleared, 0x10003380 case 4) */
                 float wp[3], thr = 0;
                 int have = 0, isnav = 0, side = 1, isthing = 0;
                 if (tgt < 0 && g_tgt_thing >= 0 && g_tgt_thing < g_sim.bld_count && g_sim.bld[g_tgt_thing].hp > 0) {
@@ -8606,6 +8964,8 @@ int main(int argc, char **argv)
                         float wx, wz, ddx, ddz, ax, ay, bx, by, dd2;
                         int sd = 1, istgt, nvq = -1, set3 = 0;
                         const hud_sprite *sp;
+                        if (g_satmap && q >= 0 && !(q >= g_actor_count ? (tgt < 0 && q - g_actor_count == g_tgt_thing) : q == tgt)) continue;   /* the satellite
+                            * view (0x10003830): no unit / thing icons (0x10003960 only in the other views) - the map shows them */
                         if (q >= g_actor_count) {   /* a thing (0x10003960's second list; the target 0x10003a60) */
                             const int b = q - g_actor_count;
                             float tp[3];
@@ -8749,7 +9109,9 @@ int main(int argc, char **argv)
                     const float *wdark = HP(8), *wred = HP(0xb), *wgreen = HP(14), *wwhite = HP(0xfe), *wyellow = HP(3);   /* the mission
                                        * palette (0x10260324); the 0xe green drawn as 14 here (as before) */
                     (void)grey; (void)white;
-                    if (cw->ammo == 0 || pu->loc_gone[cw->location]) col = wdark;
+                    /* (state -1 first: a weapon a critical hit destroyed keeps its location and its ammo count, and was
+                     * drawn recycling red - user report; the engine switches on the state, -1 -> 8) */
+                    if (cw->state < 0 || cw->ammo == 0 || pu->loc_gone[cw->location]) col = wdark;
                     else if (cw->state == CW_FIRING) col = wgreen;
                     else if (cw->state != CW_READY) col = wred;
                     else if (g_groups[1] & (1u << wi)) col = wwhite;
@@ -8977,7 +9339,10 @@ int main(int argc, char **argv)
                      * rectangle): a selected nav point's emblem (0x109 / 0x106 at half the rectangle's width and height,
                      * 0x10023120) - centred, clipped to the box as it opens or closes; a mech or building target: black */
                     hud_clip(g_hud, bx, by, bw, bh);
-                    hud_draw(g_hud, &g_hs_vtgt_nav, bx + bw * 0.5f, by + bh * 0.5f, NULL);
+                    {
+                        const int nvc = current_nav(NULL);
+                        hud_draw(g_hud, nvc >= 0 && nvc < 256 && g_nav_seen[nvc] && g_hs_vtgt_navr.tex ? &g_hs_vtgt_navr : &g_hs_vtgt_nav, bx + bw * 0.5f, by + bh * 0.5f, NULL);
+                    }
                     hud_clip_off(g_hud);
                 }
                 {   /* the frame in colour 8 (0x10006450 with edx 8 on every 0x10021300 path; DOSBox 60,0,0) */
@@ -9049,13 +9414,35 @@ int main(int argc, char **argv)
                             one.parts = (mech3d_part *)bp; one.part_count = 1;
                             {   /* world placed; the camera on the structure's centre, its radius the box's half diagonal
                                  * (the engine's bounding sphere +0x34..+0x40, 0x10029890 - the port keeps a box) */
-                                mech3d_part tmp = *bp;
+                                /* the thing's object and the objects under it in its record (the engine draws the object
+                                 * tree, 0x10021300): the TEALARE3 gunship's rotor, a child of the fuselage, had been left
+                                 * out (user report) - each in its type's colour, the projectile pool's 0x400 red (as image
+                                 * enhancement colours them: draw_target_view level 2) */
+                                static mech3d_part tmp[32];
+                                int nt = 0, q;
                                 float sr0 = g_wire_r[0], sr1 = g_wire_r[1], sf0 = g_wire_f[0], sf1 = g_wire_f[1];
                                 float hx = (gb->mx[0] - gb->mn[0]) * 0.5f, hy = (gb->mx[1] - gb->mn[1]) * 0.5f, hz = (gb->mx[2] - gb->mn[2]) * 0.5f;
-                                one.parts = &tmp;
+                                tmp[nt++] = *bp;
+                                for (q = 0; q < g_mech.part_count && nt < 32; q++) {
+                                    const mech3d_part *cp = &g_mech.parts[q];
+                                    int up = cp->parent_obj, d;
+                                    if (q == gb->intact || cp->hidden || strcmp(cp->rec, bp->rec) != 0) continue;
+                                    for (d = 0; d < 16 && up >= 0 && up != bp->obj_index; d++) {   /* its ancestors in the record */
+                                        int r2, nx2 = -1;
+                                        for (r2 = 0; r2 < g_mech.part_count; r2++) if (g_mech.parts[r2].obj_index == up && strcmp(g_mech.parts[r2].rec, bp->rec) == 0) { nx2 = g_mech.parts[r2].parent_obj; break; }
+                                        if (r2 == g_mech.part_count) { up = -1; break; }
+                                        up = nx2;
+                                    }
+                                    if (up == bp->obj_index && up >= 0) tmp[nt++] = *cp;
+                                }
+                                one.parts = tmp; one.part_count = nt;
                                 (void)brg; (void)wblue;
                                 wire_camera((gb->mn[0] + gb->mx[0]) * 0.5f, (gb->mn[1] + gb->mx[1]) * 0.5f, (gb->mn[2] + gb->mx[2]) * 0.5f, sqrtf(hx * hx + hy * hy + hz * hz));
+                                /* the wireframe's colours by the shape's kind (0x1002a4b0, m_wireframeColors 0): the thing 0x200
+                                 * blue (7), an object of the projectile pool 0x400 red (0xb), any other (the rotor under the
+                                 * gunship) colour 8 */
                                 draw_target_wire(&one, 0, 1, head, bx, by, bw, bh, HP(7));
+                                if (nt > 1) { g_wire_persp = 1; draw_target_wire(&one, 1, nt, head, bx, by, bw, bh, HP(8)); }
                                 g_wire_persp = 0;
                                 g_wire_r[0] = sr0; g_wire_r[1] = sr1; g_wire_f[0] = sf0; g_wire_f[1] = sf1;
                             }
@@ -9074,8 +9461,12 @@ int main(int argc, char **argv)
                          * from the start (60 s) with no nav selected; the port had shown the current objective's nav */
                         int nv = g_nav_sel >= 0 ? current_nav(&label) : -1;
                         if (nv >= 0) {
-                            if (g_hs_vtgt_nav.tex && !snow) hud_draw(g_hud, &g_hs_vtgt_nav, (float)(tvw.x0 + (tvw.x1 - tvw.x0) / 2) * tvw.ux, (float)(tvw.y0 + (tvw.y1 - tvw.y0) / 2) * tvw.uy, NULL);   /* at ((x1 - x0) / 2, (y1 - y0) / 2) of the window (0x100213d1, C division): DOSBox (114, 622) at 1024 x 768 */
-                            hud_text(g_hud, nx, ty, label, HP(2));   /* DOSBox YELLSCN1 "Nav Epsilon": 190,146,0 = index 2 */
+                            /* a nav point already reached (its flag 0x20): the emblem 0x109 (VTGT_NR) and the name in colour 1 (dimmed)
+                             * instead of 0x106 / colour 2 (0x10021300, 0x10020e40) - kept when another nav is picked and back */
+                            const int rch = nv < 256 && g_nav_seen[nv];
+                            const hud_sprite *emb = rch && g_hs_vtgt_navr.tex ? &g_hs_vtgt_navr : &g_hs_vtgt_nav;
+                            if (emb->tex && !snow) hud_draw(g_hud, emb, (float)(tvw.x0 + (tvw.x1 - tvw.x0) / 2) * tvw.ux, (float)(tvw.y0 + (tvw.y1 - tvw.y0) / 2) * tvw.uy, NULL);   /* at ((x1 - x0) / 2, (y1 - y0) / 2) of the window (0x100213d1, C division): DOSBox (114, 622) at 1024 x 768 */
+                            hud_text(g_hud, nx, ty, label, HP(rch ? 1 : 2));   /* DOSBox YELLSCN1 "Nav Epsilon": 190,146,0 = index 2 */
                             /* the range as for any target (the player's +0xc4, formatted by range_text) in the text
                              * routine's colour 0xe (DOS 0x30180 / 3Dfx 0x1002118f reset it after the name): DOSBox YELLSCN1
                              * "1.08k" in green for Nav Epsilon at 1075 m (the port had " 1075m" in the name's yellow) */

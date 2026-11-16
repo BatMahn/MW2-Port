@@ -94,7 +94,7 @@ ifeq ($(RB),gl12)
   endif
 endif
 
-LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/mek.c
+LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/cddrive.c src/mek.c
 BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium test_gamefolder
 GLBIN   = glshot glview mw2shell
 
@@ -153,7 +153,7 @@ build/libnsc55.a: $(NSC55_OBJ)
 	$(AR) rcs $@ $^
 
 # mw2: one executable - the shell, and with --sim the simulation (glview built in, its main renamed)
-mw2: $(WINRES) build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
+mw2: $(WINRES) build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shell.c tools/glview.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/ttext.c src/cockpitcfg.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(WINSRC) $(HDRS)
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(SDL3_CFLAGS) -o build/mw2shell_one.o
@@ -164,7 +164,7 @@ mw2shell: build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shel
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu $(SDL3_CFLAGS) -Ithird_party $(filter %.c,$^) build/libmt32emu.a $(SC55_LIB) -o $@ $(SDL3_LIBS) -lm -lpthread $(CXXLIB)
 
-glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
+glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB)
 
@@ -182,10 +182,10 @@ bwdtool: tools/bwdtool.c src/mtbl.c src/bwd.c src/prj.c src/datapath.c
 mektool: tools/mektool.c src/mek.c src/datapath.c src/prj.c
 	$(CC) $(CFLAGS) -Isrc $^ -o $@
 
-cdtool: tools/cdtool.c src/cdaudio.c build/miniaudio.o
+cdtool: tools/cdtool.c src/cdaudio.c src/cddrive.c build/miniaudio.o
 	$(CC) $(CFLAGS) -Isrc $^ -o $@ $(LDLIBS)
 
-test_port: tests/test_port.c src/cdaudio.c src/datapath.c build/miniaudio.o
+test_port: tests/test_port.c src/cdaudio.c src/cddrive.c src/datapath.c build/miniaudio.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc $^ -o $@ $(LDLIBS)
 
 test_titanium: tests/test_titanium.c src/tex.c src/skygnd.c src/portcfg.c src/prj.c src/datapath.c
@@ -272,7 +272,7 @@ test_sequences: glview
 # the sequences against the OpenGL 1.2 renderer (RB=gl12): a glview built with it as build/glview_gl12 (the system's
 # OpenGL - Mesa's llvmpipe headless); SEQ_ARGS="--only NAME,NAME" for the picture / look sequences
 GL12_SRC = $(filter-out src/rb_gpu.c src/rb_shaders.c,$(GL3D_SRC)) src/rb_gl12.c src/rb_gl12_world.c
-build/glview_gl12: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(sort $(GL12_SRC)) $(HDRS)
+build/glview_gl12: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(sort $(GL12_SRC)) $(HDRS)
 	$(SDL3_CHECK)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DMW2_RB_GL12 -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) $(if $(filter Darwin,$(UNAME_S)),-framework OpenGL,-lGL) -lm -lpthread $(DLLIB)
@@ -281,7 +281,7 @@ test_sequences_gl12: build/glview_gl12
 .PHONY: test_sequences_gl12
 
 # the same under AddressSanitizer / UBSan (a separate binary, build/glview_asan)
-test_sequences_asan: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
+test_sequences_asan: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
 	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(SDL3_CFLAGS) $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB)
 	ASAN_OPTIONS=detect_leaks=0 SEQ_TIME_SCALE=6 python3 tests/sequences/run_sequences.py --glview build/glview_asan $(SEQ_ARGS)
 .PHONY: test_sequences test_sequences_asan

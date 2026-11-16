@@ -551,6 +551,53 @@ static int hole_pieces(unsigned mask, SDL_Rect *pc)
     }
     return n;
 }
+static SDL_Window *g_win;
+/* the shell's mouse pointer: DATABASE item 0x19 (entry 24, a 29 x 25 SHP; MW2SHELL GetDBItem(0x19) -> the MouseState's
+ * cursor shape, drawn by the shell itself with its top-left on the pointer) in the screens' fixed grey ramp (palette
+ * entries 1-14: 0xff down to 0x11 in steps of 0x11 in every shell picture). The port had shown the system's arrow */
+static void cursor_draw(SDL_Renderer *rd)
+{
+    static SDL_Texture *ct;
+    static int tried, cw, ch;
+    float wx, wy, lx, ly;
+    if (!tried) {
+        uint8_t *e = NULL;
+        long n;
+        shp_frame fr;
+        tried = 1;
+        n = shelldb_entry(&g_db, 24, &e);
+        if (n > 0 && shp_decode(e, (size_t)n, 0, &fr) == 0) {
+            uint8_t *rgba = calloc((size_t)fr.w * (size_t)fr.h, 4);
+            int k;
+            if (rgba) {
+                for (k = 0; k < fr.w * fr.h; k++)
+                    if (fr.mask[k]) {
+                        const int ix = fr.pix[k], g = ix == 0 || ix >= 15 ? 0 : 0xff - (ix - 1) * 0x11;
+                        rgba[k * 4] = rgba[k * 4 + 1] = rgba[k * 4 + 2] = (uint8_t)(ix == 8 ? 0x7f : g); rgba[k * 4 + 3] = 255;
+                    }
+                ct = SDL_CreateTexture(rd, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, fr.w, fr.h);
+                if (ct) {
+                    SDL_UpdateTexture(ct, NULL, rgba, fr.w * 4);
+                    SDL_SetTextureBlendMode(ct, SDL_BLENDMODE_BLEND);
+                    SDL_SetTextureScaleMode(ct, SDL_SCALEMODE_NEAREST);
+                    cw = fr.w; ch = fr.h;
+                    SDL_HideCursor();
+                }
+                free(rgba);
+            }
+            shp_frame_free(&fr);
+        }
+        free(e);
+    }
+    if (!ct || !g_win || !(SDL_GetWindowFlags(g_win) & SDL_WINDOW_MOUSE_FOCUS)) return;
+    SDL_GetMouseState(&wx, &wy);
+    SDL_RenderCoordinatesFromWindow(rd, wx, wy, &lx, &ly);
+    {
+        SDL_FRect d = {floorf(lx), floorf(ly), (float)cw, (float)ch};
+        SDL_RenderTexture(rd, ct, NULL, &d);
+    }
+}
+
 static void text_layer_draw(SDL_Renderer *rd)
 {
     int i;
@@ -570,6 +617,7 @@ static void text_layer_draw(SDL_Renderer *rd)
         for (k = 0; k < np; k++) { SDL_SetRenderClipRect(rd, &pc[k]); tt_draw(rd, &g_tt[i]); }
         SDL_SetRenderClipRect(rd, NULL);
     }
+    cursor_draw(rd);
     if (grab_frames > 0 && --grab_frames == 0 && getenv("MW2_SHELL_GRAB")) {   /* tests: the rendered window, full resolution */
         SDL_Surface *got = SDL_RenderReadPixels(rd, NULL);   /* SDL3: the whole output, as a surface */
         SDL_Surface *rgb = got ? SDL_ConvertSurface(got, SDL_PIXELFORMAT_RGB24) : NULL;
@@ -1266,7 +1314,6 @@ static void ia_planet(overlay *o)
  * the files go (default: the install dir, as the original); MW2_SIM: command with %s = scenario;
  * MW2_PILOT: the player's name. Formations go to the simulation as MW2_OF / MW2_OE (-of= / -oe=). */
 static const char *const FORM_ARG[6] = {"echelonl", "echelonr", "lineabreast", "lineastern", "vform", "wedge"};
-static SDL_Window *g_win;
 static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg, int def);
 static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, int py);
 static int menu_opens(const SDL_Event *e);
@@ -2441,6 +2488,10 @@ static medit g_lab_test;
 static void ed_masses(const medit *e, mek_mass *m)
 {
     mek_masses(&e->d, m);
+    /* Endo-steel / Ferro-fibrous count once chosen, their 7 slots placed or still unassigned in the pool (mek_masses only
+     * sees placed slots: choosing Endo added criticals to assign but saved no mass - user report) */
+    m->endo = ed_endo(e); m->ferro = ed_ferro(e);
+    m->internal = m->endo ? e->d.tonnage / 20.0 : e->d.tonnage / 10.0;
     m->dbl = e->dbl; m->nsinks = e->dbl ? m->dissip / 2 : m->dissip; m->sinks = m->nsinks > 10 ? m->nsinks - 10 : 0;
     m->armor = e->halftons * 0.5;
     m->equip = e->masc;   /* MASC placed or still in the pool */
@@ -5893,6 +5944,13 @@ int main(int argc, char **argv)
             if (!strstr(nm, "STD") || mek_load(a, nm, &d) != 0) continue;
             if (!strncmp(nm, "DOR", 3) || !strncmp(nm, "ELE", 3) || !strncmp(nm, "TAR", 3) || !strncmp(nm, "TCK", 3) || !strncmp(nm, "TUR", 3)) continue;   /* dropship, Elemental, vehicles */
             ed_init(&g_lab_test, &d); ed_masses(&g_lab_test, &mm); cnt++;
+            if (getenv("MW2_LAB_ENDO") && !ed_endo(&g_lab_test)) {   /* tests: Std -> Endo as the Internal page's Type entry, slots unassigned */
+                mek_mass m2;
+                int q;
+                for (q = 0; q < 7; q++) ed_pool_add(&g_lab_test, (uint16_t)(8001 + q), 1);
+                ed_masses(&g_lab_test, &m2);
+                printf("%-9s endo: internal %.2f -> %.2f, used %.2f -> %.2f\n", nm, mm.internal, m2.internal, mm.used, m2.used);
+            }
             if (mm.used > d.tonnage + 1e-9) over++;
             printf("%-9s %3u t used %6.2f %s%s\n", nm, d.tonnage, mm.used, mm.dbl ? "DHS" : "SHS", mm.used > d.tonnage + 1e-9 ? "  OVER" : "");
         }
@@ -6032,6 +6090,9 @@ int main(int argc, char **argv)
         smk *ov = NULL, *xov[8] = {0};
         Uint64 xlast[8] = {0};
         const char *pending_video = NULL;
+        smk *holo = NULL;   /* the hall's holoprojector clip, played in place before the Archive (see the click) */
+        int holo_x = 0, holo_y = 0, holo_next = -1, holo_clan = clan;
+        Uint64 holo_last = 0;
         int next = -1, nclan = clan, f = 0, amb_entry = -1;
         Uint64 amb_due = 0;
         Uint64 last = SDL_GetTicks();
@@ -6194,7 +6255,19 @@ int main(int argc, char **argv)
                                         if (shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1) == 0) running = 0;
                                     }
                                     else {
+                                        if (holo) break;   /* (the clip is playing: no other click) */
                                         if (sd->id == 1 && sd->hs[i].next == 5) shell_sound(0x67, 0x32);   /* the hall's holoprojector (FUN_0001dbe0 case 1, 0x9169c) */
+                                        if (sd->id == 1 && sd->hs[i].next == 5 && sd->hs[i].video && !headless && (holo = open_smk(sd->hs[i].video))) {
+                                            /* the holoprojector clip plays IN the hall, in the archive table's slot 1 at its place -
+                                             * awoholop (0x14c, 0xe8), ajfholop (0xd1, 0xca) - with the ball's slot 0 closed, and
+                                             * the Archive follows when it ends (MW2SHELL 0x1001445c: PlayVideo(1, ..., 2), then the
+                                             * exit message once IsVideoPlaying is false). The port had played it full screen */
+                                            holo_x = sd->hs[i].clan == 1 ? 0xd1 : 0x14c; holo_y = sd->hs[i].clan == 1 ? 0xca : 0xe8;
+                                            holo_next = sd->hs[i].next; holo_clan = sd->hs[i].clan; holo_last = 0;
+                                            if (sd->nov > 0 && xov[0]) { smk_close(xov[0]); xov[0] = NULL; }
+                                            if (sd->nov > 1 && xov[1]) { smk_close(xov[1]); xov[1] = NULL; }
+                                            break;
+                                        }
                                         next = sd->hs[i].next; nclan = sd->hs[i].clan; pending_video = sd->hs[i].video;
                                     }
                                 }
@@ -6219,6 +6292,15 @@ int main(int argc, char **argv)
                     }
                     if (xov[q]) blit_smk(xov[q], sd->ov[q].x, sd->ov[q].y);
                 }
+            }
+            if (holo) {   /* the holoprojector clip, once through, then the Archive */
+                Uint64 now = SDL_GetTicks();
+                if (!holo_last || now - holo_last >= (Uint64)smk_frame_ms(holo)) {
+                    int fi = smk_next(holo);
+                    holo_last = now;
+                    if (fi < 0 || fi >= smk_frames(holo) - 1) { next = holo_next; nclan = holo_clan; }
+                }
+                blit_smk(holo, holo_x, holo_y);
             }
             if (sd)
                 for (i = 0; i < sd->nhs; i++)
@@ -6254,6 +6336,7 @@ int main(int argc, char **argv)
             }
         }
         smk_close(ov);
+        if (holo) { smk_close(holo); holo = NULL; }
         if (sd && sd->id == 8) shell_sound_stop(0x68);   /* the main menu's voice ends with the menu */
         { int q; for (q = 0; q < 8; q++) smk_close(xov[q]); }
         if (pending_video) play_cinematic(rd, tx, pending_video, headless);   /* e.g. the registration clip */

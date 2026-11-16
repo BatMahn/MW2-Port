@@ -28,6 +28,8 @@ void hud_set_palette(hud *h, const uint8_t *p6);
  * palette fades): the new palette (768 bytes of 6-bit values) for everything drawn from now on, and every loaded sprite
  * that uses a changed colour redrawn. Returns 1 if any colour changed. */
 int  hud_repalette(hud *h, const uint8_t *p6);
+void hud_sprite_wrap(const hud_sprite *s);   /* a sprite drawn wrapping (hud_draw_window): REPEAT across */
+void hud_prewarm(hud *h, const uint8_t *p6);   /* keep the sprites' readings in p6 ready (no change shown) */
 /* the current palette's colour idx as RGBA 0..1 */
 void hud_pal_color(const hud *h, int idx, float rgba[4]);
 /* Load SHP `name` frame `frame`; returns 0 on success. */
@@ -92,6 +94,7 @@ float hud_flash_level(const hud *h);
 void hud_rect(hud *h, float x, float y, float w, float hgt, const float rgba[4]);
 /* a filled convex polygon of n virtual points {x, y} */
 void hud_poly(hud *h, const float *xy, int n, const float rgba[4]);
+void hud_tris(hud *h, const float *xy, int ntri, const float rgba[4]);   /* triangles, 6 floats each, one colour */
 /* Clip the HUD drawing that follows to the virtual rectangle (x, y, w, hgt) (scissor; empty: nothing drawn), until
  * hud_clip_off - the engine's instrument windows drawn into their animating rectangle (0x10021730 / 0x10011aa0) */
 void hud_clip(hud *h, float x, float y, float w, float hgt);

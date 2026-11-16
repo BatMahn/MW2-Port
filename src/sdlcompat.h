@@ -423,6 +423,7 @@ MW2C SDL_JoystickID *SDL_GetJoysticks(int *count)
 #define SDL_GetJoystickAxis SDL_JoystickGetAxis
 #define SDL_GetJoystickButton(j, b) (SDL_JoystickGetButton(j, b) != 0)
 #define SDL_GetJoystickHat SDL_JoystickGetHat
+static inline bool SDL_HideCursor(void) { return SDL_ShowCursor(SDL_DISABLE) >= 0; }
 
 #endif /* MW2_SDL2 */
 #endif

@@ -143,6 +143,7 @@ typedef struct {
     int          player_tex;     /* the player's star's STAR entry +0 (its table, GPS +4): the camo / insignia slot offset,
                                   * as every unit's (mech3d world_actor.tex_offset) */
     char         player_skel[17], player_loadout[17];   /* from USERSTAR.BWD (shell), else Timber Wolf */
+    char         player_rec[17];   /* the record holding the player's GPS (USERSTAR, a trial's <xxxx>STAR, TNx#USS1): node targets by that name are the player */
     int32_t      now;            /* ms */
     /* mission end (engine 0x10009f50 / 0x100374e0): the player's star (table 0) result or the player's
      * destruction starts a 1820-tick (10 s) end sequence, then the mission is over */

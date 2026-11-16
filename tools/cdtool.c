@@ -9,6 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#define wait_ms(ms) Sleep(ms)
+#else
+#define wait_ms(ms) usleep((ms) * 1000)
+#endif
 
 static void put16(FILE *f, unsigned v) { fputc((int)(v & 0xff), f); fputc((int)((v >> 8) & 0xff), f); }
 static void put32(FILE *f, unsigned long v) { put16(f, (unsigned)(v & 0xffff)); put16(f, (unsigned)(v >> 16)); }
@@ -44,7 +50,11 @@ static int render_wav(cdaudio *cd, int track, const char *path, double seconds)
             put16(f, (unsigned)(int16_t)(s * 32767.0f) & 0xffff);
         }
         frames_total += got;
-        if (got < CHUNK) break;
+        if (got < CHUNK) {
+            cdaudio_get_status(cd, &st);
+            if (!st.busy) break;
+            wait_ms(5);   /* a real drive: still reading ahead (seeking) - wait for it */
+        }
     }
     cdaudio_get_status(cd, &st);
     fseek(f, 4, SEEK_SET); put32(f, 36 + frames_total * 4);

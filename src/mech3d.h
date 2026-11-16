@@ -86,6 +86,9 @@ typedef struct {
     float        heading;        /* yaw of the whole mech, degrees */
     int          twist_node;     /* torso node (carries the *_HEAD part), -1 if none */
     float        twist;          /* torso twist relative to the legs, degrees */
+    float        tilt;           /* torso pitch, degrees, + down (the engine's: the player's is half the servo's, 0x10019310) */
+    int          pitch_node;     /* the record's second THNG node (the engine's pitch object: arms, a turret's guns), -1 none */
+    float        pitch;          /* its local pitch, degrees, + down (0x10019310: the aim's pitch less the torso's half) */
     const void  *pose_anim;      /* the last mech3d_pose arguments (an anim_set *), for a level of detail posed alike */
     float        pose_t;
     const float *pose_off;       /* per ANIM track, added to the table's value (anim_player off: the carried offset), or NULL */

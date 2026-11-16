@@ -579,6 +579,7 @@ SDL_Thread *SDL_CreateThread(SDL_ThreadFunction fn, const char *name, void *data
 void SDL_WaitThread(SDL_Thread *t, int *status) { if (!t) return; if (status) *status = t->status; free(t); }
 int SDL_GetNumLogicalCPUCores(void) { return 1; }
 bool SDL_SetTextureBlendMode(SDL_Texture *t, SDL_BlendMode m) { if (t) t->blend = m == SDL_BLENDMODE_BLEND; return t != NULL; }
+bool SDL_HideCursor(void) { plat_hide_cursor(); return true; }
 bool SDL_SetTextureScaleMode(SDL_Texture *t, SDL_ScaleMode m) { if (t) t->linear = m == SDL_SCALEMODE_LINEAR; return t != NULL; }
 bool SDL_UpdateTexture(SDL_Texture *t, const SDL_Rect *rect, const void *pixels, int pitch)
 {

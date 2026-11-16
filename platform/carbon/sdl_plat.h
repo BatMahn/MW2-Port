@@ -43,6 +43,7 @@ void core_mouse_wheel(float dy);
 void core_quit_request(void);
 void plat_pump(void);
 void plat_relative_mouse(plat_window *w, int on);
+void plat_hide_cursor(void);              /* the system pointer off for good (the shell draws its own) */
 void plat_mouse_state(float *x, float *y, uint32_t *buttons);
 
 /* audio: 16-bit signed stereo, native endian, at `rate`; fill(frames) is called by the system (interrupt time on

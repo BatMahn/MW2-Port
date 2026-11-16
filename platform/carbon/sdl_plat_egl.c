@@ -93,6 +93,7 @@ void plat_pump(void)
     }
 }
 void plat_relative_mouse(plat_window *w, int on) { (void)w; (void)on; }
+void plat_hide_cursor(void) {}
 void plat_mouse_state(float *x, float *y, uint32_t *b) { *x = *y = 0; *b = 0; }
 
 int plat_audio_open(int rate, int frames, plat_audio_fill fill) { (void)rate; (void)frames; g_fill = fill; g_audio = 1; g_t0 = plat_ticks_us(); g_done = 0; if (getenv("MW2_EGL_WAV")) g_wav = fopen(getenv("MW2_EGL_WAV"), "wb"); return 0; }

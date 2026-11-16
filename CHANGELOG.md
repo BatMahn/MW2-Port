@@ -1,5 +1,81 @@
 # Changelog
 
+## v1.1.26 (2026-11-16)
+
+From a GitHub report on Burning Chrome (Wolf mission 7) and the Mech Lab. The first two were older than v1.1.24, not
+caused by it; checking them turned up the same faults in other missions.
+
+- **A wrecked dropship stood in the middle of Burning Chrome; you could walk and shoot through it.** A destructible
+  object comes in two versions: intact, and the destroyed variant that replaces it when it is destroyed. The engine
+  does not create the destroyed variant until then. The port only hid destroyed variants whose models are named SA*,
+  so others were drawn from the start. This mission's dropship wreck and three crashed Aerotech fighters stood at the
+  map centre. Destroyed variants (and everything attached to them) are now hidden until the swap, whatever they are
+  called. Across the 32 campaign missions this hides 413 such pieces. Most are rubble inside the intact buildings.
+  The rest are stray wrecks: dropship wrecks in 15 missions (most at the map centre or inside the landed dropship),
+  crashed fighters, and wrecked cars at the map centre in Blade Splint (Wolf 3).
+- **Four of Burning Chrome's turrets stood hundreds of metres from where they belong, one beyond the ice wall.** A
+  formation's first slot is the leader's own, and the engine places every other slot relative to it. The stock
+  formations have the leader at 0,0, but a mission can define its own, and Burning Chrome's turret formation gives
+  map coordinates. The port ignored the leader's slot, so the followers stood at the leader's position plus the
+  map coordinates. Fixed; this also moves turrets in Scorching Sand (Wolf 8, which were 2.6 km out) and Golden
+  Spade (Wolf 15).
+- **Mech Lab: switching to Endo Steel added the criticals but saved no weight.** The weight only counted Endo Steel
+  once its 7 slots were assigned. It now counts as soon as it is chosen, and Ferro-Fibrous armour the same.
+- **A weapon destroyed by a critical hit showed red** (as though recycling) instead of dark in the weapon list. The
+  list now follows the engine: a destroyed slot is dark whatever else is true of it.
+
+## v1.1.25 (2026-11-15)
+
+- **Music from the original CD in a drive.** Put the disc in any drive (USB included) and the game reads the music
+  digitally while it plays, with the disc's own table of contents: Windows XP and newer, Linux and macOS (the classic
+  Mac build excepted). It is the last place the game looks, after ripped tracks and a BIN/CUE image. `MW2_CD_DRIVE`
+  or `music=cd:E:` picks a drive. A reader thread stays about 3 s ahead of the music; when the game jumps to another
+  track, the music waits for the drive to seek, as the original did.
+- **BIN/CUE images: more places to put them.** If `cd=` names a disc image file, the game also looks for the `.cue`
+  in that file's folder. The README now lists where the files go.
+- `cdtool render` waits for a drive that is still reading ahead instead of stopping early.
+
+## v1.1.24 (2026-11-15)
+
+From a long feedback list on GitHub.
+
+- **Sable Flame: groups, power-up order, radar, dropship logos.** The mission's MTBL tables were read by their order in
+  the file, not by the table number each one carries. In SABL the two differ, so stars were spawned from the wrong
+  tables. This caused the 3-2-3 groups (should be 2-2-4), groups waking in the wrong order and showing on radar early,
+  the third group chasing the dropship, and Falcon dropships showing the Wolf insignia. Tables are now looked up by
+  number.
+- **Sable Flame: the sensor dome was opaque.** Its polygons are colour type 2, which the engine draws as outlines, not
+  fills. In the 3D looks those polygons are now drawn as thin unlit lines in their palette colour.
+- **Turrets did not turn (Wolf 2, Sable Flame dropships).** Turrets aim with two nodes, twist and pitch, named by the
+  model's THNG chunks. The port only turned the twist node of mechs. Both nodes now follow the unit's aim.
+- **Wolf Trial 1: the mech pairs started late.** The trial's player record is `jennstar`, not `UserStar`. The port
+  matched the player's star by name, so the trial's logic never saw the player. The player's record is now found by
+  the record that holds the player's start position.
+- **Satellite view (radar mode 2) redone from the engine's map view.** Terrain is shaded by height. Units and buildings
+  are drawn black with outlines in their side's colour (your mech included; buildings red). Shots are yellow lines,
+  and fires and explosions show as their sprites. The reticle and target brackets are no longer drawn over it.
+- **Ctrl+Up / Ctrl+Down looked the wrong way.** The pilot's look now uses the engine's sign: Ctrl+Up looks down, as
+  in the original.
+- **The reticle felt "floaty".** The view now follows half the torso pitch, as the engine does, while the reticle is
+  projected along the weapons' full aim.
+- **F5-F8 (lower display).** Each key now shows its display, and pressing it again clears the display, as in the
+  original. The MFD cycle key uses the same modes.
+- **Zoom (Z) hid the cockpit.** The cockpit frame now stays drawn while zoomed.
+- **Light amplification dropped frames when turned on.** Repainting the HUD for the new palette took about 35 ms. The
+  readings are now cached per sprite and prepared at mission start, which brings this to about 1 ms.
+- **A red line beside the target brackets.** HUD sprites now clamp at their edges instead of wrapping.
+- **Visited nav points now dim** in the target display, with the engine's visited emblem and colour.
+- **Helicopter rotor missing in the target display.** The wireframe of a building or vehicle now includes its child
+  parts (the fuselage and the parts in their own colours).
+- **Weapon hits on buildings** now show the structure hit effect instead of the ground splash.
+- **Menu cursor.** The shell now draws the game's own cursor (DATABASE.MW2 shape) instead of the system pointer.
+- **Holoprojector.** In the clan hall, ARCHIVE now plays the holoprojector clip in place on the projector, as the
+  original does, before opening the archive.
+- **Original CD audio.** Besides FLAC / MP3 / WAV rips, the music now plays from a BIN/CUE image of the CD (table of
+  contents from the cue sheet, pregaps included) and from AIFF tracks (as macOS shows an audio CD's tracks). A cue in
+  `music/`, `cd/` or the game folder is found when there are no ripped tracks. Playing a physical drive is not
+  supported. See "CD music" in the README.
+
 ## v1.1.23 (2026-11-15)
 
 - **PPC ground hits sometimes showed a black square (TEXTURES TITANIUM, reported on GitHub).** A PPC that hits the

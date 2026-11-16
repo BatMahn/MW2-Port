@@ -126,6 +126,12 @@ struct glr {
     const texture *spr_src[64];
     rb_tex spr_tex[64];
     int    spr_next;
+    /* colour kind 2 (0x2xxx: the shield domes, lattices, rotor blades) in the 3D editions: drawn as their outlines - the
+     * engine's face colour hook returns ((w & 0xff0) >> 4) | 0x2000 (0x1002a4b0 case 0x2000), and polygon mode 0x2000 is
+     * the outlined draw (the satellite view's second pass uses it too) - so a shield dome is a mesh one sees through
+     * (user report: Sable Flame's sensor array dome solid). Per layer: the edges (game coordinates) and their colour */
+    float *kl[2];
+    int    kl_n[2], kl_cap[2];
 };
 
 /* The program: shaders/world.vert and world.frag (the OpenGL 3.3 program's shaders, compiled offline for every backend
@@ -410,6 +416,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
 
     memset(acount, 0, sizeof acount);
     memset(apos, 0, sizeof apos);
+    if (li < 2) r->kl_n[li] = 0;
     for (pi = 0; pi < m->part_count; pi++) {
         const wtb_model *pm = r->ti_slots && m->parts[pi].ti_model ? m->parts[pi].ti_model : &m->parts[pi].model;
         const wtb_object *o;
@@ -473,6 +480,41 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * with low nibble 0 or 3 (0x1004eef0) */
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
+                if (!ti && !r->dos && model->extended && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
+                    if (pass == 1) {
+                        const int ci = (q->color >> 4) & 0xff;
+                        int e;
+                        if (r->kl_n[li] + q->n > r->kl_cap[li]) {
+                            int nc = r->kl_cap[li] + q->n + 1024;
+                            float *g = realloc(r->kl[li], (size_t)nc * 9 * sizeof *g);
+                            if (!g) continue;
+                            r->kl[li] = g; r->kl_cap[li] = nc;
+                        }
+                        for (e = 0; e < q->n; e++) {
+                            const wtb_vertex *va = &o->verts[q->idx[e]], *vb = &o->verts[q->idx[(e + 1) % q->n]];
+                            float *d = r->kl[li] + (size_t)r->kl_n[li] * 9;
+                            const wtb_vertex *vv[2] = {va, vb};
+                            int w2;
+                            for (w2 = 0; w2 < 2; w2++) {
+                                float x = (float)vv[w2]->x, y = (float)vv[w2]->y, z = (float)vv[w2]->z, *o3 = d + w2 * 3;
+                                if (part->has_rot) {
+                                    const float *R = part->rot;
+                                    o3[0] = R[0] * x + R[1] * y + R[2] * z + (float)part->pos[0];
+                                    o3[1] = R[3] * x + R[4] * y + R[5] * z + (float)part->pos[1];
+                                    o3[2] = R[6] * x + R[7] * y + R[8] * z + (float)part->pos[2];
+                                } else {
+                                    float cy = cosf(part->yaw * 3.14159265f / 180.0f), sy = sinf(part->yaw * 3.14159265f / 180.0f);
+                                    o3[0] = cy * x + sy * z + (float)part->pos[0];
+                                    o3[1] = y + (float)part->pos[1];
+                                    o3[2] = -sy * x + cy * z + (float)part->pos[2];
+                                }
+                            }
+                            d[6] = (float)palette[ci][0] / 255.0f; d[7] = (float)palette[ci][1] / 255.0f; d[8] = (float)palette[ci][2] / 255.0f;
+                            r->kl_n[li]++;
+                        }
+                    }
+                    continue;
+                }
                 /* the 3D editions' colour words 0x8000-0xb000 (engine 0x10026e80) are textured polygons of slot 0x100 + the
                  * low byte (0x1002c880; bank 1, the surface slots) - not the type 3 billboard: the scrub records' ground
                  * patches (TNW1SCR1 0xbc38 V1_PLAIN, RUSTSCR1 / SABLSCR1 0xbc39). Unlit (edge code + 512 below): 0xb000
@@ -2352,6 +2394,50 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             /* (RENDITION: the world, objects and effects fogged per vertex; the ground and dome above per pixel / unfogged) */
             U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
             r->F.u_far = v->ortho_w > 0 ? 0.0f : v->far_cull;
+        }
+    }
+    if ((r->kl_n[0] > 0 || r->kl_n[1] > 0) && !v->solo && !v->wire) {
+        /* the colour kind 2 outlines (r->kl): each edge a ribbon facing the camera, about 1 px wide at its depth, unlit
+         * in its palette colour, depth-tested with the scene */
+        static float *lb;
+        static size_t lcap;
+        const float th2 = 2.0f * tanf(v->vfov * 0.5f * 3.14159265f / 180.0f) / (float)(h > 0 ? h : 1);
+        size_t need = (size_t)(r->kl_n[0] + r->kl_n[1]) * 6 * FLOATS_PER_VERTEX, nv = 0;
+        int li2, e;
+        if (need > lcap) { float *g = realloc(lb, need * sizeof *g); if (g) { lb = g; lcap = need; } }
+        if (lb && need <= lcap) {
+            float *f = lb;
+            for (li2 = 0; li2 < 2; li2++)
+                for (e = 0; e < r->kl_n[li2]; e++) {
+                    const float *d = r->kl[li2] + (size_t)e * 9;
+                    float A[3] = {d[0], d[1], -d[2]}, B[3] = {d[3], d[4], -d[5]}, dir[3], c[3], sd[3], sl, ha, hb, da, db;
+                    int c3;
+                    for (c3 = 0; c3 < 3; c3++) { dir[c3] = B[c3] - A[c3]; c[c3] = eye[c3] - (A[c3] + B[c3]) * 0.5f; }
+                    sd[0] = dir[1] * c[2] - dir[2] * c[1]; sd[1] = dir[2] * c[0] - dir[0] * c[2]; sd[2] = dir[0] * c[1] - dir[1] * c[0];
+                    sl = sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);
+                    if (sl < 1e-6f) continue;
+                    da = sqrtf((A[0] - eye[0]) * (A[0] - eye[0]) + (A[1] - eye[1]) * (A[1] - eye[1]) + (A[2] - eye[2]) * (A[2] - eye[2]));
+                    db = sqrtf((B[0] - eye[0]) * (B[0] - eye[0]) + (B[1] - eye[1]) * (B[1] - eye[1]) + (B[2] - eye[2]) * (B[2] - eye[2]));
+                    ha = 0.6f * da * th2 / sl; hb = 0.6f * db * th2 / sl;
+                    {
+                        const float q[4][3] = {{A[0] - sd[0] * ha, A[1] - sd[1] * ha, A[2] - sd[2] * ha}, {A[0] + sd[0] * ha, A[1] + sd[1] * ha, A[2] + sd[2] * ha},
+                                               {B[0] + sd[0] * hb, B[1] + sd[1] * hb, B[2] + sd[2] * hb}, {B[0] - sd[0] * hb, B[1] - sd[1] * hb, B[2] - sd[2] * hb}};
+                        static const int QK[6] = {0, 1, 2, 0, 2, 3};
+                        int j;
+                        for (j = 0; j < 6; j++) {
+                            f = env_vertex(f, q[QK[j]][0], q[QK[j]][1], q[QK[j]][2], 0, 1, 0, 0, 0);
+                            f[-5] = d[6]; f[-4] = d[7]; f[-3] = d[8];
+                        }
+                        nv += 6;
+                    }
+                }
+            if (nv) {
+                glr_bind_stream(glr_stream(lb, nv * FLOATS_PER_VERTEX));
+                r->D.u_unlit = 1;
+                r->D.u_textured = 0;
+                glr_draw_arrays(r, 0, (int)nv);
+                r->D.u_unlit = 0;
+            }
         }
     }
     if (r->spr_n > 0 && !v->solo) {   /* weapon effects: camera-facing cards, unlit, alpha-tested, fogged */
