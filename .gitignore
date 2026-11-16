@@ -20,6 +20,7 @@ mw2
 mw2.exe
 missionsim
 sweep_objectives
+audit_missions
 sweep_ai
 *.app/
 dist/

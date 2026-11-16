@@ -208,11 +208,22 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
                 th++;
             }
     }
+    {   /* the unit class (GP +2): only the player types with a torso controller turn these objects (players.c: classes 1-6 and
+         * 8 UpdateMech, 3 UpdateArtillery); doors (7) have their own and turn nothing - a door's rotation keys are its own.
+         * UpdateMech sets the pitch object first and the torso object last, so where both are one node (aircraft,
+         * dropships, the Tarantula, the logic dummies) the torso's rotation stands and the pitch none */
+        int gp_class = -1;
+        for (k = 0; k < n; k++) if (strcmp(chunks[k].tag, "GP") == 0 && chunks[k].size >= 4) gp_class = (int16_t)(chunks[k].data[2] | chunks[k].data[3] << 8);
+        if (gp_class == 7) out->twist_node = out->pitch_node = -1;
+        if (out->pitch_node == out->twist_node) out->pitch_node = -1;
+        if (gp_class == 7) goto no_head_twist;
+    }
     if (out->twist_node < 0)
         for (i = 0; i < out->part_count; i++) {
             size_t nl = strlen(out->parts[i].model_name);
             if (nl >= 5 && strcasecmp(out->parts[i].model_name + nl - 5, "_HEAD") == 0) { out->twist_node = out->parts[i].node; break; }
         }
+no_head_twist:
     /* animation id and the TSK bindings "node;70,flags,track" */
     for (k = 0; k < n; k++) {
         const bwd_chunk *c = &chunks[k];

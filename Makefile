@@ -256,6 +256,10 @@ sweep: sweep_objectives
 	MW2_INSTALL_DIR=$(MW2) ./sweep_objectives $(MW2)/MW2.PRJ $(SWEEP_ARGS)
 .PHONY: sweep
 
+# static audit of every mission's set-up (units off their group or the boundary, strays at the map origin, wrecks shown early)
+audit_missions: tools/audit_missions.c src/lance.c src/msim.c src/fx.c src/ai.c src/combat.c src/mtbl.c src/anim.c src/mek.c src/mech3d.c src/wtb.c src/bwd.c src/prj.c src/datapath.c $(HDRS)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc $(filter %.c,$^) -o $@ -lm
+
 # walking sweep (tests only): tools/sweep_walk.py drives glview (MW2_WALK_TRACE hooks); sweep_ai reports stuck AI mechs
 sweep_ai: tools/sweep_ai.c src/msim.c src/fx.c src/ai.c src/combat.c src/mtbl.c src/anim.c src/mek.c src/mech3d.c src/wtb.c src/bwd.c src/prj.c src/datapath.c $(HDRS)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc $(filter %.c,$^) -o $@ -lm

@@ -1133,6 +1133,10 @@ The 3D editions add `lemmy`. INFERRED:
   subtracts the leader slot's x / z from every slot; the port now does the same (GREY greytur1, BROW turret, GOLD).
 - Mech Lab mass: Endo-steel / Ferro-fibrous count once chosen (slots placed or in the pool).
 - Weapon list colour: state -1 (destroyed / out of ammunition) is dark first (weaponpanel.c DrawWeaponPanel).
+- Torso / pitch objects (v1.1.27): GP class 7 (doors) none (players.c: no torso controller); where both THNG nodes are
+  one node, the pitch object is dropped (UpdateMech sets the pitch object, then the torso object last).
+- Audit (tools/audit_missions.c): trial / lance start points up to 46 m up fall in as placed (the data); DOS "star" has
+  2 follower positions (the rest 0,0), so TEAL's 4th Summoner starts in its leader in the DOS look (the data).
 
 ## Open items (as of 2026-11-02)
 

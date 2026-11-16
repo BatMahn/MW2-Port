@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.27 (2026-11-16)
+
+After v1.1.26, every mission was checked for the same kinds of fault, not only the ones players reported: all 59
+scenes (campaign, trials, training, Instant Action). The checks were the objective sweep, in which a scripted player
+completes every objective (all 59 missions can be won, DOS data), and a new static audit run on both the DOS and the
+3D data, `make audit_missions`. The audit looks for units placed far from their group or outside the mission boundary,
+objects drawn at the map origin, destroyed variants shown early, and units left floating or underground once the
+simulation settles. The v1.1.26 fixes covered what it found in the data. One more fault came from v1.1.24's turret
+change:
+
+- **Doors, aircraft and dropships no longer turn the way turrets do.** v1.1.24 made each unit's first two THNG nodes
+  its torso and its pitch object, so turrets would turn. The engine does that only for the unit classes that use its
+  mech or artillery controller. Doors (class 7) have their own controller, and their animation was being overridden.
+  Where a model's torso and pitch objects are the same node (aircraft, dropships, the Tarantula), the engine applies
+  the pitch first and the torso last, so the torso's rotation wins. The port had been adding both.
+
+What the audit flagged but matches the original data:
+- **Trial and starting-lance drops:** some trial opponents and lancemates start up to 46 m in the air and drop in at
+  the start, as their start points place them.
+- **Overlapping Summoners in Blade Splint, DOS look:** the DOS archive's "star" formation has only two follower
+  positions (its other slots are 0,0), so the fourth Summoner of its group starts inside the leader. The 3D archives'
+  "star" has six.
+- **Aerospace and dropship units start outside the boundary:** they fly in.
+
 ## v1.1.26 (2026-11-16)
 
 From a GitHub report on Burning Chrome (Wolf mission 7) and the Mech Lab. The first two were older than v1.1.24, not
