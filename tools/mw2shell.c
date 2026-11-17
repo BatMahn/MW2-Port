@@ -5213,6 +5213,36 @@ static const char *BRF_LABEL[4] = {"ABORT", "SITUATION", "LAUNCH", "SKIP"};
  * developers' switch); SKIP returns screen 3, the debriefing, without flying the mission */
 static int brf_skip(int reg) { return reg >= 0 && strcmp(g_reg[reg].name, "FERRARI") == 0; }
 static const int BRF_LX[4] = {480, 160, 320, 590};
+/* The shell's text substitutions (Win95 MW2SHELL.DLL 0x10002f00, run on every ORDR page before it is laid out; the
+ * DOS shell the same): \r0 / \r1 / \r2 the selected pilot's rank title + 0 / 1 / 2 (pilot +0x10, the table 0x10086d98;
+ * the original caps the index at 9, one past the table - the port at 8, Khan), \h the pilot's honor (%d, +0x14), \q the
+ * caller's text (the debriefing's objectives table, 0x1000e9b6; empty for the briefing). Any other escape is kept for
+ * the layout. The trial aftermaths ("You have displayed skill sufficient to acquire the rank of \r0") showed "0". */
+static int  g_sub_title, g_sub_honor;
+static char g_sub_q[3000];
+static size_t ordr_expand(const char *in, size_t len, char *out, size_t cap)
+{
+    size_t i = 0, o = 0;
+    #define PUT(str) do { const char *s_ = (str); while (*s_ && o + 1 < cap) out[o++] = *s_++; } while (0)
+    while (i < len && o + 1 < cap) {
+        if (in[i] == '\\' && i + 1 < len) {
+            const char c = in[i + 1];
+            if ((c == 'r' || c == 'R') && i + 2 < len && in[i + 2] >= '0' && in[i + 2] <= '2') {
+                int t = g_sub_title + (in[i + 2] - '0');
+                if (t < 0) t = 0;
+                if (t > 8) t = 8;
+                PUT(RANK_TITLE[t]); i += 3; continue;
+            }
+            if (c == 'r' || c == 'R') { i += 2; continue; }   /* (another digit: nothing, 0x10003195) */
+            if (c == 'h' || c == 'H') { char v[16]; snprintf(v, sizeof v, "%d", g_sub_honor); PUT(v); i += 2; continue; }
+            if (c == 'q' || c == 'Q') { PUT(g_sub_q); i += 2; continue; }
+        }
+        out[o++] = in[i++];
+    }
+    #undef PUT
+    out[o] = 0;
+    return o;
+}
 static int brf_lines(const char *txt, size_t len, char lines[][96], int *centre, int maxl, int width)
 {
     int n = 0;
@@ -5272,7 +5302,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                 size_t o = 12;
                 while (o + 8 <= r.size) {
                     uint32_t sz = r.data[o + 4] | r.data[o + 5] << 8 | r.data[o + 6] << 16 | (uint32_t)r.data[o + 7] << 24;
-                    if (memcmp(r.data + o, "ORDR", 4) == 0) n = brf_lines((const char *)r.data + o + 8, sz - 8, lines, centre, 600, bw - 8);
+                    if (memcmp(r.data + o, "ORDR", 4) == 0) { static char ex[32768]; size_t el; g_sub_title = g_reg[reg].title; g_sub_honor = g_reg[reg].honor; g_sub_q[0] = 0; el = ordr_expand((const char *)r.data + o + 8, sz - 8, ex, sizeof ex); n = brf_lines(ex, el, lines, centre, 600, bw - 8); }
                     if (sz < 8) break;
                     o += sz;
                 }
@@ -5370,7 +5400,7 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
     uint32_t len;
     const uint8_t *p;
     if (mission_record(scen, suffix, &r) == 0) {
-        if ((p = chunk_find(&r, "ORDR", &len))) n = brf_lines((const char *)p, len, lines, centre, 600, bw - 8);
+        if ((p = chunk_find(&r, "ORDR", &len))) { static char ex[32768]; const size_t el = ordr_expand((const char *)p, len, ex, sizeof ex); n = brf_lines(ex, el, lines, centre, 600, bw - 8); }
         prj_record_free(&r);
     }
     while (!done) {
@@ -5402,14 +5432,14 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
 {
     int mission_done;
     static deb_line L[64];
-    int n = 0, i, next = -1, f = 0, reg, success, total = 0, final = 0, top = 0;
+    int n = 0, i, next = -1, f = 0, reg, success, total = 0, final = 0, top = 0, primary_won = 0;
     unsigned char msn[0x9d4], car[80], dif[8];
     char path[800];
     FILE *fp;
     pilot_rec before;
     int bx = clan == 1 ? 98 : 88, by = clan == 1 ? 51 : 30, bw = clan == 1 ? 403 : 454, lh = 14;
     memset(msn, 0, sizeof msn); memset(car, 0, sizeof car); memset(dif, 0, sizeof dif);
-    dif[4] = 1; dif[5] = 1;
+    dif[3] = 1; dif[4] = 1; dif[5] = 1;   /* (no file: the install's defaults - collision damage, heat tracking on) */
     {
         const char *dir = getenv("MW2_SAVE_DIR") ? getenv("MW2_SAVE_DIR") : g_dir;
         snprintf(path, sizeof path, "%s/MW2MSN.CFG", dir); if ((fp = fopen(path, "rb"))) { if (fread(msn, 1, sizeof msn, fp)) {} fclose(fp); }
@@ -5426,6 +5456,7 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
 #define TEXT(lbl) do { if (n < 64) { snprintf(L[n].label, sizeof L[n].label, "%s", lbl); L[n].value[0] = 0; L[n].centre = 1; n++; } } while (0)
     {   /* the objectives */
         int no = msn[4] | msn[5] << 8, k, primary_failed = 0, sec = 0, ter = 0;
+        g_sub_q[0] = 0;
         static const char *TY[9] = {"Default", "Primary", "Secondary", "", "Tertiary", "", "", "", "Return"};
         TEXT("OBJECTIVES");
         for (k = 0; k < no && k < 40; k++) {
@@ -5435,6 +5466,12 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             snprintf(txt, sizeof txt, "%.31s", (const char *)e + 20);
             { int q = (int)strlen(txt); while (q > 0 && txt[q - 1] == ' ') txt[--q] = 0; }
             LINE(txt, "%s %s", ty <= 8 && TY[ty][0] ? TY[ty] : "Unknown", st == 1 ? "Successful" : "Failed");
+            if (k == 0) snprintf(g_sub_q, sizeof g_sub_q, "%s", "");
+            {   /* the aftermath's \q: the same table (0x1000e9b6, "Type Objective Status" rows) */
+                const size_t ql = strlen(g_sub_q);
+                snprintf(g_sub_q + ql, sizeof g_sub_q - ql, "%s Objective: %s - %s\\n", ty <= 8 && TY[ty][0] ? TY[ty] : "Unknown", txt, st == 1 ? "Successful" : "Failed");
+            }
+            if (ty == 1 && st == 1) primary_won++;
             if (ty == 1 && st == 0) primary_failed = 1;
             if (ty == 2 && st == 1) sec++;
             if (ty == 4 && st == 1) ter++;
@@ -5481,10 +5518,29 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         g_reg[reg].rank++;   /* the campaign advances */
         LINE("Career Honor:", "%d", g_reg[reg].honor);
     }
+    /* promotion (Win95 MW2SHELL.DLL 0x1000f0d5, added to pilot +0x10 at 0x1000f3a2, capped at 8 = Khan): a won trial
+     * raises the rank title by one per primary objective completed - only a campaign pilot, a mission the campaign table
+     * flags a trial, the mission won, heat tracking on, and none of the Combat Variables that dishonor (0x1000dd00:
+     * unlimited ammo, invulnerability, no collision damage). The port never promoted: every pilot stayed Mechwarrior. */
+    if (success && campaign_is_trial(clan, mission_done) && dif[4] == 1 && dif[0] != 1 && dif[1] != 1 && dif[3] != 0 && primary_won > 0) {
+        g_reg[reg].title += primary_won;
+        if (g_reg[reg].title > 8) g_reg[reg].title = 8;
+        if (g_reg[reg].title < 0) g_reg[reg].title = 0;
+    }
+    g_sub_title = g_reg[reg].title; g_sub_honor = g_reg[reg].honor;
+    {   /* \q ends with the career honor line (0x1000ee6d) */
+        const size_t ql = strlen(g_sub_q);
+        snprintf(g_sub_q + ql, sizeof g_sub_q - ql, "\\nCareer Honor: %d\\n", g_reg[reg].honor);
+    }
 #undef LINE
 #undef TEXT
     reg_save();
     load_bg(clan == 1 ? 22 : 15);
+    if (headless && getenv("MW2_SHELL_AFTERMATH") && mission_done >= 0 && mission_done < 16) {   /* tests: the AFTERMATH page -> MW2_SHELL_SHOT */
+        text_page(rd, tx, headless, clan, CAMPAIGN_SCEN[clan][mission_done], success ? "DBFS" : "DBFF");
+        printf("aftermath: title %d (%s) honor %d\n", g_reg[reg].title, RANK_TITLE[g_reg[reg].title >= 0 && g_reg[reg].title < 9 ? g_reg[reg].title : 0], g_reg[reg].honor);
+        return -2;
+    }
     while (next == -1) {
         SDL_Event e;
         if (!headless) {

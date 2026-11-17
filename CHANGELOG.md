@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.1.31 (2026-11-17)
+
+From a playtest of Wolf Trial 1.
+
+- **Trials never promoted the pilot, and the aftermath read "the rank of 0".** Two faults:
+  - **No promotion.** The original raises the pilot's rank title after a won trial (MW2SHELL 0x1000f0d5, added at
+    0x1000f3a2): one step per primary objective completed, capped at Khan. It only does this when the mission is a
+    trial in the campaign table, heat tracking is on, and none of unlimited ammo, invulnerability or no collision
+    damage is set (0x1000dd00). The port never promoted, so every pilot stayed Mechwarrior.
+  - **Text codes not replaced.** The trial aftermath texts use the shell's codes (0x10002f00):
+    - `\r0` / `\r1` / `\r2`: the rank title, plus 0 / 1 / 2;
+    - `\h`: the pilot's honor;
+    - `\q`: the debriefing's objectives table.
+    The port dropped the backslash and printed the "0". These pages, and the briefings, now show the new rank (Trial 1:
+    "Star Commander"), the objectives and the career honor.
+- **A mech with a leg shot off could still turn on the spot.** Losing the first leg stopped it walking, but its legs
+  kept turning, so it came about to face you wherever you went. Now a legged mech, AI or player, only twists its torso
+  within its limits, so you can circle behind it. A turn on the jump jets still works, and Feet-to-Torso does nothing
+  with a leg gone. Reported against the original; the engine's rule was not traced.
+
+## v1.1.30 (2026-11-17)
+
+From a follow-up to the v1.1.24 feedback list.
+
+- **Satellite view: enemy buildings were shaded like the ground, not outlined in red.** v1.1.24's satellite view
+  colours a structure by its side only when its object's type word has bit 0x200. The engine sets that bit at load on
+  each object a GT (thing) record claims. The OBJ records themselves carry 0 or 0xc0, and the port never set the bit,
+  so no building ever matched. The port now goes by the GT link: a thing's object is drawn black with its edges in
+  its side's colour (enemy red, friendly green, unaligned grey). Seen on Wolf mission 3 (TEAL).
+
 ## v1.1.29 (2026-11-17)
 
 From a GitHub report.

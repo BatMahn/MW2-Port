@@ -2242,7 +2242,10 @@ static void sat_draw(int w, int h)
             else {
                 int b, thing = -1;
                 for (b = 0; b < g_sim.bld_count; b++) if (g_sim.bld[b].intact == k || g_sim.bld[b].destroyed == k) { thing = b; break; }
-                if (thing >= 0 && (kd & 0x200)) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
+                /* a thing's object: the engine sets type bit 0x200 on the objects its GT record claims at load; the
+                 * OBJ records themselves carry 0 / 0xc0, so the port goes by the GT link (user report: TEAL's enemy
+                 * buildings were shaded like terrain, not outlined in red) */
+                if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
                 else if (kd & 0x200) col = SAT_COL[5];
                 else if (kd & 0x100) col = SAT_COL[1];
                 else if (kd & 0x400) col = SAT_COL[6];
@@ -7050,6 +7053,9 @@ int main(int argc, char **argv)
                     int jh = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || pu->shutdown);
                     if (jh && pu->jets > 0 && !pu->no_jump && !pu->destroyed && pu->jet_fuel >= 0)
                         turn = pu->jet_fuel - dt * 182.0f > 0 ? 180.0f : 0.0f;
+                    else if (pu->immobile) turn = 0.0f;   /* a leg gone: the legs no longer turn, only the torso twists
+                                                          * (user report against the original: a one-legged mech could
+                                                          * not come about, so you circle behind it; msim the same) */
                 }
                 g_pl_legs_turn = 0;
                 {   /* a manual turn cancels the autopilot, announced as the key does (engine 0x1001a480..0x1001a4fc): in
@@ -7140,6 +7146,7 @@ int main(int argc, char **argv)
                     if (rl.val != 0) g_pl_legs_turn = 1;
                 }
                 { int pr = 0; float a = g_im_ok ? im_axis(&g_im, "legs_pan_delta", ks, 1, &pr) : 0; if (pr) g_pl.heading += a * turn * dt; if (pr && fabsf(a) >= 1e-7f) g_pl_legs_turn = 1; }
+                if (g_feet_to_torso && g_sim_ok && g_sim.player_unit.immobile) g_feet_to_torso = 0;   /* (a leg gone: as the turn above) */
                 if (g_feet_to_torso) {
                     float step = 55.0f * dt, d = g_pl.twist;
                     if (fabsf(d) <= step) { g_pl.heading += d; g_pl.twist = 0; g_feet_to_torso = 0; }

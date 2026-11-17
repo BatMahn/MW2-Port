@@ -2007,6 +2007,8 @@ void msim_step(msim *s, int32_t dt_ms)
                 if (m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)
                     rate = s->units[i].jet_fuel - sdt * 182.0f > 0 ? m->turn / 1024.0f * 90.0f * 2.0f : 0.0f;   /* the jets held (a
                                    * tank, state 2): x2 (0x102473d4) while fuel is left after the burn, else no turn (0x1001a180) */
+                if (s->units[i].immobile && !(m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)) rate = 0.0f;   /* a leg gone: no leg turn (user report against the
+                                   * original: a legged mech cannot come about - circle behind it; it still twists its torso) */
                 ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
                 if (freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
                     float d = (ac->mech.heading - hd0) * 3.14159265f / 180.0f, cd = cosf(d), sd = sinf(d);
