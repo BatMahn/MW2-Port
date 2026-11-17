@@ -616,10 +616,16 @@ static prj_archive *g_ma;
  * 640-wide reference (focal 320 x zoom) 72 / 170 / 450 m, halved with DISPLAY DETAIL low. The representations share the
  * full model's skeleton (mech3d_use_skeleton), so a level of detail is posed exactly as the full model. */
 static int g_lodq = 1;
+/* camera +0xa0 (the engine's m_detailScale) = the view's focal length in pixels / (LOD quality x 160) (view.c: scaleX =
+ * half-width x fov / (quality x 160); DOS the same in 16.16, 0x3f1c1): it grows with the resolution - 2 at the 640 x 480
+ * reference (focal 320), 4.5 at 1080 lines. The port had kept the reference's 2 at every size, so a mech dropped to its
+ * first level of detail at 72 m whatever the window (user report: "about 115-120 m"). Set each frame from the view */
+static float g_lod_focal = 320.0f;
+static float lod_a0(void) { return g_lod_focal / 160.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq; }
 static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_alod[64];
 static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist)
 {
-    float a0 = 2.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq;
+    float a0 = lod_a0();
     int r = dist < 0 ? (int)-dist : dist < a0 * 3600.0f ? 0 : dist < a0 * 8500.0f ? 1 : dist < a0 * 22500.0f ? 2 : 3;   /* dist -r: representation r */
     mech3d *m;
     if (getenv("MW2_NO_LOD") && dist >= 0) r = 0;
@@ -2129,7 +2135,7 @@ static void scene_anim(glr *r)
  *    per vertex in the 3D editions (Gouraud), flat here per polygon at its mean height.
  * Types 0x30 / 0x70 are skipped (0x100040b0), as are destroyed units. Drawn by the HUD's 2D primitives, lowest first. */
 static const int SAT_COL[13] = {0xe, 0xa, 0x6, 0xf, 0xb, 0xf5, 0x2, 0x3, 0xf9, 0xff, 0xf0, 0x1, 0x2};
-typedef struct { float y; int part_src, part; int side_col; } sat_item;   /* side_col: -1 shaded, -2 bitmap, else a palette index */
+typedef struct { float y; int part_src, part; int side_col; int poly; } sat_item;   /* poly: -1 the whole part (a card), else one polygon */   /* side_col: -1 shaded, -2 bitmap, else a palette index */
 static float g_sat_gnd[4] = {0.3f, 0.3f, 0.3f, 1.0f};
 static const texture *g_sat_gnd_tex;
 static void sat_ground_colour(void)
@@ -2246,16 +2252,34 @@ static void sat_draw(int w, int h)
                 else if (ty == 0x10 || ty == 0x20 || ty == 0x60 || pp->facing) col = -2;
                 else col = -1;
             }
-            if (n == cap) { sat_item *g = realloc(it, (size_t)(cap ? cap * 2 : 1024) * sizeof *g); if (!g) break; it = g; cap = cap ? cap * 2 : 1024; }
-            it[n].y = top; it[n].part_src = src; it[n].part = k; it[n].side_col = col;
-            n++;
+            /* one entry per polygon, at its mean height: drawn lowest first as the engine's view from above paints its
+             * polygons (a whole part at its top put a hill's part over a mech standing on its side - user report) */
+            if (col == -2) {
+                if (n == cap) { sat_item *g = realloc(it, (size_t)(cap ? cap * 2 : 1024) * sizeof *g); if (!g) break; it = g; cap = cap ? cap * 2 : 1024; }
+                it[n].y = top; it[n].part_src = src; it[n].part = k; it[n].side_col = col; it[n].poly = -1;
+                n++;
+                continue;
+            }
+            for (v = 0; v < o->poly_count; v++) {
+                const wtb_poly *q = &o->polys[v];
+                float my = 0, q3[3];
+                int c3;
+                if (q->n < 3) continue;
+                for (c3 = 0; c3 < q->n; c3++) { sat_vertex(pp, &o->verts[q->idx[c3]], q3); my += q3[1]; }
+                if (n == cap) { sat_item *g = realloc(it, (size_t)(cap ? cap * 2 : 1024) * sizeof *g); if (!g) break; it = g; cap = cap ? cap * 2 : 1024; }
+                /* units over the world: seen from straight above a unit is covered only by what stands over it, which
+                 * the maps have none of; a hill's polygon spans heights a mean (or top) cannot order against a mech on
+                 * its slope */
+                it[n].y = my / (float)q->n + (src != -2 ? 1e7f : 0.0f); it[n].part_src = src; it[n].part = k; it[n].side_col = col; it[n].poly = v;
+                n++;
+            }
         }
     }
     qsort(it, (size_t)n, sizeof *it, sat_cmp);
     if (getenv("MW2_SAT_TRACE")) {   /* TEST hook: the items by colour, once */
         static int once;
         if (!once++) {
-            for (i = 0; i < n; i++) if (it[i].part_src != -2 || it[i].side_col >= 0) printf("SATITEM src %d part %d col %d y %.0f type %#x\n", it[i].part_src, it[i].part, it[i].side_col, (double)it[i].y, sat_src(it[i].part_src)->parts[it[i].part].objtype);
+            for (i = 0; i < n; i++) if ((it[i].part_src != -2 || it[i].side_col >= 0) && it[i].poly <= 0) printf("SATITEM src %d part %d col %d y %.0f type %#x\n", it[i].part_src, it[i].part, it[i].side_col, (double)it[i].y, sat_src(it[i].part_src)->parts[it[i].part].objtype);
             for (i = 0; i < 13; i++) printf("SATCOL %d idx %#x = %.2f %.2f %.2f\n", i, SAT_COL[i], (double)HP(SAT_COL[i])[0], (double)HP(SAT_COL[i])[1], (double)HP(SAT_COL[i])[2]);
             printf("SATN %d\n", n);
         }
@@ -2276,7 +2300,7 @@ static void sat_draw(int w, int h)
             hud_draw_rect_tex(g_hud, spr, 320.0f + ((mn[0] + mx[0]) * 0.5f - ex) * sc - wd * 0.5f, 240.0f - ((mn[2] + mx[2]) * 0.5f - ez) * sc - hg * 0.5f, wd, hg, NULL);
             continue;
         }
-        for (j = 0; j < o->poly_count; j++) {
+        for (j = it[i].poly; j <= it[i].poly; j++) {   /* this entry's polygon */
             const wtb_poly *q = &o->polys[j];
             float pv[WTB_MAX_POLY_VERTS][3], e1[3], e2[3], ny, my = 0;
             int c3, t;
@@ -7676,7 +7700,8 @@ int main(int argc, char **argv)
                 /* the levels of detail are the simulation's (msim collision_lods: 0x100267d0, DOS 0x37580 - a unit is hit as it is
                  * drawn): this frame's camera for its next step */
                 memcpy(g_sim.cam_eye, v.eye, sizeof g_sim.cam_eye);
-                g_sim.cam_a0 = 2.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq;
+                g_lod_focal = (float)(h > 0 ? h : 480) * 0.5f / 0.75f;   /* the cockpit view's vertical tangent 0.75 (73.74 deg) */
+                g_sim.cam_a0 = lod_a0();
                 g_sim.cam_ok = 1;
                 for (k = 0; k < g_actor_count; k++) total += g_actors[k].mech.part_count;
                 if (show_pl || (g_cockpit && g_pl_ok)) total += g_pl.part_count + (g_plpit_ok ? g_plpit.part_count : 0);
@@ -8393,6 +8418,7 @@ int main(int argc, char **argv)
         v.alpha_blend = getenv("MW2_TEST_NO_ALPHA_BLEND") ? 0 : look_blend(g_edition);   /* (TEST ONLY: the 0.5 alpha test, as before) */
         if (getenv("MW2_TEST_ATI_TEX")) { int tv = atoi(getenv("MW2_TEST_ATI_TEX")); v.ati_tex = tv == 0 ? 0 : (v.ati_tex & 4) | (tv == 2 ? 3 : 1); }   /* TEST ONLY: 0 every
                                                                     * polygon perspective-correct and masked (the port before), 2 all affine */
+        if (getenv("MW2_SAT_ZOOM")) g_sat_i = atoi(getenv("MW2_SAT_ZOOM")) % 5;   /* tests: the satellite map's zoom step */
         if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
         world_fade(r);
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);

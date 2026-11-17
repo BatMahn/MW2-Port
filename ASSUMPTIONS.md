@@ -1138,6 +1138,17 @@ The 3D editions add `lemmy`. INFERRED:
 - Audit (tools/audit_missions.c): trial / lance start points up to 46 m up fall in as placed (the data); DOS "star" has
   2 follower positions (the rest 0,0), so TEAL's 4th Summoner starts in its leader in the DOS look (the data).
 
+## 34. Satellite order, LOD scale, shell clips, waking (2026-11-17)
+- Satellite view: per polygon by mean height, units over the world (INFERRED: no map has anything standing over a unit).
+- LOD: camera +0xa0 = focal px / (quality x 160) (view.c m_detailScale = half-width x fov / (q x 160)); the port's focal is
+  the window's height / 2 / 0.75 (73.74 deg vertical). Thresholds 3600 / 8500 / 22500 unchanged.
+- Shell clips: LoadVideoFile 0x1001703b gives every clip with a sound track its sound (holoprojector, briefing, holotable).
+  Briefing clip in place at (0x69, 0x64) / (0x6b, 0x69) (readyroom.cpp). Ambience: Wolf hall DB 0x4f, training DB 0x4c,
+  both looped at 0x32 (Windows 95 shell; INFERRED the DOS shell the same).
+- The player "attacks" a unit only after a hit (shots.c RecordAttack); FindAttacker needs the attacker in state 3 with that
+  goal. Resting units (state 10) run their rules (RunAIRules for every AI player); shut-down ones (11) do not.
+- "Enemy power-up detected" only for the mech controller's classes (not 3 artillery / turret dropships, not 7 doors).
+
 ## Open items (as of 2026-11-02)
 
 Everything earlier on this list was closed in sessions 14-15 (see §22-§25); what is left after those passes:

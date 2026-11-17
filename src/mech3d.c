@@ -764,6 +764,11 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                      * dropship bomb turrets (TUR00DRP), 0 the CYAN doors - the player's targeting rules (0x1001d050) */
                     ac->unit_flags = m.records[i].chunks[k].size >= 28 ? (unsigned)(m.records[i].chunks[k].data[26] | m.records[i].chunks[k].data[27] << 8) : 0x400u;
                     ac->tex_offset = g.table >= 0 && g.table < 64 && star_tex[g.table] >= 0 && star_tex[g.table] < 16 ? star_tex[g.table] : 0;
+                    {   /* and on its own parts: the levels of detail (glview actor_lod) copy it from them - left 0, every enemy
+                         * beyond the full model's distance wore the Wolf crest (user report: Wolf mission 2's Falcon Stormcrow) */
+                        int q;
+                        for (q = 0; q < ac->mech.part_count; q++) ac->mech.parts[q].tex_offset = ac->tex_offset;
+                    }
                     ac->ai_level = g.pilot_level;
                     {   int q; for (q = 0; q < 3; q++) ac->ai_range[q] = (float)(g.ranges[q] ? g.ranges[q] : 250) * 100.0f; }
                     snprintf(ac->loadout, sizeof ac->loadout, "%s", g.loadout);

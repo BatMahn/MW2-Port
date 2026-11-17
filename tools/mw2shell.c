@@ -109,7 +109,8 @@ static const overlay_def FALCON_HALL_OV[] = {{"AJFBALL", 400, 384}, {"AJFARCHT",
 static const screen_def SCREENS[] = {
     {8, "title", 0, "AMWLOGO1", 111, 33, 73, TITLE_HS, 4, -1, NULL, 0},   /* ambient: getter index 0x4a, 1-based -> entry 73 */
     {7, "Instant Action (Trials of Grievance)", 8, NULL, 0, 0, -1, NULL, 0, -1, NULL, 0},
-    {1, "Wolf clan hall", 10, NULL, 0, 0, -1, WOLF_HALL_HS, 5, 0, WOLF_HALL_OV, 5},
+    {1, "Wolf clan hall", 10, NULL, 0, 0, 0x4e, WOLF_HALL_HS, 5, 0, WOLF_HALL_OV, 5},   /* ambience: DATABASE 0x4f looped at 0x32
+                                         * (Windows 95 MW2SHELL 0x10014040; the Jade Falcon hall has none) */
     {1, "Jade Falcon clan hall", 17, NULL, 0, 0, -1, FALCON_HALL_HS, 5, 1, FALCON_HALL_OV, 2},
 };
 
@@ -728,7 +729,10 @@ static void clip_close(clip *c)
 
 /* ---- ambient WAV from DATABASE (RIFF, 8-bit mono) ---- */
 static uint8_t *g_amb; static long g_amblen;
-static void play_ambient(int entry)
+static void play_ambient_vol(int entry, int vol);
+static void play_ambient(int entry) { play_ambient_vol(entry, 0x1e); }
+/* entry: the DATABASE entry (index - 1), looped at vol (0-127); -1 stops */
+static void play_ambient_vol(int entry, int vol)
 {
     long n, i;
     sfx_stop_loops(g_sfx);
@@ -741,7 +745,7 @@ static void play_ambient(int entry)
         uint32_t cl = g_amb[i + 4] | g_amb[i + 5] << 8 | g_amb[i + 6] << 16 | (uint32_t)g_amb[i + 7] << 24;
         if (!memcmp(g_amb + i, "fmt ", 4) && i + 14 <= n) rate = g_amb[i + 12] | g_amb[i + 13] << 8;
         if (!memcmp(g_amb + i, "data", 4)) {
-            sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, (float)0x1e / 127.0f, 1);   /* the main
+            sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, (float)vol / 127.0f, 1);   /* the main
                                          * menu's loop (0x2a4c9): faded up to volume 0x1e, the voice's level */
             return;
         }
@@ -4954,13 +4958,22 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                             launch_scenario(clan, scen, reg >= 0 ? g_reg[reg].name : "Cadet");
                             music_after_mission(14, clan);   /* user report: the training menu's song resumes */
                             load_bg(clan == 1 ? 19 : 12);
+                            play_ambient_vol(0x4b, 0x32);   /* and the room's ambience */
                         }
                 }
             }
         }
         draw_bg();
         if (panel) {   /* the menu panel slides in once; its last frame stays */
-            if (!menu_done) { int fi = smk_next(panel); if (fi < 0 || fi >= smk_frames(panel) - 1) menu_done = 1; }
+            if (!menu_done) {
+                int fi = smk_next(panel);
+                if (fi < 0 || fi >= smk_frames(panel) - 1) {
+                    menu_done = 1;
+                    if (!headless) play_ambient_vol(0x4b, 0x32);   /* the room's ambience, DATABASE 0x4c looped at 0x32, once the
+                                                                    * panel is in (Windows 95 MW2SHELL cadet training: the buttons
+                                                                    * added when video slot 0 ends) */
+                }
+            }
             blit_smk(panel, clan == 1 ? 416 : 453, 0);
         } else menu_done = 1;
         if (inst) {   /* the instructor: a and b alternate */
@@ -4990,6 +5003,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         }
     }
     smk_close(panel); smk_close(inst);
+    play_ambient(-1);
     return next;
 }
 
@@ -5624,6 +5638,9 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
 {
     int next = -1, f = 0, i, reg, cheat;
     smk *grid, *tbl = NULL;   /* MECH LAB: the holotable clip, then the lab */
+    smk *brief = NULL;        /* MISSION BRIEFING: the briefing-room clip in place, then the briefing */
+    Uint64 blast = 0;
+    int bdone = 0;
     Uint64 tlast = 0;
     int tdone = 0;
     Uint64 last = 0;
@@ -5661,15 +5678,25 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
                             g_lab_slot = 0;
                             shell_sound(0x64, 0x32);
                             if (!(tbl = open_smk(nm))) { shell_sound_stop(0x64); next = 9; }
-                            else { smk_next(tbl); tlast = SDL_GetTicks(); }
+                            else { clip_sound(tbl, headless); smk_next(tbl); tlast = SDL_GetTicks(); }   /* (and its own sound, as every clip) */
                         } }
                         else if (i == 2) { if (trial) shell_message(rd, tx, headless, "Your 'Mech has been|selected for you.|Prepare for Trial!#Ok"); else next = 13; }
-                        else { play_cinematic(rd, tx, clan == 1 ? "AJFBRIEF" : "AWOBRIEF", headless); next = 0; }
+                        else if (!brief) {
+                            /* the briefing-room clip plays in the room at its place - awobrief (0x69, 0x64), ajfbrief (0x6b, 0x69) - in
+                             * a free video slot (the grid keeps running), with its sound, and the briefing follows when it ends
+                             * (MW2SHELL readyroom.cpp case 3). The port had played it full screen */
+                            if ((brief = open_smk(clan == 1 ? "AJFBRIEF" : "AWOBRIEF"))) { clip_sound(brief, headless); smk_next(brief); blast = SDL_GetTicks(); bdone = 0; }
+                            else next = 0;
+                        }
                     }
                     if (cheat && next == -1)
                         for (i = 0; i < 16; i++) {
                             int cx = i < 8 ? 400 : 520, cy = 25 + 30 * (i % 8);
-                            if (x >= cx && x <= cx + 119 && y >= cy && y <= cy + 24) { g_reg[reg].rank = i; reg_save(); star_reset_mission(clan, i); play_cinematic(rd, tx, clan == 1 ? "AJFBRIEF" : "AWOBRIEF", headless); next = 0; }
+                            if (x >= cx && x <= cx + 119 && y >= cy && y <= cy + 24 && !brief) {   /* (goto briefing: the same clip) */
+                                g_reg[reg].rank = i; reg_save(); star_reset_mission(clan, i);
+                                if ((brief = open_smk(clan == 1 ? "AJFBRIEF" : "AWOBRIEF"))) { clip_sound(brief, headless); smk_next(brief); blast = SDL_GetTicks(); bdone = 0; }
+                                else next = 0;
+                            }
                         }
                 }
             }
@@ -5691,6 +5718,15 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
                 else { int fi = smk_next(tbl); if (fi < 0 || fi >= smk_frames(tbl) - 1) tdone = 1; }   /* the last frame shown once */
             }
             if (tbl) blit_smk(tbl, clan == 1 ? 276 : 305, clan == 1 ? 164 : 185);
+        }
+        if (brief) {   /* once through, its last frame shown, then the briefing */
+            Uint64 now = SDL_GetTicks();
+            if (now - blast >= (Uint64)smk_frame_ms(brief)) {
+                blast = now;
+                if (bdone) { smk_close(brief); brief = NULL; next = 0; }
+                else { int fi = smk_next(brief); if (fi < 0 || fi >= smk_frames(brief) - 1) bdone = 1; }
+            }
+            if (brief) blit_smk(brief, clan == 1 ? 0x6b : 0x69, clan == 1 ? 0x69 : 0x64);
         }
         for (i = 0; i < 4; i++) {
             const rr_hs *h = &RR_HS[clan][i];
@@ -5715,6 +5751,7 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
     }
     smk_close(grid);
     if (tbl) smk_close(tbl);
+    if (brief) smk_close(brief);
     return next;
 }
 
@@ -6224,7 +6261,7 @@ int main(int argc, char **argv)
             int vms = sd && sd->id == 8 && !headless ? shell_sound_ms(0x68) : -1;
             amb_due = 0;
             if (vms >= 0) { play_ambient(-1); shell_sound(0x68, 0x78); amb_due = SDL_GetTicks() + (Uint64)vms; amb_entry = sd->ambient; }
-            else play_ambient(sd ? sd->ambient : -1);
+            else play_ambient_vol(sd ? sd->ambient : -1, sd && sd->id == 1 ? 0x32 : 0x1e);
         }
         if (sd && sd->id == 1 && g_new_pilot && !headless) shell_sound(0x69, 0x7f);   /* the hall after the roster made a pilot
                                          * (Windows 95 MW2SHELL.DLL 0x100047eb, flag 0x10086efc set at 0x10018723): "Report
@@ -6264,6 +6301,9 @@ int main(int argc, char **argv)
                                              * exit message once IsVideoPlaying is false). The port had played it full screen */
                                             holo_x = sd->hs[i].clan == 1 ? 0xd1 : 0x14c; holo_y = sd->hs[i].clan == 1 ? 0xca : 0xe8;
                                             holo_next = sd->hs[i].next; holo_clan = sd->hs[i].clan; holo_last = 0;
+                                            play_ambient(-1);   /* the hall's ambience stops (0x1001445c case 1) */
+                                            clip_sound(holo, headless);   /* the clip's own sound: the holoprojector's chime (LoadVideoFile
+                                                                           * 0x1001703b gives every clip with a sound track its sound) */
                                             if (sd->nov > 0 && xov[0]) { smk_close(xov[0]); xov[0] = NULL; }
                                             if (sd->nov > 1 && xov[1]) { smk_close(xov[1]); xov[1] = NULL; }
                                             break;

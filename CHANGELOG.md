@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.1.29 (2026-11-17)
+
+From a GitHub report.
+
+- **Satellite view: your mech drawn under a hill.** The view sorted whole objects by their highest point, so a hill
+  taller than your mech covered it as you climbed its side. Polygons are now drawn one at a time, lowest first, and
+  units always over the ground: seen from straight above, nothing stands over a mech on any map.
+- **Falcon mechs wore the Wolf insignia at a distance** (Wolf mission 2's Stormcrow and every other enemy). The
+  low-detail copies of a mech take its insignia from the mech's own parts, which were never given their star's
+  value. They are now.
+- **Mission Briefing clip played full screen.** Like the Archive's holoprojector in v1.1.24, the Ready Room's
+  briefing clip now plays in the room at its own place (awobrief / ajfbrief), then the briefing opens.
+- **Clip sounds in the shell.** The original plays every clip's own soundtrack. The port dropped it for clips played
+  in place, so the holoprojector lost its chime (the "accessing" voice was already there). The holoprojector,
+  briefing and Mech Lab holotable clips now play their sound.
+- **Ambient sound in the Wolf clan hall and the Cadet Training room.** The hall loops DATABASE sound 0x4f; the
+  training room loops 0x4c once its menu panel is in (both at the original's volume 0x32, from the Windows 95 shell).
+  The Jade Falcon hall has no ambient loop in the original.
+- **Levels of detail now follow the screen resolution.** The engine scales its level-of-detail distances with the
+  view's size in pixels (m_detailScale = half-width × fov / 160). The port used the 640 × 480 distances at every
+  size, so mechs dropped to their first low-detail model at 72 m. At 1080 lines the switches are now at 162 m,
+  382 m and 1 km (2.25× the old distances), at 1440 lines 3×.
+- **Trial 1: the second star woke for missiles passing over it.** The port treated the player as attacking whatever
+  it had targeted as soon as it fired. The original counts the player as attacking a unit only once a shot hits it
+  (RecordAttack on a hit), so a near miss no longer wakes a unit; a hit still does.
+- **Sable Flame: the dropships woke at 750 m with "Enemy power-up detected".** Two fixes:
+  - A resting unit (a hold node) now runs its rest rule, as the engine does for every AI unit. The rest rule wakes
+    it when the player comes within its rest-alert range: 1 km for these dropships. The port had run no rules for a
+    powered-down unit, so resting units woke only on their star's next node. This applies in every mission.
+  - "Enemy power-up detected" is posted by the mech controller's power-up. Turrets and the turret-class dropships
+    power up through the artillery controller, which posts nothing, so they no longer trigger it.
 ## v1.1.28 (2026-11-16)
 
 - **"Flee to ..." names the system you're on.** The main menu said FLEE TO DOS (from the DOS shell) and the in-game

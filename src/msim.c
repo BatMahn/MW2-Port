@@ -833,6 +833,7 @@ static int assign_ok(const msim *s, int q)
 static void ai_wake(msim *s, int i);
 static void group_assign(msim *s, int table, int leader, int who)
 {
+    if (getenv("MW2_POST_TRACE")) fprintf(stderr, "group_assign %.2f table %d leader %d who %d ok %d\n", s->now / 1000.0, table, leader, who, leader >= 0 ? assign_ok(s, leader) : -1);   /* TEST ONLY */
     int q, pick = -1, best = 0x7fff;
     int want = who == -1 ? s->player_unit.rating : who >= 0 && who < s->actor_count ? s->units[who].rating : 0;
     for (q = 0; q < s->actor_count; q++) {
@@ -1471,7 +1472,9 @@ static void unit_messages(msim *s)
         if (u->shutdown || (s->powered_down && s->powered_down[i])) s->msg_seen[i] |= 2;
         else if ((s->msg_seen[i] & 2) && !(s->online_at && (float)s->now < s->online_at[i])) {   /* the start-up done */
             s->msg_seen[i] &= ~2;
-            if (enemy && pl_up && s->on_message) s->on_message(s->message_user, "Enemy power-up detected", 74);
+            /* (posted by the mech controller's power state machine, 0x1001a180 - classes 1, 2, 4, 5, 6, 8; turrets and the
+             * turret-class dropships (3) power up in LateUpdateArtillery, which posts nothing: user report, Sable Flame) */
+            if (enemy && pl_up && ac->unit_class != 3 && ac->unit_class != 7 && s->on_message) s->on_message(s->message_user, "Enemy power-up detected", 74);
         }
     }
 }
@@ -1695,8 +1698,12 @@ void msim_step(msim *s, int32_t dt_ms)
         if (s->ai_focus && s->ai_who && !(s->cmd && s->cmd[i]) && !(in_star ? cur >= 0 && s->logic.tables[ac->table].nodes[cur].lock == 2 : (m->lock_bits & 1))) {
             int self_al = ac->friendly ? 0 : ac->alliance, att = -2, q3;
             int pt = s->player_target;
-            if (s->player_attacks && pt == i && self_al == 1 && !s->player_unit.destroyed) att = -1;
-            if (self_al == 2 && s->player_victim == i && !s->player_unit.destroyed) att = -1;   /* a neutral the player hit */
+            /* the player is "attacking" a unit only once one of its shots has HIT it (shots.c -> RecordAttack 0x10014110:
+             * the shooter's goal and state 3, which FindAttacker 0x10013370 looks for) - not for firing at it while it is
+             * targeted: the port had woken a resting unit for a missile passing over it (user report, Trial 1's second
+             * star: they wake only when hit) */
+            (void)pt;
+            if (self_al != 0 && s->player_victim == i && !s->player_unit.destroyed) att = -1;
             for (q3 = 0; q3 < s->actor_count && att == -2; q3++) {
                 int al = s->actors[q3].friendly ? 0 : s->actors[q3].alliance;
                 if (q3 != i && s->armed[q3] && !s->units[q3].destroyed && s->ai_who[q3] == i && al != self_al) att = q3;
@@ -1864,9 +1871,15 @@ void msim_step(msim *s, int32_t dt_ms)
         }
     star_done:
         v.speed_kmh = fabsf(m->speed) * 0.036f;   /* actual speed */
-        if (s->powered_down && s->powered_down[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; }   /* shut down: no rules run */
+        /* powered down: a shut-down unit (state 11) runs no rules - it waits for an event; a RESTING one (state 10, a hold node)
+         * runs its state's rules as any other (RunAIRules 0x10011d20 for every AI player): DEFLT's rest rule posts a sighting
+         * within the unit's rest alert range (condition 7, range -1) to its leader, whose group assignment wakes it. The
+         * port ran no rules for either, so a resting unit woke only by its star's next node (user report: Sable Flame's
+         * dropships, rest alert 1000 m, woke at their 750 m zone) */
+        if (s->powered_down && s->powered_down[i] && m->state != AI_REST) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; }
         else {
             ai_step(&s->ai, m, &v, dt);
+            if (s->powered_down && s->powered_down[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; m->jet = 0; }   /* (still down until woken) */
             if (m->entered) {   /* 0x10013e00: the exit (0x10013680 cases 5 / 7 -> 0x10013e90) and the entry (0x10013790 case 7
                                  * -> 0x10013f00 round the target +0x14e: a node's guard target, a Defend order's mech) */
                 int c = s->cmd ? s->cmd[i] : 0, t = s->cmd_target ? s->cmd_target[i] : -1;
@@ -1907,6 +1920,7 @@ void msim_step(msim *s, int32_t dt_ms)
         if (m->post_cond && in_star) { if (!s->star_post) s->star_post = m->post_who + 2; }
         else if (m->post_cond) {
             ai_mind *lm = l ? &s->minds[l - s->actors] : m;
+            if (getenv("MW2_POST_TRACE")) fprintf(stderr, "post %.2f actor %d cond %d who %d leader %d pending %d\n", s->now / 1000.0, i, m->post_cond, m->post_who, l ? (int)(l - s->actors) : -1, lm->event_cond);   /* TEST ONLY */
             if (lm->event_cond == 0) { lm->event_cond = m->post_cond; lm->event_who = m->post_who; }
         }
         if (m->c7_fired && (m->state == AI_TARGET || m->state == AI_ATTACK)) m->tgt = m->post_who;   /* ref2 0x25: the pick */
@@ -4796,6 +4810,8 @@ static void buildings_init(msim *s, const mech3d *w)
                     if (strcmp(c[k].tag, "STAR") == 0)
                         for (q = 0; (size_t)(q + 1) * 24 <= c[k].size; q++) {
                             const uint8_t *e = c[k].data + q * 24;
+                            /* +0 the star's affiliation, +4 its side: LoadStarTable 0x10042d40 g_starSides[affiliation] = side
+                             * (a thing's AFFL names an affiliation) */
                             uint32_t tm = (uint32_t)e[0] | (uint32_t)e[1] << 8 | (uint32_t)e[2] << 16 | (uint32_t)e[3] << 24;
                             if (tm < 64) team_all[tm] = (int)((uint32_t)e[4] | (uint32_t)e[5] << 8 | (uint32_t)e[6] << 16 | (uint32_t)e[7] << 24);
                         }

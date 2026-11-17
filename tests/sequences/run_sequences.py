@@ -1982,9 +1982,11 @@ def ai_aim_eye_ray(c):
       'the eye ray along the legs + lagged twist: the walk\'s rotation keys on the torso never add up (0x1001a180 sets its '
       'rotation every frame; Gargoyle +-4 deg yaw)', '%s' % [(x['t'], x['yaw'], x['body']) for x in aim if abs(x['yaw'] - x['body']) >= 0.3][:4])
     c(len(hits) >= 8, 'the AI hits the player', '%d hits' % len(hits))
-    c(hits and all(x['group'] == 3 and 900 <= x['up'] <= 1250 for x in hits),
+    # (the shooters' level of detail - their eye node - follows the view's size since v1.1.29, as the engine's camera
+    # +0xa0: at this window a hit can land a few cm under 9 m)
+    c(hits and all(x['group'] == 3 and 880 <= x['up'] <= 1250 for x in hits),
       'every hit on the cockpit set\'s head at the eye ray\'s height (not the centre ~5.5 m)',
-      '%s' % [(x['group'], x['up']) for x in hits if not (x['group'] == 3 and 900 <= x['up'] <= 1250)][:5])
+      '%s' % [(x['group'], x['up']) for x in hits if not (x['group'] == 3 and 880 <= x['up'] <= 1250)][:5])
 
 
 @sequence
