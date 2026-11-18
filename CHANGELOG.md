@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.32 (2026-11-17)
+
+- **New: the map viewer** (`mapview`; README "Map viewer"). A separate program in the Windows, Linux and macOS
+  downloads (macOS: `MW2 Map Viewer.app`) that shows every mission map (campaigns, training, Instant Action) in the 3D editions' look:
+  - What it shows: the world as it stands at the start (destroyed variants hidden, the scrub patch, the fire cards
+    animated), every star's units on the ground, the nav points and the mission boundary.
+  - Two views: a free-flying camera, and a map straight down with north up.
+  - Clicking an object, unit or nav point shows its mission data: the record and OBJ node, position and size, a
+    building's name, side and hit points; a unit's loadout, group, state table, side, pilot level and alert ranges.
+  - It is read-only, uses the game's own folder (mw2port.cfg), and needs the `3d/` files.
+
 ## v1.1.31 (2026-11-17)
 
 From a playtest of Wolf Trial 1.

@@ -168,6 +168,11 @@ glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB)
 
+# the map viewer (tools/mapview.c): a mission's map in the 3D look, a free camera / map view, click to inspect
+mapview: $(WINRES) tools/mapview.c src/portcfg.c src/ttext.c $(GL3D_SRC) $(WINSRC) $(HDRS)
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Wno-unused-function -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(WINRES) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(WINLIBS)
+
 gl: $(GLBIN)
 
 mechview3d: tools/mechview3d.c src/anim.c src/mek.c src/mech3d.c src/render.c src/tex.c src/wtb.c src/bwd.c src/prj.c src/datapath.c
