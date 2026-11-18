@@ -9,11 +9,14 @@
  *
  * Keys: W A S D move, Q / E down / up, Shift faster, mouse drag (left or right) look - pan in the map view, wheel
  * speed / zoom, click select, Tab 3D / map, M missions, PgUp / PgDn previous / next mission, Home the player's start,
- * F go to the selection, N nav points, U units, B boundary, L labels, G fog, H help, Esc close / deselect.
+ * F go to the selection, N nav points, U units, B boundary, L labels, G fog, H help, Esc close / deselect;
+ * X export the selection, Shift+X the whole map (glTF .glb, for Blender), T the mission's textures (PNG) - into the game
+ * folder's exports/<SCENE>/.
  *
  * Needs the 3D editions' archives (the game folder's 3d/: models.prj and textures.prj), as the port's 3D looks do.
  * Tests: MW2_MAPVIEW_SHOT=out.ppm (one frame, then exit), MW2_MAPVIEW_CAM="x,y,z,yaw,pitch" (m, degrees),
  * MW2_MAPVIEW_TOP=width_m (start in the map view), MW2_MAPVIEW_CLICK="x,y" (a click at that window pixel first),
+ * MW2_MAPVIEW_EXPORT="sel|map|tex,..." (those exports first; MW2_MAPVIEW_EXPORTS=<folder> instead of the game folder),
  * MW2_MAPVIEW_LIST=1 / MW2_MAPVIEW_HELP=1 (the mission list / the help shown), MW2_MAPVIEW_CYCLE=n (the next n missions
  * loaded and drawn in turn first).
  */
@@ -27,12 +30,15 @@
 #include "common3d.h"
 #include "datapath.h"
 #include "glr.h"
+#include "gltf_export.h"
 #include "hud.h"
 #include "msim.h"
 #include "portcfg.h"
 #include "rb.h"
 #include "skygnd.h"
 #include "ttext.h"
+#include <sys/stat.h>
+#include <errno.h>
 
 #define MV_TITLE "MW2 Map Viewer"
 
@@ -97,6 +103,7 @@ static mech3d g_world, g_all;   /* the world layer; the actor layer (units + mov
 static world_actor *g_ac;
 static int g_na;
 static int *g_act_first, *g_act_count;   /* each actor's parts in g_all */
+static float *g_abase;                   /* each actor's lowest point (cm) */
 static msim g_s;
 static int g_s_ok;
 static bwd_mission g_bm;
@@ -109,6 +116,7 @@ static float g_bnd[16][64][3];   /* boundary circles, on the ground */
 static int g_bn;
 static glr_view g_base;          /* the mission's sky / ground / fog */
 static float g_fog_density;
+static float g_tile_ground = 20000.0f;   /* the mission's ground tiling (skygnd), for the exported ground */
 
 /* ---- the camera and the overlays */
 static float g_eye[3], g_yaw, g_pitch = -10.0f, g_speed = 3000.0f;   /* cm, degrees, cm/s */
@@ -118,7 +126,7 @@ static int g_show_nav = 1, g_show_units = 1, g_show_bnd = 1, g_show_labels = 1, 
 static int g_sel_kind, g_sel;     /* 0 none, 1 world part, 2 unit, 3 nav point */
 static int g_w = 1600, g_h = 900; /* the picture, pixels */
 static float g_dpi = 1.0f;
-static char g_msg[256];
+static char g_msg[1024];
 static int g_face_src[1024], g_face_dst[1024], g_nface;   /* the fire / smoke cards: world part -> its copy on the actor layer */
 static int g_scrg_gx, g_scrg_gz, g_scrg_cx, g_scrg_cz;   /* the scrub patch's grid point (scrub_follow) */
 
@@ -241,6 +249,7 @@ static void free_mission(void)
     if (g_bm_ok) { bwd_mission_free(&g_bm); g_bm_ok = 0; }
     free(g_pmin); free(g_pmax); g_pmin = g_pmax = NULL;
     free(g_act_first); free(g_act_count); g_act_first = g_act_count = NULL;
+    free(g_abase); g_abase = NULL;
     if (g_r) glr_flush_textures(g_r);
     if (g_sc_ok) { c3d_free_scene(&g_sc); g_sc_ok = 0; }
     for (i = 0; i < 384; i++) if (g_lab[i].sp.tex) { hud_sprite_free(&g_lab[i].sp); memset(&g_lab[i], 0, sizeof g_lab[i]); }
@@ -261,6 +270,7 @@ static void environment(const char *code)
     skygnd_defaults(&fog);
     if (g_fog[0]) skygnd_lookup(g_fog, code, &fog);
     glr_set_environment(g_r, g, sky, tiles.tile_sky, tiles.tile_ground);
+    g_tile_ground = tiles.tile_ground;
     if (g) glr_texture_average(g, ga);
     if (sky) glr_texture_average(sky, sa);
     glr_default_view(&g_base);
@@ -312,11 +322,6 @@ static int load_mission(int idx)
     if (msim_init(&g_s, g_ma, scene, g_ac, g_na) == 0) {
         g_s_ok = 1;
         if (g_world.part_count) msim_set_world(&g_s, &g_world);   /* (buildings: the destroyed variants hidden) */
-        for (i = 0; i < g_na; i++)
-            if (g_s.units) {   /* standing on the ground the simulation finds under them */
-                const float y = msim_ground(&g_s, (float)g_ac[i].mech.origin[0], (float)g_ac[i].mech.origin[2], (float)g_ac[i].mech.origin[1] + 3000.0f);
-                if (fabsf(y) < 1e8f && g_ac[i].unit_class != 5 && g_ac[i].unit_class != 8) g_ac[i].mech.origin[1] = (int32_t)lrintf(y);
-            }
     }
     /* the boxes */
     g_pmin = calloc((size_t)(g_world.part_count + 1), sizeof *g_pmin);
@@ -344,6 +349,22 @@ static int load_mission(int idx)
                 q->moving = 0;   /* (as placed at the start; glr skips the flagged ones on both layers) */
                 if (q->facing) { q->facing = 0; q->has_rot = 0; g_face_src[g_nface] = i; g_face_dst[g_nface] = g_all.part_count - 1; if (g_nface < 1023) g_nface++; }
             }
+    }
+    /* each unit's feet: the lowest point of its parts (markers, picking and exports stand on it) */
+    g_abase = calloc((size_t)(g_na + 1), sizeof *g_abase);
+    for (i = 0; i < g_na && g_abase; i++) {
+        float mn[3], mx[3], lo = 1e30f;
+        for (k = g_act_first[i]; k < g_act_first[i] + g_act_count[i] && g_all.parts; k++) if (part_box(&g_all.parts[k], mn, mx) && mn[1] < lo) lo = mn[1];
+        g_abase[i] = lo < 1e29f ? lo : (float)g_ac[i].mech.origin[1];
+        if (g_s_ok && g_ac[i].unit_class != 5 && g_ac[i].unit_class != 8) {   /* standing on the ground, as the simulation puts them
+                                                                              * (the spawn records' heights are not the ground's) */
+            const float gy = msim_ground(&g_s, (float)g_ac[i].mech.origin[0], (float)g_ac[i].mech.origin[2], 1e7f);
+            if (fabsf(gy) < 1e8f) {
+                const int32_t dy = (int32_t)lrintf(gy - g_abase[i]);
+                for (k = g_act_first[i]; k < g_act_first[i] + g_act_count[i]; k++) g_all.parts[k].pos[1] += dy;
+                g_abase[i] += (float)dy;
+            }
+        }
     }
     /* the nav points and the boundary */
     if (bwd_mission_load(g_ma, scene, &g_bm) == 0) {
@@ -431,7 +452,7 @@ static int info_lines(char lines[][96], int maxl)
         L("Loadout %s", a->loadout[0] ? a->loadout : "-");
         L("Group %s, state table %d%s", a->group, a->table, a->leader ? ", leader" : "");
         L("Side: %s", side_name(unit_side(g_sel)));
-        L("Position %.1f, %.1f, %.1f m, heading %.0f", a->mech.origin[0] / 100.0, a->mech.origin[1] / 100.0, a->mech.origin[2] / 100.0, (double)a->mech.heading);
+        L("Position %.1f, %.1f, %.1f m, heading %.0f", a->mech.origin[0] / 100.0, g_abase[g_sel] / 100.0, a->mech.origin[2] / 100.0, (double)a->mech.heading);
         L("Pilot level %d, gunnery %d", a->ai_level, a->ai_skill);
         L("Ranges: leash %.0f m, rest alert %.0f m, alert %.0f m", a->ai_range[0] / 100.0, a->ai_range[1] / 100.0, a->ai_range[2] / 100.0);
         L("Walk speed %.0f km/h", a->speed * 0.036);
@@ -519,7 +540,7 @@ static void pick(float mx, float my)
     int i, kind = 0, idx = -1;
     if (g_show_units)
         for (i = 0; i < g_na; i++) {
-            const float p[3] = {(float)g_ac[i].mech.origin[0], (float)g_ac[i].mech.origin[1] + 400.0f, (float)g_ac[i].mech.origin[2]};
+            const float p[3] = {(float)g_ac[i].mech.origin[0], g_abase[i] + 400.0f, (float)g_ac[i].mech.origin[2]};
             if (project(p, &sx, &sy)) {
                 const float d = hypotf(sx - mx, sy - my) / (22.0f * g_dpi);
                 if (d < 1.0f && d * 0.5f < best) { best = d * 0.5f; kind = 2; idx = i; }
@@ -555,7 +576,7 @@ static void selection_point(float out[3])
 {
     out[0] = out[1] = out[2] = 0;
     if (g_sel_kind == 1) { int k; for (k = 0; k < 3; k++) out[k] = (g_pmin[g_sel][k] + g_pmax[g_sel][k]) * 0.5f; }
-    else if (g_sel_kind == 2) { out[0] = (float)g_ac[g_sel].mech.origin[0]; out[1] = (float)g_ac[g_sel].mech.origin[1] + 400.0f; out[2] = (float)g_ac[g_sel].mech.origin[2]; }
+    else if (g_sel_kind == 2) { out[0] = (float)g_ac[g_sel].mech.origin[0]; out[1] = g_abase[g_sel] + 400.0f; out[2] = (float)g_ac[g_sel].mech.origin[2]; }
     else if (g_sel_kind == 3) { out[0] = g_nav[g_sel].x; out[1] = g_nav[g_sel].y; out[2] = g_nav[g_sel].z; }
 }
 static void goto_selection(void)
@@ -570,6 +591,169 @@ static void goto_selection(void)
         g_eye[0] = p[0] - sinf(ly) * d; g_eye[2] = p[2] - cosf(ly) * d; g_eye[1] = p[1] + d * 0.45f;
         g_pitch = -atan2f(d * 0.45f, d) * 180.0f / 3.14159265f;
     }
+}
+
+/* ---- exports: glTF 2.0 (.glb) for Blender and other tools, PNG textures (src/gltf_export.h). Into the game folder's
+ * exports/<SCENE>/ - for your own use (modding, rendering): the files are the game's art, from your copy */
+static char g_export_root[PORTCFG_PATH];
+static int g_export_note;
+static int mkdirs(const char *path)
+{
+    char p[PORTCFG_PATH * 2];
+    size_t i;
+    snprintf(p, sizeof p, "%s", path);
+    for (i = 1; p[i]; i++)
+        if (p[i] == '/' || p[i] == '\\') { const char c = p[i]; p[i] = 0; mkdir(p, 0755); p[i] = c; }
+    return mkdir(p, 0755) == 0 || errno == EEXIST ? 0 : -1;
+}
+static int export_dir(char *out, size_t n, const char *sub)
+{
+    if (g_cur < 0) return -1;
+    snprintf(out, n, "%s/exports/%s%s%s", g_export_root, g_ms[g_cur].scene, sub ? "/" : "", sub ? sub : "");
+    return mkdirs(out);
+}
+static void safe_name(char *s) { for (; *s; s++) if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '_' || *s == '-')) *s = '_'; }
+static void export_done(int ok, const char *what, const char *path)
+{
+    snprintf(g_msg, sizeof g_msg, ok ? "Exported %s: %.800s%s" : "Could not export %s (%.800s)%s", what, path,
+             ok && !g_export_note++ ? "   (the game's art from your copy: for your own use)" : "");
+    printf("mapview: %s\n", g_msg);
+}
+static void part_extras(char *out, size_t n, const mech3d_part *p, int pi)
+{
+    char nm[40] = "", rec[24], model[40];
+    const int b = pi >= 0 ? part_thing(pi) : -1;
+    gx_json_str(rec, sizeof rec, p->rec);
+    gx_json_str(model, sizeof model, p->model_name);
+    if (b >= 0) gx_json_str(nm, sizeof nm, g_s.bld[b].name);
+    snprintf(out, n, "{\"mw2\":{\"record\":\"%s\",\"obj\":%d,\"model\":\"%s\",\"type\":%d,\"collision\":%d%s%s%s%s}}", rec, p->obj_index, model, p->objtype, p->coll,
+             b >= 0 ? ",\"structure\":\"" : "", nm, b >= 0 ? "\"" : "", b >= 0 && g_s.bld[b].destroyed == pi ? ",\"destroyed_variant\":true" : "");
+}
+static void unit_extras(char *out, size_t n, int i)
+{
+    const world_actor *a = &g_ac[i];
+    char sk[40], lo[24], gr[40], nm[80];
+    gx_json_str(sk, sizeof sk, a->skel); gx_json_str(lo, sizeof lo, a->loadout); gx_json_str(gr, sizeof gr, a->group); gx_json_str(nm, sizeof nm, a->name);
+    snprintf(out, n, "{\"mw2\":{\"skeleton\":\"%s\",\"loadout\":\"%s\",\"group\":\"%s\",\"name\":\"%s\",\"table\":%d,\"side\":%d,\"class\":%d,\"heading\":%.2f}}",
+             sk, lo, gr, nm, a->table, unit_side(i), a->unit_class, (double)a->mech.heading);
+}
+static int is_descendant(int pi, int root)   /* a world part hanging under root's OBJ node (same record) */
+{
+    const mech3d_part *r = &g_world.parts[root];
+    int obj = g_world.parts[pi].parent_obj, guard = 64, k;
+    while (obj >= 0 && guard--) {
+        if (obj == r->obj_index) return 1;
+        for (k = 0; k < g_world.part_count; k++)
+            if (g_world.parts[k].obj_index == obj && !strcmp(g_world.parts[k].rec, r->rec)) break;
+        if (k == g_world.part_count) return 0;
+        obj = g_world.parts[k].parent_obj;
+    }
+    return 0;
+}
+static void export_selection(void)
+{
+    char dir[PORTCFG_PATH * 2], path[PORTCFG_PATH * 3], ex[512], nm[64];
+    gx *g;
+    int ok = 0;
+    if (!g_sel_kind) { snprintf(g_msg, sizeof g_msg, "Select an object or unit first (click it), then X - or Shift+X for the whole map"); return; }
+    if (g_sel_kind == 3) { snprintf(g_msg, sizeof g_msg, "Nav points go out with the whole map (Shift+X)"); return; }
+    if (export_dir(dir, sizeof dir, NULL) != 0 || !(g = gx_new((const uint8_t (*)[3])g_sc.palette, g_sc.slot, (const char (*)[16])g_sc.name))) { export_done(0, "the selection", dir); return; }
+    if (g_sel_kind == 1) {
+        const mech3d_part *p = &g_world.parts[g_sel];
+        const float o[3] = {(float)p->pos[0], (float)p->pos[1], (float)p->pos[2]};
+        const int b = part_thing(g_sel);
+        int root, k;
+        snprintf(nm, sizeof nm, "%s_%s_%d", p->model_name, p->rec, p->obj_index);
+        root = gx_group(g, nm, NULL, -1, NULL);
+        part_extras(ex, sizeof ex, p, g_sel);
+        gx_part(g, p, o, root, ex);
+        for (k = 0; k < g_world.part_count; k++)
+            if (k != g_sel && !g_world.parts[k].hidden && !g_world.parts[k].scrg && is_descendant(k, g_sel)) { part_extras(ex, sizeof ex, &g_world.parts[k], k); gx_part(g, &g_world.parts[k], o, root, ex); }
+        if (b >= 0 && g_s.bld[b].destroyed >= 0 && g_s.bld[b].destroyed != g_sel) {   /* its destroyed variant, set beside it */
+            const int d = g_s.bld[b].destroyed;
+            const float off = (g_pmax[g_sel][0] - g_pmin[g_sel][0]) + 1000.0f, dp[3] = {off, 0, 0};
+            const int grp = gx_group(g, "destroyed variant", dp, root, "{\"mw2\":{\"destroyed_variant\":true}}");
+            part_extras(ex, sizeof ex, &g_world.parts[d], d);
+            gx_part(g, &g_world.parts[d], o, grp, ex);
+        }
+    } else {
+        const world_actor *a = &g_ac[g_sel];
+        const float o[3] = {(float)a->mech.origin[0], g_abase[g_sel], (float)a->mech.origin[2]};
+        int root, k;
+        snprintf(nm, sizeof nm, "%s", a->skel);
+        unit_extras(ex, sizeof ex, g_sel);
+        root = gx_group(g, nm, NULL, -1, ex);
+        for (k = g_act_first[g_sel]; k < g_act_first[g_sel] + g_act_count[g_sel]; k++) gx_part(g, &g_all.parts[k], o, root, NULL);
+    }
+    safe_name(nm);
+    snprintf(path, sizeof path, "%s/%s.glb", dir, nm);
+    ok = gx_write_glb(g, path) == 0;
+    gx_free(g);
+    export_done(ok, "the selection", path);
+}
+static void export_map(void)
+{
+    char dir[PORTCFG_PATH * 2], path[PORTCFG_PATH * 3], ex[512], nm[64];
+    gx *g;
+    int root, world, dest, units, navs, i, k, ok;
+    if (export_dir(dir, sizeof dir, NULL) != 0 || !(g = gx_new((const uint8_t (*)[3])g_sc.palette, g_sc.slot, (const char (*)[16])g_sc.name))) { export_done(0, "the map", dir); return; }
+    {
+        char t[96], sc[16];
+        gx_json_str(t, sizeof t, g_ms[g_cur].title); gx_json_str(sc, sizeof sc, g_ms[g_cur].scene);
+        snprintf(ex, sizeof ex, "{\"mw2\":{\"scene\":\"%s\",\"title\":\"%s\",\"units\":\"cm in the game, m here; game z = -glTF z\"}}", sc, t);
+    }
+    root = gx_group(g, g_ms[g_cur].scene, NULL, -1, ex);
+    world = gx_group(g, "world", NULL, root, NULL);
+    dest = gx_group(g, "destroyed variants (hidden at the start)", NULL, root, NULL);
+    units = gx_group(g, "units", NULL, root, NULL);
+    navs = gx_group(g, "nav points", NULL, root, NULL);
+    for (i = 0; i < g_world.part_count; i++) {
+        const mech3d_part *p = &g_world.parts[i];
+        const int b = part_thing(i);
+        if (p->scrg) continue;
+        if (p->hidden && !(b >= 0 && g_s.bld[b].destroyed == i)) continue;
+        part_extras(ex, sizeof ex, p, i);
+        gx_part(g, p, NULL, p->hidden ? dest : world, ex);
+    }
+    for (i = 0; i < g_na; i++) {
+        const float o[3] = {(float)g_ac[i].mech.origin[0], g_abase[i], (float)g_ac[i].mech.origin[2]};
+        int u;
+        unit_extras(ex, sizeof ex, i);
+        snprintf(nm, sizeof nm, "%s (%s)", g_ac[i].skel, g_ac[i].group);
+        u = gx_group(g, nm, o, units, ex);
+        for (k = g_act_first[i]; k < g_act_first[i] + g_act_count[i]; k++) gx_part(g, &g_all.parts[k], o, u, NULL);
+    }
+    for (i = 0; i < g_nn; i++) {
+        const float p[3] = {g_nav[i].x, g_nav[i].y, g_nav[i].z};
+        char n2[64];
+        gx_json_str(n2, sizeof n2, g_nav[i].name);
+        snprintf(ex, sizeof ex, "{\"mw2\":{\"nav\":\"%s\",\"type\":%d,\"radius_m\":%.1f,\"selectable\":%d,\"boundary\":%d}}", n2, g_nav[i].type, g_nav[i].r / 100.0, g_nav[i].shown, g_nav[i].boundary);
+        gx_group(g, g_nav[i].name[0] ? g_nav[i].name : "nav", p, navs, ex);
+    }
+    if (g_s_ok && g_sc.slot[SKYGND_GROUND_SLOT]) gx_ground(g, g_sc.slot[SKYGND_GROUND_SLOT], g_s.player[0], g_s.player[2], 500000.0f, g_tile_ground / 32.0e6f, root);
+    snprintf(path, sizeof path, "%s/%s.glb", dir, g_ms[g_cur].scene);
+    ok = gx_write_glb(g, path) == 0;
+    gx_free(g);
+    export_done(ok, "the map", path);
+}
+static void export_textures(void)
+{
+    char dir[PORTCFG_PATH * 2], path[PORTCFG_PATH * 3], nm[40];
+    int i, f, n = 0, bad = 0;
+    if (export_dir(dir, sizeof dir, "textures") != 0) { export_done(0, "the textures", dir); return; }
+    for (i = 0; i < GLR_SLOTS; i++) {
+        if (g_sc.slot[i]) {
+            snprintf(nm, sizeof nm, "%s", g_sc.name[i][0] ? g_sc.name[i] : "cel");
+            safe_name(nm);
+            snprintf(path, sizeof path, "%s/slot_%02x_%s.png", dir, i, nm);
+            if (gx_png_texture(path, g_sc.slot[i]) == 0) n++; else bad++;
+            for (f = 1; f < g_sc.nfr[i] && f < BWD_TEXMAP_FRAMES; f++)   /* an animated slot's other frames */
+                if (g_sc.fr[i][f]) { snprintf(path, sizeof path, "%s/slot_%02x_%s_frame%02d.png", dir, i, nm, f); if (gx_png_texture(path, g_sc.fr[i][f]) == 0) n++; else bad++; }
+        }
+        if (g_sc.bank0[i]) { snprintf(path, sizeof path, "%s/bank0_%02x.png", dir, i); if (gx_png_texture(path, g_sc.bank0[i]) == 0) n++; else bad++; }
+    }
+    snprintf(path, sizeof path, "%s (%d images)", dir, n);
+    export_done(bad == 0 && n > 0, "the textures", path);
 }
 
 /* ---- the overlays */
@@ -627,7 +811,7 @@ static void draw_overlays(void)
         }
     if (g_show_units) {
         for (i = 0; i < g_na; i++) {
-            const float p[3] = {(float)g_ac[i].mech.origin[0], (float)g_ac[i].mech.origin[1] + 400.0f, (float)g_ac[i].mech.origin[2]};
+            const float p[3] = {(float)g_ac[i].mech.origin[0], g_abase[i] + 400.0f, (float)g_ac[i].mech.origin[2]};
             if (!project(p, &sx, &sy)) continue;
             {
                 const float *c = C_SIDE[unit_side(i)];
@@ -691,7 +875,8 @@ static void draw_panels(void)
             "W A S D  move        Q / E  down / up        Shift  faster        drag  look (map: pan)        wheel  speed (map: zoom)",
             "click  select        F  go to selection        Home  your start        Tab  3D / map view",
             "M  mission list        PgUp / PgDn  previous / next mission",
-            "N  nav points        U  units        B  boundary        L  labels        G  fog        H  this help        Esc  close / deselect"};
+            "N  nav points        U  units        B  boundary        L  labels        G  fog        H  this help        Esc  close / deselect",
+            "X  export the selection (.glb)        Shift+X  export the whole map (.glb)        T  export the textures (.png)   - to the game folder's exports/"};
         if (g_help) {
             const int nh = (int)(sizeof HELP / sizeof HELP[0]);
             float w = 0, y;
@@ -700,7 +885,7 @@ static void draw_panels(void)
             ui_rect(0, y - pad * 0.5f, (float)g_w, (float)nh * lh + pad * 2.5f, C_PANEL);
             for (i = 0; i < nh; i++) ui_text(pad, y + (float)i * lh, HELP[i], C_DIM);
         } else {
-            const char *hint = g_msg[0] ? g_msg : "H  help     M  missions     Tab  map view     click  select";
+            const char *hint = g_msg[0] ? g_msg : "H  help     M  missions     Tab  map view     click  select     X  export";
             ui_rect(0, (float)g_h - lh - pad, text_w(hint) + pad * 2, lh + pad, C_PANEL);
             ui_text(pad, (float)g_h - lh - pad * 0.5f, hint, C_DIM);
         }
@@ -868,6 +1053,8 @@ int main(int argc, char **argv)
         else { char m2[PORTCFG_PATH + 8]; snprintf(m2, sizeof m2, "%s/MECH2", cfg.cd); dp_add_root(m2); dp_add_root(cfg.cd); }
     }
     if (!(g_ma = prj_open(models, err, sizeof err)) || !(g_ta = prj_open(textures, err, sizeof err))) { fprintf(stderr, "mapview: %s\n", err); return 1; }
+    snprintf(g_export_root, sizeof g_export_root, "%s", cfg.game[0] ? cfg.game : cfg.install);
+    if (getenv("MW2_MAPVIEW_EXPORTS")) snprintf(g_export_root, sizeof g_export_root, "%s", getenv("MW2_MAPVIEW_EXPORTS"));   /* tests */
     printf("mapview: game folder %s\nmapview: models %s, textures %s (%s)\n", cfg.game[0] ? cfg.game : cfg.install, models, textures, kind);
     ttext_init(base);
     missions_list(g_ma);
@@ -914,6 +1101,13 @@ int main(int argc, char **argv)
         int c, nc = atoi(getenv("MW2_MAPVIEW_CYCLE"));
         for (c = 0; c < nc; c++) { load_mission((g_cur + 1) % g_mn); g_top = c & 1; draw_frame(); rb_present(); }
         g_top = 0;
+    }
+    if (getenv("MW2_MAPVIEW_EXPORT")) {   /* tests */
+        const char *x = getenv("MW2_MAPVIEW_EXPORT");
+        if (getenv("MW2_MAPVIEW_CLICK")) { float cx = 0, cy = 0; sscanf(getenv("MW2_MAPVIEW_CLICK"), "%f,%f", &cx, &cy); pick(cx, cy); }
+        if (strstr(x, "sel")) export_selection();
+        if (strstr(x, "map")) export_map();
+        if (strstr(x, "tex")) export_textures();
     }
     if (getenv("MW2_MAPVIEW_LIST")) g_list = 1;   /* tests */
     if (getenv("MW2_MAPVIEW_HELP")) g_help = 1;
@@ -990,6 +1184,8 @@ int main(int argc, char **argv)
                 else if (k == SDLK_L) g_show_labels = !g_show_labels;
                 else if (k == SDLK_G) g_fog_on = !g_fog_on;
                 else if (k == SDLK_F) goto_selection();
+                else if (k == SDLK_X) { if (e.key.mod & SDL_KMOD_SHIFT) export_map(); else export_selection(); }   /* exports */
+                else if (k == SDLK_T) export_textures();
                 else if (k == SDLK_HOME) goto_start();
                 else if (k == SDLK_PAGEDOWN) load_mission((g_cur + 1) % g_mn);
                 else if (k == SDLK_PAGEUP) load_mission((g_cur + g_mn - 1) % g_mn);

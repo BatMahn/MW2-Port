@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.33 (2026-11-17)
+
+- **Map viewer: export to Blender.** New keys in the map viewer:
+  - **X** exports the selected building or unit as a glTF 2.0 file (.glb). A building comes with its child parts and
+    its destroyed variant; a unit comes in its rest pose.
+  - **Shift+X** exports the whole map as one .glb. It holds the world, the destroyed variants (in their own group),
+    the units on the ground, the nav points (as named empties) and the ground.
+  - **T** exports the mission's textures as PNG, with the animated slots' frames and the scrub bitmaps.
+
+  Files go to the game folder's `exports/<SCENE>/`. Every .glb opens in Blender and passes the Khronos glTF
+  validator. Every object and material keeps the game's names (record, OBJ node, model, texture slot) in its glTF
+  extras, so edited models can later be matched back to the game; loading mods into the port is a later step
+  (README "Map viewer").
+- **Map viewer: units stand on the ground.** The units were drawn at their spawn records' height, the Stormcrow on
+  Wolf 3 50 m up; they now stand on the ground under them, as the simulation puts them. Clicking now picks the
+  polygon under the pointer, so tall buildings and the towers behind units can be selected.
+
 ## v1.1.32 (2026-11-17)
 
 - **New: the map viewer** (`mapview`; README "Map viewer"). A separate program in the Windows, Linux and macOS
