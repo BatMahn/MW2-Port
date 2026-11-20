@@ -241,3 +241,32 @@ These are the measured facts the MW2 port matches. A Mac port should reproduce t
 - **Filtered output** (opengl output, scalers) changes the pixels. Use `output=surface`.
 - **Leftover state in a shared install copy:** a patched EXE or a changed pilot file. Use one copy per experiment.
 - **Trusting your own port as the reference.** When the original and the port disagree, the original wins. When you can't measure something, mark it ASSUMED in your notes; don't present it as fact.
+
+## 11. Building an install from the BattlePack CD (v1.1.40)
+
+When only a DOS `MW2.EXE` (1.1) and the game folder are at hand, the rest of a working install comes from the
+MechWarrior 2 BattlePack CD image. Extract its data track to an ISO (strip the 2352-byte raw sectors to 2048), then
+copy into the install folder:
+
+- From the game folder: `MW2.PRJ`, `DATABASE.MW2`, `ARCHJF.MW2`, `ARCHWO.MW2`, plus a `USERSTAR.BWD`.
+- From the CD's `MW2` folder: `DOS4GW.EXE`, `MW2.INI` (its `[SystemError]` table names the fatal errors), the `.CFG`
+  files, `INPUT.MAP` and the other `.MAP` files.
+- The CD's `VFX` folder (`MCGA.DLL`, `VESA480.DLL`, `VESA768.DLL`) and `GIDDI` folder (the input drivers).
+
+Fixes the BattlePack files need for the DOS 1.1 executable:
+
+- **Mount the CD image as D:** (`imgmount d t1.iso -t iso`). Otherwise MW2.EXE stops with fatal error 0x53, "CD-ROM
+  not mounted".
+- **Empty `GIDDI/MOUSE.STD` and `GIDDI/JOYSTICK.STD`.** Their channel names ("Down/Up") are the Windows driver's, and
+  DOS refuses them (fatal error 0x11).
+- **Remove the `GAMEKEY.MAP` lines whose command isn't in DOS's table** (the Starmate, AeroTech and MFD-cycle keys).
+  `tools/inputmap.h` has the 153 DOS names.
+- **`MW2SND.CFG`:**
+  - +0x2c is the VESA driver name (`vesa480.dll` for 640 x 480).
+  - +0x14 to +0x24 are the detail switches (1 = on / high).
+  - **+0x28 is the brightness level, 0-15.** MW2.EXE 0x14d90 builds 16 gamma tables, out = 63 x (v / 63)^(1 / (L / 16 +
+    0.5)). Level 8 is gamma 1, the palette as stored. The CD's file has 0, which is gamma 2 and makes every colour much
+    darker. Set it to 8 before comparing colours.
+
+DOSBox's own screenshot key (Ctrl+F5, `captures=` in the conf) saves an indexed PNG whose palette is the VGA DAC as it
+stands. That is the quickest way to read the original's live palette.

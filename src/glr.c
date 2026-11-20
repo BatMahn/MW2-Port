@@ -134,6 +134,8 @@ struct glr {
     int    kl_n[2], kl_cap[2];
 };
 
+#define KL_F 13   /* an outline edge: two ends, the colour, the part's sphere */
+
 /* The program: shaders/world.vert and world.frag (the OpenGL 3.3 program's shaders, compiled offline for every backend
  * into src/rb_shaders.c; see scripts/gen_shaders.py). Its uniforms are r->F (rb_world_frame: the camera, lights, the
  * DOS projection - a few times a frame) and r->D (rb_world_draw: per batch), sent with each draw (glr_draw_arrays). */
@@ -482,17 +484,19 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
                 if (!ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
                     if (pass == 1) {
-                        const int ci = model->extended ? (q->color >> 4) & 0xff : (q->color >> 8) & 0xff;
+                        /* the colour bits 4-11 in both kinds of model: Sable Flame's dome 0x2c50 is index 0xc5, grey (SABL_NI
+                         * 10,10,10) - the DOS models had taken bits 8-15, 0x2c (15,0,0): a red mesh (user report, 1.1.37) */
+                        const int ci = (q->color >> 4) & 0xff;
                         int e;
                         if (r->kl_n[li] + q->n > r->kl_cap[li]) {
                             int nc = r->kl_cap[li] + q->n + 1024;
-                            float *g = realloc(r->kl[li], (size_t)nc * 9 * sizeof *g);
+                            float *g = realloc(r->kl[li], (size_t)nc * KL_F * sizeof *g);
                             if (!g) continue;
                             r->kl[li] = g; r->kl_cap[li] = nc;
                         }
                         for (e = 0; e < q->n; e++) {
                             const wtb_vertex *va = &o->verts[q->idx[e]], *vb = &o->verts[q->idx[(e + 1) % q->n]];
-                            float *d = r->kl[li] + (size_t)r->kl_n[li] * 9;
+                            float *d = r->kl[li] + (size_t)r->kl_n[li] * KL_F;
                             const wtb_vertex *vv[2] = {va, vb};
                             int w2;
                             for (w2 = 0; w2 < 2; w2++) {
@@ -510,6 +514,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                                 }
                             }
                             d[6] = (float)palette[ci][0] / 255.0f; d[7] = (float)palette[ci][1] / 255.0f; d[8] = (float)palette[ci][2] / 255.0f;
+                            memcpy(d + 9, psph, 4 * sizeof *d);   /* the part's sphere: the view-distance cull */
                             r->kl_n[li]++;
                         }
                     }
@@ -2416,9 +2421,16 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             float *f = lb;
             for (li2 = 0; li2 < 2; li2++)
                 for (e = 0; e < r->kl_n[li2]; e++) {
-                    const float *d = r->kl[li2] + (size_t)e * 9;
+                    const float *d = r->kl[li2] + (size_t)e * KL_F;
                     float A[3] = {d[0], d[1], -d[2]}, B[3] = {d[3], d[4], -d[5]}, dir[3], c[3], sd[3], sl, ha, hb, da, db;
                     int c3;
+                    if (v->far_cull > 0 && d[12] > 0) {
+                        /* the part's view-distance cull as the batches' (the DOS 0x3f500: wholly beyond the planet's VIEW far,
+                         * not drawn) - the outlines had been drawn at any distance: Sable Flame's dome showed from 1.3 km
+                         * where DOS brings it in at 900 m - 1 km (user report, 1.1.37) */
+                        const float sx = d[9] - eye[0], sy = d[10] - eye[1], sz = d[11] - eye[2], fr = v->far_cull + d[12];
+                        if (sx * sx + sy * sy + sz * sz > fr * fr) continue;
+                    }
                     for (c3 = 0; c3 < 3; c3++) { dir[c3] = B[c3] - A[c3]; c[c3] = eye[c3] - (A[c3] + B[c3]) * 0.5f; }
                     sd[0] = dir[1] * c[2] - dir[2] * c[1]; sd[1] = dir[2] * c[0] - dir[0] * c[2]; sd[2] = dir[0] * c[1] - dir[1] * c[0];
                     sl = sqrtf(sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]);

@@ -1573,6 +1573,74 @@ static void wp_place_parts(world3d_paths *P, mech3d *world, int only_rec, int on
     }
 }
 
+/* A path-carried vehicle's flat details for a depth-buffered renderer. The DOS and 3D engines draw an object's polygons
+ * in their own order over what was drawn before it (the painter's way), so a vehicle's polygons that lie ON a surface
+ * show: Wolf 3's cars carry their headlight beam (colour 0x1170) and underside at height 0, in the road, and their
+ * yellow headlamps (0x0030) about a centimetre in front of the nose. In a depth buffer the road hid the beam and the
+ * nose fought the lamps, a lamp sinking into the car from some angles (user report, 1.1.37). Here (once per model):
+ * the vertices at height 0 or below go 4 cm up, and a polygon lying within 3 cm of another face of the model, over it,
+ * comes 3 cm out along that face's outward normal. */
+static void vehicle_decals(wtb_object *o)
+{
+    static const wtb_object *done[256];
+    static int nd;
+    float ctr[3] = {0, 0, 0};
+    unsigned char *mv;
+    int i, k, j, e, c;
+    if (!o || o->vert_count <= 0) return;
+    for (i = 0; i < nd; i++) if (done[i] == o) return;
+    if (nd < 256) done[nd++] = o;
+    if (!(mv = calloc((size_t)o->vert_count, 1))) return;
+    for (i = 0; i < o->vert_count; i++) { ctr[0] += (float)o->verts[i].x; ctr[1] += (float)o->verts[i].y; ctr[2] += (float)o->verts[i].z; }
+    for (c = 0; c < 3; c++) ctr[c] /= (float)o->vert_count;
+    for (i = 0; i < o->poly_count; i++) {
+        const wtb_poly *P = &o->polys[i];
+        float pc[3] = {0, 0, 0};
+        if (P->n < 3) continue;
+        for (e = 0; e < P->n; e++) { pc[0] += (float)o->verts[P->idx[e]].x; pc[1] += (float)o->verts[P->idx[e]].y; pc[2] += (float)o->verts[P->idx[e]].z; }
+        for (c = 0; c < 3; c++) pc[c] /= (float)P->n;
+        for (k = 0; k < o->poly_count; k++) {
+            const wtb_poly *Q = &o->polys[k];
+            const wtb_vertex *a, *b, *d;
+            float u[3], v[3], nq[3], l, off, qc[3] = {0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+            int on = 1, shared = 0;
+            if (k == i || Q->n < 3) continue;
+            a = &o->verts[Q->idx[0]]; b = &o->verts[Q->idx[1]]; d = &o->verts[Q->idx[2]];
+            u[0] = (float)(b->x - a->x); u[1] = (float)(b->y - a->y); u[2] = (float)(b->z - a->z);
+            v[0] = (float)(d->x - a->x); v[1] = (float)(d->y - a->y); v[2] = (float)(d->z - a->z);
+            nq[0] = u[1] * v[2] - u[2] * v[1]; nq[1] = u[2] * v[0] - u[0] * v[2]; nq[2] = u[0] * v[1] - u[1] * v[0];
+            l = sqrtf(nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2]);
+            if (l < 1e-3f) continue;
+            for (c = 0; c < 3; c++) nq[c] /= l;
+            for (e = 0; e < Q->n; e++) {
+                const wtb_vertex *w = &o->verts[Q->idx[e]];
+                const float wp[3] = {(float)w->x, (float)w->y, (float)w->z};
+                for (c = 0; c < 3; c++) { qc[c] += wp[c] / (float)Q->n; if (wp[c] < mn[c]) mn[c] = wp[c]; if (wp[c] > mx[c]) mx[c] = wp[c]; }
+            }
+            for (e = 0; e < P->n && on; e++) {
+                const wtb_vertex *w = &o->verts[P->idx[e]];
+                const float dd = ((float)w->x - (float)a->x) * nq[0] + ((float)w->y - (float)a->y) * nq[1] + ((float)w->z - (float)a->z) * nq[2];
+                int q2;
+                if (fabsf(dd) > 3.0f) on = 0;
+                for (q2 = 0; q2 < Q->n; q2++) if (Q->idx[q2] == P->idx[e]) shared = 1;
+            }
+            if (!on || shared) continue;
+            for (c = 0; c < 3; c++) if (pc[c] < mn[c] - 2.0f || pc[c] > mx[c] + 2.0f) on = 0;   /* over the face */
+            if (!on) continue;
+            off = (qc[0] - ctr[0]) * nq[0] + (qc[1] - ctr[1]) * nq[1] + (qc[2] - ctr[2]) * nq[2] < 0 ? -3.0f : 3.0f;
+            for (e = 0; e < P->n; e++) {
+                wtb_vertex *w = &o->verts[P->idx[e]];
+                if (mv[P->idx[e]] & 1) continue;
+                mv[P->idx[e]] |= 1;
+                w->x += (int32_t)lrintf(nq[0] * off); w->y += (int32_t)lrintf(nq[1] * off); w->z += (int32_t)lrintf(nq[2] * off);
+            }
+            break;
+        }
+    }
+    for (j = 0; j < o->vert_count; j++) if (o->verts[j].y <= 0) o->verts[j].y += 4;
+    free(mv);
+}
+
 world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *world)
 {
     bwd_mission m;
@@ -1702,6 +1770,7 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
             if (strcmp(pp->rec, P->recs[i].rec) == 0 && pp->obj_index >= 0 && pp->obj_index < WP_NODES && wp_carried(&P->recs[i], pp->obj_index)) {
                 P->part_rec[q] = i; P->part_node[q] = pp->obj_index;
                 pp->moving = 1;
+                if (pp->model.object_count > 0) vehicle_decals(&pp->model.objects[0]);
                 break;
             }
     }

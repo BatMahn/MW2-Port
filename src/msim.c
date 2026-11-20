@@ -1767,6 +1767,15 @@ void msim_step(msim *s, int32_t dt_ms)
         dz = v.enemy_z - (float)ac->mech.origin[2];
         v.enemy_dist = sqrtf(dx * dx + dz * dz);
         v.enemy_bearing = atan2f(dx, dz) * 180.0f / 3.14159265f;
+        if ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok) {
+            /* turrets and the turret-class dropships aim (the twist demand) from their eye, as the pitch below: the
+             * aim ray starts there (0x10044810), and a dropship's eye stands 17 m out on its nose, so a bearing from the
+             * origin sent every shot past the player to one side off the centre line (user report, Sable Flame: the
+             * Falcon dropships' fire missed left or right on every difficulty) */
+            float ex2 = v.enemy_x - (float)ac->mech.origin[0] - (ac->mech.eye_pos[0] - ac->mech.mount_from[0]);
+            float ez2 = v.enemy_z - (float)ac->mech.origin[2] - (ac->mech.eye_pos[2] - ac->mech.mount_from[2]);
+            v.enemy_bearing = atan2f(ex2, ez2) * 180.0f / 3.14159265f;
+        }
         /* elevation between the unit origins (the pitch demand, 0x100231a0 -> 0x100135d0) */
         {
             /* turrets and the turret-class dropships (classes 3, 8): from their eye, where the guns are (user report, Sable

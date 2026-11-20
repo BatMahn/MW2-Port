@@ -584,11 +584,14 @@ static SDL_Window *g_win;
 /* the shell's mouse pointer: DATABASE item 0x19 (entry 24, a 29 x 25 SHP; MW2SHELL GetDBItem(0x19) -> the MouseState's
  * cursor shape, drawn by the shell itself with its top-left on the pointer) in the screens' fixed grey ramp (palette
  * entries 1-14: 0xff down to 0x11 in steps of 0x11 in every shell picture). The port had shown the system's arrow */
+static int g_cursor_off;   /* a cinematic playing: no pointer (the shell hides it over a movie and shows it again after -
+                            * user report, 1.1.37: it stayed on the SMK videos) */
 static void cursor_draw(SDL_Renderer *rd)
 {
     static SDL_Texture *ct;
     static int tried, cw, ch;
     float wx, wy, lx, ly;
+    if (g_cursor_off) return;
     if (!tried) {
         uint8_t *e = NULL;
         long n;
@@ -1024,6 +1027,7 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     movie_pace mp = {1.0, 0};
     if (getenv("MW2_SHELL_MOVIE_SCALE")) mp.sc = atof(getenv("MW2_SHELL_MOVIE_SCALE"));   /* TEST ONLY: the picture's starting scale */
     if (!s) return;
+    g_cursor_off = 1;
     text_layer_clear();   /* the screen's queued text (e.g. the hovered hotspot's label) is not part of the movie */
     look = movie_look(s, &fit);
     n = headless ? 3 : smk_frames(s);
@@ -1081,6 +1085,7 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     if (mtx) SDL_DestroyTexture(mtx);
     if (snd) { sfx_stop_pcm(g_sfx, snd); free(snd); }
     smk_close(s);
+    g_cursor_off = 0;
 }
 
 static void play_entry(int entry, int screen);

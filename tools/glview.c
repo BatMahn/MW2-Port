@@ -4045,7 +4045,14 @@ static void mm_activate(int k)
             }
         }
         if (it->arg) g_mm_quit = 1;                                          /* Flee: leave the game */
-        if (g_sim_ok && g_world && !g_sim.over) msim_end_now(&g_sim);         /* Abort: as EXIT_SIM (action 0x3b) */
+        else if (g_sim_ok && g_world && !g_sim.over && !g_sim.ending && !g_sim.player_unit.destroyed) {
+            /* Abort: action 0x3b is EJECT (0x100174f0(c, 1); DOS the same) - "Ejecting.", the ejection camera rising and
+             * spinning over the mech, "Mission failed.", "Press any key to exit..." (DOSBox TEALSCN1: MAIN MENU, 1, 1);
+             * the port had ended the mission at once, a plain fade to black (user report, 1.1.37) */
+            player_eject(1);
+            return;
+        }
+        if (g_sim_ok && g_world && !g_sim.over) msim_end_now(&g_sim);
     }
 }
 static void mm_key(SDL_Keycode k, Uint16 mod)
@@ -4511,6 +4518,13 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 fprintf(stderr, "polys %s type %#x:", pp->model_name, pp->objtype);
                 for (k3 = 0; k3 < pp->model.objects[0].poly_count; k3++) fprintf(stderr, " %04x/%04x", pp->model.objects[0].polys[k3].color, pp->model.objects[0].polys[k3].material);
                 fprintf(stderr, "\n");
+                if (getenv("MW2_DEBUG_POLYV"))   /* TEST hook: each polygon's corners */
+                    for (k3 = 0; k3 < pp->model.objects[0].poly_count; k3++) {
+                        const wtb_poly *q3 = &pp->model.objects[0].polys[k3]; int e3;
+                        fprintf(stderr, "  poly %d %04x n %d:", k3, q3->color, q3->n);
+                        for (e3 = 0; e3 < q3->n; e3++) { const wtb_vertex *w3 = &pp->model.objects[0].verts[q3->idx[e3]]; fprintf(stderr, " (%d,%d,%d)", w3->x, w3->y, w3->z); }
+                        fprintf(stderr, "\n");
+                    }
             }
         }
         if (getenv("MW2_DEBUG_SPHERES")) {   /* TEST hook: each world part's bounding sphere (box centre, farthest vertex) */
@@ -8401,8 +8415,23 @@ int main(int argc, char **argv)
                 for (q2 = 0; wm && q2 < wm->part_count && n < GLR_MAX_SPRITES; q2++) {
                     const mech3d_part *pp = &wm->parts[q2];
                     const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
-                    int pk;
+                    int pk, has_pt = 0;
+                    float pr = 0, ddx, ddy, ddz;
                     if (!o || pp->hidden || o->vert_count < 1) continue;
+                    for (pk = 0; pk < o->poly_count && !has_pt; pk++) has_pt = o->polys[pk].n == 1;
+                    if (!has_pt) continue;
+                    if (g_view_far > 0) {
+                        /* the object's view-distance cull (DOS 0x3f500: its position and radius wholly beyond the planet's
+                         * VIEW far, not drawn) - the dots had shown across the whole map, before the buildings (user report,
+                         * Wolf 3, 1.1.37) */
+                        for (pk = 0; pk < o->vert_count; pk++) {
+                            const float r2 = (float)o->verts[pk].x * o->verts[pk].x + (float)o->verts[pk].y * o->verts[pk].y + (float)o->verts[pk].z * o->verts[pk].z;
+                            if (r2 > pr) pr = r2;
+                        }
+                        pr = sqrtf(pr);
+                        ddx = (float)pp->pos[0] - v.eye[0]; ddy = (float)pp->pos[1] - v.eye[1]; ddz = (float)pp->pos[2] - v.eye[2];
+                        if (ddx * ddx + ddy * ddy + ddz * ddz > (g_view_far + pr) * (g_view_far + pr)) continue;
+                    }
                     for (pk = 0; pk < o->poly_count && n < GLR_MAX_SPRITES; pk++) {
                         const wtb_poly *pl = &o->polys[pk];
                         const wtb_vertex *vv;
@@ -8426,7 +8455,12 @@ int main(int argc, char **argv)
                             spr[n].pos[1] = (float)vv->y + (float)pp->pos[1];
                             spr[n].pos[2] = -sy * vv->x + cy * vv->z + (float)pp->pos[2];
                         }
-                        spr[n].half_w = spr[n].half_h = 60.0f;
+                        {   /* a dot: one pixel of the 640 x 480 screen (the DOS look's VESA mode; the vertical tangent 0.75 over
+                             * 240 rows) at any distance - a pinprick, as the engines plot it; the port's 1.2 m card had grown
+                             * to large squares close by (user report, 1.1.37) */
+                            const float ex = spr[n].pos[0] - v.eye[0], ey = spr[n].pos[1] - v.eye[1], ez = spr[n].pos[2] - v.eye[2];
+                            spr[n].half_w = spr[n].half_h = 0.5f * sqrtf(ex * ex + ey * ey + ez * ez) * (0.75f / 240.0f) / (g_zoom > 1 ? g_zoom : 1.0f);
+                        }
                         spr[n].tex = &dot[ci];
                         spr[n].bb = 0; spr[n].quad = 0; spr[n].ti = 0; spr[n].wire_code = 0; spr[n].has_tri = 0;
                         n++;
@@ -9142,8 +9176,13 @@ int main(int argc, char **argv)
                 const int rmode = g_radar_big ? 2 : 1, pxr = !g_satmap && !hud_dead;
                 const hud_win rdw = rmode == 1 ? hud_window(0, 0, 0, 0, 0, 0xa3d) : hud_window(0, 0, 0, 0, 0x147b, 0x2148);
                 hud_win rw = rdw;
+                int rsw = w, rsh = h;   /* the screen the DOS radar's aspect (+0x44) is taken from: the HUD's 4:3 one (W1 + 1,
+                                         * H1 + 1) - the window's own, not the port's whole wide screen, whose aspect had
+                                         * flattened the rim to an ellipse: the cone's arms stopped short of the circle (user
+                                         * report, 1.1.37) */
                 {
                     const int W1 = (int)lrintf(640.0f / rdw.ux) - 1, H1 = (int)lrintf(480.0f / rdw.uy) - 1;
+                    rsw = W1 + 1; rsh = H1 + 1;
                     rw.x0 = fx16_round((long long)(rmode == 1 ? 1311 : 8520) * W1); rw.x1 = fx16_round((long long)(rmode == 1 ? 17039 : 57015) * W1);
                     rw.y0 = fx16_round((long long)(rmode == 1 ? 1311 : 0) * H1); rw.y1 = fx16_round((long long)(rmode == 1 ? 22282 : 65536) * H1);
                     rw.rx = rw.x0 + fx16_round((long long)(rw.x1 - rw.x0) * (rmode == 1 ? 0 : 0x147b));
@@ -9160,7 +9199,9 @@ int main(int argc, char **argv)
                     snprintf(lb, sizeof lb, "Bearing: %3.1lf", (double)bh);
                     hud_text(g_hud, 6.4f, 24.0f, lb, green);
                 }
-                if (!pxr && !g_satmap) hud_circle(g_hud, cx, cy, rad, 1.5f, yellow);   /* (pxr: the circle and label after the blips) */
+                if (!pxr && !g_satmap) hud_circle(g_hud, cx, cy, rad, 1.5f, HP(2));   /* colour 2 while powering up too: it had a
+                                                                    * brighter yellow of its own until the mech came up
+                                                                    * (user report, 1.1.37; DOSBox YELLSCN1: 190,146,0 all through) */   /* (pxr: the circle and label after the blips) */
                 if (pxr) {   /* the view cone (0x10003d40 / DOS 0x14670 -> 0x147c0): two lines in colour 1 (DOSBox 121,97,0) from the
                               * centre to the rim point (x1 - x0 + 1) / 2 - 2 out, floored, at the torso's bearing +-45 degrees
                               * (narrowed by the zoom). DOSBox YELLSCN1 at rest: (58, 53) and (229, 53) at 1024 x 768, exact; at 640 x
@@ -9173,7 +9214,7 @@ int main(int argc, char **argv)
                         const int32_t a0 = 0x5a0000 - (int32_t)((((int64_t)lrintf(g_pl.twist * 65536.0f)) % 0x1680000 + 0x1680000) % 0x1680000);
                         for (sd = -1; sd <= 1; sd += 2) {
                             int ex, ey;
-                            dos_radar_rim(rw.x1 - rw.x0 + 1, rw.y1 - rw.y0 + 1, a0 + sd * half, w, h, &ex, &ey);
+                            dos_radar_rim(rw.x1 - rw.x0 + 1, rw.y1 - rw.y0 + 1, a0 + sd * half, rsw, rsh, &ex, &ey);
                             px_line(&rw, rcx, rcy, rw.x0 + ex, rw.y0 + ey, HP(1));
                         }
                     } else
@@ -9188,7 +9229,7 @@ int main(int argc, char **argv)
                         float b = dx2 * ox + dy2 * oy, cc = ox * ox + oy * oy - rad * rad, disc = b * b - cc, t2;
                         if (disc < 0) continue;
                         t2 = -b + sqrtf(disc);
-                        hud_line(g_hud, px, py, px + dx2 * t2, py + dy2 * t2, 1.2f, yellow);
+                        hud_line(g_hud, px, py, px + dx2 * t2, py + dy2 * t2, 1.2f, g_satmap ? yellow : HP(1));   /* colour 1 (DOSBox 121,97,0) */
                     }
                 }
                 if (!g_satmap) { if (g_hs_ruser.tex) hud_draw(g_hud, &g_hs_ruser, px, py, NULL); else hud_rect(g_hud, px - 4.0f, py - 1.0f, 8.0f, 4.0f, green); }
@@ -9241,9 +9282,9 @@ int main(int argc, char **argv)
                             const int RW = rw.x1 - rw.x0 + 1, RH = rw.y1 - rw.y0 + 1;
                             dos_radar_point(RW, RH, wx, wz, g_sim.player_eye_ok ? g_sim.player_eye[0] : (float)g_pl.origin[0],
                                             g_sim.player_eye_ok ? g_sim.player_eye[2] : (float)g_pl.origin[2], g_pl.heading,
-                                            (int)lrintf(rcm * 2.0f), w, h, &rx2, &ry2);
-                            dd2 = dos_radar_inside(RW, RH, rx2, ry2, w, h) ? 0.0f : 1e12f;
-                            if (dd2 > 0 && istgt) dos_radar_edge(RW, RH, rx2, ry2, w, h, &rx2, &ry2);
+                                            (int)lrintf(rcm * 2.0f), rsw, rsh, &rx2, &ry2);
+                            dd2 = dos_radar_inside(RW, RH, rx2, ry2, rsw, rsh) ? 0.0f : 1e12f;
+                            if (dd2 > 0 && istgt) dos_radar_edge(RW, RH, rx2, ry2, rsw, rsh, &rx2, &ry2);
                             bx = (float)(rw.x0 + rx2) * rw.ux; by = (float)(rw.y0 + ry2) * rw.uy;
                         }
                         if (dd2 > rad * rad) {

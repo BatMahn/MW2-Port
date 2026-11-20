@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.1.40 (2026-11-20)
+
+Fixes from the latest bug report (on 1.1.37). Each one was checked against the original DOS MW2.EXE running in DOSBox.
+
+- **Wolf 3: the cars' headlight beams show.** A car carries its headlight beam on the road surface. In the port's
+  depth buffer the road hid it. The beam, and a car's underside, now sit 4 cm above the road.
+- **Wolf 3: the cars' yellow headlamps no longer sink into the car.** The lamps sit about a centimetre in front of the
+  nose, so the two fought in the depth buffer from some angles. Flat details lying on another face of a moving vehicle
+  now stand 3 cm out from it.
+- **Wolf 3: roof lights.**
+  - They now go out of view with the rest of the scene, at the planet's view distance. Before, you could see them
+    across the whole map before the buildings.
+  - They are now pinpricks: one pixel of the DOS look's 640 x 480 screen, at any distance. Before, they were 1.2 m
+    squares.
+- **Sable Flame: the Sensor Array Dome's wireframe is grey.** The DOS models' outline colour was read from the wrong
+  bits of the colour word, which made the dome red.
+- **Sable Flame: the dome appears at the view distance.** Outlines are now culled like everything else, so the dome
+  shows from about 900 m to 1 km, as in DOS, not from 1.3 km and beyond.
+- **Sable Flame: the Falcon dropships hit what they aim at.** A dropship's eye, where its aim starts, sits 17 m out on
+  its nose. It aimed from its centre, so the shots passed beside you, left or right. Turrets and dropships now aim
+  from their eye.
+- **Radar:**
+  - The view cone's arms reach the circle on wide screens. Their ends were worked out with the whole window's aspect,
+    which squashed them short of the circle.
+  - While your mech powers up, the radar now uses its normal colours. Before, the circle and arms were a brighter yellow
+    until the mech came online.
+- **Abort Mission ejects you, as in the original.** The menu's Abort is the eject command: "Ejecting.", the camera
+  rising and spinning over your mech, "Mission failed.", then "Press any key to exit...". The port had ended the
+  mission at once with a plain fade to black.
+- **Shell: no mouse pointer over the movies.** The pointer is hidden while an SMK movie plays and comes back after it.
+
 ## v1.1.39 (2026-11-20)
 
 A full emulated comparison of the DOS look's sim against the DOS MW2.EXE, done the way the Ghost Bear's Legacy port
