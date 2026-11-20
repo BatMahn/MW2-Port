@@ -1,10 +1,17 @@
-# DOS MW2.EXE emulated comparison (v1.1.39)
+# DOS MW2.EXE comparison (v1.1.41)
 
-The port's DOS-look sim code is checked against the original DOS MW2.EXE (1.1, md5 51634b60...). The method is the
-same one the Ghost Bear's Legacy port used: the original routines run under the unicorn x86 emulator, and the port's C
-runs on the same inputs. Each test prints PASS or FAIL with the first differences.
+The port's DOS look is checked against the original DOS MW2.EXE (1.1, md5 51634b60...) in two ways:
 
-## Running it
+- **Emulated sim tests.** The original routines run under the unicorn x86 emulator, and the port's C runs on the same
+  inputs. Each test prints PASS or FAIL with the first differences. This is the method the Ghost Bear's Legacy port
+  used.
+- **Render comparison.** The same mission runs in DOSBox (the BattlePack CD's DOS install) and in the port's DOS look,
+  and the frames are put side by side. DOSBox's screenshot key saves the frame as an indexed PNG with the live VGA
+  palette, so colours can be compared exactly. The method is in docs/DOSBOX_COMPARISON_METHOD.md.
+
+This file says what was checked, what turned up, and what was not checked.
+
+## Running the sim tests
 
 The executable is game data and is not in the repo. Make its ELF image once, then build the shims and run:
 
@@ -18,38 +25,135 @@ MW2_ELF=mw2dos.elf python3 tools/audit/simdiff.py [-n cases] [-s seed] [test ...
   maths tables (0x3aa90) first and restores the data segment between cases. A test can stub any callee.
 - `shim_*.c` include the port's `combat.c`, `ai.c` and `msim.c` so their static functions can be called. The
   DOS-edition flags are switched on.
+- Where a routine draws random numbers, MW2.EXE's `rand` (0x4a070) is stubbed with the port's own generator, so both
+  sides see the same numbers. The chooser and missile-warning tests also check that both sides make the same number
+  of draws.
 
-## Tests and results
+## Sim tests and results
+
+All 16 tests pass (about 18,500 checks at the default case counts).
 
 | Test | MW2.EXE | Port | Result |
 |---|---|---|---|
 | heat_state | 0x24f90 (sinking, 66 warning, 81 sequence, shutdown, BlowAmmo, restart) | combat_tick | PASS |
-| heat_sink_tiers | 0x4cd7b..0x4ce25 (dissipation by player, difficulty, temperature) | combat_set_player_difficulty | **fixed** |
+| heat_sink_tiers | 0x4cd7b..0x4ce25 (dissipation by player, difficulty, temperature) | combat_set_player_difficulty | **fixed** (v1.1.39) |
 | heat_override_roll | 0x250f0 (rand(500 x ticks)) | combat_tick | PASS (mean time within 15 %) |
 | ai_nav_turn | 0x229e0 | ai_nav_turn | PASS |
-| leg_turn_demand | 0x27c87..0x27d70 | msim_leg_demand | **fixed** |
+| leg_turn_demand | 0x27c87..0x27d70 | msim_leg_demand | **fixed** (v1.1.39) |
 | servo_step | 0x49b80 | drive_servo | PASS |
 | servo_setup | 0x49b40 (T = chop(s x 182)) | servo T constants | PASS |
 | turret_twist | 0x2edc3..0x2ee2a + 0x49b80 | msim_twist_round | PASS |
 | collision_damage | 0x20890 / 0x20a50 -> 0x20930 | collide | PASS |
-| manoeuvre_start | 0x2cbf0 | start_manoeuvre | PASS |
+| manoeuvre_start | 0x2cbf0 (limits, reverse, 11's jet, the +0x17e flag) | start_manoeuvre | **fixed** (v1.1.41) |
+| manoeuvre_choose | 0x2c880 (every class, the Elemental table) | choose_manoeuvre | **fixed** (v1.1.41) |
+| missile_warning | 0x2e450 (from the shooter test on; see below) | ai_missile_warning | **fixed** (v1.1.41) |
+| torso_inputs | 0x2e930..0x2e971 -> 0x22970 / 0x229a0 / 0x23a40 | dos_twist_q / dos_pitch_q | **fixed** (v1.1.41) |
+| patrol_sweep | 0x24710 (runs of 300 frames) | patrol_sweep_dos | PASS (new in v1.1.41) |
+| flank_pick | 0x2e6f0 | flank_pick | PASS (new in v1.1.41) |
+| seg_poly | 0x1ca00 / 0x1cd60 / 0x1cbb0 | cpoly_in | PASS (new in v1.1.41) |
 
 ## Differences found and fixed
 
-- **Hard difficulty in cold weather:** the player's dissipation below -30 degrees is 67 per heat sink point per
-  tick in MW2.EXE (0x4cdf7). The port used the 3D-card engine's 67.5.
+### v1.1.39
+
+- **Hard difficulty in cold weather:** the player's dissipation below -30 degrees is 67 per heat sink point per tick
+  in MW2.EXE (0x4cdf7). The port used the 3D-card engine's 67.5.
 - **Leg turning when reversing fast:** MW2.EXE clamps the speed term only at the top (+80). The port also clamped
-  reverse speeds at -80. In MW2.EXE a mech reversing faster than 80 km/h turns its legs less, and past 90 km/h the
-  other way (the cosine goes negative).
+  reverse speeds at -80.
+
+### v1.1.41, sim
+
+- **Jump after a jump.** When an enemy runs out of weapons, the out-of-weapons step forces a jump (4) and sets a flag
+  that should make a second jump (5) follow it. In MW2.EXE every manoeuvre start clears that flag (0x2cc00), so the
+  5 never comes. The port kept the flag and made the second jump.
+- **Missile dodge direction.** The missile warning stores which way to dodge (0x2e6a6). The manoeuvre start copies
+  the cleared flag over it (0x2cc11) before the dodge (11) reads it, so in MW2.EXE the dodge always fires the left
+  jet. The port dodged forward for some quadrants.
+- **A jump with the target off to one side.** The chooser drops a jump (4) when the target is beyond the torso's twist
+  limit. MW2.EXE compares the signed bearing (0x230d0), so only a target off to the plus side cancels it. The port
+  used the absolute angle.
+- **One-row classes still draw a random number.** Aircraft (always 12), dropships (1) and other vehicles (0) have a
+  one-row record. MW2.EXE still calls rand(1) for it, and the port now does too, so the unit's later draws line up.
+- **The chooser's ground test for 5.** MW2.EXE drops a 5 only on the ground (+0x78). The port also dropped it without
+  jets or fuel.
+- **The missile warning outside the attack state.** MW2.EXE sets the forced manoeuvre whatever the target's state; it
+  waits for the next chooser call. The port ignored the warning unless the target was attacking.
+- **Torso aim inputs.** The fire decision writes the torso inputs in steps: the bearing in 1024ths of 180 degrees
+  (chopped), the elevation in 1024ths of 60. The port used the exact angles. This applies to turrets and dropships
+  as much as mechs.
+- **Missile lock.**
+  - The timed lock (0x52ea0, for the player and the computer's units) takes 0x16c ticks (364) in MW2.EXE. The port
+    used the 3D-card DLL's 362.
+  - When the fire decision picks a guided weapon, MW2.EXE also gives the unit an instant lock on a roll:
+    rand(range byte + 1) == 0, for range bytes up to 4 (0x2ea99..0x2eab0). The volley fired that frame homes. The
+    port had only the timed lock.
+- The earlier AI work in this release (manoeuvres 1, 6, 7, 9 and 12, the flank slots, the patrol sweep, the jump
+  checks and the rule timings) was ported by reading the disassembly, the GBL port's audit and its `E_sim_unmatched.tsv`
+  mapping. The patrol sweep, the flank slot pick and the point-in-polygon rule have emulated tests. The manoeuvre
+  steps themselves do not (see below).
+
+### v1.1.41, render
+
+- **Sky-object tree drawn at any distance.** A scene's first shape of kind 0x90 is the sky object. MW2.EXE detaches
+  its object tree from the scene and draws it with the far plane at 0x7fffffff and only the frustum test (the
+  engine's SecondRender and the frame's draw; demech2's render.c). In Marooned that tree is the city dome, its eight
+  struts and its windows. The port culled the struts at the planet's view distance (40,000), so a strut that DOS
+  draws across the sky was missing. Only the first such shape counts: GOLD has two, and its second (a walkway) still
+  culls.
 
 ## Differences kept
 
 - **Invulnerable player and BlowAmmo:** MW2.EXE's shutdown-above-100 branch (0x25130) calls BlowAmmo even for an
   invulnerable player. The destruction it leads to (0x25340) then does nothing for that player. The port skips the
   branch for an invulnerable player, so a critical hit on an ammunition bin can't happen in that cheat mode either.
+- **Sky-object draw order.** MW2.EXE draws the sky-object tree before the scene, so the scene always covers it. The
+  port draws it with the scene in the depth buffer. A building beyond a dome strut would cover the strut in DOS and
+  not in the port. No such view was found in the comparisons.
+- **Lock timing within a frame.** MW2.EXE updates the timed lock after the weapons fire, so a volley uses the lock
+  from the frame before. The port updates it first.
 
-## Checked by reading, not emulated
+## Render comparison
 
-The manoeuvre chooser (0x2c880), the missile warning (0x2e450), the damage display levels (0x26570), the sound
-distance level (0x40bc0) and the message pick (0x11020) were ported in v1.1.38 by reading the disassembly. They need
-more of the unit's state than the tests above set up.
+Sixteen missions were run to about 9 seconds in both, in the cockpit view at 640 x 480: AQUA, BLON, BROW, CYAN, GOLD,
+GREE, IREN, JACK, JENN, KIM_, MARO, PINK, PLUM, SABL, TAUP and YELL.
+
+- **Match:** sky and haze bands, ground colours, terrain and buildings, vehicles, the HUD and its palette colours,
+  radar, weapon list, heat bars and damage display in all of them except as listed below.
+- **Fixed:** MARO's dome strut (above).
+- **Timing, not a defect:**
+  - TAUP: a convoy truck crosses in front of the player at 9 s in DOSBox and at about 11 s in the port. DOSBox's
+    wall-clock time includes its load time.
+  - Friendly radar blips and the odd enemy blip sit in different places, because units have moved for different
+    lengths of time.
+- **Not compared:**
+  - JACK: DOS can't start it in this install (it needs en01star.bwd).
+  - The rear and down MFD views (F7 / F8) and the other F-key displays. In the DOSBox harness, function keys don't
+    reach MW2.EXE (letter keys do: the radar zoom key works), so there was no DOS frame to compare.
+  - External and free-eye views: they have no key in the BattlePack's GAMEKEY.MAP.
+- **Noted, not fixed:** PINK's DOS frame shows "0 kph" in blue. In DOS the speed servo sits slightly negative on that
+  slope.
+
+Earlier render checks against DOSBox (v1.1.40): Wolf 3's roof lights and car headlights, the Sable Flame dome's
+outline colour and its view distance, the radar arms and power-up colours, Abort Mission's eject camera.
+
+## Not checked
+
+- **The manoeuvre steps** (the step table 0x2c1d0: 0 to 12 per tick) are not emulated. They need a live unit, its
+  target and the world for the line-of-sight and probe calls. They were ported by reading the disassembly; the
+  chooser, the starts, the flank pick and the patrol sweep around them are emulated.
+- **The AI shooter's view tests before a missile warning** (0x2e50d..0x2e5a7: 0x29860, the line of sight 0x3f320,
+  and the 3 degree pitch and 15 degree bearing cones) are not ported. The port warns the target on any guided launch
+  or PPC shot by a computer-run unit of pilot level 2 or less. The emulated test enters from the player-type shooter
+  record, which skips these tests.
+- **The weapon pick** (0x2e980) was compared by reading only. It matches the port's combat ai_choose: range class
+  1-2, heat + weapon heat under 65, ready, ammunition, rand(refire / 91 + 1) == 0. It also adds a pitch offset for
+  weapon types 0 and 4, which the fire decision overwrites straight after (0x2e971), so it has no effect.
+- **The damage display levels** (0x26570), **the sound distance level** (0x40bc0) and **the message pick** (0x11020)
+  were ported in v1.1.38 by reading the disassembly and are not emulated.
+- **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's
+  IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
+  jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule
+  until they get an audit of their own.
+- **Dropship and turret aim end to end** was not compared frame by frame against DOSBox. Its parts are tested: the
+  torso inputs (torso_inputs), the twist servo (turret_twist). The fire decision's interval (rand(range byte) x 0x16 ticks) was checked by reading. The eye position the
+  aim starts from (v1.1.40) was checked by reading only.

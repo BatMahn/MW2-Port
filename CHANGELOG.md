@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.1.41 (2026-11-20)
+
+A fuller audit of the DOS look against the DOS MW2.EXE, closer to the one done for the Ghost Bear's Legacy port. Six
+more emulated tests (16 in all, about 18,500 checks), and a frame-by-frame comparison with DOSBox across 16 missions.
+docs/AUDIT_DOS.md lists what was checked, what turned up, and what still isn't covered. All changes are to the DOS
+look; the 3D looks are unchanged.
+
+- **Marooned: the city dome's struts show at any distance.** The original draws a scene's sky object (here the dome,
+  its struts and windows) with no distance limit. The port hid a strut that crosses the sky from the start position.
+- **Enemy AI, from the original's code:**
+  - Flanking (manoeuvre 1) picks one of eight slots round its target, 150 m out, and units share the slots out as in
+    the original. Manoeuvre 7 now picks a point round the unit itself, as in DOS.
+  - The patrol torso sweep runs whether the unit moves or not, at the original's timing.
+  - The jump checks use the original's view test, and a turning jump lasts until the landing.
+  - A unit just given a target waits for its first fire decision as in the original, and its rules run in more states.
+  - A dropship or flanking unit's slot is freed when it stops attacking.
+  - When an enemy runs out of weapons and jumps, a second jump no longer follows. The original clears the flag for it.
+  - A missile dodge always fires the left jet, as in the original.
+  - A jump is cancelled only by a target off to one side of the torso's twist limit, as in the original.
+  - The missile warning reaches a unit that isn't attacking yet. Its dodge waits for the next manoeuvre.
+- **Turret, dropship and mech aim:** the torso aim moves in the original's steps (1024ths of 180 degrees across, of 60
+  up and down).
+- **Missile lock:**
+  - The timed lock takes the original's 364 ticks (it was 362).
+  - A computer pilot of skill up to 3 can also lock at once when it fires a guided weapon, as in the original.
+- **Moving scenery:** path-following objects spin and circle at the DOS engine's clock.
+
 ## v1.1.40 (2026-11-20)
 
 Fixes from the latest bug report (on 1.1.37). Each one was checked against the original DOS MW2.EXE running in DOSBox.

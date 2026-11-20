@@ -90,6 +90,10 @@ typedef struct {
     float height;            /* current height above ground, cm */
     float jet_fuel;          /* jet fuel, ticks (controller +0xc0; manoeuvre 5 ends under 1, 0x1001ea40) */
     float enemy_height;      /* target's height, cm (for "target above me", 0x10020090) */
+    int   jump_low;          /* DOS 0x2da50: a unit target 8 m above, hidden along the line from the unit's feet */
+    int  *own_flank;         /* DOS: this unit's own manoeuvre 1 counters (+0x19c; 0x2e6f0's front case reads them) */
+    float enemy_dist3;       /* the 3D distance to the target (DOS +0xc4) */
+    int   jump_view;         /* DOS: the target 8 m above, hidden from the feet, in view at its height (0x2da50) */
     int   pilot_level;       /* GPS 1-4 (engine +0x159); < 4 enables jump-to-turn (0x10020950) */
     /* condition references (engine 0x10011d20 -> 0x10013400 / 0x10013a50: the rule's cond_ref is an iterator) */
     int   commanded;         /* +0x152 & 3: a commanded mate - condition 7 returns 0 (0x10012fd0) */
@@ -152,7 +156,7 @@ typedef struct {
     int   tons1;             /* DOS: a 1-ton unit (an Elemental): the jumper record */
     int   jump_man;          /* DOS +0x190: set when manoeuvre 4, 5, 9 or 11 starts, cleared when any other starts (0x2cc43) */
     int   goal_pt;           /* DOS manoeuvre 12: the own point steered for (index in guard) */
-    int   dodge_fwd;         /* DOS: manoeuvre 11 jets forward (+0x20) instead of left (+0x1e) - +0x17a from the warning (0x2e6a6) */
+    int   dodge_fwd;         /* +0x17a from the DOS warning (0x2e6a6); start_manoeuvre zeroes it before case 11 reads it (left jet always) */
     float leg_srv;           /* DOS look: the leg turn servo's value c[0xf], deg/s (MW2.EXE servo +0x34, T 0.3 s = 54 ticks) */
     int   drive_slow;        /* servo +0x24's T: 0 = 36.2 ticks (0x100190d0) until a walk key flagged 0x10 runs, then 90.5 */
     int   targets_player;    /* this step's enemy is the player (+0x14e == player | 0x200): the MISLTRCK check (0x10031e30) */

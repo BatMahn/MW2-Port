@@ -4490,6 +4490,7 @@ static void load_view_far(prj_archive *ma, const char *scene)
     for (k = 0; k < bm.record_count; k++)
         for (c = 0; c < bm.records[k].chunk_count; c++) {
             const bwd_chunk *ch = &bm.records[k].chunks[c];
+            if (strcmp(ch->tag, "VIEW") == 0 && ch->size >= 8 && getenv("MW2_DEBUG_VIEW")) fprintf(stderr, "VIEW %s near %d far %d\n", bm.records[k].name, (int)(ch->data[0] | ch->data[1] << 8 | ch->data[2] << 16 | (uint32_t)ch->data[3] << 24), (int)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24));
             if (strcmp(ch->tag, "VIEW") == 0 && ch->size >= 8 && g_view_far <= 0)
                 g_view_far = (float)(int32_t)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24);
         }

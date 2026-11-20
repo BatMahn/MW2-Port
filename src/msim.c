@@ -364,6 +364,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     /* the start-up (engine 0x1001a180 state 0, 0x1001ab71): every mech, the player's too, comes online after
      * 0x43e + rand(0x16a) ticks = 5.97-7.95 s; until then no throttle, turning, jets or weapons */
     s->online_at = calloc((size_t)(count > 0 ? count : 1), sizeof *s->online_at);
+    s->unit_flank = calloc((size_t)(count > 0 ? count : 1), sizeof *s->unit_flank);
     s->ai_focus = malloc((size_t)(count > 0 ? count : 1) * sizeof *s->ai_focus);
     s->ai_who = malloc((size_t)(count > 0 ? count : 1) * sizeof *s->ai_who);
     for (i = 0; s->ai_focus && s->ai_who && i < count; i++) s->ai_focus[i] = s->ai_who[i] = -2;
@@ -848,7 +849,8 @@ static void group_assign(msim *s, int table, int leader, int who)
     {
         ai_mind *m = &s->minds[pick];
         m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = who;
-        m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
+        if (msim_dos_int) m->counter = 1;   /* DOS: the assignment pushes (state, target), depth 1 (the GBL port's audit) */
+        m->next_fire = (float)(rnd_ms(&s->rng) % 10u * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
         ai_wake(s, pick);
     }
 }
@@ -1055,7 +1057,7 @@ static void node_assign(msim *s, int table, int leader)
         m->node_tgt = tcode;
         m->prev_state = m->state; m->state = st; m->target = st == AI_TARGET; m->tgt = unit && st == AI_TARGET ? (tcode & 0xffff) - 1 : -2;
         m->to_navref = 0;
-        if (st == AI_TARGET) m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 22u);   /* entry 0x10013790 case 2 */
+        if (st == AI_TARGET) m->next_fire = (float)(rnd_ms(&s->rng) % 10u * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
         if (st == AI_PATROL) guard_enter(s, m, tcode);                       /* entry case 7 -> 0x10013f00 */
         ai_wake(s, pick);
     }
@@ -1669,7 +1671,10 @@ void msim_step(msim *s, int32_t dt_ms)
             int lk = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].lock : 0;
             s->seen_node[i] = cur;
             m->lock_bits = lk == 1 ? 2 : lk == 2 ? 1 : 0;   /* +0x152 = (+0x152 & ~3) | 0x100146e0(node +0xb7) | 0x40 */
-            if (kn & 0x400) { m->state = AI_REST; m->target = 0; ai_power_down(s, i); }
+            /* DOS MW2.EXE 0x23c34..0x23c97: with a state pushed (+0x13c) the node's (state, target) goes to the stack slot
+             * instead - the unit keeps what it is doing (a unit woken on the player stays on it when its hold node ends) */
+            if (msim_dos_int && m->counter) {}
+            else if (kn & 0x400) { m->state = AI_REST; m->target = 0; ai_power_down(s, i); }
             else if (kn & (0x800 | 0x10)) { m->state = AI_SHUTDOWN; m->target = 0; ai_power_down(s, i); }
             else {   /* the leader idles, the members follow; the node's targets come one a tick (node_assign) */
                 ai_wake(s, i);
@@ -1721,7 +1726,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 int al = s->actors[q3].friendly ? 0 : s->actors[q3].alliance;
                 if (q3 != i && s->armed[q3] && !s->units[q3].destroyed && s->ai_who[q3] == i && al != self_al) att = q3;
             }
-            if (att != -2 && s->ai_focus[i] != att) { s->ai_focus[i] = att; m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; ai_wake(s, i); }
+            if (att != -2 && s->ai_focus[i] != att) { s->ai_focus[i] = att; m->prev_state = m->state; if (msim_dos_int) { m->counter = 1; m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 18u); } m->state = AI_TARGET; m->target = 1; ai_wake(s, i); }   /* DOS: pushed; the entry's fire delay */
         }
         if (s->ai_focus && s->ai_focus[i] >= 0 && (!s->armed[s->ai_focus[i]] || s->units[s->ai_focus[i]].destroyed)) s->ai_focus[i] = -2;
         if (s->ai_focus && s->ai_focus[i] == -1 && s->player_unit.destroyed) s->ai_focus[i] = -2;
@@ -1776,6 +1781,22 @@ void msim_step(msim *s, int32_t dt_ms)
             float ez2 = v.enemy_z - (float)ac->mech.origin[2] - (ac->mech.eye_pos[2] - ac->mech.mount_from[2]);
             v.enemy_bearing = atan2f(ex2, ez2) * 180.0f / 3.14159265f;
         }
+        /* the jump pre-check's view test (DOS MW2.EXE 0x2da50 -> 0x2e150): a unit target more than 8 m above, out of
+         * sight along the line from the unit's feet to the target's, and in sight along the level line at the target's
+         * height - a jump would bring it into view. The port had jumped at any target 8 m above */
+        v.jump_view = v.jump_low = 0;
+        if (v.has_enemy && !v.target_not_unit && ac->unit_class == 1 && v.enemy_height > v.height + 800.0f) {
+            const float ey3 = v.enemy_height + s->units[i].ground, x3 = (float)ac->mech.origin[0], z3 = (float)ac->mech.origin[2];
+            v.jump_low = los_blocked(s, x3, s->units[i].y, z3, v.enemy_x, ey3, v.enemy_z);
+            v.jump_view = v.jump_low && !los_blocked(s, x3, ey3, z3, v.enemy_x, ey3, v.enemy_z);
+        }
+        {   /* the 3D distance (DOS +0xc4: manoeuvre 6's 20 m) */
+            const float dy3 = v.enemy_height + s->units[i].ground - s->units[i].y;
+            v.enemy_dist3 = sqrtf(v.enemy_dist * v.enemy_dist + dy3 * dy3);
+        }
+        /* the manoeuvre 1 counters: the target's (the player's, or a unit's: DOS +0x19c per record) and the unit's own */
+        v.flank_slots = !v.has_enemy ? NULL : enemy_who == -1 ? s->flank_slots : enemy_who >= 0 && s->unit_flank ? s->unit_flank[enemy_who] : NULL;
+        v.own_flank = s->unit_flank ? s->unit_flank[i] : NULL;
         /* elevation between the unit origins (the pitch demand, 0x100231a0 -> 0x100135d0) */
         {
             /* turrets and the turret-class dropships (classes 3, 8): from their eye, where the guns are (user report, Sable
@@ -1907,9 +1928,15 @@ void msim_step(msim *s, int32_t dt_ms)
          * within the unit's rest alert range (condition 7, range -1) to its leader, whose group assignment wakes it. The
          * port ran no rules for either, so a resting unit woke only by its star's next node (user report: Sable Flame's
          * dropships, rest alert 1000 m, woke at their 750 m zone) */
-        if (s->powered_down && s->powered_down[i] && m->state != AI_REST) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; }
+        /* DOS MW2.EXE 0x21510: the rule pass 0x215f0 runs for every computer-run unit in every AI state but 12 - shut down
+         * (11) included; any state entered then goes through the entry 0x22bd0, which restarts a powered-down unit
+         * (the start-up again) unless the state entered is 10 / 11 itself (the GBL port's audit; MW2.EXE the same code) */
+        if (s->powered_down && s->powered_down[i] && m->state != AI_REST && !(msim_dos_int && m->state == AI_SHUTDOWN)) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; }
         else {
+            int was_down = s->powered_down && s->powered_down[i];
             ai_step(&s->ai, m, &v, dt);
+            if (msim_dos_int && m->entered && was_down && m->state != AI_REST && m->state != AI_SHUTDOWN) ai_wake(s, i);
+            else if (msim_dos_int && m->entered && !was_down && (m->state == AI_REST || m->state == AI_SHUTDOWN)) ai_power_down(s, i);
             if (s->powered_down && s->powered_down[i]) { m->throttle = 0; m->turn = 0; m->wants_fire = 0; m->jet = 0; }   /* (still down until woken) */
             if (m->entered) {   /* 0x10013e00: the exit (0x10013680 cases 5 / 7 -> 0x10013e90) and the entry (0x10013790 case 7
                                  * -> 0x10013f00 round the target +0x14e: a node's guard target, a Defend order's mech) */
@@ -2347,7 +2374,7 @@ void msim_free(msim *s)
     free(s->msg_seen); s->msg_seen = NULL;
     free(s->twist_limit);
     free(s->minds);
-    free(s->cmd); free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->draw_lift); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
+    free(s->cmd); free(s->unit_flank); s->unit_flank = NULL; free(s->online_at); free(s->radius); free(s->fly_seen); free(s->centre_h); free(s->draw_lift); free(s->ai_focus); free(s->ai_who); free(s->powered_down); free(s->seen_node); free(s->sd_at); free(s->cmd_target); free(s->engage); free(s->mate_target); free(s->defend_leg);
     free(s->bld);
     free(s->inspected);
     free(s->ai_lock);
@@ -2588,7 +2615,7 @@ static float aim_range_step(msim *s, msim_aim *a, int hit, float dist)
     if (!a->ok) {
         a->range.t = a->conv.t = 0;   /* set up with the unit at the mission's start (0x10018a20) */
         a->range.target = a->range.value = a->conv.target = a->conv.value = 50000;
-        a->range.tau = 3620; a->conv.tau = 36;
+        a->range.tau = msim_dos_int ? 3640 : 3620; a->conv.tau = 36;   /* 20 s / 0.2 s: DOS 0x24bf5 chop(20 x 182) = 3640 */
         a->ok = 1;
     }
     iservo_step(&a->range, now);
@@ -3166,12 +3193,12 @@ static void combat_step(msim *s, float dt)
                 }
                 if (on) {
                     m->lock |= 0x8000;
-                    if (!(m->lock & 0x40)) { m->lock |= 0x40; m->lock_ticks = 362.0f; }
+                    if (!(m->lock & 0x40)) { m->lock |= 0x40; m->lock_ticks = msim_dos_int ? 364.0f : 362.0f; }   /* DOS 0x530d4: 0x16c */
                     else if (m->lock_ticks < 1.0f) { m->lock_ticks = 0; m->lock |= 0x80; }
                     else m->lock_ticks -= ticks;
                 } else {
                     m->lock &= ~(0x8000 | 0x80);
-                    if (m->lock & 0x40) { m->lock_ticks += ticks; if (m->lock_ticks >= 362.0f) m->lock &= ~0x40; }
+                    if (m->lock & 0x40) { m->lock_ticks += ticks; if (m->lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) m->lock &= ~0x40; }
                 }
             } else m->lock = 0;
         }
@@ -3186,6 +3213,14 @@ static void combat_step(msim *s, float dt)
                     s->units[i].lock_target = !(m->lock & 0x80) ? -2 : who >= -1 ? who
                                             : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
                     fw = combat_ai_select(cu, sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);
+                    /* DOS MW2.EXE 0x2ea8d..0x2eab0: a guided weapon chosen, and the fire decision's range byte (+0x154 =
+                     * skill + 1) at most 4 - rand(+0x154 + 1) == 0 locks it there and then (+0x10c |= 0x80), whatever
+                     * the timed lock (0x52ea0) says; the volley (0x52080, the same frame) homes */
+                    if (msim_dos_int && fw >= 0 && msim_weapon_guided(cu->weapons[fw].weapon)) {
+                        int rb = (s->actors[i].ai_skill > 0 ? s->actors[i].ai_skill : 1) + 1;
+                        if (rb <= 4 && ms_roll(&s->rng, (unsigned)rb + 1u) == 0)
+                            s->units[i].lock_target = who >= -1 ? who : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
+                    }
                     if (fw >= 0 && who == -1 && msim_weapon_guided(cu->weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
                     cu->ai_trigger = fw >= 0 && !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f,
                                                              (float)s->actors[i].mech.origin[2], ex, aim_h, ez) &&
@@ -3300,14 +3335,14 @@ static void combat_step(msim *s, float dt)
         }
         if (in) {
             s->player_lock |= 0x8000;
-            if (!(s->player_lock & 0x40)) { s->player_lock |= 0x40; s->player_lock_ticks = 362.0f; }
+            if (!(s->player_lock & 0x40)) { s->player_lock |= 0x40; s->player_lock_ticks = msim_dos_int ? 364.0f : 362.0f; }   /* DOS 0x52ea0 (also the player's, 0x27a55): 0x16c */
             else if (s->player_lock_ticks < 1.0f) { s->player_lock_ticks = 0; s->player_lock |= 0x80; }
             else s->player_lock_ticks -= ticks;
         } else if (wid >= 0 && msim_weapon_guided(wid) && (e >= 0 || MSIM_IS_THING(e))) {
             /* off target / out of the window (0x10044560): 0x8000 and 0x80 cleared, the timer counts back up by dt and
              * 0x40 goes at 0x16a - so a brief break resumes where it was */
             s->player_lock &= ~(0x8000 | 0x80);
-            if (s->player_lock & 0x40) { s->player_lock_ticks += ticks; if (s->player_lock_ticks >= 362.0f) s->player_lock &= ~0x40; }
+            if (s->player_lock & 0x40) { s->player_lock_ticks += ticks; if (s->player_lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) s->player_lock &= ~0x40; }
         } else s->player_lock = 0;   /* no guided weapon or no target: everything cleared */
     }
     /* the player fires at the crosshair target, or with none along the aim line (engine 0x100448e0: shots follow the
@@ -3848,15 +3883,55 @@ static void cpoly_fill(cpoly_t *c, const mech3d_part *wp, const wtb_poly *pg, co
     }
 }
 
-/* point in polygon on two axes (0x10010a90 x / z, 0x100110d0 y / z, 0x10010db0 x / y) */
+/* point in polygon on two axes (DOS MW2.EXE 0x1ca00 x / z, 0x1cd60 y / z, 0x1cbb0 x / y - the GBL port's emulated comparison; MW2.EXE the same code, simdiff seg_poly; the 3Dfx DLL's 0x10010a90 /
+ * 0x100110d0 / 0x10010db0): a vertex on each side of the point on both axes first (else out); then the edges (v[n-1],
+ * v[0]), (v[n-2], v[n-1]) .. (v[0], v[1]) whose y range holds y (ends included; an edge starting at y is skipped, so a
+ * vertex at y counts once) are classed left / right of the point: the first of each side is noted, a second on the side
+ * already seen gives out, one on the other side gives in. A point ON an edge or a corner - the crossing at x, or on a
+ * flat edge at y between its ends - is in. The port had the even-odd rule, which leaves a point on the outline out
+ * (simdiff seg_poly: 80 of 2000 corner / edge hits) */
 static int cpoly_in(const cpoly_t *p, int a, int b, float x, float y)
 {
-    int i, j, c = 0;
-    for (i = 0, j = p->n - 1; i < p->n; j = i++) {
-        const float *P = p->v[i], *Q = p->v[j];
-        if ((P[b] > y) != (Q[b] > y) && x < (Q[a] - P[a]) * (y - P[b]) / (Q[b] - P[b]) + P[a]) c = !c;
+    int k, bits = 0, left = 0, right = 0;
+    const float *Q;
+    if (!msim_dos_int) {   /* the 3D looks: the even-odd crossing rule as before (the engines' rule, demech2 IsPointInFaceXZ,
+                            * is the same as DOS's, but its floats were not compared, and AQUA's dropship wing then
+                            * holds a jetting mech 73 cm up - the airborne_move_3d sequence; left for a 3D-look audit) */
+        int i, j, c = 0;
+        for (i = 0, j = p->n - 1; i < p->n; j = i++) {
+            const float *P = p->v[i], *R = p->v[j];
+            if ((P[b] > y) != (R[b] > y) && x < (R[a] - P[a]) * (y - P[b]) / (R[b] - P[b]) + P[a]) c = !c;
+        }
+        return c;
     }
-    return c;
+    if (p->n < 3) return 0;
+    for (k = p->n - 1; k >= 0 && bits != 0xf; k--) {
+        bits |= x < p->v[k][a] ? 2 : 1;
+        bits |= y < p->v[k][b] ? 8 : 4;
+    }
+    if (bits != 0xf) return 0;
+    Q = p->v[0];
+    for (k = p->n - 1; k >= 0; Q = p->v[k], k--) {
+        const float *P = p->v[k];
+        int side;   /* -1 left, 1 right */
+        if (!((y <= P[b] || y <= Q[b]) && (P[b] <= y || Q[b] <= y))) continue;
+        if (y == P[b] && P[b] == Q[b]) {
+            if (P[a] < x && Q[a] < x) return 0;
+            if (P[a] <= x) return 1;
+            return x < Q[a] ? 0 : 1;
+        }
+        if (y == P[b]) continue;
+        if (P[a] < x && Q[a] < x) side = -1;
+        else if (x < P[a] && x < Q[a]) side = 1;
+        else {
+            float xi = truncf((Q[a] - P[a]) * (y - P[b]) / (Q[b] - P[b])) + P[a];   /* (the 64-bit idiv truncates) */
+            if (xi == x) return 1;
+            side = xi < x ? -1 : 1;
+        }
+        if (side < 0) { if (left) return 0; if (right) return 1; left = 1; }
+        else { if (right) return 0; if (left) return 1; right = 1; }
+    }
+    return 0;
 }
 
 /* the quadtree of a type 5 object (0x1000c550 / 0x1000c640): the root is the vertex box and always splits; a child takes

@@ -316,6 +316,27 @@ static void part_sphere(const mech3d_part *part, float out[4])
     free(w);
 }
 
+/* A part of the sky object's tree: the scene shape of kind 0x90 and the objects under it (MW2.EXE / engine SecondRender:
+ * DetachObjTreeShapes, then the frame draws that tree with the far plane at 0x7fffffff and only the frustum test) - the
+ * Marooned dome, its struts and windows are drawn at any distance */
+static int sky_tree(const mech3d *m, int pi)
+{
+    int depth, j, sky;
+    for (sky = 0; sky < m->part_count && (m->parts[sky].objtype & 0xf0) != 0x90; sky++) {}   /* the FIRST such shape only (the
+                                                                                               * loop breaks there): GOLD's
+                                                                                               * second, its walkway, culls */
+    if (sky >= m->part_count) return 0;
+    for (depth = 0; depth < 16 && pi >= 0; depth++) {
+        const mech3d_part *p = &m->parts[pi];
+        if (pi == sky) return 1;
+        if (p->parent_obj < 0) return 0;
+        for (j = 0; j < m->part_count; j++)
+            if (m->parts[j].obj_index == p->parent_obj && strcmp(m->parts[j].rec, p->rec) == 0) break;
+        pi = j < m->part_count ? j : -1;
+    }
+    return 0;
+}
+
 /* A Titanium colour kind 1 polygon's palette shade (mercsw 0x1001b5e4 -> 0x1002f5e3, the 16-bit build's DOS-style
  * level): L = the LITE ambient (0x10248b0c) + max(0, I x globalintensity / 128) - the LITE's term when it has one
  * (0x10097cb4), or a point light at the eye when its vector is 888888 x 3 (0x100ad320 -> the camera position
@@ -466,7 +487,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
              * bit 0x800) -> class 2; other objects (type 0 rocks, buildings) keep their textures */
             int notex_cls = (li == 1 && part->objtype == 0) || (part->objtype & 0x300) || (part->objtype & 0xf0) == 0x50 ? 1
                           : (part->objtype & 0x800) ? 2 : 0;
-            if (pass == 1) part_sphere(part, psph);
+            if (pass == 1) { part_sphere(part, psph); if (li == 0 && sky_tree(m, pi)) psph[3] = 0; if (getenv("MW2_DEBUG_SPH")) fprintf(stderr, "sph li%d %s %x %d %.0f %.0f %.0f %.0f\n", li, part->model_name, part->objtype, part->parent_obj, (double)psph[0], (double)psph[1], (double)psph[2], (double)psph[3]); }   /* tests */
             for (k = 0; k < o->poly_count; k++) {
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3], ti_vmin;

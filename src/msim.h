@@ -193,6 +193,7 @@ typedef struct {
     int          pav_side, pav_hit;
     float        pav_next, pav_len;
     int          fx_light_ok;
+    int        (*unit_flank)[8]; /* per actor: attackers per manoeuvre 1 slot round it (DOS record +0x19c; the player's: flank_slots) */
     int         *ai_focus;       /* per actor: the attacker it turned on (0x10012520): -1 the player, -2 none */
     int         *ai_who;
     int         *powered_down;   /* per actor: shut down by a rest / hold node (states 10 / 11, mech +0xa0 |= 3) */

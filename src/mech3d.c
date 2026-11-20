@@ -1288,7 +1288,10 @@ int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone
 /* ---- path tasks (TSK type 5 over PTBL paths): see mech3d.h -------------------------------------------------- */
 
 #define WP_NODES (MAX_NODES * 4)
-#define WP_TAU (0.3f * 181.0f)   /* the filters' time constant: 0.3 x 181.0 (0x10248490) ticks */
+/* the path tasks' clock: the 3Dfx DLL's 181 ticks a second (0x10248490, 0x102471c4, 0x102471e4); the DOS edition's 182
+ * (MW2.EXE 0x1b9a0 / 0x1b729 0xb6, the servos chop(0.3 x 182) = 54 - the GBL port's audit; MW2.EXE the same code) */
+#define WP_CLOCK (mech3d_dos_hips ? 182.0f : 181.0f)
+#define WP_TAU (mech3d_dos_hips ? 54.0f : 0.3f * 181.0f)   /* the filters' time constant */
 typedef struct { float R[9], t[3]; } wp_xf;
 typedef struct { float last, target, cur; } wp_filt;
 typedef struct {
@@ -1523,13 +1526,13 @@ static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now)
     wp_rec *r = &P->recs[t->rec];
     wp_xf *x = &r->local[t->node];
     if (t->type == 0) {   /* spin (0x1000e880): each angle turns by its rate x elapsed / (seconds x 181) */
-        float q = (now - t->last) / t->k[3];
+        float q = (now - t->last) / (t->k[3] * (WP_CLOCK / 181.0f));   /* (k[3] = seconds x 181 at the load) */
         t->last = now;
         wp_turn(x, t->k[0] * q, t->k[1] * q, t->k[2] * q);
         return 1;
     }
     if (t->type == 2) {   /* circling (0x1000ea50): a step along the heading + 90, then a yaw turn */
-        float dts = (now - t->last) * (1.0f / 181.0f), d, a = t->k[2] * 0.017453292f, dy;   /* 0x102471e4: 1 / 181 */
+        float dts = (now - t->last) * (1.0f / WP_CLOCK), d, a = t->k[2] * 0.017453292f, dy;   /* 0x102471e4: 1 / 181 */
         if (t->k[3] == 0) return 0;
         t->last = now;
         d = t->k[1] * dts;

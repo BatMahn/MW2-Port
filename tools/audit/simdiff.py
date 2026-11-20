@@ -298,11 +298,12 @@ def collision_damage(rep, rnd, n):
 @test
 def manoeuvre_start(rep, rnd, n):
     """MW2.EXE 0x2cbf0 (a manoeuvre's start: its time limit, reverse input +0x2f, by the jump table 0x2cbb8; rand
-    0x4a070 fed the port's own draw) vs ai.c start_manoeuvre (DOS), manoeuvres 0 1 4 8 10 12 with contact cases"""
+    0x4a070 fed the port's own draw) vs ai.c start_manoeuvre (DOS), manoeuvres 0 1 4 8 10 11 12 with contact cases; 11's jet with the warning's +0x17a
+    left set, and the 4-then-5 flag +0x17e after the start"""
     L = lib('ai'); L.shim_rand.restype = ctypes.c_uint
     L.shim_man_limit.restype = ctypes.c_float
     rv, js, jf = ctypes.c_int(), ctypes.c_int(), ctypes.c_int()
-    for man in (0, 1, 4, 8, 10, 12):
+    for man in (0, 1, 4, 8, 10, 11, 12):
         for case in range(n):
             e = emu()
             seed = rnd.randint(1, 1 << 30)
@@ -312,13 +313,310 @@ def manoeuvre_start(rep, rnd, n):
             u = e.alloc(0x200); ib = e.alloc(0x60); ctl = e.alloc(0x200)
             e.w32(u + 0x4c, ib); e.w32(u + 0x20, ctl); e.w32(ctl + 0xa4, contact)
             e.w8(u + 0x16c, man); e.w8(u + 0x16d, prev); e.w32(u + 0x7c, 3 if cu else 0xffffffff)
+            fwd = rnd.randint(0, 1)   # the missile warning's dodge quadrant left in +0x17a (4: forward), the 4-then-5 flag set
+            e.w32(u + 0x17a, 4 if fwd else 0); e.w32(u + 0x17e, 1)
             e.w32(NOW, 1000); e.w32(TICKS, 6)
             e.call(0x2cbf0, eax=u)
             dl = e.rs32(u + 0x172) - 1000
             dr = e.r8(ib + 0x2f)
-            pl = L.shim_man_limit(man, prev, contact, cu, seed, ctypes.byref(rv), ctypes.byref(js), ctypes.byref(jf), 0)
-            rep.check(abs(dl - pl) < 0.5 and (man not in (8, 10) or dr == rv.value),
-                      'man %d prev %d contact %d unit %d: dos limit %d reverse %d, port %.0f %d' % (man, prev, contact, cu, dl, dr, pl, rv.value))
+            dj = (e.r8(ib + 0x1e), e.r8(ib + 0x20))
+            dq = e.rs32(u + 0x17e)
+            pl = L.shim_man_limit(man, prev, contact, cu, seed, ctypes.byref(rv), ctypes.byref(js), ctypes.byref(jf), fwd)
+            pj = (1 if js.value < 0 else 0, jf.value)
+            pq = L.shim_start_q5(man)
+            rep.check(abs(dl - pl) < 0.5 and (man not in (8, 10) or dr == rv.value) and (man != 11 or dj == pj) and (dq == 1) == (pq == 1),
+                      'man %d prev %d contact %d unit %d fwd %d: dos limit %d reverse %d jets %s flag %d, port %.0f %d %s %d'
+                      % (man, prev, contact, cu, fwd, dl, dr, dj, dq, pl, rv.value, pj, pq))
+
+class Lcg:
+    """the port's ai_rand sequence (ai.c) as MW2.EXE's rand 0x4a070 stub, so both sides draw the same numbers"""
+    def __init__(self, seed): self.s = seed & 0xffffffff
+    def __call__(self, em):
+        n = em.reg('eax') & 0xffffffff
+        self.s = (self.s * 1103515245 + 12345) & 0xffffffff
+        return ((self.s >> 16) & 0x7fff) % n if n else 0
+
+@test
+def manoeuvre_choose(rep, rnd, n):
+    """MW2.EXE 0x2c880 (the manoeuvre chooser: class 1's contact / non-unit / jump pre-check - 0x2da50 and the view test
+    0x2e150 stubbed - then the class record 0xfdf10 built by 0x2c778: the first pick, the row of the last manoeuvre, 4 after
+    4 with +0x17e, 4's jets / level / signed-bearing test, 3 -> 2, 5 on the ground) vs ai.c choose_manoeuvre (DOS); every
+    class, the Elemental table, random states; the answer and the rand draws used"""
+    L = lib('ai'); L.shim_choose2.restype = ctypes.c_int
+    U = ctypes.c_uint(); F = ctypes.c_float
+    import struct
+    # the class records as 0x2c778..0x2c861 (inline in the unit set-up) builds them: {rows, first, table}
+    recs = b''.join(struct.pack('<hhI', *({1: (13, 7, 0x963f4), 5: (1, 0, 0x964f0), 8: (1, 0, 0x96502)}.get(k, (1, 0, 0x964de))))
+                    for k in range(1, 9)) + struct.pack('<hhI', 13, 7, 0x96514)
+    flag = 1
+    for case in range(n * 60):
+        e = emu(); e.write(0xfdf10, recs); e.w32(0x96600, flag)
+        cls = rnd.choice([1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 8]); tons1 = rnd.random() < 0.2
+        prev = rnd.choice([-1] + list(range(13))); man = rnd.choice([0, 1, 3, 4, 10, 12])
+        contact = rnd.random() < 0.3; reverse = rnd.random() < 0.3; jump_man = rnd.random() < 0.3
+        tnu = rnd.random() < 0.15; can_jump = rnd.random() < 0.7; heat = rnd.choice([0, 10, 19, 20, 35])
+        level = rnd.randint(1, 4); above = rnd.random() < 0.3; grounded = rnd.random() < 0.5
+        twist = rnd.choice([5, 9, 10, 60, 90, 120, 180]); off = rnd.choice([rnd.uniform(-180, 180), 75.0, -75.0, 0.0])
+        q5 = rnd.random() < 0.4; seed = rnd.randint(1, 1 << 30)
+        u = e.alloc(0x200); ctl = e.alloc(0x200); ib = e.alloc(0x60)
+        e.w32(u, cls); e.w32(u + 0x20, ctl); e.w32(ctl, u); e.w32(u + 0x4c, ib); e.w32(ctl + 0xe4, 1 if tons1 else 50)
+        e.w8(ib + 0x2f, 1 if reverse else 0); e.w32(u + 0x190, 1 if jump_man else 0); e.w8(u + 0x16c, man)
+        e.w32(ctl + 0xa4, 1 if contact else 0); e.w16(u + 0x14a, 0x100 if tnu else 0x205)
+        e.w32(ctl + 0xc0, 100 if can_jump else 0); e.w32(ctl + 0xec, 1); e.w32(ctl + 0x98, heat << 16)
+        e.w8(u + 0x198, 2 if level < 4 else 0); e.w8(u + 0x16d, prev & 0xff); e.w32(u + 0x17e, 1 if q5 else 0)
+        e.w32(u + 0x16e, 0); e.w32(ctl + 0xe0, twist << 16); e.w32(u + 0x78, 1 if grounded else 0)
+        e.stub(0x22850, ret=0); e.stub(0x2da50, ret=1); e.stub(0x2e150, ret=1 if above else 0)
+        e.stub(0x230d0, ret=int(round(off * 65536)) & 0xffffffff)
+        g = Lcg(seed); e.stub(RAND, g)
+        dos = e.call(0x2c880, eax=u) & 0xffff; dos = dos - 0x10000 if dos & 0x8000 else dos
+        prt = L.shim_choose2(cls, 1 if tons1 else 50, prev, contact, reverse, jump_man, man, tnu, can_jump, F(heat), level,
+                             above, grounded, F(twist), F(off), q5, seed, ctypes.byref(U))
+        rep.check(dos == prt and U.value == g.s,
+                  'cls %d el %d prev %d man %d contact %d rev %d jm %d tnu %d jets %d heat %d lvl %d above %d gnd %d twist %d off %.1f q5 %d: dos %d port %d%s'
+                  % (cls, tons1, prev, man, contact, reverse, jump_man, tnu, can_jump, heat, level, above, grounded, twist, off, q5,
+                     dos, prt, '' if U.value == g.s else ' (rand draws differ)'))
+
+@test
+def missile_warning(rep, rnd, n):
+    """MW2.EXE 0x2e450 (a guided launch or a PPC warns its target): the shooter's +0x198 bit 4 and rand(3); the target's
+    +0x16e already 4; jets and heat < 65 (0x2e3d0 run); rand(3); the quadrant of the shooter off the target's heading
+    (0x230d0 stubbed); rand(2) for the first side, the 50 m probes (0x2df30 / 0x1c3f0 stubbed, either side blocked) -> 11;
+    else a level <= 3 pilot with nothing forced jumps (4) - vs ai.c ai_missile_warning (DOS). The shooter is set up as
+    the player-type record (+0x10 == 2), which skips the AI shooter's view tests (0x29860 / 0x3f320 / the 3 and 15 degree
+    cones - not ported; see AUDIT_DOS.md)"""
+    L = lib('ai'); L.shim_warn.restype = ctypes.c_int
+    U = ctypes.c_uint(); O = (ctypes.c_int * 2)(); F = ctypes.c_float
+    for case in range(n * 40):
+        e = emu()
+        lv_s = rnd.randint(1, 4); lv_t = rnd.randint(1, 4); can_jump = rnd.random() < 0.75
+        heat = rnd.choice([0, 30, 64, 65, 80]); forced = rnd.choice([0, 0, 0, 4, 10])
+        rel = rnd.choice([rnd.uniform(-180, 180), rnd.randint(-4, 4) * 90.0, 89.999, -0.001])
+        fp, fm = rnd.random() < 0.6, rnd.random() < 0.6; seed = rnd.randint(1, 1 << 30); t = 5
+        shot = e.alloc(0x40); sh = e.alloc(0x200); sp = e.alloc(8); tg = e.alloc(0x200); tc = e.alloc(0x200)
+        e.w32(shot + 4, 0x15); e.w32(sp, sh); e.w32(sh + 0x10, 2); e.w8(sh + 0x198, 4 if lv_s <= 2 else 0)
+        e.w32(sh + 0xdc, 0x200 | t); e.w16(sh + 4, 0); e.w32(0xf8a40 + 4 * t, tg)
+        e.w32(tg + 0x16e, forced); e.w32(tg + 0x20, tc); e.w32(tg + 0xdc, 0x200)
+        e.w32(tc + 0xc0, 100 if can_jump else 0); e.w32(tc + 0xec, 1); e.w32(tc + 0x98, heat << 16)
+        e.w8(tg + 0x198, 2 if lv_t <= 3 else 0)
+        g = Lcg(seed); e.stub(RAND, g)
+        e.stub(0x22850, ret=0); e.stub(0x230d0, ret=int(math.floor(rel * 65536)) & 0xffffffff)
+        probed = []
+        def p0(em):
+            probed.append(s32(em.reg('ebx')) if em.reg('ebx') & 0x8000 == 0 else s32(em.reg('ebx') | 0xffff0000)); return 0
+        e.stub(0x2df30, p0, pops=8)
+        e.stub(0x1c3f0, lambda em: 0 if (fp if probed[-1] > 0 else fm) else 1)
+        e.call(0x2e450, eax=shot, edx=sp)
+        df = s32(e.r32(tg + 0x16e))
+        pf = L.shim_warn(seed, lv_s, F(rel), can_jump, F(heat), lv_t, -1 if forced == 0 else forced, fp, fm, O, ctypes.byref(U))
+        pf = 0 if pf == -1 else pf
+        po = [x for x in O if x]
+        rep.check(df == pf and probed == po and U.value == g.s,
+                  'shooter lv %d target lv %d jets %d heat %d forced %d rel %.3f free +%d -%d: dos %d probes %s, port %d %s%s'
+                  % (lv_s, lv_t, can_jump, heat, forced, rel, fp, fm, df, probed, pf, po, '' if U.value == g.s else ' (rand draws differ)'))
+
+@test
+def torso_inputs(rep, rnd, n):
+    """MW2.EXE 0x2e930..0x2e971 (the fire decision's torso inputs: 0x22970 the bearing off the legs / 0x2d00 and 0x229a0
+    the elevation / 0xf00, each through 0x23a40's +-0x400 clamp, written x 0x2d00 / x 0xf00 to input +4 / +0) vs ai.c
+    dos_twist_q / dos_pitch_q - the turret and dropship aim demand as much as a mech's"""
+    L = lib('ai'); L.shim_twist_q.restype = ctypes.c_float; L.shim_pitch_q.restype = ctypes.c_float
+    F = ctypes.c_float
+    for case in range(n * 50):
+        e = emu()
+        aim = rnd.choice([rnd.uniform(-180, 180), rnd.randint(-1024, 1024) * 180 / 1024.0, rnd.uniform(-1, 1)])
+        el = rnd.choice([rnd.uniform(-90, 90), rnd.randint(-1100, 1100) * 60 / 1024.0, rnd.uniform(-0.2, 0.2)])
+        af = int(aim * 65536) & 0xffffffff; ef = int(el * 65536)
+        u = e.alloc(0x200); e.w32(u + 0xd8, ef & 0xffffffff)
+        tw = s32(e.call(0x22970, eax=u, edx=af, ebx=0)) * 0x2d00 / 65536.0
+        pt = s32(e.call(0x229a0, eax=u, edx=0)) * 0xf00 / 65536.0
+        pw = L.shim_twist_q(F(aim)); pp = L.shim_pitch_q(F(el))
+        rep.check(abs(tw - pw) < 1e-4 and abs(pt - pp) < 1e-4,
+                  'aim %.5f el %.5f: dos %.5f %.5f port %.5f %.5f' % (aim, el, tw, pt, pw, pp))
+
+@test
+def patrol_sweep(rep, rnd, n):
+    """MW2.EXE 0x24710 (the patrol torso sweep of states 5-8, class 1: 5 degrees every 0x40 / 0x20 ticks, turning past 45,
+    the due time +0x172 pulled in when the interval shortens) over runs of frames vs ai.c patrol_sweep_dos"""
+    e = emu(); L = lib('ai'); F = ctypes.c_float
+    for run in range(n):
+        frames = 300
+        ticks = [rnd.choice([1, 3, 6, 6, 6, 9, 12, 30, 70]) for _ in range(frames)]
+        thr = [rnd.choice([0, 0, 0x333, 0x400]) if rnd.random() < 0.1 or k == 0 else None for k in range(frames)]
+        for k in range(1, frames):
+            if thr[k] is None: thr[k] = thr[k - 1]
+        torso0 = rnd.choice([0, 5, -45, 45, 40]) * 0x10000
+        dir0 = rnd.randint(0, 1)
+        now = 1000; due = now + rnd.randint(-20, 64)
+        u = e.alloc(0x200); inp = e.alloc(0x40)
+        e.w32(u, 1); e.w32(u + 0x4c, inp); e.w32(inp + 4, torso0); e.w32(u + 0x172, due); e.w32(u + 0x17a, dir0)
+        dos = []
+        for k in range(frames):
+            now += ticks[k]
+            e.w32(NOW, now); e.w32(inp + 8, thr[k])
+            e.call(0x24710, eax=u)
+            dos.append(s32(e.r32(inp + 4)) / 65536.0)
+        out = (F * frames)()
+        L.shim_patrol_seq(frames, (F * frames)(*ticks), (F * frames)(*[t / 1024.0 for t in thr]), out,
+                          1 if dir0 else -1, F(torso0 / 65536.0), F(float(due - 1000)))
+        bad = [k for k in range(frames) if abs(out[k] - dos[k]) > 1e-3]
+        rep.check(not bad, 'run %d: first differing frame %s dos %s port %s' %
+                  (run, bad[0] if bad else '-', dos[bad[0]] if bad else '-', out[bad[0]] if bad else '-'))
+        e.reset_data()
+
+@test
+def flank_pick(rep, rnd, n):
+    """MW2.EXE 0x2e6f0 (manoeuvre 1's slot: the sector of the attacker's bearing off the target's facing - 0x230d0 stubbed
+    with the angle - and the counters +0x19c: the front case on the attacker's own, the others on the target's) vs ai.c
+    flank_pick, random and sector-edge angles, random counters, both rand(2) results"""
+    L = lib('ai'); L.shim_rand.restype = ctypes.c_uint
+    I8 = ctypes.c_int * 8
+    for case in range(n * 40):
+        e = emu()
+        rel = rnd.choice([rnd.uniform(-180, 180), rnd.randint(-8, 8) * 22.5, rnd.randint(-4, 4) * 45.0, 180.0])
+        err = int(round(rel * 65536))
+        seed = rnd.randint(1, 1 << 30)
+        own = [rnd.choice([0, 0, 1]) for _ in range(8)]
+        tgt = [rnd.choice([0, 0, 1, 2]) for _ in range(8)]
+        me, t = 3, 7
+        u = e.alloc(0x200); tr = e.alloc(0x200)
+        e.w32(u + 4, me); e.w16(u + 0x14a, 0x200 | t); e.w32(0xf8a40 + 4 * t, tr)
+        for k in range(8): e.w8(u + 0x19c + k, own[k]); e.w8(tr + 0x19c + k, tgt[k])
+        e.stub(0x22850, ret=0)
+        e.stub(0x230d0, ret=err & 0xffffffff)
+        e.stub(RAND, lambda em, s=seed: L.shim_rand(s, em.reg('eax')))
+        dos = e.call(0x2e6f0, eax=u) & 0xffff
+        prt = L.shim_flank_pick(ctypes.c_float(rel), seed, I8(*own), I8(*tgt)) * 2
+        rep.check(dos == prt, 'rel %.3f own %s tgt %s: dos slot %d port %d' % (rel, own, tgt, dos, prt))
+
+@test
+def seg_poly(rep, rnd, n):
+    """GBL 0x1c7a0 (a segment against one face: the plane crossing in 2.29 x cm integers, t = (-f << 16) / (n . d) on the
+    octagonal-length direction 0x1d960, the crossing point, then 0x1cbc0 -> 0x1cc50 / 0x1cfb0 / 0x1ce00 point in polygon
+    on the plane of the normal's largest component, and the segment cut there, 0x1de20) vs eseg_poly + cpoly_in (msim.c,
+    floats): random convex faces (3-6 integer vertices round a centre, any orientation) and segments crossing near them.
+    Hit / miss must agree, the cut point within 2 cm + 3.5 cm / cos (the DOS plane distance's rounding along a grazing segment); a case whose crossing lies within 2 cm of an edge (either side's
+    rounding can decide it) is counted, not judged."""
+    L = lib('msim')
+    F3 = ctypes.c_float * 3
+    edge = 0
+    for case in range(n * 40):
+        e = emu()
+        nv = rnd.randint(3, 6)
+        # the face's plane: a random unit normal, a centre, two axes in the plane
+        while True:
+            nx, ny, nz = rnd.gauss(0, 1), rnd.gauss(0, 1), rnd.gauss(0, 1)
+            if rnd.random() < 0.3: (nx, ny, nz) = rnd.choice([(0, 1, 0), (1, 0, 0), (0, 0, 1), (0, -1, 0), (1, 1, 0), (0, 1, 1)])
+            l = math.sqrt(nx * nx + ny * ny + nz * nz)
+            if l > 1e-3: break
+        nrm = (nx / l, ny / l, nz / l)
+        ax = (1, 0, 0) if abs(nrm[0]) < 0.9 else (0, 1, 0)
+        u = (nrm[1] * ax[2] - nrm[2] * ax[1], nrm[2] * ax[0] - nrm[0] * ax[2], nrm[0] * ax[1] - nrm[1] * ax[0])
+        lu = math.sqrt(sum(c * c for c in u)); u = tuple(c / lu for c in u)
+        w = (nrm[1] * u[2] - nrm[2] * u[1], nrm[2] * u[0] - nrm[0] * u[2], nrm[0] * u[1] - nrm[1] * u[0])
+        cen = [rnd.randint(-30000, 30000) for _ in range(3)]
+        R = rnd.choice([200, 1000, 5000, 20000])
+        angs = sorted(rnd.uniform(0, 2 * math.pi) for _ in range(nv))
+        if rnd.random() < 0.5: angs.reverse()
+        verts = [[int(round(cen[k] + R * (math.cos(a) * u[k] + math.sin(a) * w[k]))) for k in range(3)] for a in angs]
+        # DOS records: the face (+2 count, +4 offset of the index bytes, +0x14 normal 2.29), the vertices (0x2c each,
+        # world x / y / z at +0xc), the segment (0x38: start, end, delta, direction 16.16, length, +0x34 state)
+        N = [int(round(c * (1 << 29))) for c in nrm]
+        poly = e.alloc(0x60); vb = e.alloc(0x2c * nv); seg = e.alloc(0x40)
+        e.w16(poly + 2, nv); e.w32(poly + 4, 0x40)
+        for k in range(3): e.w32(poly + 0x14 + 4 * k, N[k])
+        for j in range(nv):
+            e.w8(poly + 0x40 + j, j)
+            for k in range(3): e.w32(vb + 0x2c * j + 0xc + 4 * k, verts[j][k])
+        # a segment from in front of the plane to behind it (now and then parallel, from behind, or short of it)
+        a, b = rnd.uniform(0, 1.3), rnd.uniform(0, 1.3)
+        q = [cen[k] + R * (a * math.cos(b * 6.28) * u[k] + a * math.sin(b * 6.28) * w[k]) for k in range(3)]
+        d0 = rnd.choice([rnd.uniform(1, 3000), rnd.uniform(1, 50), rnd.uniform(-500, -1)])
+        d1 = rnd.choice([rnd.uniform(-3000, -1), rnd.uniform(1, 400), -rnd.uniform(0, 30)])
+        tilt = [rnd.uniform(-1500, 1500) for _ in range(3)]
+        p0 = [int(round(q[k] + nrm[k] * d0 + tilt[k])) for k in range(3)]
+        p1 = [int(round(q[k] + nrm[k] * d1 - tilt[k] * rnd.uniform(0, 1))) for k in range(3)]
+        if p0 == p1: continue
+        for k in range(3):
+            e.w32(seg + 4 * k, p0[k]); e.w32(seg + 12 + 4 * k, p1[k]); e.w32(seg + 24 + 4 * k, p1[k] - p0[k])
+        e.w32(seg + 0x34, 0)
+        e.call(0x1d960, eax=seg)
+        if e.rs32(seg + 0x30) <= 0: continue
+        dh = e.call(0x1c7a0, eax=poly, edx=vb, ebx=seg) != 0
+        dpt = [e.rs32(seg + 12 + 4 * k) for k in range(3)]
+        out = F3()
+        vv = (ctypes.c_float * (3 * nv))(*[float(c) for vtx in verts for c in vtx])
+        ph = L.shim_seg_poly(vv, nv, F3(*nrm), F3(*map(float, p0)), F3(*map(float, p1)), out) != 0
+        # how near the plane crossing is to the face's edges (in the plane), for the edge class
+        dn = sum(nrm[k] * (p1[k] - p0[k]) for k in range(3))
+        near = False
+        if abs(dn) > 1e-9:
+            t = sum(nrm[k] * (verts[0][k] - p0[k]) for k in range(3)) / dn
+            X = [p0[k] + (p1[k] - p0[k]) * t for k in range(3)]
+            for j in range(nv):
+                A, B = verts[j], verts[(j + 1) % nv]
+                AB = [B[k] - A[k] for k in range(3)]; AX = [X[k] - A[k] for k in range(3)]
+                L2 = sum(c * c for c in AB) or 1
+                s = max(0, min(1, sum(AB[k] * AX[k] for k in range(3)) / L2))
+                if math.sqrt(sum((AX[k] - AB[k] * s) ** 2 for k in range(3))) < 2.0: near = True
+            if abs(t) * math.sqrt(sum((p1[k] - p0[k]) ** 2 for k in range(3))) < 2.0 or abs(1 - t) * math.sqrt(sum((p1[k] - p0[k]) ** 2 for k in range(3))) < 2.0: near = True
+            if abs(sum(nrm[k] * (p0[k] - verts[0][k]) for k in range(3))) < 2.0: near = True
+        if dh != ph and near: edge += 1; continue
+        # the DOS plane distance is a sum of six rounded 2.29 x cm products (up to 3 cm) and t a whole number: along the
+        # segment that is up to ~3 cm / cos(angle to the normal) + 1
+        sl = math.sqrt(sum((p1[k] - p0[k]) ** 2 for k in range(3)))
+        cs = abs(dn) / sl if sl else 1
+        tol = 2.0 + 3.5 / max(cs, 1e-3)
+        ok = dh == ph and (not dh or max(abs(dpt[k] - out[k]) for k in range(3)) <= tol)
+        rep.check(ok, 'case %d nv %d R %d: dos %s %s, port %s %s (p0 %s p1 %s)' % (case, nv, R, dh, dpt if dh else '',
+                  ph, [round(c, 1) for c in out] if ph else '', p0, p1))
+    rep.notes.append('%d cases within 2 cm of an edge / the plane / an end disagreed (not judged)' % edge)
+    # edge inputs: axis-aligned faces (a wall, a floor) with integer corners, hit straight on at a corner, on an edge, just
+    # inside / outside them (the DOS crossing rules count a point on an edge or a corner as inside)
+    for case in range(n * 20):
+        e = emu()
+        axis = rnd.randint(0, 2); sgn = rnd.choice([1, -1])
+        a1, a2 = [k for k in range(3) if k != axis]
+        x0, z0 = rnd.randint(-5000, 5000), rnd.randint(-5000, 5000)
+        wdt, hgt = rnd.randint(1, 3000), rnd.randint(1, 3000)
+        lvl = rnd.randint(-3000, 3000)
+        corners = [(x0, z0), (x0 + wdt, z0), (x0 + wdt, z0 + hgt), (x0, z0 + hgt)]
+        if rnd.random() < 0.5: corners = [(x0, z0), (x0 + wdt, z0 + hgt // 2), (x0, z0 + hgt)]
+        verts = []
+        for (c1, c2) in corners:
+            v = [0, 0, 0]; v[axis] = lvl; v[a1] = c1; v[a2] = c2; verts.append(v)
+        nv = len(verts)
+        nrm = [0.0, 0.0, 0.0]; nrm[axis] = float(sgn)
+        pick = rnd.choice(['corner', 'edge', 'in1', 'out1', 'mid'])
+        j = rnd.randrange(nv); A, B = verts[j], verts[(j + 1) % nv]
+        if pick == 'corner': h = list(A)
+        elif pick == 'mid': h = [sum(v[k] for v in verts) // nv for k in range(3)]
+        else:
+            f = rnd.uniform(0, 1); h = [int(round(A[k] + (B[k] - A[k]) * f)) for k in range(3)]
+            if pick != 'edge':
+                c = [sum(v[k] for v in verts) / nv for k in range(3)]
+                for k in (a1, a2):
+                    dd = 1 if c[k] > h[k] else -1 if c[k] < h[k] else 0
+                    h[k] += dd if pick == 'in1' else -dd
+        d0, d1 = rnd.randint(1, 2000), rnd.randint(1, 2000)
+        p0 = list(h); p0[axis] = lvl + sgn * d0
+        p1 = list(h); p1[axis] = lvl - sgn * d1
+        N = [int(round(c * (1 << 29))) for c in nrm]
+        poly = e.alloc(0x60); vb = e.alloc(0x2c * nv); seg = e.alloc(0x40)
+        e.w16(poly + 2, nv); e.w32(poly + 4, 0x40)
+        for k in range(3): e.w32(poly + 0x14 + 4 * k, N[k])
+        for jj in range(nv):
+            e.w8(poly + 0x40 + jj, jj)
+            for k in range(3): e.w32(vb + 0x2c * jj + 0xc + 4 * k, verts[jj][k])
+        for k in range(3):
+            e.w32(seg + 4 * k, p0[k]); e.w32(seg + 12 + 4 * k, p1[k]); e.w32(seg + 24 + 4 * k, p1[k] - p0[k])
+        e.w32(seg + 0x34, 0)
+        e.call(0x1d960, eax=seg)
+        dh = e.call(0x1c7a0, eax=poly, edx=vb, ebx=seg) != 0
+        out = F3()
+        vv = (ctypes.c_float * (3 * nv))(*[float(c) for vtx in verts for c in vtx])
+        ph = L.shim_seg_poly(vv, nv, F3(*nrm), F3(*map(float, p0)), F3(*map(float, p1)), out) != 0
+        rep.check(dh == ph, 'edge case %d (%s, axis %d): dos %s port %s, face %s, hit at %s' % (case, pick, axis, dh, ph, verts, h))
+
 
 def main():
     args = sys.argv[1:]
