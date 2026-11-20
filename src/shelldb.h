@@ -35,4 +35,6 @@ size_t shell_lzss(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen
 int  shell_pcx(const uint8_t *data, size_t len, shell_image *img, int *exact);
 void shell_image_free(shell_image *img);
 
+/* Watcom C's qsort as the shell links it (not stable: its order of equal elements is the Hall of Honor's) */
+void wc_qsort(void *base, size_t n, size_t es, int (*cmp)(const void *, const void *));
 #endif

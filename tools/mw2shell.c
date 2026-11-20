@@ -3875,7 +3875,7 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     Uint64 last = 0;
     reg_load();
     for (i = 0; i < 20; i++) list[i] = &g_reg[i];
-    qsort(list, 20, sizeof list[0], honor_cmp);
+    wc_qsort(list, 20, sizeof list[0], honor_cmp);   /* the library qsort 0x48dc1: ties as Watcom's leaves them */
     load_bg(1);
     while (!done) {
         SDL_Event e;

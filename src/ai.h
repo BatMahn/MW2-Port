@@ -103,6 +103,9 @@ typedef struct {
     float leader_dist;
     float enemy_elev;        /* elevation from my origin to the target's origin, degrees (up +) */
     int   contact;           /* touching another mech (controller +0xa4, 0x10020e00) */
+    int   contact_unit;      /* the contact is a unit (object +0x7c != -1; DOS 0x2ce4e) */
+    int   target_not_unit;   /* the attack target is not a unit (+0x14a bit 0x200 clear: a building / thing or a nav) */
+    int   grounded;          /* on the ground (object +0x78) */
     int   out_of_weapons;    /* 0x10020880: no weapon with ammunition / working */
     int   moving;            /* controller +0x88 != 0 (0x1001ea40's out-of-weapons test) */
 } ai_view;
@@ -145,6 +148,12 @@ typedef struct {
     float speed;             /* actual ground speed, cm/s (signed; the velocity c[0x3d..0x3f], see msim_drive_step) */
     float thr_servo;         /* current throttle c[0x13] as a fraction of full (servo +0x44, T 36.2 ticks) */
     float spd_servo;         /* servoed drive speed c[0xb], cm/s (servo +0x24 toward c[10]) */
+    int   cls;               /* DOS: the unit class the manoeuvre record is taken by (1 mechs; ai_set_class) */
+    int   tons1;             /* DOS: a 1-ton unit (an Elemental): the jumper record */
+    int   jump_man;          /* DOS +0x190: set when manoeuvre 4, 5, 9 or 11 starts, cleared when any other starts (0x2cc43) */
+    int   goal_pt;           /* DOS manoeuvre 12: the own point steered for (index in guard) */
+    int   dodge_fwd;         /* DOS: manoeuvre 11 jets forward (+0x20) instead of left (+0x1e) - +0x17a from the warning (0x2e6a6) */
+    float leg_srv;           /* DOS look: the leg turn servo's value c[0xf], deg/s (MW2.EXE servo +0x34, T 0.3 s = 54 ticks) */
     int   drive_slow;        /* servo +0x24's T: 0 = 36.2 ticks (0x100190d0) until a walk key flagged 0x10 runs, then 90.5 */
     int   targets_player;    /* this step's enemy is the player (+0x14e == player | 0x200): the MISLTRCK check (0x10031e30) */
     int   lock;              /* missile lock flags (0x10044560): 0x8000 on target, 0x40 acquiring, 0x80 locked */
@@ -185,7 +194,8 @@ int  ai_allows(const ai_library *lib, const ai_mind *m, int state);
 void ai_post(ai_mind *m, int cond);
 /* the target of a guided launch reacts (engine 0x10020ac0): shooter_level = the shooter's pilot level (player 1).
  * side_free(ctx, side) reports whether a 50 m sidestep that way (-1 left, +1 right) is clear. */
-void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int (*side_free)(void *ctx, int side), void *ctx);
+void ai_set_class(ai_mind *m, int unit_class, int tons);   /* DOS: the manoeuvre record by class (MW2.EXE 0x2c880) */
+void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, float shooter_rel, int (*side_free)(void *ctx, int side), void *ctx);
 /* The nav steering (3Dfx 0x10013600 / DOS 0x229e0, the AI's and the player's autopilot): err = bearing - heading in
  * degrees (-180..180) -> the leg input +0xc (819.2 = full). ai_dos_int: the DOS edition's integer form (whole degrees,
  * floored) */

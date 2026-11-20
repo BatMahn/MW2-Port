@@ -1072,6 +1072,17 @@ static void combat_step(msim *s, float dt);
 static void terrain_release(void *t);
 static float wrap180(float a);
 static int los_blocked(const msim *s, float x0, float y0, float z0, float x1, float y1, float z1);
+static float drive_servo(float cur, float tgt, float T, float ticks);
+/* MW2.EXE's vector length (the normalise 0x40500, the collisions 0x20890 / 0x20a50): the octagonal estimate (4 max + mid +
+ * min) / 4 of the axis offsets (DOS integers >> 2; here as floats) */
+static float oct_len(float x, float y, float z)
+{
+    float a = fabsf(x), b = fabsf(y), c = fabsf(z), t;
+    if (a < b) { t = a; a = b; b = t; }
+    if (a < c) { t = a; a = c; c = t; }
+    return (a * 4.0f + b + c) * 0.25f;
+}
+float msim_dos_len(float x, float y, float z) { return oct_len(x, y, z); }
 static void avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, float dt);
 static unsigned rnd_ms(unsigned *x);
 static unsigned rnd_ms(unsigned *x) { *x = *x * 1103515245u + 12345u; return (*x >> 16) & 0x7FFF; }
@@ -1605,6 +1616,7 @@ void msim_step(msim *s, int32_t dt_ms)
         int cur = ac->table < s->logic.table_count ? s->logic.current[ac->table] : -1, prog;
         world_actor *l = group_leader(s, ac->table);
         float dx, dz;
+        ai_set_class(m, ac->unit_class, s->units[i].tons);   /* the manoeuvre record (DOS 0x2c880: by class, the 1-ton jumper) */
         int enemy_who = -1, in_star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
         if (s->armed[i] && s->units[i].destroyed && !fixed_unit(ac) && s->units[i].y > s->units[i].ground + 1.0f) {
             /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 on the ground
@@ -1688,6 +1700,7 @@ void msim_step(msim *s, int32_t dt_ms)
             v.has_enemy = pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who);
             enemy_who = v.has_enemy ? who : -1;
             v.enemy_is_player = v.has_enemy && who == -1;
+            v.target_not_unit = v.has_enemy && who < -1;
             m->targets_player = v.enemy_is_player;
             v.enemy_x = ex; v.enemy_z = ez; v.enemy_heading = ef; v.enemy_height = ey - s->units[i].ground;   /* against my own height above my ground */
         }
@@ -1738,6 +1751,8 @@ void msim_step(msim *s, int32_t dt_ms)
                 v.leader_ok = 1; v.leader_dist = sqrtf(lx * lx + lz * lz);
             }
             v.contact = (s->bump_with && s->bump_with[i] > 0) || s->units[i].blocked;   /* controller +0xa4 (cleared on landing on a unit) */
+            v.contact_unit = s->bump_with && s->bump_with[i] > 0;
+            v.grounded = s->units[i].y <= s->units[i].ground + 1.0f;
             v.out_of_weapons = combat_out_of_weapons(&s->units[i]);                  /* 0x10020880 */
             v.moving = ac->speed > 0 && !fixed_unit(ac);   /* controller +0x88: the top speed (0x10041410; 0 for turrets, 0x100219c9) */
         }
@@ -1949,8 +1964,18 @@ void msim_step(msim *s, int32_t dt_ms)
              * limit (0x1001a180), pitch T = 0.2 s = 36.2 ticks; value += dt x (target - value) / T, no overshoot */
             float lim = s->twist_limit ? s->twist_limit[i] : 90.0f, tw = m->twist_demand, ticks = dt * 182.0f;
             float kt = ticks / 108.6f, kp = ticks / 36.2f;
+            if (msim_dos_int) {
+                /* DOS MW2.EXE: a mech's twist servo 0.6 s and pitch 0.2 s chopped at 182 Hz (0x26733 / 0x26772: 109 / 36 ticks);
+                 * a turret's both 0.8 s = 145 (0x2eb1f / 0x2eb38) - the port had the 3Dfx DLL's 108.6 / 36.2 for every unit,
+                 * a turret's pitch 4x too quick. A turret with a whole turn (limit >= 360, 0x2edd1) first takes its servo's
+                 * value round to within 180 degrees of the demand (0x2edd9..0x2edfc), so it turns the short way when its
+                 * target crosses behind it (the GBL port's emulated comparison, GBL 0x2eed0 / 0x2f1a9; MW2.EXE the same) */
+                int tur = ac->unit_class == 3;
+                kt = ticks / (tur ? 145.0f : 109.0f); kp = ticks / (tur ? 145.0f : 36.0f);
+            }
             if (lim < 360.0f) { if (tw > lim) tw = lim; if (tw < -lim) tw = -lim; }
-            m->twist += (tw - m->twist) * (kt < 1.0f ? kt : 1.0f);
+            if (msim_dos_int && lim >= 360.0f) m->twist = msim_twist_round(m->twist, tw, ac->unit_class == 3 ? 145.0f : 109.0f, ticks);
+            else m->twist += (tw - m->twist) * (kt < 1.0f ? kt : 1.0f);
             m->pitch += (m->pitch_demand - m->pitch) * (kp < 1.0f ? kp : 1.0f);
             ac->mech.twist = m->twist;   /* drawn, and the weapon mounts follow it */
             /* the pitch object (the record's second THNG node: arms, a turret's guns) turned to the aim's pitch
@@ -2016,6 +2041,22 @@ void msim_step(msim *s, int32_t dt_ms)
                                    * tank, state 2): x2 (0x102473d4) while fuel is left after the burn, else no turn (0x1001a180) */
                 if (s->units[i].immobile && !(m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)) rate = 0.0f;   /* a leg gone: no leg turn (user report against the
                                    * original: a legged mech cannot come about - circle behind it; it still twists its torso) */
+                if (msim_dos_int) {
+                    /* DOS MW2.EXE 0x27ce3..0x27d5a: kv = c[0xb] (16.16 cm/tick, +0x2c) / 10000 by idiv (toward zero, ~km/h);
+                     * a computer-run unit at kv 0 does not turn on the spot; airborne (object +0x80 bit 4, the feet more
+                     * than the centre height over the ground) no leg turn unless the jets are held (above). The heading then
+                     * turns by the leg turn SERVO's value (0x27561: object +0x60 += +0x3c x ticks / 182), servo +0x34 easing
+                     * toward the demand with T = chop(0.3 x 182) = 54 ticks (0x2675c): a turn builds up and runs on ~0.3 s.
+                     * Found by the GBL port's emulated comparison (GBL 0x28054 / 0x278e1; MW2.EXE the same code) */
+                    int jets_held = m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0;
+                    if (!jets_held) {
+                        int airborne = s->units[i].y - s->units[i].ground > (s->centre_h ? s->centre_h[i] : 550.0f);
+                        rate = msim_leg_demand(m->turn, m->spd_servo, 0, s->units[i].speed_gain, airborne, 0, 0.0f);
+                        if (s->units[i].immobile) rate = 0.0f;
+                    }
+                    m->leg_srv = drive_servo(m->leg_srv, rate, 54.0f, sdt * 182.0f);
+                    rate = m->leg_srv;
+                }
                 ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
                 if (freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
                     float d = (ac->mech.heading - hd0) * 3.14159265f / 180.0f, cd = cosf(d), sd = sinf(d);
@@ -2093,7 +2134,7 @@ void msim_step(msim *s, int32_t dt_ms)
                             /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
                              * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
                              * |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
-                            float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], dv = sqrtf(dvx * dvx + dvy * dvy);
+                            float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], dv = msim_dos_int ? oct_len(dvx, dvy, 0.0f) : sqrtf(dvx * dvx + dvy * dvy);   /* DOS 0x20890: the DOS length */
                             float bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
                             float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);   /* projected onto its sphere */
                             float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
@@ -2159,6 +2200,10 @@ void msim_step(msim *s, int32_t dt_ms)
                                 * ground window: 0x10019c4e), collision damage at the attempted speed on every contact frame
                                 * (0x10019d84 -> 0x1000c3c0 / 0x1000c1f0) and the object walked into takes its share */
                         float wn[3], bx = nx, bz = nz, sp3 = sqrtf(spd * spd + acr * acr) / 182.0f;
+                        if (msim_dos_int) {   /* DOS MW2.EXE 0x20a50: the DOS length (4 max + mid + min) / 4 of the velocity (world x / y / z) */
+                            float hh3 = ac->mech.heading * 3.14159265f / 180.0f;
+                            sp3 = oct_len((sinf(hh3) * spd + cosf(hh3) * acr) / 182.0f, s->units[i].vy, (cosf(hh3) * spd - sinf(hh3) * acr) / 182.0f);
+                        }
                         float sacr = s->across ? s->across[i] : 0.0f;
                         /* the attempted velocity is the frame's end one (0x10019310: v + a t before the move) */
                         float dyi = dy_sub, vyi = dy_sub == 0.0f ? 0.0f : imp3 ? vy3 : dt > 0.0f ? 2.0f * dy_frame / (dt * 182.0f) - s->units[i].vy : s->units[i].vy;
@@ -2177,7 +2222,7 @@ void msim_step(msim *s, int32_t dt_ms)
                         s->units[i].blocked = !(imp & 2);
                         if (!(imp & 2)) {
                             if (s->collision_damage)   /* Combat Variables: a global switch in the engine */
-                                combat_collision(&s->units[i], sp3, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - ac->mech.heading, &s->rng);
+                                combat_collision(&s->units[i], sp3, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - (ac->mech.heading + m->twist), &s->rng);   /* off heading + twist (DOS 0x209ab..0x209b9: object +0x60 + +0x6c), as the player's */
                             msim_impact_damage(s, i, sp3);
                         }
                     touched = 1;
@@ -2638,7 +2683,10 @@ static void spawn_shot_h(msim *s, int weapon, int owner, const float from[3], co
     sh->prox = 0;
     sh->first = 0;
     sh->id = ++s->shot_serial;
-    if (owner == -1) s->player_last_shot = sh->id;   /* 0x10044xxx: DAT_1025a69c (kept only for a missile) */
+    /* the player's newest MISSILE (projectile type 3 / 4) - the one F10 / F9 follow (0x10044xxx: DAT_1025a69c, kept only for
+     * a missile): every shot had counted, so after a laser or a gun F10 had nothing to follow (the GBL port's DOSBox check:
+     * an LRM fired, then the machine gun, then F10 - the camera takes the missile) */
+    if (owner == -1 && (combat_weapon_kind(weapon) == 3 || combat_weapon_kind(weapon) == 4)) s->player_last_shot = sh->id;
 }
 
 static void car_inc(msim *s, int off)
@@ -2903,17 +2951,19 @@ static int side_free(void *ctx, int side)
     return !probe_engine(c->s, c->i, p0, p1, &climb, &ox, &oz);
 }
 /* a guided launch at AI mech t by a shooter of pilot level lv (the player 1): engine 0x10020ac0 */
-static void missile_warning(msim *s, int t, int lv)
+static void missile_warning(msim *s, int t, int lv, float sx, float sz)
 {
     ai_view v;
     struct side_ctx c;
+    float rel;
     if (!s->minds || !s->ai_ok || t < 0 || t >= s->actor_count || !s->armed[t] || s->units[t].destroyed) return;
+    rel = atan2f(sx - (float)s->actors[t].mech.origin[0], sz - (float)s->actors[t].mech.origin[2]) * 57.29578f - s->actors[t].mech.heading;   /* the shooter off the target's heading (DOS 0x2e5ec..) */
     memset(&v, 0, sizeof v);
     v.can_jump = s->units[t].jets > 0 && !s->units[t].no_jump && s->units[t].jet_fuel > 5.0f;
     v.heat = s->units[t].heat;
     v.pilot_level = s->actors[t].ai_level >= 1 && s->actors[t].ai_level <= 4 ? s->actors[t].ai_level : 1;
     c.s = s; c.i = t;
-    ai_missile_warning(&s->minds[t], &v, lv, side_free, &c);
+    ai_missile_warning(&s->minds[t], &v, lv, rel, side_free, &c);
 }
 
 static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
@@ -3208,7 +3258,7 @@ static void combat_step(msim *s, float dt)
                 }
                 if (who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* the target dodges (0x10020ac0 from 0x1004397b) */
                     int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
-                    missile_warning(s, who, lv);
+                    missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2]);
                 }
                 if (s->on_shot) s->on_shot(s->shot_user, w, i, first, src[0], src[2]);
                 if (first) muzzle(s, w, src, src == mf ? &s->actors[i].mech : NULL, mech3d_mount_slot(loc), s->actors[i].mech.heading);
@@ -3319,7 +3369,9 @@ static void combat_step(msim *s, float dt)
                         /* 0x10020ac0 (from 0x1004397b): the player (level 1) launching at its target - in its view: within
                          * 15 degrees of the aim - warns it */
                         float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
-                        if (fabsf(off) < 15.0f) missile_warning(s, e, 1);
+                        /* DOS MW2.EXE 0x2e45e..0x2e46b: the shooter's +0x198 bit 4 (pilot level <= 2) is set for computer-run units
+                         * only - the player's shots never warn (the GBL port's DOSBox probe against MW2.EXE) */
+                        if (fabsf(off) < 15.0f && !msim_dos_int) missile_warning(s, e, 1, s->player[0], s->player[2]);
                     }
                     s->shot_loc = loc;
                     if (s->on_shot) s->on_shot(s->shot_user, w, -1, first, src[0], src[2]);
@@ -4279,6 +4331,27 @@ static float drive_servo(float cur, float tgt, float T, float ticks)
     float d = tgt - cur, inc = ticks * d / T;
     if (fabsf(d) < 1e-7f || fabsf(inc) >= fabsf(d)) return tgt;
     return cur + inc;
+}
+float msim_servo(float cur, float tgt, float T, float ticks) { return drive_servo(cur, tgt, T, ticks); }
+/* the DOS leg turn demand c[0xe] walking (MW2.EXE 0x27cd4..0x27d6d): input on the 1024 scale, spd = c[0xb] in cm/s; kv =
+ * c[0xb] (16.16 cm/tick) / 10000 by idiv (toward zero; ~km/h): 0 when kv is 0 for a computer-run unit, or for the player
+ * with the throttle gain c[0x2d] at 0 (immobile); else (input / 1024, toward zero in 16.16) x 90 x cos(min(80, kv) deg).
+ * Airborne (object +0x80 bit 4): the autopilot on (+0xbc) keeps the last demand, else 0 */
+float msim_leg_demand(float input, float spd, int player, float gain, int airborne, int autopilot, float prev)
+{
+    int kv = (int)(spd * (65536.0f / 182.0f)) / 10000;
+    if (airborne) return autopilot ? prev : 0.0f;
+    if (kv == 0 && (!player || gain <= 0.0f)) return 0.0f;
+    if (kv > 80) kv = 80;
+    /* only the top is clamped (0x27d07): reversing faster than 80 takes cos(kv) of the negative kv as it is */
+    return input / 1024.0f * 90.0f * cosf((float)kv * 3.14159265f / 180.0f);
+}
+/* a whole-turn twist (a turret, DOS 0x2edd1..0x2edfc then the servo): the value taken round to within 180 degrees of the
+ * demand, then stepped toward it; returned within +-180 */
+float msim_twist_round(float cur, float demand, float T, float ticks)
+{
+    cur = demand - wrap180(demand - cur);
+    return wrap180(drive_servo(cur, demand, T, ticks));
 }
 /* The engine's throttle-to-speed chain (traced session 12; was a DOS-fitted ramp). Every mech, player and AI alike:
  *  - 0x1001a180: throttle target c[0x12] = 1/64 + input +8 x c[0x2c] (stop 1/64, full 2/64; 1/64 + 1/512 turning on the

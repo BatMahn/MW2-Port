@@ -292,6 +292,8 @@ static void var_free(gl12_var *v)
     }
 }
 
+int rb_prewarm_count(void) { return 0; }   /* (fixed function: nothing to build) */
+void rb_prewarm(int i) { (void)i; }
 void rb_quit(void)
 {
     int k;

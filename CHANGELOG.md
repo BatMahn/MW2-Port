@@ -1,5 +1,74 @@
 # Changelog
 
+## v1.1.39 (2026-11-20)
+
+A full emulated comparison of the DOS look's sim against the DOS MW2.EXE, done the way the Ghost Bear's Legacy port
+did its own. The original routines run in an x86 emulator next to the port's code on the same inputs (ten tests,
+about 20,000 checks: heat, heat sinking, override roll, nav steering, leg turning, servos, turret twist, collision
+damage and manoeuvre timings). The tools are in tools/audit, with the results in docs/AUDIT_DOS.md. Two differences
+turned up, both now fixed for the DOS look:
+
+- **Heat on Hard in cold weather:** below -30 degrees your heat sinks now shed heat at MW2.EXE's rate (67 in 16.16
+  fixed point per sink a tick), not the 3D-card edition's 67.5. That is under 1 % slower.
+- **Leg turning while reversing fast:** MW2.EXE limits the speed term of the leg turn only going forward. Reversing
+  faster than 80 km/h, the legs now turn less, and past 90 km/h they turn the other way, as in the original. The port
+  had treated fast reversing like 80 km/h.
+
+## v1.1.38 (2026-11-20)
+
+Fixes from the Ghost Bear's Legacy port. GBL runs on the same DOS engine. Its port tested GBL's MW2.EXE routines
+under emulation and against DOSBox. Each fix below was checked in MechWarrior 2's own DOS MW2.EXE before it went in.
+Some of GBL's fixes turned out to be GBL-only and were left out: the -100 degree heat tier, the distant-sound fade,
+the CT hit spread, the vehicles' manoeuvres and the cheat codes.
+
+Unless noted, these apply to the DOS look. The 3D looks keep the 3D-card edition's rules.
+
+- **Leg turning eases in and out.** The legs turn through a servo, about 0.3 s each way, for you and the enemy
+  (MW2.EXE servo +0x34, T 54 ticks). Before, a turn started and stopped at once. Computer-run units no longer turn
+  on the spot. Nothing turns its legs in mid-air without jump jets.
+- **Turrets:**
+  - They aim at the original's slower rate: 0.8 s on both axes. Their gun tilt had been four times too quick.
+  - A turret that can turn all the way round now turns the short way when you circle behind it.
+  - Mechs' torso servos use the DOS timings (0.6 s / 0.2 s at 182 Hz).
+- **Enemy manoeuvres:**
+  - Every manoeuvre's timing is the DOS edition's (182 Hz clock).
+  - An enemy backs off a contact only when it isn't already reversing or landing from a jump.
+  - It attacks a building or nav point with its plain pattern.
+  - A dodge (manoeuvre 11) uses the jet the original picks, from the side the shot came from.
+  - Aircraft circle their target 100 m out (manoeuvre 12), dropships use the flanking slots, and other vehicles
+    charge straight at you. Elementals use their jumping table. Before, every unit used the mechs' table.
+  - Your own missiles and PPCs never make an enemy dodge. Only computer-run pilots' shots trigger a dodge
+    (MW2.EXE 0x2e450).
+- **Heat:** overriding a shutdown at high heat now risks an ammunition explosion about once every 1.5 minutes, as
+  the DOS edition rolls it. The port had used the 3D-card edition's rate, 14 times higher.
+- **Ammunition explosions:** an enemy mech whose ammunition explodes is out of the fight at once (MW2.EXE 0x25c7d).
+  Before, that only happened with automatic ejection on.
+- **Collisions:** ramming and landing on another mech do the DOS damage. The speed is measured the DOS way. Landing
+  on a heavier mech's head does 4 x its tonnage ratio, not 2 x. The struck side is worked out from the torso's facing.
+- **MASC** boosts speed only while your mech is striding: not standing still or with the jets firing. "MASC" now
+  shows left of the kph readout while it is engaged.
+- **Damage display:** a location turns yellow and red by its armour and internal structure together, as the
+  original works it out (MW2.EXE 0x2f611). It no longer goes red while the structure is still whole. The same levels
+  colour the target display and image enhancement.
+- **HUD:**
+  - When both message lines are busy, a new message replaces the one that would stay up longer. Toggling the
+    autopilot no longer wipes "MASC engaged."
+  - The heat bar always reads "Heat": the DOS edition has no "Shutdown..." or "Overridden" label.
+- **Missile camera (F10 / F9), all looks:** it follows your newest missile. Before, a laser or gun shot fired after
+  the missile left it nothing to follow.
+- **Flee to DOS** from the in-mission menu sets off your mech's self-destruct, as the DOS edition does. The game
+  closes once the mission has ended.
+- **Sound:** object loops (machinery, fans) play on their own channels (MW2.EXE 0x40e90). They no longer use up the
+  eight channels weapons and footsteps need.
+- **Hall of Honor:** pilots with equal rank, honor and missions are listed in the order the original's own sort puts
+  them (Watcom's qsort, MW2SHELL.EXE 0x48dc1).
+- **All looks:**
+  - The fade from black at the start of a mission lasts its full 2 seconds at any frame rate. At 144 fps it had been
+    over almost at once.
+  - Slow first frames no longer make the start-up jump ahead.
+  - The graphics pipelines are built while the drop screen is up, so a new install's first mission doesn't stall.
+    A Direct3D 12 driver that can't run the game's shaders now falls back to Vulkan instead of stopping the game.
+
 ## v1.1.37 (2026-11-20)
 
 - **Re-release: the GitHub v1.1.36 was built from v1.1.29's sources.** The v1.1.36 commit on GitHub had the

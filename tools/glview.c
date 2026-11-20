@@ -273,6 +273,8 @@ static int       g_pl_legs_turn;       /* this frame's leg-turn input (+0xc) is 
 static anim_player g_pl_ap;            /* the player's walk animation key player (engine 0x1000dec0); g_pl_t = its pose */
 static int       g_pl_ap_ok;
 static int       g_feet_to_torso;
+static int       g_pl_reset_legs;
+static int       g_masc_key;        /* the player's walk key now playing has flag 0x10 (MASC applies in the DOS look) */   /* the DOS look's leg turn servo zeroed (a new mission) */
 static float     g_twist_dem, g_pitch_dem;   /* the torso demands c[2] / c[6] (the sinks'); g_pl.twist / g_pitch are the servos' values c[3] / c[7] */
 static float     g_twist_srv = 1e9f, g_pitch_srv = 1e9f;   /* the servos' values as the servo step last left them */
 static hud      *g_hud;
@@ -416,7 +418,11 @@ static void hud_message_ex(const char *m, int ticks, int pri)
     for (k = 0; k < 2 && pick < 0; k++) if (g_msg_line[k].until <= now) pick = k;
     if (pick < 0)
         for (k = 0; k < 2; k++)
-            if (g_msg_line[k].pri <= pri && (pick < 0 || g_msg_line[k].pri < g_msg_line[pick].pri)) pick = k;
+            if (g_msg_line[k].pri <= pri && (pick < 0 || g_msg_line[k].pri < g_msg_line[pick].pri ||
+                /* DOS MW2.EXE 0x1108f..0x110a2: on a tie the line that ends LATER is taken - "MASC engaged.", "Autopilot
+                 * engaged.", "Autopilot disengaged.": the last replaces the autopilot line and MASC stays (the GBL port's
+                 * DOSBox check); the 3D editions' port took the first line */
+                (msim_dos_int && g_msg_line[k].pri == g_msg_line[pick].pri && g_msg_line[k].until > g_msg_line[pick].until))) pick = k;
     if (pick < 0) return;
     snprintf(g_msg_line[pick].text, sizeof g_msg_line[pick].text, "%s", m);
     g_msg_line[pick].until = now + ticks * 1000 / 182;
@@ -2918,6 +2924,8 @@ static dmg_set *target_outline(prj_archive *ma, const char *skel)
     g_tdmg[k].ok = 1;
     return &g_tdmg[k];
 }
+static int loc_nibble(const combat_unit *tu, int gq);
+static int dos_hud_level(const combat_unit *u, int loc);
 /* a unit's outline: 15 regions coloured by its locations' damage (as the player's, engine 0x1001b620) */
 static void draw_outline(const hud_sprite lvl[4], const int regions[15][4], const combat_unit *u, float dx, float dy)
 {
@@ -2931,6 +2939,7 @@ static void draw_outline(const hud_sprite lvl[4], const int regions[15][4], cons
         if (u->armor_max[loc] > 0) lf = 15 - 15 * (int)u->armor[loc] / u->armor_max[loc];
         if (u->rear_max[loc] > 0) lr = 15 - 15 * (int)u->rear[loc] / u->rear_max[loc];
         lv = lf > lr ? lf : lr;
+        if (msim_dos_int && loc >= 0 && loc < MEK_LOC_COUNT) lv = u == &g_sim.player_unit ? dos_hud_level(u, loc) : loc_nibble(u, loc + 1);   /* the DOS levels */
         pick = u->loc_gone[loc] ? 3 : lv <= 0 ? 0 : lv < 12 ? 1 : 2;
         if (pick == 0) continue;
         hud_draw_region(g_hud, &lvl[pick], dx, dy, (float)rg[0] * 2.0f * g_hud_s, (float)rg[1] * 2.0f * g_hud_s, (float)rg[2] * 2.0f * g_hud_s, (float)rg[3] * 2.0f * g_hud_s);
@@ -3255,12 +3264,65 @@ static const combat_unit *g_wire_unit;
 /* a location's colour in the target view, as the damage outline (0x1001b620: levels 6 / 3 / 11 / 0 - here the HUD
  * blue, yellow, red, black): armour lost front or rear in fifteenths, 0 intact, 1-11 yellow, 12+ red; the centre torso
  * of a destroyed unit black. Returns 0 blue, 1 yellow, 2 red, 3 black; tu NULL or gq outside 1-8: blue */
+/* the DOS look's damage levels (MW2.EXE): at the load each side of a location gets the nibble n = (structure + armour) / 5 in
+ * whole points, clamped to 0..15 (+0x26: front bits 0-3, rear 4-7); a side's level is then 15 - (armour / div + structure) x
+ * 3 / (n << 16) in 16.16, clamped to 0..15, 0 for n = 0 (the hit 0x26598..0x265c1 into the object nibble 0x1e7e0, the
+ * player's outline 0x2f611..0x2f6d9); div the player's 4 (0x961d8), another unit's by difficulty (0x961d4). So the armour and
+ * the structure both count, and a location with more than 75 points stays undamaged on the display until it is down to 75
+ * (the 3D editions' rule, the armour's fifteenths alone, went red with a fifth of the armour left). Found by the GBL port
+ * (GBL 0x265e0 / 0x2f930); MW2.EXE the same code */
+static float (*g_int0)[MEK_LOC_COUNT];
+static int g_int0_n;
+static void int0_capture(void)
+{
+    int k, l;
+    free(g_int0); g_int0 = NULL; g_int0_n = 0;
+    if (!g_sim_ok || !g_sim.units) return;
+    g_int0 = calloc((size_t)g_sim.actor_count + 1, sizeof *g_int0);
+    if (!g_int0) return;
+    g_int0_n = g_sim.actor_count + 1;
+    for (k = 0; k < g_sim.actor_count; k++) for (l = 0; l < MEK_LOC_COUNT; l++) g_int0[k][l] = g_sim.units[k].internal[l];
+    for (l = 0; l < MEK_LOC_COUNT; l++) g_int0[g_sim.actor_count][l] = g_sim.player_unit.internal[l];
+}
+static float int0_of(const combat_unit *u, int loc)
+{
+    int k = u == &g_sim.player_unit ? g_sim.actor_count : (int)(u - g_sim.units);
+    if (!g_int0 || k < 0 || k >= g_int0_n || loc < 0 || loc >= MEK_LOC_COUNT) return u->internal[loc];
+    return g_int0[k][loc];
+}
+static int dos_side_level(float armor, int armor_max, float mult, float internal, float int0, int div)
+{
+    const int m = (int)lrintf(mult) > 0 ? (int)lrintf(mult) : 1;
+    long long n = ((long long)lrintf(int0) + armor_max / m) / 5, a, v;
+    if (n < 1) return 0;
+    if (n > 15) n = 15;
+    a = (long long)(armor * 65536.0f);
+    v = 15 - ((a / div + (long long)(internal * 65536.0f)) * 3) / (n << 16);
+    return v < 1 ? 0 : v > 15 ? 15 : (int)v;
+}
+/* the player's outline (0x2f611..0x2f6e4): both sides' levels, the higher - a location with no rear armour has its rear
+ * nibble from the structure alone */
+static int dos_hud_level(const combat_unit *u, int loc)
+{
+    float i0 = int0_of(u, loc);
+    int lf = dos_side_level(u->armor[loc], u->armor_max[loc], u->armor_mult, u->internal[loc], i0, 4);
+    int lr = dos_side_level(u->rear[loc], u->rear_max[loc], u->armor_mult, u->internal[loc], i0, 4);
+    return lf > lr ? lf : lr;
+}
 /* a location's damage nibble 0-15 (the fifteenths of armour lost, front or rear - the location objects' +0 bits 4-7) */
 static int loc_nibble(const combat_unit *tu, int gq)
 {
     int loc, lf = 0, lr = 0;
     if (!tu || gq < 1 || gq > 8) return 0;
     loc = gq - 1;
+    if (msim_dos_int) {   /* the DOS hit's nibble (0x265e0 -> 0x1e7e0): the side hit, the rear only for the torsos; the higher */
+        int div = tu == &g_sim.player_unit ? 4 : (int)lrintf(combat_armor_mult(0, 1, g_sim.difficulty));
+        float i0 = int0_of(tu, loc);
+        if (div < 1) div = 1;
+        lf = dos_side_level(tu->armor[loc], tu->armor_max[loc], tu->armor_mult, tu->internal[loc], i0, div);
+        if (loc == MEK_RT || loc == MEK_CT || loc == MEK_LT) lr = dos_side_level(tu->rear[loc], tu->rear_max[loc], tu->armor_mult, tu->internal[loc], i0, div);
+        return lf > lr ? lf : lr;
+    }
     if (tu->armor_max[loc] > 0) lf = 15 - 15 * (int)tu->armor[loc] / tu->armor_max[loc];
     if (tu->rear_max[loc] > 0) lr = 15 - 15 * (int)tu->rear[loc] / tu->rear_max[loc];
     lf = lf > lr ? lf : lr;
@@ -3778,7 +3840,7 @@ static int  g_mm_v[MV_COUNT], g_mm_old[MV_COUNT];   /* the pages' values (slider
 static int  g_mm_eds[PORTCFG_ED_COUNT], g_mm_ned = -1;   /* the renderers the Renderer item offers */
 static int  g_mm_tx_lock = -1;                  /* Textures locked to Original: a DOS mission, or no titanium/ folder */
 static int  g_mm_vol[3] = {-1, -1, -1};         /* music, effects, voice in force (16.16; -1 = not read yet) */
-static int  g_mm_ed_req = -1, g_mm_tx_req = -1, g_mm_world_dirty, g_mm_quit;
+static int  g_mm_ed_req = -1, g_mm_tx_req = -1, g_mm_world_dirty, g_mm_quit, g_mm_flee;   /* g_mm_flee: leaving once the self-destruct has ended the mission */
 static void mm_read_volumes(void)
 {
     unsigned char snd[60];
@@ -3969,6 +4031,19 @@ static void mm_activate(int k)
     } else if (it->type == MI_ACCEPT) { mm_commit_page(pg); mm_pop(); }
     else if (it->type == MI_CONFIRM) {
         mm_close_all();
+        /* the DOS edition's Flee in a mission: the self-destruct sequence, as the key's, and the game leaves once the mission
+         * has ended (its death sequence, "Press any key to exit...", the exit fade) - the GBL port's DOSBox check (MAIN MENU,
+         * 5 Flee to DOS, 1 Accept: the mech blows up, the mission ends as after the key, MW2.EXE exits with status 255);
+         * with the mech not up, the game leaves at once. (The Windows 95 edition leaves at once, 0x100642e0) */
+        if (it->arg && g_edition == PORTCFG_ED_DOS && g_sim_ok && g_world && !g_sim.over && !g_sim.ending) {
+            const combat_unit *pu2 = &g_sim.player_unit;
+            if (!pu2->destroyed && !pu2->shutdown && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))) {
+                hud_message_v("Self-destruct sequence initiated", 16);   /* message 4 */
+                player_eject(0); g_sim.player_unit.down_in_update = 1;
+                g_mm_flee = 1;
+                return;
+            }
+        }
         if (it->arg) g_mm_quit = 1;                                          /* Flee: leave the game */
         if (g_sim_ok && g_world && !g_sim.over) msim_end_now(&g_sim);         /* Abort: as EXIT_SIM (action 0x3b) */
     }
@@ -4461,10 +4536,11 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         combat_jet_fuel_max = g_edition == PORTCFG_ED_DOS ? 1820.0f : 1810.0f;   /* the full jet tank: DOS 0x71c (0x4ce84), 3Dfx 0x712 */
         combat_jet_refill_dos = g_edition == PORTCFG_ED_DOS;   /* DOS: whole ticks >> 2 a 30 fps frame (0x27c63) */
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
+        int0_capture();   /* the starting structure (the DOS look's damage levels) */
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
-        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on; DOS: the integer throttle servo (0x49b80) */
+        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = sfx_loops_apart = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on; DOS: the integer throttle servo (0x49b80) */
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
@@ -4559,7 +4635,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
-            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_jet_fire = 0; g_pl_anim_held = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
+            g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_jet_fire = 0; g_pl_anim_held = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_pl_reset_legs = 1; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_masc_key = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
             if (getenv("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
@@ -5119,7 +5195,7 @@ static int pl_move(float dt, float top)
                 touched = 1;
                 /* the engine's speeds (0x1000ba20 copies the other's z velocity over its own): damage at
                  * |(dvx, dvy)|, bounce at half |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
-                float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], sp = sqrtf(dvx * dvx + dvy * dvy), bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
+                float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], sp = msim_dos_int ? msim_dos_len(dvx, dvy, 0.0f) : sqrtf(dvx * dvx + dvy * dvy), bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
                 float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);
                 float gnd = msim_ground(&g_sim, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
                 if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
@@ -5196,7 +5272,9 @@ static int pl_move(float dt, float top)
                     * heading kept in g_pl_across (easing off at 1/45 a tick, above); unless harmless (a climbable face, the
                     * feet in the ground window: 0x10019c4e), collision damage at the attempted speed on every contact frame
                     * (0x10019d84 -> 0x1000c3c0 / 0x1000c1f0), the object walked into takes its share and the impact sounds */
-            float wn[3], sp3 = sqrtf(g_pl_speed * g_pl_speed + across * across) / 182.0f;   /* |the attempted velocity|, cm/tick */
+            float wn[3], sp3 = msim_dos_int ? msim_dos_len((sinf(h) * g_pl_speed + cosf(h) * across) / 182.0f, g_sim.player_unit.vy,   /* DOS 0x20a50: the DOS length */
+                                                           (cosf(h) * g_pl_speed - sinf(h) * across) / 182.0f)
+                                            : sqrtf(g_pl_speed * g_pl_speed + across * across) / 182.0f;   /* |the attempted velocity|, cm/tick */
             float x0 = (float)g_pl.origin[0] + (touched ? g_pl_frac[0] : fx), z0 = (float)g_pl.origin[2] + (touched ? g_pl_frac[1] : fz), bx = nx, bz = nz;
             int imp;
             if (getenv("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
@@ -6276,7 +6354,7 @@ int main(int argc, char **argv)
         }
     }
     g_show_objectives = getenv("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
-    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = g_edition == PORTCFG_ED_DOS;   /* DOS: the integer throttle servo (0x49b80) */
+    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = sfx_loops_apart = g_edition == PORTCFG_ED_DOS;   /* DOS: the integer throttle servo (0x49b80) */
     edition_look(&v);
     if (getenv("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
         const char *p = getenv("MW2_GROUPS");
@@ -6306,6 +6384,14 @@ int main(int argc, char **argv)
             Uint64 el = SDL_GetTicks() - g_drop_t0;
             static int music_on;
             if (el >= 2000 && !music_on) { music_on = 1; if (g_world && g_sim_ok) music_start(g_sim.music_track); }
+            {   /* the pipelines the mission will use, built behind the drop screen, one a frame (rb_prewarm); the screen
+                 * holds until they are done (from the GBL port: a new install's first mission no longer stalls) */
+                static int pw;
+                if (pw < rb_prewarm_count()) {
+                    rb_prewarm(pw++);
+                    if (el > 1900) { g_drop_t0 = SDL_GetTicks() - 1900; el = 1900; }
+                }
+            }
             if (el < 2000 + 860) {
                 g_drop_level = el <= 2000 ? 1.0f : 1.0f - (float)(el - 2000) / 860.0f;
                 while (SDL_PollEvent(&e)) if (e.type == SDL_EVENT_QUIT) running = 0;
@@ -6791,6 +6877,10 @@ int main(int argc, char **argv)
                     mm_key(mk, 0);
                 }
             }
+            /* the opening (the first 4 s of the mission, its fade from black included): a frame counts for at most 1/20 s, so
+             * the first frames' cost (the GPU driver building shaders, the mission's first draw) does not jump the start-up
+             * and the fade forward. Port choice: the original's first frames ran on its own clock */
+            if (!g_auto_on && g_sim_ok && g_sim.now < 4000 && dt > 0.05f) dt = 0.05f;
             if (g_mm_depth || g_paused) dt = 0;   /* the MAIN MENU (and PAUSE_GAME) pauses the game (WinMain 0x10009770: "pause timer TRUE") */
             mech3d all;
             int i;
@@ -6875,14 +6965,18 @@ int main(int argc, char **argv)
                  * swings back to the centre within ~0.5 s */
                 int offline = starting || (g_sim_ok && g_sim.player_unit.shutdown);
                 float heading_before = g_pl.heading;
-                float top = g_pl_walk * (g_sim_ok ? g_sim.player_unit.speed_gain : 1.0f) * (g_masc ? 1.5f : 1.0f), kmh, turn;
-                if (g_masc && g_sim_ok) {
+                /* the DOS look (MW2.EXE 0x27f0e..0x28006): MASC's x 1.5 and its malfunction roll only while the walk key now
+                 * playing carries flag 0x10 (object +0x80 bit 1, set / cleared per key by the animation task) and the jets are
+                 * not firing - so not standing, nor between strides (the GBL port's comparison, GBL 0x28298; MW2.EXE the same) */
+                int masc_now = g_masc && (!msim_dos_int || (g_masc_key && !g_pl_jet_fire));
+                float top = g_pl_walk * (g_sim_ok ? g_sim.player_unit.speed_gain : 1.0f) * (masc_now ? 1.5f : 1.0f), kmh, turn;
+                if (masc_now && g_sim_ok) {
                     /* engine 0x1001a180: MASC raises the target speed by half; while it runs and the mech moves forward,
                      * every 0xb5 ticks rand() % 60 == 12 is a malfunction (not for an invulnerable player, only while up -
                      * 0x1001a98f) - "MASC malfunction.", sound 0xc9, MASC off, and the heat (+0x98) rises by a quarter */
                     static float masc_t;
                     masc_t += dt * 182.0f;
-                    if (g_pl_speed > 1.0f && masc_t >= 181.0f) {
+                    if ((msim_dos_int ? masc_t > 182.0f : (g_pl_speed > 1.0f && masc_t >= 181.0f))) {   /* DOS 0x27f40: > 0xb6 */
                         masc_t = 0;
                         if (rand() % 60 == 12 && !g_sim.player_unit.invulnerable && !g_sim.player_unit.shutdown) {
                             g_masc = 0; if (g_sfx) sfx_play(g_sfx, 0xc9, SFX_V64, 0.0f);   /* 0x1001a9de: (0xc9, 0x64, 0x40, 5, 0x50) */ hud_message_v("MASC malfunction.", 0);
@@ -7067,6 +7161,12 @@ int main(int argc, char **argv)
                 /* engine turn = input/1024 (0x10247438) x 90 (0x10247428) x cos(min(80, km/h)) (0x1001a180); input = the legs_pan_delta
                  * sink's value -1..1 x its range 1024 (control table 0x10256540) */
                 turn = 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);
+                if (msim_dos_int) {   /* DOS MW2.EXE 0x27ce3..0x27d5a: kv = c[0xb] (16.16 cm/tick) / 10000 whole (~km/h) in the cosine;
+                                       * none at kv 0 with the throttle gain c[0x2d] at 0 (immobile), nor airborne (object +0x80 bit
+                                       * 4: the feet more than the centre height over the ground) - the jets held below override */
+                    turn = msim_leg_demand(1024.0f, g_spd_srv, 1, g_sim_ok ? g_sim.player_unit.speed_gain : 1.0f,
+                                           g_sim_ok && g_sim.player_unit.y - g_sim.player_unit.ground > g_sim.player_centre_h, 0, 0.0f);
+                }
                 if (g_sim_ok) {   /* the jets held (input +0x1d, state 2, a tank: c[0x30] >= 0): the turn is input / 1024 x 90
                                    * x 2 (0x102473d4) with no speed term while the tank holds fuel after this frame's burn,
                                    * else 0 - an empty tank with the jets held does not turn (0x1001a180: bVar3 -> local_2c) */
@@ -7168,7 +7268,7 @@ int main(int argc, char **argv)
                 }
                 { int pr = 0; float a = g_im_ok ? im_axis(&g_im, "legs_pan_delta", ks, 1, &pr) : 0; if (pr) g_pl.heading += a * turn * dt; if (pr && fabsf(a) >= 1e-7f) g_pl_legs_turn = 1; }
                 if (g_feet_to_torso && g_sim_ok && g_sim.player_unit.immobile) g_feet_to_torso = 0;   /* (a leg gone: as the turn above) */
-                if (g_feet_to_torso) {
+                if (g_feet_to_torso && !msim_dos_int) {
                     float step = 55.0f * dt, d = g_pl.twist;
                     if (fabsf(d) <= step) { g_pl.heading += d; g_pl.twist = 0; g_feet_to_torso = 0; }
                     else { float sgn = d > 0 ? 1.0f : -1.0f; g_pl.heading += sgn * step; g_pl.twist -= sgn * step; }
@@ -7184,6 +7284,25 @@ int main(int argc, char **argv)
                      * to 0 at the player's T = 0.2 s (0x1003b7e0) - and nothing else moves them */
                     g_pl.heading = heading_before; g_throttle = 0; g_throttle_eff = 0;
                     g_pl.twist = g_twist_srv; g_pitch = g_pitch_srv;
+                }
+                if (msim_dos_int) {   /* the DOS look: the leg turn SERVO. The turns above make the demand c[0xe] (deg/s); the heading
+                     * turns by the servo's value c[0xf] (MW2.EXE 0x27561: object +0x60 += +0x3c x ticks / 182), servo +0x34 easing
+                     * toward the demand with T = chop(0.3 x 182) = 54 ticks (0x2675c): a turn builds up and runs on ~0.3 s after the
+                     * key is let go. Not up: the demand is 0 and the servo runs out. FEET_TO_TORSO: the demand +-55 deg/s by the
+                     * twist's sign, the twist taking the heading's change; within 1 degree the demand, the servo and the twist are
+                     * 0 at once (the GBL port's emulated comparison, GBL 0x278e1 / 0x2811d; MW2.EXE the same code) */
+                    static float leg_srv;
+                    float dem = dt > 0 ? (g_pl.heading - heading_before) / dt : 0.0f;
+                    if (g_feet_to_torso && g_sim_ok && g_sim.player_unit.immobile) g_feet_to_torso = 0;
+                    if (g_feet_to_torso && !offline) {
+                        if (fabsf(g_pl.twist) >= 1.0f) dem = g_pl.twist > 0 ? 55.0f : -55.0f;
+                        else { dem = 0; leg_srv = 0; g_pl.twist = 0; g_feet_to_torso = 0; }
+                    }
+                    if (offline || g_pl_reset_legs) { dem = 0; if (g_pl_reset_legs) leg_srv = 0; g_pl_reset_legs = 0; }
+                    leg_srv = msim_servo(leg_srv, dem, 54.0f, dt * 182.0f);
+                    g_pl.heading = heading_before + leg_srv * dt;
+                    if (g_feet_to_torso && !offline) g_pl.twist -= leg_srv * dt;
+                    if (fabsf(leg_srv) >= 1e-4f) g_pl_legs_turn = 1;
                 }
                 if (getenv("MW2_POW_TRACE")) {   /* tests: power state, speed, torso, heading every 0.25 s */
                     static int32_t last_tr = -1000;
@@ -7244,6 +7363,7 @@ int main(int argc, char **argv)
                     if (seq < 0) seq = 0;
                     if (getenv("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
                     if (ev & ANIM_EV_SLOW) g_drive_slow = 1;   /* a key flagged 0x10: 0x1001a180: T 90.5 from now on */
+                    g_masc_key = g_pl_ap.key >= 0 && g_pl_ap.key < g_pl_anim.key_count && (g_pl_anim.key_flags[g_pl_ap.key] & 0x10);
                     if ((ev & ANIM_EV_STEP) && g_sfx && !g_sim.player_unit.destroyed)
                     {   /* the player's own footstep (a key flagged 0x800: +0x80 bit 3): the mech record's ASND chunk {u16
                          * sound, name} (Mad Dog, Nova, Timber Wolf MECFSMED 0xd6; Jenner, Kit Fox MECLIGHT 0xe0) - engine
@@ -8094,6 +8214,7 @@ int main(int argc, char **argv)
             test_dump("over");   /* TEST hook */
             write_results();
             running = 0;
+            if (g_mm_flee) exit_code = 42;   /* Flee, after its self-destruct: the shell leaves too */
         }
         if (g_world && g_sim_ok && getenv("MW2_DEBUG_KILL") && g_sim.now >= 1000) {   /* test: destroy actors "n[,n...][@secs]" at 1 s (or secs) */
             const char *q0 = getenv("MW2_DEBUG_KILL"), *at = strchr(q0, '@');
@@ -9357,6 +9478,7 @@ int main(int argc, char **argv)
                     if (pu->armor_max[loc] > 0) lf = 15 - 15 * (int)pu->armor[loc] / pu->armor_max[loc];
                     if (pu->rear_max[loc] > 0) lr = 15 - 15 * (int)pu->rear[loc] / pu->rear_max[loc];
                     lv = lf > lr ? lf : lr;
+                    if (msim_dos_int) lv = dos_hud_level(pu, loc);   /* DOS 0x2f611..: armour and structure (dos_side_level) */
                     pick = pu->loc_gone[loc] ? 3 : lv <= 0 ? 0 : lv < 12 ? 1 : 2;
                     if (pick == 0) continue;
                     hud_draw_region(g_hud, &g_hs_dmg_lvl[pick], dx, dy, (float)rg[0] * 2.0f * g_hud_s, (float)rg[1] * 2.0f * g_hud_s, (float)rg[2] * 2.0f * g_hud_s, (float)rg[3] * 2.0f * g_hud_s);
@@ -9367,6 +9489,13 @@ int main(int argc, char **argv)
                                              * colour (0xe) while the player's autopilot (controller +0xbc) is 1 or 2; DOSBox
                                              * YELLSCN1 a: caps 177-240 x 732-742 at 1024x768, gone once a turn cancels it */
                 { HUD_SIDE(-1); hud_text(g_hud, 110.0f, 456.0f, "AUTOPILOT", green); HUD_SIDE(0); }   /* bottom left: left-hand */
+            if (!hud_dead && g_masc && msim_dos_int) {   /* DOS MW2.EXE instrument 18 (0x321b0, slot 0xfe188): "MASC" (0x90cc0) in
+                                                           * the HUD font's colour while MASC is engaged (0x961f8), at its window's
+                                                           * corner - (250,188)-(273,199) in table 0x968e0, text point (0, 0) - left
+                                                           * of the kph readout (the GBL port's DOSBox check; MW2.EXE the same) */
+                const hud_win msw = hud_window(250, 188, 273, 199, 0, 0);
+                HUD_SIDE(1); hud_text(g_hud, (float)msw.x0 * msw.ux, (float)msw.y0 * msw.uy, "MASC", green); HUD_SIDE(0);
+            }
             if (!hud_dead) {   /* the instruments (dark while shut down) */
             /* tall bar, right edge of CPIT rect 1 (engine 0x1001c5b0, geometry 0x1001c250): the THROTTLE SETTING, its
              * shown value easing halfway to the setting on every draw (cur += (target - cur) >> 1, 16.16; stepped at the
@@ -9689,7 +9818,8 @@ int main(int argc, char **argv)
                 }
                 /* engine 0x100185e0: the heat bar's label - flag 4 (shutdown sequence) "Shutdown..." in red (0xb), with flag 8
                  * (overridden) "Overridden" in red, else "Heat" in green (0xe) */
-                if (pu->shutdown_pending || pu->shutdown) hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, pu->override ? "Overridden" : "Shutdown...", red);
+                /* (the DOS edition always draws "Heat": MW2.EXE has no "Shutdown..." or "Overridden" label) */
+                if ((pu->shutdown_pending || pu->shutdown) && !msim_dos_int) hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, pu->override ? "Overridden" : "Shutdown...", red);
                 else hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, "Heat", green);
                 hud_text(g_hud, (float)dw.x0 * dw.ux, (float)(dw.y0 + ly) * dw.uy, "dH/dT", green);
                 if (pu->jets > 0) {
@@ -9851,17 +9981,15 @@ int main(int argc, char **argv)
              * vertex colour (DAT_1024e494) or the flat colours / HUD table (0x1002ac40), and the frame-3 fade targets the
              * time of day's slot (4 / 0 / 8: DAT_1024e494 off) - so the picture is there from the first frame; the HUD
              * and flat colours are the start slot's (hud_mission_palette). (Titanium textures keep the fade: not traced) */
-            static int frame, steps;
-            static int32_t prev_now;
+            /* At the original's frame rates (DOS: 10-30 a second) that is 0x16c ticks from the third frame; the port runs it
+             * on the simulation's clock: the same 0x16c ticks (2.0 s) at any frame rate. Counted in frames, a frame shorter
+             * than a tick gave 10 steps - at 144 frames a second the fade was over in 0.07 s (the GBL port's fix) */
+            static int frame;
+            static int32_t t3;
             float level;
             frame++;
-            if (frame == 3) {
-                float ticks = (float)(g_sim.now - prev_now) * 0.182f;
-                steps = ticks <= 0 ? 0x14 : ticks < 1.0f ? 10 : (int)(362.0f / ticks + 0.5f);
-                if (steps < 1) steps = 1;
-            }
-            prev_now = g_sim.now;
-            level = frame <= 3 ? 0.0f : (float)(frame - 3) / (float)steps;
+            if (frame == 3) t3 = g_sim.now;
+            level = frame <= 3 ? 0.0f : (float)(g_sim.now - t3) * 0.182f / 364.0f;
             g_fade_level = level > 1.0f ? 1.0f : level;
             if (level < 1.0f) {
                 int fw, fh;

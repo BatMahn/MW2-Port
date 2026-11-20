@@ -425,6 +425,10 @@ int  msim_aim_target(const msim *s, float aim_yaw, float cone, float *distance);
 /* 1: the DOS edition's integer throttle servo (MW2.EXE 0x49b80: truncating, stalls 5 / 1024 of full short at 30 fps) and
  * servo taus 36 / 91; 0: the 3Dfx DLL's floats (36.2 / 90.5). The front end sets it by edition */
 extern int msim_dos_int;
+float msim_servo(float cur, float tgt, float T, float ticks);
+float msim_dos_len(float x, float y, float z);
+float msim_leg_demand(float input, float spd, int player, float gain, int airborne, int autopilot, float prev);   /* DOS 0x27cd4 */
+float msim_twist_round(float cur, float demand, float T, float ticks);   /* DOS 0x2edd1: a turret's whole-turn twist step */   /* MW2.EXE's octagonal vector length (4 max + mid + min) / 4 */   /* the servo 0x1003b7e0 / DOS 0x49b80 (float form) */
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks);
 /* a mech's full-throttle speed c[0x22] / 64 (cm/s) on a planet of gravity_g, in DOS MW2.EXE's integer steps */
 float msim_top_speed(int walk_mp, float gravity_g);

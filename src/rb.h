@@ -69,6 +69,8 @@ int  rb_target_height(void);
 void rb_blit(rb_tex src, int sx0, int sy0, int sx1, int sy1, rb_tex dst, int dx0, int dy0, int dx1, int dy1, int linear);
 /* glReadPixels(GL_RGB) of the current target: w x h RGB bytes, the bottom row first */
 void rb_read_rgb(int x, int y, int w, int h, unsigned char *rgb);
+int  rb_prewarm_count(void);   /* the pipelines a mission makes, built ahead of it (behind the drop screen) */
+void rb_prewarm(int i);
 void rb_finish(void);                    /* run everything recorded and wait for the GPU */
 void rb_present(void);                   /* run the frame and show the window's picture */
 

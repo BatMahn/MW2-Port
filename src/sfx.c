@@ -8,6 +8,9 @@
 #include <string.h>
 
 #define SFX_VOICES 24
+/* DOS MW2.EXE 0x40e90..0x40eb8: the object sound tasks' loops take channels 8..15, apart from the eight effect channels -
+ * with this set, a loop does not count against the effects' eight (the front end sets it for the DOS edition) */
+int sfx_loops_apart = 0;
 #define SFX_CACHE  512
 
 typedef struct { unsigned char *data; int len; Uint32 last; } clip;
@@ -402,7 +405,7 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
         snd_rule(index, &prio, &cap);
         for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].index == index) same++;
         if (cap >= 0 && same >= cap) { SDL_UnlockAudioStream(s->stream); return; }
-        for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && !s->v[k].is_voice) { busy++; if (s->v[k].prio < prio && !s->v[k].loop) steal = k; }
+        for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && !s->v[k].is_voice && !(sfx_loops_apart && s->v[k].loop)) { busy++; if (s->v[k].prio < prio && !s->v[k].loop) steal = k; }
         best = -1;
         if (s->next_is_voice || busy < 8) { for (k = 0; k < SFX_VOICES; k++) if (!s->v[k].c) { best = k; break; } }
         else best = steal;

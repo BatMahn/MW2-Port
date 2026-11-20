@@ -59,6 +59,7 @@ float sfx_pos_pan(float dx, float dz, float listener_yaw);
  * loop = 1 repeats until sfx_stop_loops. Returns 0 on success. */
 int  sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volume, int loop);
 void sfx_stop_loops(sfx *s);
+extern int sfx_loops_apart;   /* DOS: looping sounds on their own channels, not counted in the eight effect channels */
 /* the in-game menu's pause (engine 0x10031f30 / 0x10031f50): one-shot effects end, voice, loops and music hold */
 void sfx_pause(sfx *s, int on);
 /* 1 while a voice is playing sound `index` */

@@ -193,6 +193,42 @@ static const short MAN_TABLE[12][9] = {
     {4, 3, 5, 5, 8, 0, 0, 0, 0}, {5, 2, 7, 8, 0, 0, 0, 0, 0}, {6, 1, 6, 0, 0, 0, 0, 0, 0}, {7, 3, 0, 1, 8, 0, 0, 0, 0},
     {8, 5, 0, 1, 2, 3, 4, 0, 0}, {9, 3, 0, 8, 7, 0, 0, 0, 0}, {10, 3, 7, 7, 4, 0, 0, 0, 0}, {11, 2, 3, 1, 0, 0, 0, 0, 0}};
 
+/* DOS MW2.EXE 0x2c778..0x2c861 (the records 0xfdf10 per class, built once): class 1 (mechs) the mech table 0x963f4 (13 rows,
+ * the first pick rand(13 - 7)); class 5 (aircraft) one row {12} (0x964f0: manoeuvre 12 only, circling the target); class 8
+ * (dropships) {1} (0x96502: the flank slots); every other class (hovercraft, tanks...) {0} (0x964de: the straight attack);
+ * and a unit whose controller +0xe4 (the MEK tonnage) is 1 - the Elementals - the jumper table 0x96514 (0x2c8ab). The 3D
+ * editions' port gave every unit the mech table */
+static const short JUMPER_TABLE[12][9] = {
+    {0, 7, 0, 1, 2, 3, 4, 4, 4}, {1, 6, 0, 1, 2, 3, 4, 4, 0}, {2, 4, 7, 8, 4, 4, 0, 0, 0}, {3, 4, 7, 8, 4, 4, 0, 0, 0},
+    {4, 3, 5, 5, 8, 0, 0, 0, 0}, {5, 2, 7, 8, 0, 0, 0, 0, 0}, {6, 1, 6, 0, 0, 0, 0, 0, 0}, {7, 5, 0, 1, 2, 8, 4, 0, 0},
+    {8, 6, 0, 1, 2, 3, 4, 4, 0}, {9, 3, 0, 8, 7, 0, 0, 0, 0}, {10, 4, 7, 7, 4, 4, 0, 0, 0}, {11, 1, 3, 0, 0, 0, 0, 0, 0}};
+void ai_set_class(ai_mind *m, int unit_class, int tons) { m->cls = unit_class; m->tons1 = tons == 1; }
+
+/* the unit's own nav points in manoeuvre 12 (DOS 0x23420: four round the target; 0x233b0 drops every other one as its
+ * deletions shift the table, as msim's guard_drop) - kept in ai_mind.guard */
+static void own_drop(ai_mind *m)
+{
+    int r, w = 0;
+    for (r = 1; r < m->guard_n; r += 2, w++) { m->guard[w][0] = m->guard[r][0]; m->guard[w][1] = m->guard[r][1]; }
+    m->guard_n = w;
+    m->goal_pt /= 2;
+}
+static void own_goal(ai_mind *m, int i)
+{
+    if (m->guard_n <= 0) return;
+    m->goal_pt = (i + 1) % m->guard_n;
+    if (m->goal_pt < 0) m->goal_pt = 0;
+    m->flank_x = m->guard[m->goal_pt][0];
+    m->flank_z = m->guard[m->goal_pt][1];
+}
+static void own_square(ai_mind *m, const ai_view *v)   /* 0x23420: x - r, z - r, x + r, z + r (r: a unit 100 m) */
+{
+    static const float D[4][2] = {{-10000.0f, 0}, {0, -10000.0f}, {10000.0f, 0}, {0, 10000.0f}};
+    int k;
+    for (k = 0; k < 4 && m->guard_n < 16; k++) { m->guard[m->guard_n][0] = v->enemy_x + D[k][0]; m->guard[m->guard_n][1] = v->enemy_z + D[k][1]; m->guard_n++; }
+    own_goal(m, -1);
+}
+
 /* 0x10020a30(n): jets with fuel and heat below n */
 static int jets_ok(const ai_view *v, float n) { return v->can_jump && v->heat < n; }
 
@@ -201,6 +237,49 @@ static int choose_manoeuvre(ai_mind *m, const ai_view *v)
 {
     int tries, level_lt4 = v->pilot_level < 4;   /* +0x19e bit 2 (0x1001ee30) */
     if (m->forced_man != -1) { int f = m->forced_man; m->forced_man = -1; return f; }
+    if (ai_dos_int) {
+        /* DOS MW2.EXE 0x2c880: class 1 only - in contact (+0xa4), unless the reverse input +0x2f is on, +0x190 is set (the last
+         * manoeuvre started was a jump: 4, 5, 9 or 11) or the manoeuvre is 10 -> 10; a target that is not a unit -> 0; the
+         * jump pre-check. Then the class's record: the first pick rand(rows - first) (rows 0-5 of a mech's), later a row
+         * matching the last manoeuvre (the first match) picks among its options; 4 after 4 with +0x17e -> 5; 4 needs jets
+         * (heat < 20) and pilot level <= 3, else a re-roll, and 0 when the target is beyond the twist limit; 3 -> 2 with a
+         * twist limit under 10; 5 on the ground -> 0 */
+        const short (*T)[9] = MAN_TABLE;
+        int rows = 12, first = 6, solo = -1;
+        if (m->tons1) { T = JUMPER_TABLE; first = 6; }
+        else if (m->cls == 5) solo = 12;
+        else if (m->cls == 8) solo = 1;
+        else if (m->cls != 1) solo = 0;
+        if (m->cls == 1) {
+            if (v->contact && !m->reverse && !m->jump_man && m->man != 10) return 10;
+            if (v->target_not_unit) return 0;
+            if (jets_ok(v, 20.0f) && level_lt4 && v->enemy_height > v->height + 800.0f) {
+                if (m->prev_man == 0) return 9;
+                return ai_rand(m, 2) != 0 ? 8 : 0;
+            }
+        }
+        if (solo >= 0) return solo;
+        for (tries = 0; tries < 64; tries++) {
+            int pick;
+            if (m->prev_man < 0) pick = T[ai_rand(m, (unsigned)first)][0];
+            else {
+                int row = -1, r;
+                for (r = 0; r < rows; r++) if (T[r][0] == m->prev_man) { row = r; break; }
+                if (row < 0) row = 0;
+                pick = T[row][2 + ai_rand(m, (unsigned)T[row][1])];
+            }
+            if (m->prev_man == 4 && m->queue5) { m->queue5 = 0; return 5; }
+            if (pick == 4) {
+                if (!jets_ok(v, 20.0f) || !level_lt4) continue;
+                if (v->twist_limit < 360.0f && fabsf(wrap180(v->enemy_bearing - v->heading)) > v->twist_limit) pick = 0;
+            }
+            if (pick == 3 && v->twist_limit < 10.0f) pick = 2;
+            if (pick == 5 && (v->grounded || !v->can_jump)) pick = 0;
+            if (pick == 9 && !v->can_jump) pick = 0;
+            return pick;
+        }
+        return 0;
+    }
     if (v->contact) return 10;                                                    /* 0x10020e00 */
     /* jump pre-check: heat < 20, level < 4, the target above (0x10020090: > 8 m), reachable (0x100207b0) */
     if (jets_ok(v, 20.0f) && level_lt4 && v->enemy_height > v->height + 800.0f) {
@@ -240,6 +319,31 @@ static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
     m->jet_side = 0;
     m->jet_back = 0;
     m->man_limit = 9050.0f;                                                     /* 0x235a ticks (0x1001f290) */
+    m->jump_man = man == 4 || man == 5 || man == 9 || man == 11;   /* DOS +0x190 (0x2cc43 cleared, the jump cases set it) */
+    if (ai_dos_int) {
+        /* DOS MW2.EXE 0x2cc28..0x2ce87 (the jump table 0x2cbb8): the same cases at its 182 Hz clock - the 3Dfx DLL's tick
+         * constants were scaled to its 181 Hz: now + 0x238c; 0 (rand(5) + 8) x 0xb6; 1 0xe38; 4 0x38e; 8 (rand(11) + 10) x
+         * 0xb6 reverse; 10 in contact after a 10 with a non-unit (+0x7c == -1) 0x2d8 and NOT reversing, else reverse 0x5b0;
+         * 11 0x16c, the left jet (+0x1e) when +0x17a is 0 or 2, else the forward jet (+0x20); 12 0x4718. (The GBL port's
+         * emulated comparison, GBL 0x2ced0; MW2.EXE the same) */
+        m->man_limit = 9100.0f;
+        switch (man) {
+        case 0: m->man_limit = (float)((ai_rand(m, 5) + 8u) * 182u); return;
+        case 1: m->man_limit = 3640.0f; m->flank_face = 0; return;
+        case 4: m->man_limit = 910.0f; m->throttle = 0; m->turn = 0; return;
+        case 8: m->reverse = 1; m->man_limit = (float)((ai_rand(m, 11) + 10u) * 182u); return;
+        case 10:
+            if (m->prev_man == 10 && v->contact && !v->contact_unit) m->man_limit = 728.0f;
+            else { m->reverse = 1; m->man_limit = 1456.0f; }
+            return;
+        case 11:
+            m->man_limit = 364.0f; m->turn = 0;
+            if (m->dodge_fwd) { m->jet_side = 0; m->jet_forward = 1; } else m->jet_side = -1;
+            return;
+        case 12: m->man_limit = 18200.0f; m->flank_retarget = 0; m->guard_n = 0; own_square(m, v); return;   /* 0x2ce7d -> 0x23420 */
+        default: break;   /* 3, 5, 7, 9 as below */
+        }
+    }
     switch (man) {
     case 0: m->man_limit = (float)(ai_rand(m, 5) * 181u + 1448u); break;      /* rand(5) x 181 + 1448 */
     case 1: m->man_limit = 3620.0f; m->flank_face = 0; break;
@@ -409,7 +513,23 @@ static void attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R
     case 8:  *R = -1.0f; if (v->contact) done = 1; break;   /* 0x1001fc00: full reverse, ends on contact (+0xa4) */
     case 10: *R = -1.0f; break;                              /* 0x1001ff70: full reverse until the time limit */
     case 11: *R = 0; m->jet = 1; break;                      /* 0x1001fe10: sidestep on the jets, 362 ticks */
-    case 12: *R = 3000.0f; break;
+    case 12:
+        if (ai_dos_int) {   /* DOS MW2.EXE 0x2d990: every 0x5b0 ticks (+0x176) with the target beyond 150 m (+0xc0 > 0x3a98) the own
+                             * points are dropped (0x233b0) and four made round it where it is now (0x23420); within 30 m of the goal
+                             * the next own point - an aircraft circles its target 100 m out. Ends on its time limit 0x4718 */
+            float fx, fz;
+            m->flank_retarget -= ticks;
+            if (m->flank_retarget < 0) {
+                if (d > 15000.0f) { own_drop(m); own_square(m, v); }
+                m->flank_retarget = 1456.0f;
+            }
+            *R = 3000.0f;
+            *dist = -1.0f;
+            fx = m->flank_x - v->self_x; fz = m->flank_z - v->self_z;
+            if (sqrtf(fx * fx + fz * fz) < 3001.0f) own_goal(m, m->goal_pt);
+            break;
+        }
+        *R = 3000.0f; break;
     default: done = 1;
     }
     if (*dist >= 0) *dist = d;
@@ -451,8 +571,29 @@ static int program_allows(const ai_library *lib, const ai_mind *m, int state)
 
 int ai_allows(const ai_library *lib, const ai_mind *m, int state) { return program_allows(lib, m, state); }
 
-void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int (*side_free)(void *ctx, int side), void *ctx)
+void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, float shooter_rel, int (*side_free)(void *ctx, int side), void *ctx)
 {
+    if (ai_dos_int) {
+        /* DOS MW2.EXE 0x2e450: the shooter's +0x198 bit 4 (pilot level <= 2) and rand(3) != 0; a guided weapon or the PPC; the
+         * target not already set to jump (+0x16e != 4); jets with heat < 65 (0x2e3d0(0x41)) and rand(3) != 0 -> the dodge
+         * direction from the shooter's quadrant off the target's heading (q = (bearing - heading + 360) % 360 / 90): +0x17a =
+         * ((q + 1) % 4) x 4, then a 50 m probe one side at random, then the other: clear -> manoeuvre 11. Otherwise a level
+         * <= 3 pilot with no manoeuvre forced jumps (4) */
+        int side, k, q;
+        float r;
+        if (shooter_level > 2 || ai_rand(m, 3) == 0) return;
+        if (m->forced_man == 4 || m->state != AI_ATTACK) return;
+        if (!jets_ok(v, 65.0f)) return;
+        if (ai_rand(m, 3) != 0) {
+            r = fmodf(shooter_rel + 360.0f, 360.0f);
+            q = (int)(r / 90.0f) & 3;
+            side = ai_rand(m, 2) == 0 ? 1 : -1;   /* 0x2e62d: rand(2) != 0 -> -1 */
+            for (k = 0; k < 2; k++, side = -side)
+                if (!side_free || side_free(ctx, side)) { m->forced_man = 11; m->dodge_fwd = ((q + 1) % 4) * 4 > 2; return; }
+        }
+        if (m->forced_man == -1 && v->pilot_level <= 3) m->forced_man = 4;
+        return;
+    }
     /* 0x10020ac0: shooter +0x19e bit 4 (level < 3) and rand(3) != 0; then the target: jets and heat < 65
      * (0x10020a30(0x41)), rand(3) != 0 -> probe a 50 m sidestep, one side at random then the other (0x100204e0 /
      * 0x100103e0): clear -> manoeuvre 11, which always jets to the LEFT (0x1001f290 sets input +0x1e; the probed side

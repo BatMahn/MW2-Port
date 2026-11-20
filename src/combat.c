@@ -246,9 +246,14 @@ void combat_tick(combat_unit *u, float dt)
             u->seq_ticks = 0;
             u->auto_shutdown = 1;          /* message 0xd "Shutting down", nothing else that frame */
         } else if (h > 100 && u->override) {
-            if (!u->invulnerable && ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1); rate as below */
+            if (!u->invulnerable && ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
+                /* a roll per frame: 0x250f0..0x2511c rand(500 x the frame's whole ticks) == 0 -> BlowAmmo 0x24ec0. The chance a
+                 * frame is 1 / (500 t), so a second's falls with the square of the frame's ticks; the port takes it at the 30 fps
+                 * reference its walking heat uses (6 ticks a frame: 1 in 18000 a tick, a cook-off every ~95 s on average). It had
+                 * the 3Dfx DLL's 3 in 4000 a tick, an overridden mech blowing up 14x sooner (found by the GBL port's emulated
+                 * comparison, GBL 0x25430; MW2.EXE the same code) */
                 u->rng = u->rng * 1103515245u + 12345u;
-                if ((float)((u->rng >> 16) & 0x7FFF) / 32768.0f < 3.0f * ticks / 4000.0f) { cook_off(u); if (u->destroyed) u->down_in_update = 1; }
+                if ((float)(u->rng >> 8) / 16777216.0f < ticks / 18000.0f) { cook_off(u); if (u->destroyed) u->down_in_update = 1; }
             }
         } else if (h > 100 && u->shutdown) {
             /* 0x25130: shut down above 100 for more than 0x71c ticks since the shutdown: BlowAmmo every frame */
@@ -325,6 +330,13 @@ static void cook_off(combat_unit *u)
             for (k = 0; k < u->slot_count[l]; k++)
                 if (u->slots[l][k] == u->bins[0].id) { crit_item(u, l + 1, k, 0); return; }
         }
+    /* DOS MW2.EXE 0x24ec0 (BlowAmmo): with bins (+0x5c set) but none of them still in a location, a computer-run unit -
+     * or the player with automatic ejection on (0x961d0) - goes to state 5, then 0x25340 as an ejection (0x24f3d..0x24f53).
+     * Without bins it is simply destroyed */
+    if (combat_heat_dos && u->bin_count > 0 && (g_auto_eject || !u->human) && !(u->human && u->invulnerable)) {
+        u->ejected = g_planet.hostile ? 2 : 1;
+        u->intact_out = u->human && !g_planet.hostile;
+    }
     u->destroyed = 1;
 }
 
@@ -398,8 +410,11 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
                         t->slots[i][idx] = 0;
                         destroy_location(t, loc);
                     }
-                    if (g_auto_eject) {
-                        /* automatic ejection (0x100167b0, after the explosion's damage): state 5, then 0x10016280.
+                    if (g_auto_eject || (combat_heat_dos && !t->human)) {
+                        /* DOS MW2.EXE 0x25c7d..0x25c9f: after the explosion's damage a computer-run unit ALWAYS goes to state 5
+                         * and 0x25340 - every AI 'Mech whose ammunition explodes is out at once - the player only with
+                         * automatic ejection on (0x961d0); the 3D editions only with automatic ejection.
+                         * automatic ejection (0x100167b0, after the explosion's damage): state 5, then 0x10016280.
                          * Already destroyed by this explosion: 0x10016280 returns at once and the unit stays in state
                          * 5 - out of action, no death sequence. Else breathable: the player keeps state 5 (ejected),
                          * an AI mech is set to state 4 (an ordinary death, its pilot counted as ejected); hostile
@@ -897,14 +912,17 @@ float combat_jets_dy(const combat_unit *u, int jetting, float dt)
  * side's torso */
 static void collide(combat_unit *u, float speed, float ny, float rel_deg, int other_tons, int latch, unsigned *rng)
 {
-    float dmg = (speed - 3.0693676f) * 0.050123077f * 3.0f;
+    /* DOS MW2.EXE 0x208fb..0x20916 / 0x20aa5: S over 200000 (16.16 cm/tick): ((S - 200000) << 16) / 1300000 x 3 (the 3Dfx
+     * DLL 3.069 / 0.0501 x 3, nearly the same) */
+    float dmg = combat_heat_dos ? (speed - 200000.0f / 65536.0f) * (3.0f * 65536.0f / 1300000.0f) : (speed - 3.0693676f) * 0.050123077f * 3.0f;
     if (latch) u->blocked = 1;   /* terrain (0x10019d84 -> 0x1000c3c0) and a unit (0x10019d77 -> 0x1000c160) alike: every contact
                                   * frame - the impact cuts the velocity to a quarter (msim_world_impact), so pressing on stays
                                   * under the threshold; blocked = the contact (the player's impact-sound latch 0x1007c338) */
     if (dmg <= 0 || u->destroyed || u->invulnerable || u->no_collision_damage || getenv("MW2_NO_COLLISION_DAMAGE")) return;   /* Combat Variables */
     if (ny < -0.8660254f) {                       /* from above: the head (0x1000c212) */
         if (other_tons > 0) {
-            float k = 2.0f * (float)other_tons / (float)(u->tons > 0 ? u->tons : 1);
+            /* x 2 x the other's tonnage / its own in the 3Dfx DLL; DOS x 4 (0x2094c..0x20969: lea [esi*4], at least x 1) */
+            float k = (combat_heat_dos ? 4.0f : 2.0f) * (float)other_tons / (float)(u->tons > 0 ? u->tons : 1);
             if (k > 1.0f) dmg *= k;
         }
         apply_damage_at(u, dmg, 0, 1, rng);
@@ -917,6 +935,12 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
     }
     while (rel_deg > 180.0f) rel_deg -= 360.0f;
     while (rel_deg < -180.0f) rel_deg += 360.0f;
+    if (combat_heat_dos) {   /* DOS 0x209d5..: (0, 180] 45-135 the right arm (5) else the right torso (2); else -135..-45 the left
+                              * arm (6) else the left torso (4) - the band edges included */
+        if (rel_deg > 0) apply_damage_at(u, dmg, 0, (rel_deg >= 45.0f && rel_deg <= 135.0f) ? 5 : 2, rng);
+        else apply_damage_at(u, dmg, 0, (rel_deg >= -135.0f && rel_deg <= -45.0f) ? 6 : 4, rng);
+        return;
+    }
     if (rel_deg < 0) apply_damage_at(u, dmg, 0, (rel_deg > -135.0f && rel_deg < -45.0f) ? 6 : 4, rng);   /* left arm / left torso (groups 6 / 4) */
     else apply_damage_at(u, dmg, 0, (rel_deg > 45.0f && rel_deg < 135.0f) ? 5 : 2, rng);                 /* right arm / right torso (groups 5 / 2) */
 }
@@ -968,5 +992,8 @@ void combat_set_player_difficulty(combat_unit *u, int difficulty)
                                   {0.000686645508f, 0.00102996826f, 0.000549316406f}};
     int t = g_planet.temperature < -30 ? 1 : g_planet.temperature > 50 ? 2 : 0;
     if (difficulty < 0 || difficulty > 2) difficulty = 1;
-    u->sink_per_tick = u->sink_per_tick / F[1][t] * F[difficulty][t];   /* the unit was set up at Medium */
+    float f = F[difficulty][t];
+    /* DOS MW2.EXE 0x4cdf7: Hard below -30 is 67 (16.16 per tick), not the 3Dfx engine's 67.5 (tools/audit/simdiff.py) */
+    if (combat_heat_dos && difficulty == 2 && t == 1) f = 67.0f / 65536.0f;
+    u->sink_per_tick = u->sink_per_tick / F[1][t] * f;   /* the unit was set up at Medium */
 }

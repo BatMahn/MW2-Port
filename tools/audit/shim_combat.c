@@ -1,0 +1,68 @@
+/* shim_combat.c - the port's combat.c with its statics reachable, for tools/audit/simdiff.py (ctypes) */
+#include "../../src/combat.c"
+
+combat_unit *shim_unit_new(void) { combat_unit *u = calloc(1, sizeof *u); return u; }
+void shim_unit_free(combat_unit *u) { free(u); }
+void shim_set_dos(int on) { combat_heat_dos = on; }
+
+/* heat: one frame - `add` heat (16.16) arrives, `ticks` whole ticks pass (the DOS frame) */
+typedef struct {
+    int heat16, sink16, ticks, add16;
+    int shutdown, pending, override, latch, warn_latch, destroyed;
+    int msg_warn, msg_seq, msg_down, restarted;
+    float seq_ticks, heat;
+} shim_heat;
+void shim_heat_setup(combat_unit *u, int sink16, int human, int seed)
+{
+    memset(u, 0, sizeof *u);
+    u->sink_per_tick = (float)sink16 / 65536.0f;
+    u->human = human;
+    u->rng = (unsigned)seed;
+    u->hold_fire_above = human ? 0 : 65;
+}
+void shim_heat_frame(combat_unit *u, shim_heat *h)
+{
+    u->heat += (float)h->add16 / 65536.0f;
+    u->override = h->override;
+    u->heat_warning = u->seq_alarm = u->auto_shutdown = u->restarted = 0;
+    combat_tick(u, (float)h->ticks / COMBAT_TICKS_PER_S);
+    h->heat = u->heat;
+    h->shutdown = u->shutdown; h->pending = u->shutdown_pending; h->override = u->override;
+    h->latch = u->alarm_latch; h->warn_latch = u->warn_latch; h->destroyed = u->destroyed;
+    h->msg_warn = u->heat_warning; h->msg_seq = u->seq_alarm; h->msg_down = u->auto_shutdown; h->restarted = u->restarted;
+    h->seq_ticks = u->seq_ticks;
+}
+void shim_set_seq(combat_unit *u, float t) { u->seq_ticks = t; }
+/* the unit's dissipation per tick (16.16 units x heat sinking) as combat_init and combat_set_player_difficulty set it */
+float shim_unit_sink(int heat_sinking, int player, int difficulty, int temperature)
+{
+    combat_unit u; combat_planet p = {1.0f, temperature, 100000.0f, 0};
+    combat_set_planet(&p);
+    memset(&u, 0, sizeof u);
+    u.sink_per_tick = (float)heat_sinking * (g_planet.temperature < -30 ? 0.00152587890625f : g_planet.temperature > 50 ? 0.0006866455078125f : 0.000762939453125f);
+    if (player) combat_set_player_difficulty(&u, difficulty);
+    return u.sink_per_tick;
+}
+/* frames of `ticks` until an overridden unit above 100 heat cooks off (max frames: -1) */
+int shim_override_frames(int ticks, int seed, int maxf)
+{
+    combat_unit u; int f;
+    memset(&u, 0, sizeof u);
+    u.human = 1; u.rng = (unsigned)seed; u.override = 1; u.shutdown_pending = 1;
+    for (f = 1; f <= maxf; f++) {
+        u.heat = u.heat_mark = 105.0f;
+        combat_tick(&u, (float)ticks / COMBAT_TICKS_PER_S);
+        if (u.destroyed) return f;
+    }
+    return -1;
+}
+/* collision damage: armour taken from each location (out[8]) for a collide() at the given speed / normal / bearing */
+void shim_collide(float speed, float ny, float rel, int other_tons, int own_tons, float out[8])
+{
+    combat_unit u; int l; unsigned rng = 1;
+    memset(&u, 0, sizeof u);
+    for (l = 0; l < 8; l++) { u.armor[l] = 1000.0f; u.rear[l] = 1000.0f; u.internal[l] = 1000.0f; u.armor_max[l] = 1000; }
+    u.tons = own_tons;
+    collide(&u, speed, ny, rel, other_tons, 0, &rng);
+    for (l = 0; l < 8; l++) out[l] = 1000.0f - u.armor[l];
+}

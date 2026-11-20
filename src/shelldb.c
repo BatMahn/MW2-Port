@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 
@@ -143,4 +144,101 @@ void shell_image_free(shell_image *img)
 {
     free(img->pix);
     memset(img, 0, sizeof *img);
+}
+
+/* Watcom C's qsort as MW2SHELL links it (MW2SHELL.EXE 0x48dc1; from the GBL port, its 0x4b7aa): not stable, and its order of equal
+ * elements is what the Hall of Honor and the debriefing's objective list show. n > 15: pivot the middle element (median
+ * of three over 30, of three medians over 42), a 3-way partition (equal elements gathered at both ends, then swapped to
+ * the middle), the smaller part next and the larger one stacked; n <= 15: insertion passes with gaps 3 and 1. Elements of
+ * 4 bytes at an aligned address: the pivot is copied; any other size: it is swapped to the front and compared there.
+ * tools/audit/qsort_diff.py runs the original on random arrays against this. */
+static void wc_swap(char *a, char *b, size_t n) { while (n--) { char t = *a; *a++ = *b; *b++ = t; } }
+static char *wc_med3(char *a, char *b, char *c, int (*cmp)(const void *, const void *))
+{
+    if (cmp(a, b) < 1) {
+        if (cmp(a, c) >= 0) return a;
+        if (cmp(b, c) < 1) return b;
+    } else {
+        if (cmp(a, c) < 1) return a;
+        if (cmp(b, c) > 0) return b;
+    }
+    return c;
+}
+void wc_qsort(void *base, size_t n, size_t es, int (*cmp)(const void *, const void *))
+{
+    char *lo = base, *stk[32], pv[4];
+    size_t stn[32];
+    int depth = 0, copy = ((((uintptr_t)base | es) & 3) == 0) && es <= 4;
+    for (;;) {
+        if (n > 1 && n > 15) {
+            char *mid = lo + (n >> 1) * es, *piv, *a, *b, *c, *d, *end = lo + n * es;
+            size_t s, r1, r2;
+            int r;
+            if (n > 29) {
+                char *l = lo, *h = lo + (n - 1) * es;
+                if (n > 42) {
+                    size_t t = es * (n >> 3);
+                    l = wc_med3(lo, lo + t, lo + 2 * t, cmp);
+                    mid = wc_med3(mid - t, mid, mid + t, cmp);
+                    h = wc_med3(h - 2 * t, h - t, h, cmp);
+                }
+                mid = wc_med3(l, mid, h, cmp);
+            }
+            if (copy) { memcpy(pv, mid, es); piv = pv; }
+            else { wc_swap(lo, mid, es); piv = lo; }
+            a = b = lo; c = d = lo + (n - 1) * es;
+            for (;;) {
+                for (; b <= c; b += es) {
+                    if ((r = cmp(b, piv)) > 0) break;
+                    if (r == 0) { wc_swap(a, b, es); a += es; }
+                }
+                for (; b <= c; c -= es) {
+                    if ((r = cmp(c, piv)) < 0) break;
+                    if (r == 0) { wc_swap(c, d, es); d -= es; }
+                }
+                if (b > c) break;
+                wc_swap(b, c, es); b += es; c -= es;
+            }
+            s = (size_t)(a - lo) < (size_t)(b - a) ? (size_t)(a - lo) : (size_t)(b - a);
+            if (s) wc_swap(lo, b - s, s);
+            s = (size_t)(end - es - d) <= (size_t)(d - c) ? (size_t)(end - es - d) : (size_t)(d - c);
+            if (s) wc_swap(b, end - s, s);
+            r1 = (size_t)(b - a); r2 = (size_t)(d - c);
+            if ((r1 == 0 && r2 == n * es) || (r2 == 0 && r1 == n * es)) {
+                /* no progress: a comparator that never answers 0 against its own kind (the debriefing's 0x22db0 with
+                 * two unfinished objectives) puts the whole part on one side again - the original loops for ever
+                 * (qsort_diff: lists of 16+ objectives with many DNFs); the port sorts that part by the n <= 15 passes
+                 * instead (ASSUMED) */
+                goto small;
+            }
+            if (r2 < r1) {
+                if (r1 > es) {
+                    if (depth >= 32) return;
+                    stk[depth] = lo; stn[depth++] = r1 / es;
+                    lo = end - r2; n = r2 / es;
+                    continue;
+                }
+            } else {
+                if (depth >= 32) return;
+                stk[depth] = end - r2; stn[depth++] = r2 / es;
+                n = r1 / es;
+                continue;
+            }
+        } else if (n > 1) {
+            char *end, *p, *q;
+small:
+            end = lo + n * es;
+            size_t g;
+            for (g = 3 * es; ; g -= 2 * es) {
+                for (p = lo + g; p < end; p += g)
+                    for (q = p; q > lo; q -= g) {
+                        if (cmp(q - g, q) < 1) break;
+                        wc_swap(q, q - g, es);
+                    }
+                if (g <= 2 * es) break;
+            }
+        }
+        if (depth == 0) return;
+        depth--; lo = stk[depth]; n = stn[depth];
+    }
 }
