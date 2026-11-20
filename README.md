@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-17, v1.1.33)
+## Status (2026-11-17, v1.1.29)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
@@ -346,40 +346,6 @@ macOS also shows an audio CD's tracks as `1 Audio Track.aiff`, `2 Audio Track.ai
   record sheet: armor, internals, critical slots, weapons and ammo.
 - `prjtool types|list|verify|extract|dumpall MW2.PRJ ...` lets you browse or
   extract resources. TEXT resources are stored byte-negated; extract decodes them.
-
-## Map viewer
-
-`MW2 Map Viewer` (Windows `mapview.exe` next to `mw2.exe`; Linux `mapview` in the tarball, `mw2-mapview` from the RPM;
-macOS `MW2 Map Viewer.app` beside `MechWarrior 2.app`) shows any mission's map as the 3D editions draw it: the
-buildings and terrain as they stand at the start, the units each star places, the nav points and the mission boundary.
-It is read-only: nothing is changed or saved. It uses the same game folder as the game (mw2port.cfg; run the game once
-first, or it asks for the folder) and needs the game folder's `3d/` files. `mapview <game folder> <SCENE>` opens a
-folder or a mission (e.g. `TEALSCN1`) directly.
-
-| | |
-|---|---|
-| W A S D, Q / E (or Space / C) | fly; up / down. Shift: faster; the mouse wheel sets the speed |
-| drag (left or right button) | look around; in the map view: pan |
-| Tab | the 3D view / the map straight down, north up (the wheel zooms about the pointer) |
-| click | select an object, unit or nav point: what the mission data says about it (record, model, position, size, building name, side and hit points; a unit's loadout, group, pilot level and alert ranges) |
-| F / Home | go to the selection / your start point |
-| M, PgUp / PgDn | the mission list (click one); previous / next mission |
-| N, U, B, L, G | nav points, units, boundary, labels, fog on / off |
-| H, Esc | help; close the list or help / deselect |
-| X | export the selection as a glTF file (.glb): a building with its parts and destroyed variant, or a unit in its rest pose |
-| Shift+X | export the whole map as one .glb: the world, the destroyed variants (in their own group), the units, the nav points (as named empties) and the ground |
-| T | export the mission's textures as PNG (every slot of its texture map, the animated slots' frames, the scrub bitmaps) |
-
-Unit markers: green your side, red enemy, grey neutral; the white cross is your start.
-
-Exports go to the game folder's `exports/<SCENE>/` (`textures/` for the PNGs). The .glb files open in Blender (File >
-Import > glTF 2.0), game engines and model viewers: metres, Y up, textures embedded, materials double-sided, the
-outline polygons (the shield dome's lattice) as lines. Each object keeps the game's names - its record, OBJ node, model,
-type word, a building's structure name, a unit's skeleton, loadout and group, each material's texture slot and CEL name -
-in its glTF "extras" (Blender: Object Properties > Custom Properties), so edited models can be matched back to the
-game's data. The port does not load edited models yet: that is the next step. The files are the game's art from your
-own copy - for your own use, not for sharing. On macOS the viewer is ad-hoc
-signed like the game (see "macOS: the app is not signed").
 
 ## Licences
 The port's source code is the author's, released under the GNU General Public License, version 2 or (at your option) any

@@ -14,9 +14,9 @@ jobs:
         run: brew install sdl3 pkgconf
 
       - name: Build
-        run: make mw2 mapview
+        run: make mw2
 
-      - name: Build .app bundles
+      - name: Build .app bundle
         run: sh scripts/macos_app.sh
 
       - name: Package
@@ -59,14 +59,13 @@ jobs:
           echo "SDL3_DIR=$PWD/sdl3" >> $GITHUB_ENV
 
       - name: Build
-        run: make mw2 mapview SDL3_DIR=$SDL3_DIR SDL3_LIBS="-L$SDL3_DIR/lib -lSDL3 -Wl,-rpath,\\\$\$ORIGIN"
+        run: make mw2 SDL3_DIR=$SDL3_DIR SDL3_LIBS="-L$SDL3_DIR/lib -lSDL3 -Wl,-rpath,\\\$\$ORIGIN"
 
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
           readelf -d mw2 | grep -q 'RUNPATH.*\$ORIGIN'
-          readelf -d mapview | grep -q 'RUNPATH.*\$ORIGIN'
-          cp mw2 mapview dist/MW2-Port/
+          cp mw2 dist/MW2-Port/
           cp -L $SDL3_DIR/lib/libSDL3.so.0 dist/MW2-Port/
           cp -r assets dist/MW2-Port/
           cp README.md THIRD_PARTY.md LICENSE dist/MW2-Port/
@@ -117,12 +116,12 @@ jobs:
           echo "SDL=$PWD/SDL3-${SDL3_VERSION}/x86_64-w64-mingw32" >> $GITHUB_ENV
 
       - name: Build
-        run: make mw2 mapview WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar SDL3_DIR=$SDL
+        run: make mw2 WINDOWS=1 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar SDL3_DIR=$SDL
 
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
-          cp mw2.exe mapview.exe $SDL/bin/SDL3.dll dist/MW2-Port/
+          cp mw2.exe $SDL/bin/SDL3.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
           cp README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x64.zip MW2-Port

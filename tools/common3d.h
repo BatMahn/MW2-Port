@@ -29,7 +29,6 @@ typedef struct {
      * (owned); rate in ticks a frame (0: still), mode 0 still / 1 loop / 2 once */
     int      nfr[GLR_SLOTS], rate[GLR_SLOTS], mode[GLR_SLOTS];
     texture *fr[GLR_SLOTS][BWD_TEXMAP_FRAMES];
-    char     name[GLR_SLOTS][16];   /* each slot's CEL name (the map viewer's exports) */
 } c3d_scene;
 
 /* Textures come from `texs`. An ATi archive has one format (ARGB1555). For 3dfx/S3
@@ -145,7 +144,6 @@ static int c3d_load_scene(prj_archive *models, prj_archive *texs, int ati, const
                         if (!t) continue;
                         if (s->slot[i]) { tex_free(s->slot[i]); free(s->slot[i]); } else s->textures_loaded++;
                         s->slot[i] = t;
-                        snprintf(s->name[i], sizeof s->name[i], "%s", map.name[i]);
                         for (f = 1; f < BWD_TEXMAP_FRAMES; f++) if (s->fr[i][f]) { tex_free(s->fr[i][f]); free(s->fr[i][f]); s->fr[i][f] = NULL; }
                         s->nfr[i] = 1; s->rate[i] = map.rate[i]; s->mode[i] = map.mode[i];
                         s->fr[i][0] = t;

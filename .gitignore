@@ -21,8 +21,6 @@ mw2.exe
 missionsim
 sweep_objectives
 audit_missions
-mapview
-mapview.exe
 sweep_ai
 *.app/
 dist/
