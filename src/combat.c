@@ -857,6 +857,7 @@ void combat_land(combat_unit *u, float vy, unsigned *rng)
      * Damage on, the landing speed kept for the sound (0x10019e54..0x10019ee0), stood on the ground */
     if (vy < -16.154f && !u->no_collision_damage && !u->destroyed) {
         float dmg = (vy + 16.154f) * -1.5476f;
+        if (getenv("MW2_FALL_TRACE")) fprintf(stderr, "fall: landed at %.2f cm/tick, %.1f damage a leg\n", (double)vy, (double)dmg);   /* TEST ONLY */
         combat_damage_src = "fall";
         apply_damage_at(u, dmg, 0, 8, rng);
         apply_damage_at(u, dmg, 0, 7, rng);

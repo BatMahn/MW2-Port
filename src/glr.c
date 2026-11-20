@@ -480,9 +480,9 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * with low nibble 0 or 3 (0x1004eef0) */
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
-                if (!ti && !r->dos && model->extended && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
+                if (!ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
                     if (pass == 1) {
-                        const int ci = (q->color >> 4) & 0xff;
+                        const int ci = model->extended ? (q->color >> 4) & 0xff : (q->color >> 8) & 0xff;
                         int e;
                         if (r->kl_n[li] + q->n > r->kl_cap[li]) {
                             int nc = r->kl_cap[li] + q->n + 1024;
@@ -1383,8 +1383,15 @@ void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float 
     if (tint) memcpy(r->tint, tint, sizeof r->tint);
     r->pfade = pal && k > 0 ? (k > 1 ? 1 : k) : 0;
     if (r->pfade > 0) {
+        static uint8_t last[256][3];
+        static rb_tex last_tex;
         uint8_t img[256][4];
         int x;
+        /* only when the table changes: glview calls this every frame, and re-uploading a texture the frame in flight still
+         * samples made the GPU backends wait for it - every frame while light amplification was on (user report: a big
+         * frame-rate drop with light amplification, none with image enhancement, which has no table) */
+        if (last_tex == r->ptab_tex && memcmp(last, pal, sizeof last) == 0) return;
+        memcpy(last, pal, sizeof last); last_tex = r->ptab_tex;
         for (x = 0; x < 256; x++) { img[x][0] = pal[x][0]; img[x][1] = pal[x][1]; img[x][2] = pal[x][2]; img[x][3] = 255; }
         rb_tex_image(r->ptab_tex, 256, 1, img, 0);
         rb_tex_filter(r->ptab_tex, RB_NEAREST, RB_NEAREST);

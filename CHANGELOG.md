@@ -1,5 +1,129 @@
 # Changelog
 
+## v1.1.37 (2026-11-20)
+
+- **Re-release: the GitHub v1.1.36 was built from v1.1.29's sources.** The v1.1.36 commit on GitHub had the
+  v1.1.29 files in it, probably because an old extracted folder was copied over the repository. So the v1.1.36
+  downloads had none of the fixes from v1.1.30 to v1.1.36: the shell sounds stopping when you leave a screen
+  (the title's fire loop), the map viewer, the LOD cap and the rest. This release has them all. No game changes
+  beyond v1.1.36.
+- Tests: `MW2_SHELL_PUSH` (scripted clicks for a shell running with a window) and a stop entry in the sound log, used to
+  confirm that the title's fire loop stops on leaving the title.
+
+## v1.1.36 (2026-11-20)
+
+- **Level-of-detail distances capped at the original's largest screen.** The engine scales its level-of-detail
+  distances with the screen size. The original's largest is DOS's 1024 x 768, where mechs switch to simpler
+  models at 115 m, 272 m and 720 m. The port kept scaling above that: at 1440 lines a mech kept its second model
+  out to 510 m, where DOS already shows its third (user report: DOS at 442 m against the port at 445 m). Larger
+  windows now keep the 1024 x 768 distances; smaller ones still scale down as the original does.
+- **DOS look: the horizon glow in missions without a horizon record.** Seven missions (Scorching Sand, Trial 1,
+  Trial 2, Trial 3, Golden Spade, Trial 4, Arkham Bridge) have no HRZM record. The original then draws its default
+  band, 36 lines at 320 wide, graduated from the horizon colour up into the sky. The port drew no band there, so the
+  sky was one flat dark colour. Scorching Sand's dusk and pre-dawn skies now glow at the horizon.
+
+## v1.1.35 (2026-11-20)
+
+- **Shell sounds stop when you leave a screen.** The Clan Hall's ambience used to carry on into the Ready Room, the
+  Register and cadet training. The title screen's fire loop carried on into the intro, the Register and the Trials
+  of Grievance. Each screen's sounds now stop when you leave it, as in the original.
+- **Jade Falcon Clan Hall ambience.** The Falcon hall's ambience is the sound track of its ball clip (AJFBALL), looped
+  with the clip; it now plays. (The Wolf hall keeps its DATABASE ambience.)
+- **Shell at 1920 x 1080: no more black bars on all four sides.** The 640 x 480 shell was only scaled by whole
+  numbers, which gave 1280 x 960 on a 1080-line screen. It now fills the height at 4:3 and stays sharp: SDL 3.4's
+  pixel-art scaling keeps every pixel the same size. In full screen the mouse pointer is kept on the picture instead
+  of going behind the side bars.
+- **AI can no longer shoot through hills and mesas.** The AI's line of sight only tested buildings, not the large
+  terrain parts (the mesas, ridges and ice shelves). On Burning Chrome, the Mad Dog's and Summoner's LRMs and the turret
+  on the ledge fired through rock. Those parts now block line of sight.
+- **Sable Falcon dropship turrets aim down.** Turrets and dropship guns worked out their aim from their base, not
+  from their gun height. Turrets high on the dropship couldn't depress their guns at a mech close by. They now can.
+- **Scorching Sand: Jenners brake their drop with jump jets.** An AI mech with jump jets falling more than 2 m now
+  fires its jets to slow its fall, instead of dropping off the mesa at full speed.
+- **Wolf 3: the cars' roof lights blink.** Light bars are single-point polygons that cycle their colours; the
+  renderer skipped polygons with fewer than three corners. They now draw as small lit dots.
+- **Sable Flame: the Sensor Array Dome is see-through in the DOS look.** The DOS models' outline polygons (colour
+  type 2) were filled in solid; they are now drawn as outlines, as in the 3D looks, so you can see into the dome and
+  through it.
+- **Satellite view:**
+  - Fires drew as black lines in the DOS look. They now show their flames.
+  - Lowering the range with a target outside the map left a red dot on your own mech. The target's marker is now
+    placed at the edge of the map, in its direction.
+- **Target display: turrets centred.** Scorching Sand's turrets sat at the bottom edge of the target MFD; turrets are
+  now framed on their own height.
+- **Light amplification: frame rate.** The palette table was uploaded to the GPU every frame while the fade or light
+  amp was active. It is now uploaded only when it changes.
+
+## v1.1.34 (2026-11-19)
+
+- **Windows: stripped executables, after an antivirus false positive.** One scanner of 71 on VirusTotal (Microsoft
+  Defender's machine-learning verdict `Program:Win32/Wacapew.C!ml`) flagged v1.1.33's `mw2.exe`. The port is not
+  malicious; that verdict is a heuristic score that new, unsigned programs often trip. The build had shipped with
+  its debugging data left in:
+  - the DWARF sections, which have odd names like `/4` and `/19` that scanners tag as "obfuscated";
+  - a 1.5 MB symbol table after the code, which they tag as an "overlay".
+
+  The Windows `mw2.exe` (64-bit and legacy) and `mapview.exe` are now stripped. `mw2.exe` drops from 4.9 MB to
+  3.0 MB, with no overlay and only the standard sections. Nothing else changes.
+
+## v1.1.33 (2026-11-17)
+
+- **Map viewer: export to Blender.** New keys in the map viewer:
+  - **X** exports the selected building or unit as a glTF 2.0 file (.glb). A building comes with its child parts and
+    its destroyed variant; a unit comes in its rest pose.
+  - **Shift+X** exports the whole map as one .glb. It holds the world, the destroyed variants (in their own group),
+    the units on the ground, the nav points (as named empties) and the ground.
+  - **T** exports the mission's textures as PNG, with the animated slots' frames and the scrub bitmaps.
+
+  Files go to the game folder's `exports/<SCENE>/`. Every .glb opens in Blender and passes the Khronos glTF
+  validator. Every object and material keeps the game's names (record, OBJ node, model, texture slot) in its glTF
+  extras, so edited models can later be matched back to the game; loading mods into the port is a later step
+  (README "Map viewer").
+- **Map viewer: units stand on the ground.** The units were drawn at their spawn records' height, the Stormcrow on
+  Wolf 3 50 m up; they now stand on the ground under them, as the simulation puts them. Clicking now picks the
+  polygon under the pointer, so tall buildings and the towers behind units can be selected.
+
+## v1.1.32 (2026-11-17)
+
+- **New: the map viewer** (`mapview`; README "Map viewer"). A separate program in the Windows, Linux and macOS
+  downloads (macOS: `MW2 Map Viewer.app`) that shows every mission map (campaigns, training, Instant Action) in the 3D editions' look:
+  - What it shows: the world as it stands at the start (destroyed variants hidden, the scrub patch, the fire cards
+    animated), every star's units on the ground, the nav points and the mission boundary.
+  - Two views: a free-flying camera, and a map straight down with north up.
+  - Clicking an object, unit or nav point shows its mission data: the record and OBJ node, position and size, a
+    building's name, side and hit points; a unit's loadout, group, state table, side, pilot level and alert ranges.
+  - It is read-only, uses the game's own folder (mw2port.cfg), and needs the `3d/` files.
+
+## v1.1.31 (2026-11-17)
+
+From a playtest of Wolf Trial 1.
+
+- **Trials never promoted the pilot, and the aftermath read "the rank of 0".** Two faults:
+  - **No promotion.** The original raises the pilot's rank title after a won trial (MW2SHELL 0x1000f0d5, added at
+    0x1000f3a2): one step per primary objective completed, capped at Khan. It only does this when the mission is a
+    trial in the campaign table, heat tracking is on, and none of unlimited ammo, invulnerability or no collision
+    damage is set (0x1000dd00). The port never promoted, so every pilot stayed Mechwarrior.
+  - **Text codes not replaced.** The trial aftermath texts use the shell's codes (0x10002f00):
+    - `\r0` / `\r1` / `\r2`: the rank title, plus 0 / 1 / 2;
+    - `\h`: the pilot's honor;
+    - `\q`: the debriefing's objectives table.
+    The port dropped the backslash and printed the "0". These pages, and the briefings, now show the new rank (Trial 1:
+    "Star Commander"), the objectives and the career honor.
+- **A mech with a leg shot off could still turn on the spot.** Losing the first leg stopped it walking, but its legs
+  kept turning, so it came about to face you wherever you went. Now a legged mech, AI or player, only twists its torso
+  within its limits, so you can circle behind it. A turn on the jump jets still works, and Feet-to-Torso does nothing
+  with a leg gone. Reported against the original; the engine's rule was not traced.
+
+## v1.1.30 (2026-11-17)
+
+From a follow-up to the v1.1.24 feedback list.
+
+- **Satellite view: enemy buildings were shaded like the ground, not outlined in red.** v1.1.24's satellite view
+  colours a structure by its side only when its object's type word has bit 0x200. The engine sets that bit at load on
+  each object a GT (thing) record claims. The OBJ records themselves carry 0 or 0xc0, and the port never set the bit,
+  so no building ever matched. The port now goes by the GT link: a thing's object is drawn black with its edges in
+  its side's colour (enemy red, friendly green, unaligned grey). Seen on Wolf mission 3 (TEAL).
+
 ## v1.1.29 (2026-11-17)
 
 From a GitHub report.

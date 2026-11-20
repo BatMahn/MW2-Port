@@ -15,10 +15,11 @@ Requires your own copy of the original game data.
 # source is already checked out in the working directory
 
 %build
-make -C %{_sourcedir} -j$(nproc) mw2
+make -C %{_sourcedir} -j$(nproc) mw2 mapview
 
 %install
 install -Dm755 %{_sourcedir}/mw2 %{buildroot}%{_bindir}/mw2
+install -Dm755 %{_sourcedir}/mapview %{buildroot}%{_bindir}/mw2-mapview
 mkdir -p %{buildroot}%{_datadir}/mw2port
 cp -r %{_sourcedir}/assets %{buildroot}%{_datadir}/mw2port/
 install -Dm644 %{_sourcedir}/LICENSE %{buildroot}%{_datadir}/licenses/mw2port/LICENSE
@@ -26,5 +27,6 @@ install -Dm644 %{_sourcedir}/THIRD_PARTY.md %{buildroot}%{_datadir}/licenses/mw2
 
 %files
 %{_bindir}/mw2
+%{_bindir}/mw2-mapview
 %{_datadir}/licenses/mw2port
 %{_datadir}/mw2port

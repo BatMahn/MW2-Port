@@ -562,6 +562,7 @@ void sfx_stop_loops(sfx *s)
     int k;
     if (!s) return;
     SDL_LockAudioStream(s->stream);
+    sfx_log("stoploops", 0, 0.0f, 0, 0.0f);   /* TEST ONLY */
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].loop) { s->v[k].c = NULL; s->v[k].loop = 0; }
     SDL_UnlockAudioStream(s->stream);
 }

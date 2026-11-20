@@ -618,8 +618,8 @@ static prj_archive *g_ma;
 static int g_lodq = 1;
 /* camera +0xa0 (the engine's m_detailScale) = the view's focal length in pixels / (LOD quality x 160) (view.c: scaleX =
  * half-width x fov / (quality x 160); DOS the same in 16.16, 0x3f1c1): it grows with the resolution - 2 at the 640 x 480
- * reference (focal 320), 4.5 at 1080 lines. The port had kept the reference's 2 at every size, so a mech dropped to its
- * first level of detail at 72 m whatever the window (user report: "about 115-120 m"). Set each frame from the view */
+ * reference (focal 320), 3.2 at DOS's 1024 x 768 (115 m: the user's "about 115-120 m"), capped there (larger windows
+ * keep the 1024 x 768 distances). Set each frame from the view */
 static float g_lod_focal = 320.0f;
 static float lod_a0(void) { return g_lod_focal / 160.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq; }
 static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_alod[64];
@@ -2178,11 +2178,27 @@ static int g_sat_spr_next;
 static const hud_sprite *sat_sprite(const texture *t)
 {
     int k;
-    if (!t || !t->rgba || t->w <= 0 || t->h <= 0 || g_tex_kind == 3) return NULL;
+    if (!t || !t->rgba || t->w <= 0 || t->h <= 0) return NULL;
     for (k = 0; k < 64; k++) if (g_sat_spr[k].t == t && g_sat_spr[k].s.tex) return &g_sat_spr[k].s;
     k = g_sat_spr_next; g_sat_spr_next = (g_sat_spr_next + 1) & 63;
     hud_sprite_free(&g_sat_spr[k].s);
     g_sat_spr[k].t = t;
+    if (g_tex_kind == 3) {   /* the DOS look's bitmaps hold palette indices (0xff clear): coloured through the mission's palette
+                              * (user report: the fires showed as nothing / a line in the DOS look's satellite view) */
+        const size_t n = (size_t)t->w * (size_t)t->h;
+        uint8_t *rgba = malloc(n * 4);
+        size_t i;
+        int rc;
+        if (!rgba) return NULL;
+        for (i = 0; i < n; i++) {
+            const uint32_t px = t->rgba[i];
+            const uint8_t *pc = g_scene.palette[px & 0xff];
+            rgba[i * 4] = pc[0]; rgba[i * 4 + 1] = pc[1]; rgba[i * 4 + 2] = pc[2]; rgba[i * 4 + 3] = (uint8_t)(px >> 24);
+        }
+        rc = hud_sprite_rgba(&g_sat_spr[k].s, rgba, t->w, t->h);
+        free(rgba);
+        return rc == 0 ? &g_sat_spr[k].s : NULL;
+    }
     if (hud_sprite_rgba(&g_sat_spr[k].s, (const uint8_t *)t->rgba, t->w, t->h) != 0) return NULL;
     return &g_sat_spr[k].s;
 }
@@ -2242,7 +2258,10 @@ static void sat_draw(int w, int h)
             else {
                 int b, thing = -1;
                 for (b = 0; b < g_sim.bld_count; b++) if (g_sim.bld[b].intact == k || g_sim.bld[b].destroyed == k) { thing = b; break; }
-                if (thing >= 0 && (kd & 0x200)) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
+                /* a thing's object: the engine sets type bit 0x200 on the objects its GT record claims at load; the
+                 * OBJ records themselves carry 0 / 0xc0, so the port goes by the GT link (user report: TEAL's enemy
+                 * buildings were shaded like terrain, not outlined in red) */
+                if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
                 else if (kd & 0x200) col = SAT_COL[5];
                 else if (kd & 0x100) col = SAT_COL[1];
                 else if (kd & 0x400) col = SAT_COL[6];
@@ -3489,6 +3508,10 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
     snprintf(name, sizeof name, "%.4sSCN1", mission);
     g_dos_day = 0; g_dos_group = -1; g_dos_evals = 0; g_dos_band = 0; g_dos_next_eval = 0; g_dos_fade_len = 0; g_dos_t0 = 0;
     if (bwd_mission_load(ma, name, &bm) == 0) {
+        int band_off = 0;
+        g_dos_band = 36.0f;   /* the band's height without an HRZM record: 0x24 (g_horizonBandHeight's initial value, MW2.DLL
+                               * 0x100a6d30) - JENN, BROW, AMY_, KIM_, GOLD, IREN, GREE have none; the port had drawn no band there
+                               * (user report, Scorching Sand before dawn: the sky one flat dark colour, not graduated) */
         for (k = 0; k < bm.record_count; k++)
             for (c = 0; c < bm.records[k].chunk_count; c++) {
                 const bwd_chunk *ch = &bm.records[k].chunks[c];
@@ -3507,9 +3530,9 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
                 else if (strcmp(ch->tag, "INIT") == 0 && ch->size >= 12) g_dos_t0 = (int32_t)(ch->data[8] | ch->data[9] << 8 | ch->data[10] << 16 | (uint32_t)ch->data[11] << 24);
                 else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 72) {
                     g_dos_day = (int32_t)(ch->data[12] | ch->data[13] << 8 | ch->data[14] << 16 | (uint32_t)ch->data[15] << 24);
-                    if (ch->data[68] | ch->data[69] | ch->data[70] | ch->data[71]) g_dos_band = -1;   /* the band switched off */
+                    if (ch->data[68] | ch->data[69] | ch->data[70] | ch->data[71]) band_off = 1;   /* the band switched off (BLON) */
                 }
-                else if (strcmp(ch->tag, "HRZM") == 0 && ch->size >= 8 && g_dos_band >= 0)
+                else if (strcmp(ch->tag, "HRZM") == 0 && ch->size >= 8)
                     g_dos_band = (float)(int32_t)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24);
                 else if (strcmp(ch->tag, "LTBL") == 0 && ch->size >= 2) luma_id = ch->data[0] | ch->data[1] << 8;
                 else if (strcmp(ch->tag, "LITE") == 0 && ch->size >= 28) {
@@ -3522,6 +3545,7 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
                     g_dos_lite[5] = (float)(int32_t)(d[24] | d[25] << 8 | d[26] << 16 | (uint32_t)d[27] << 24);
                 }
             }
+        if (band_off) g_dos_band = -1;
         bwd_mission_free(&bm);
     }
     if (getenv("MW2_TEST_TOD_START")) g_dos_t0 = atoi(getenv("MW2_TEST_TOD_START"));   /* TEST ONLY: INIT +8 */
@@ -3549,7 +3573,7 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
     if (getenv("MW2_DEBUG_DOS")) fprintf(stderr, "dos: PAL %d, LUMA %d%s, light %.0f %.0f %.0f amb %.0f dir %.0f fog %.0f\n", pal_id, luma_id,
                                          have_luma ? "" : " (missing)", (double)g_dos_lite[0], (double)g_dos_lite[1], (double)g_dos_lite[2],
                                          (double)g_dos_lite[3], (double)g_dos_lite[4], (double)g_dos_lite[5]);
-    if (getenv("MW2_DEBUG_DOS")) fprintf(stderr, "dos: %d textures\n", g_scene.textures_loaded);
+    if (getenv("MW2_DEBUG_DOS")) fprintf(stderr, "dos: %d textures, band %.0f, day %d, t0 %d\n", g_scene.textures_loaded, (double)g_dos_band, g_dos_day, g_dos_t0);
     if (getenv("MW2_DEBUG_DOS")) { int s2, q; for (s2 = 0; s2 < 20; s2++) if (g_dos_slot_ok[s2]) { fprintf(stderr, "slot %d:", s2); for (q = 0; q < 256; q++) if (s2 != 17 || g_dos_slotpal[s2][q * 3] != 63 || g_dos_slotpal[s2][q * 3 + 1]) fprintf(stderr, " %02x=%d,%d,%d", q, g_dos_slotpal[s2][q * 3], g_dos_slotpal[s2][q * 3 + 1], g_dos_slotpal[s2][q * 3 + 2]); fprintf(stderr, "\n"); } }
     glr_set_dos(r, (const uint8_t (*)[3])g_scene.palette, have_luma ? luma : NULL);
 }
@@ -7050,6 +7074,9 @@ int main(int argc, char **argv)
                     int jh = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || pu->shutdown);
                     if (jh && pu->jets > 0 && !pu->no_jump && !pu->destroyed && pu->jet_fuel >= 0)
                         turn = pu->jet_fuel - dt * 182.0f > 0 ? 180.0f : 0.0f;
+                    else if (pu->immobile) turn = 0.0f;   /* a leg gone: the legs no longer turn, only the torso twists
+                                                          * (user report against the original: a one-legged mech could
+                                                          * not come about, so you circle behind it; msim the same) */
                 }
                 g_pl_legs_turn = 0;
                 {   /* a manual turn cancels the autopilot, announced as the key does (engine 0x1001a480..0x1001a4fc): in
@@ -7140,6 +7167,7 @@ int main(int argc, char **argv)
                     if (rl.val != 0) g_pl_legs_turn = 1;
                 }
                 { int pr = 0; float a = g_im_ok ? im_axis(&g_im, "legs_pan_delta", ks, 1, &pr) : 0; if (pr) g_pl.heading += a * turn * dt; if (pr && fabsf(a) >= 1e-7f) g_pl_legs_turn = 1; }
+                if (g_feet_to_torso && g_sim_ok && g_sim.player_unit.immobile) g_feet_to_torso = 0;   /* (a leg gone: as the turn above) */
                 if (g_feet_to_torso) {
                     float step = 55.0f * dt, d = g_pl.twist;
                     if (fabsf(d) <= step) { g_pl.heading += d; g_pl.twist = 0; g_feet_to_torso = 0; }
@@ -7701,6 +7729,10 @@ int main(int argc, char **argv)
                  * drawn): this frame's camera for its next step */
                 memcpy(g_sim.cam_eye, v.eye, sizeof g_sim.cam_eye);
                 g_lod_focal = (float)(h > 0 ? h : 480) * 0.5f / 0.75f;   /* the cockpit view's vertical tangent 0.75 (73.74 deg) */
+                /* at most the original's largest screen's: DOS 1024 x 768 (focal 512: 115 / 272 / 720 m). Above it the
+                 * port had gone on scaling - 1440 lines 216 / 510 / 1350 m - so far mechs kept detail the original
+                 * never shows (user report: DOS at 442 m on its third model, the port at 445 m on its second) */
+                if (g_lod_focal > 512.0f) g_lod_focal = 512.0f;
                 g_sim.cam_a0 = lod_a0();
                 g_sim.cam_ok = 1;
                 for (k = 0; k < g_actor_count; k++) total += g_actors[k].mech.part_count;
@@ -8238,6 +8270,48 @@ int main(int argc, char **argv)
                     }
                 }
             }
+            {   /* point polygons (a single vertex: TEAL's roof lights, LIGHT, cycling 0x02c0 / 0x02e0 / 0x02f0 / 0 by their
+                 * colour-frame task) - the engines draw them as a dot in the palette colour; glr skips polygons under three
+                 * vertices, so they were missing (user report: Wolf 3's red / green roof lights). Drawn as small cards */
+                static texture dot[256];
+                static uint32_t dotpx[256];
+                const mech3d *wm = g_sim.world;
+                int q2;
+                for (q2 = 0; wm && q2 < wm->part_count && n < GLR_MAX_SPRITES; q2++) {
+                    const mech3d_part *pp = &wm->parts[q2];
+                    const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
+                    int pk;
+                    if (!o || pp->hidden || o->vert_count < 1) continue;
+                    for (pk = 0; pk < o->poly_count && n < GLR_MAX_SPRITES; pk++) {
+                        const wtb_poly *pl = &o->polys[pk];
+                        const wtb_vertex *vv;
+                        int ci;
+                        if (pl->n != 1) continue;
+                        ci = (pl->color >> 12) == 0 ? (pl->color >> 4) & 0xff : pl->color >> 8;
+                        if (ci == 0) continue;   /* (the cycle's dark step: off) */
+                        vv = &o->verts[pl->idx[0]];
+                        if (!dot[ci].rgba) {
+                            dotpx[ci] = (uint32_t)g_scene.palette[ci][0] | (uint32_t)g_scene.palette[ci][1] << 8 | (uint32_t)g_scene.palette[ci][2] << 16 | 0xff000000u;
+                            dot[ci].w = dot[ci].h = 1; dot[ci].rgba = &dotpx[ci];
+                        }
+                        if (pp->has_rot) {
+                            const float *R = pp->rot;
+                            spr[n].pos[0] = R[0] * vv->x + R[1] * vv->y + R[2] * vv->z + (float)pp->pos[0];
+                            spr[n].pos[1] = R[3] * vv->x + R[4] * vv->y + R[5] * vv->z + (float)pp->pos[1];
+                            spr[n].pos[2] = R[6] * vv->x + R[7] * vv->y + R[8] * vv->z + (float)pp->pos[2];
+                        } else {
+                            const float cy = cosf(pp->yaw * 3.14159265f / 180.0f), sy = sinf(pp->yaw * 3.14159265f / 180.0f);
+                            spr[n].pos[0] = cy * vv->x + sy * vv->z + (float)pp->pos[0];
+                            spr[n].pos[1] = (float)vv->y + (float)pp->pos[1];
+                            spr[n].pos[2] = -sy * vv->x + cy * vv->z + (float)pp->pos[2];
+                        }
+                        spr[n].half_w = spr[n].half_h = 60.0f;
+                        spr[n].tex = &dot[ci];
+                        spr[n].bb = 0; spr[n].quad = 0; spr[n].ti = 0; spr[n].wire_code = 0; spr[n].has_tri = 0;
+                        n++;
+                    }
+                }
+            }
             glr_set_sprites(r, spr, n);
             ti_particles(r, &v, (float)((double)g_sim.now * 182.0 / 1000.0), mission);
             {   /* engine 0x10045d00 (3Dfx; the PowerVR edition the same at 0x1003e770): an effect whose type lights takes the
@@ -8525,8 +8599,30 @@ int main(int argc, char **argv)
             }
             if (ll < 1.0f) { lx = 0; lz = 1; ll = 1; }
             vv.free_cam = 1;
+            {   /* turrets (class 3): framed on their model as drawn - the unit's centre height (MGEO, 5.5 m by default) is
+                 * not where a turret's guns sit (user report, Scorching Sand: the TURRETFs at the box's lower edge, cut
+                 * off). The model's height span gives the centre, its size the distance */
+                float ymn = 1e30f, ymx = -1e30f, xzr = 0.0f;
+                int q3, k3;
+                if (ta->unit_class == 3)
+                    for (q3 = 0; q3 < ta->mech.part_count; q3++) {
+                        const mech3d_part *pp = &ta->mech.parts[q3];
+                        const wtb_object *o3 = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
+                        for (k3 = 0; o3 && k3 < o3->vert_count; k3++) {
+                            float w3[3];
+                            sat_vertex(pp, &o3->verts[k3], w3);
+                            if (w3[1] < ymn) ymn = w3[1];
+                            if (w3[1] > ymx) ymx = w3[1];
+                            {   const float dx3 = w3[0] - (float)ta->mech.origin[0], dz3 = w3[2] - (float)ta->mech.origin[2], r3 = sqrtf(dx3 * dx3 + dz3 * dz3); if (r3 > xzr) xzr = r3; }
+                        }
+                    }
+                if (ymn < ymx) {
+                    const float half = fmaxf((ymx - ymn) * 0.5f, xzr);
+                    if (half > R) R = half;
+                    vv.eye[1] = (ymn + ymx) * 0.5f;
+                } else vv.eye[1] = (g_tgt_sel < g_sim.actor_count ? g_sim.units[g_tgt_sel].y : (float)ta->mech.origin[1]) + ch;
+            }
             vv.eye[0] = (float)ta->mech.origin[0] - lx / ll * 3.0f * R; vv.eye[2] = (float)ta->mech.origin[2] - lz / ll * 3.0f * R;
-            vv.eye[1] = (g_tgt_sel < g_sim.actor_count ? g_sim.units[g_tgt_sel].y : (float)ta->mech.origin[1]) + ch;
             vv.look_yaw = atan2f(lx, lz) * 180.0f / 3.14159265f; vv.look_pitch = 0.0f;
             vv.vfov = 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / 2.0f) * 180.0f / 3.14159265f;
             if (g_tgtdisp == 1) {
@@ -9038,6 +9134,12 @@ int main(int argc, char **argv)
                             else if (pxr) {   /* the rim point as the cone's ends (DOS 0x14670 -> 0x147c0): (x1 - x0 + 1) / 2 - 2 out */
                                 float ang = atan2f(bx - cx, cy - by), rim = (float)(rr - 1);
                                 bx = (float)(rcx + (int)-floorf(-rim * sinf(ang))) * rw.ux; by = (float)(rcy - (int)floorf(rim * cosf(ang))) * rw.uy;
+                            } else if (g_satmap) {   /* the satellite map: dd2 was a marker (1e12), not a distance - the rim point
+                                                      * came out at the centre, a red dot on the player's mech (user report) -
+                                                      * the target off the map: at the map's edge, in its direction */
+                                const float ex2 = fabsf(bx - cx) > 1e-3f ? (cx - 8.0f) / fabsf(bx - cx) : 1e30f, ey2 = fabsf(by - cy) > 1e-3f ? (cy - 8.0f) / fabsf(by - cy) : 1e30f;
+                                const float k2 = ex2 < ey2 ? ex2 : ey2;
+                                if (k2 < 1.0f) { bx = cx + (bx - cx) * k2; by = cy + (by - cy) * k2; }
                             } else {   float l = sqrtf(dd2); bx = cx + (bx - cx) * rad / l; by = cy + (by - cy) * rad / l; }
                             sp = &g_hs_rtof[nvq >= 0 ? 0 : sd];
                         } else if (nvq >= 0) {

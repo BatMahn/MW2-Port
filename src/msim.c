@@ -1753,7 +1753,14 @@ void msim_step(msim *s, int32_t dt_ms)
         v.enemy_dist = sqrtf(dx * dx + dz * dz);
         v.enemy_bearing = atan2f(dx, dz) * 180.0f / 3.14159265f;
         /* elevation between the unit origins (the pitch demand, 0x100231a0 -> 0x100135d0) */
-        v.enemy_elev = atan2f(v.enemy_height + s->units[i].ground - s->units[i].y, v.enemy_dist > 1.0f ? v.enemy_dist : 1.0f) * 180.0f / 3.14159265f;
+        {
+            /* turrets and the turret-class dropships (classes 3, 8): from their eye, where the guns are (user report, Sable
+             * Flame: the dropships' eyes stand 23 m up, the elevation between the origins was ~0, and the level shots
+             * passed over the player's head; in DOS they aim straight at you). Mechs keep the origins' elevation */
+            float eye_up = 0.0f;
+            if ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok) eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
+            v.enemy_elev = atan2f(v.enemy_height + s->units[i].ground - s->units[i].y - eye_up, v.enemy_dist > 1.0f ? v.enemy_dist : 1.0f) * 180.0f / 3.14159265f;
+        }
         {   /* the player's star (engine: the player leads it; "my leader" 0x2201 = the player) and its orders */
             int star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
             int c = s->cmd ? s->cmd[i] : 0, t = s->cmd_target ? s->cmd_target[i] : -1;
@@ -2007,6 +2014,8 @@ void msim_step(msim *s, int32_t dt_ms)
                 if (m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)
                     rate = s->units[i].jet_fuel - sdt * 182.0f > 0 ? m->turn / 1024.0f * 90.0f * 2.0f : 0.0f;   /* the jets held (a
                                    * tank, state 2): x2 (0x102473d4) while fuel is left after the burn, else no turn (0x1001a180) */
+                if (s->units[i].immobile && !(m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)) rate = 0.0f;   /* a leg gone: no leg turn (user report against the
+                                   * original: a legged mech cannot come about - circle behind it; it still twists its torso) */
                 ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
                 if (freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
                     float d = (ac->mech.heading - hd0) * 3.14159265f / 180.0f, cd = cosf(d), sd = sinf(d);
@@ -2188,6 +2197,13 @@ void msim_step(msim *s, int32_t dt_ms)
             else {
                 s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y + (s->centre_h ? s->centre_h[i] : 550.0f));
                 float y3 = s->units[i].y + dy_done;
+                /* falling fast (off a mesa, a cliff): an AI unit with jets fires them to slow the drop before it would land
+                 * hard enough to hurt its legs (fall damage beyond 16.154 cm/tick, combat_land). User report against DOS,
+                 * Scorching Sand: the two Jenners that start on the mesa jet as they drop off it (the plumes show) and land
+                 * unhurt; the port's dropped like stones and both red-legged. INFERRED from that observation (the engine's
+                 * code not traced): the jets on while over 2 m up and falling faster than 10 cm/tick */
+                if (!s->units[i].destroyed && !s->units[i].shutdown && s->units[i].jets > 0 && !s->units[i].no_jump && s->units[i].jet_fuel > 0 &&
+                    s->units[i].y - s->units[i].ground > 200.0f && s->units[i].vy < -10.0f && !getenv("MW2_NO_FALL_BRAKE")) m->jet = 1;   /* (tests: MW2_NO_FALL_BRAKE) */
                 combat_jets(&s->units[i], m->jet, dt, &s->rng);           /* jump jets / falling, on the terrain */
                 if (imp3 && land3)   /* a harmless impact (a ground-like face, the feet in the window) lands it: 0x10019c4e sets
                                       * the feet's height over the ground to -1, so 0x10019e41 stands it on the ground with the
@@ -2292,6 +2308,7 @@ void msim_free(msim *s)
     s->minds = NULL;
     free(s->air_speed); s->air_speed = NULL;
     free(s->obstacle_part); s->obstacle_part = NULL; s->world = NULL;
+    free(s->los_terrain); free(s->los_terrain_box); s->los_terrain = NULL; s->los_terrain_box = NULL; s->los_terrain_count = 0;
     world3d_paths_free(s->paths); s->paths = NULL;
     terrain_release(s->terrain); s->terrain = NULL;
     free(s->clist_seq); s->clist_seq = NULL; s->clist_seq_n = 0;
@@ -4993,6 +5010,10 @@ void msim_set_world(msim *s, const mech3d *world)
     s->obstacles = calloc((size_t)(world->part_count ? world->part_count : 1), sizeof *s->obstacles);
     s->obstacle_part = calloc((size_t)(world->part_count ? world->part_count : 1), sizeof *s->obstacle_part);
     s->obstacle_count = 0;
+    free(s->los_terrain); free(s->los_terrain_box);
+    s->los_terrain = calloc((size_t)(world->part_count ? world->part_count : 1), sizeof *s->los_terrain);
+    s->los_terrain_box = calloc((size_t)(world->part_count ? world->part_count : 1), sizeof *s->los_terrain_box);
+    s->los_terrain_count = 0;
     if (!s->obstacles || !s->obstacle_part) return;
     for (i = 0; i < world->part_count; i++) {
         const mech3d_part *p = &world->parts[i];
@@ -5009,7 +5030,14 @@ void msim_set_world(msim *s, const mech3d *world)
             if (w[2] > mx[1]) mx[1] = w[2];
             if (w[1] > top) top = w[1];
         }
-        /* candidates: anything reaching probe height (2 m), excluding terrain-sized objects (> 300 m) */
+        /* candidates: anything reaching probe height (2 m), excluding terrain-sized objects (> 300 m) - those go to the
+         * line-of-fire list (hills, the ice walls, mesas: a shot's line through them is blocked, below) */
+        if (top >= 200.0f && (mx[0] - mn[0] > 30000.0f || mx[1] - mn[1] > 30000.0f) && p->coll != 4 && s->los_terrain && s->los_terrain_box) {
+            s->los_terrain[s->los_terrain_count] = i;
+            s->los_terrain_box[s->los_terrain_count][0] = mn[0]; s->los_terrain_box[s->los_terrain_count][1] = mx[0];
+            s->los_terrain_box[s->los_terrain_count][2] = mn[1]; s->los_terrain_box[s->los_terrain_count][3] = mx[1];
+            s->los_terrain_count++;
+        }
         if (top < 200.0f || mx[0] - mn[0] > 30000.0f || mx[1] - mn[1] > 30000.0f) continue;
         s->obstacle_part[s->obstacle_count] = i;
         s->obstacles[s->obstacle_count][0] = mn[0]; s->obstacles[s->obstacle_count][1] = mx[0];
@@ -5283,6 +5311,27 @@ static int los_blocked(const msim *s, float x0, float y0, float z0, float x1, fl
         one.parts = (mech3d_part *)&s->world->parts[s->obstacle_part[i]];
         one.part_count = 1;
         if (seg_mech(&one, o3, d3, &t)) return 1;
+    }
+    /* the terrain (user report, Burning Chrome: the Mad Dog and the Summoner fired LRMs into the ice walls in front of
+     * them and the ledge turret shot at its ice wall - the line to the player passed through the wall, the port only
+     * tested buildings) */
+    {   /* (from 3 m out: a turret on a ledge stands on the terrain it would otherwise "hit" at once) */
+        const float len = sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + (z1 - z0) * (z1 - z0));
+        if (len > 1000.0f) { const float k = 300.0f / len; x0 += (x1 - x0) * k; y0 += (y1 - y0) * k; z0 += (z1 - z0) * k; }
+    }
+    for (i = 0; i < s->los_terrain_count; i++) {
+        const float *b = s->los_terrain_box[i];
+        float lo_x = x0 < x1 ? x0 : x1, hi_x = x0 > x1 ? x0 : x1, lo_z = z0 < z1 ? z0 : z1, hi_z = z0 > z1 ? z0 : z1;
+        float o3[3] = {x0, y0, z0}, d3[3] = {x1 - x0, y1 - y0, z1 - z0}, t;
+        mech3d one;
+        if (b[1] < lo_x || b[0] > hi_x || b[3] < lo_z || b[2] > hi_z) continue;
+        memset(&one, 0, sizeof one);
+        one.parts = (mech3d_part *)&s->world->parts[s->los_terrain[i]];
+        one.part_count = 1;
+        if (seg_mech(&one, o3, d3, &t) && t < 0.995f) {   /* (not the target's own footing at the far end) */
+            if (getenv("MW2_LOS_TRACE")) { static int said; if (said++ < 40) fprintf(stderr, "los: %.2fs blocked by %s at t %.2f from %.0f,%.0f\n", s->now / 1000.0, s->world->parts[s->los_terrain[i]].model_name, (double)t, x0, z0); }   /* TEST ONLY */
+            return 1;
+        }
     }
     return 0;
 }

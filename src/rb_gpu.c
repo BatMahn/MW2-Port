@@ -442,6 +442,7 @@ static SDL_GPUGraphicsPipeline *pipeline(int prog, int has_depth, int samples, i
     e->slope = bias ? S.slope : 0; e->units = bias ? S.units : 0; e->cmask = cmask & 15; e->samples = samples; e->dfmt = dfmt; e->cfmt = cfmt;
     e->p = SDL_CreateGPUGraphicsPipeline(g_dev, &pi);
     if (!e->p) { fprintf(stderr, "rb: pipeline (program %d): %s\n", prog, SDL_GetError()); exit(1); }
+    if (getenv("MW2_PIPE_TRACE")) fprintf(stderr, "rb: pipeline %d made: program %d blend %d depth %d/%d/%d bias %d mask %d samples %d\n", g_npipes, prog, blend, dtest, dwrite, dfunc, bias, cmask & 15, samples);   /* TEST ONLY */
     g_npipes++;
     return e->p;
 }

@@ -99,6 +99,10 @@ typedef struct {
     ai_library   ai;             /* the AIT programs */
     float      (*obstacles)[4];  /* building footprints: min x, max x, min z, max z (cm) - broad phase */
     int         *obstacle_part;  /* world part index for each footprint (faces tested) */
+    int         *los_terrain;    /* the terrain-sized world parts (> 300 m: hills, ice walls, mesas) - not footprints, but they
+                                  * block a shot's line (los_blocked); with their x / z boxes */
+    float      (*los_terrain_box)[4];
+    int          los_terrain_count;
     const mech3d *world;         /* the mission's world (not owned; must outlive the sim) */
     int          obstacle_count;
     int          flank_slots[8]; /* attackers per slot around the player */

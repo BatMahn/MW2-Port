@@ -69,12 +69,17 @@ ifeq ($(WINDOWS),1)
   WINSRC = src/wincompat.c
   WINLIBS = -lole32 -lshell32   # system DLLs: the folder picker (wincompat.c mw2_pick_folder)
   WINRES = build/mw2res.o
+  # release executables stripped: no DWARF sections (named /4, /19 ... in the PE) and no COFF symbol table appended
+  # after the sections - antivirus heuristics read that 1.5 MB tail as an "overlay" and the odd section names as
+  # "obfuscated" (Microsoft Defender's machine-learning verdict Program:Win32/Wacapew.C!ml on v1.1.33's mw2.exe)
+  WINSTRIP = -s
   WINDRES ?= $(patsubst %gcc,%windres,$(CC))
 else
   DLLIB = -ldl
   WINSRC =
   WINRES =
   WINLIBS =
+  WINSTRIP =
 endif
 ifeq ($(UNAME_S),Linux)
   LDLIBS += -ldl
@@ -158,7 +163,7 @@ mw2: $(WINRES) build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) -DSDL_MAIN_HANDLED -c tools/glview.c -Dmain=glview_main -o build/glview_sim.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party -Ithird_party/mt32emu -DMW2_ONE_BINARY -c tools/mw2shell.c $(SDL3_CFLAGS) -o build/mw2shell_one.o
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party/mt32emu -c src/mt32mid.c -o build/mt32mid.o
-	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(SC55_LIB) $(WINRES) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
+	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) build/mw2shell_one.o build/glview_sim.o build/mt32mid.o $(sort $(filter-out src/mt32mid.c,$(filter src/%.c,$^))) build/miniaudio.o build/libmt32emu.a $(SC55_LIB) $(WINRES) $(WINSTRIP) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(CXXLIB) $(WINLIBS)
 
 mw2shell: build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shell.c src/sfx.c src/gusmid.c src/shelldb.c src/smk.c src/vidfx.c src/lance.c src/mek.c src/prj.c src/portcfg.c src/ttext.c src/datapath.c src/shp.c src/cockpitcfg.c src/bwd.c
 	$(SDL3_CHECK)
@@ -167,6 +172,11 @@ mw2shell: build/libmt32emu.a $(SC55_LIB) $(SC55_SRC) src/mt32mid.c tools/mw2shel
 glview: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
 	$(SDL3_CHECK)
 	$(CC) $(CFLAGS) -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB)
+
+# the map viewer (tools/mapview.c): a mission's map in the 3D look, a free camera / map view, click to inspect
+mapview: $(WINRES) tools/mapview.c src/gltf_export.c src/portcfg.c src/ttext.c $(GL3D_SRC) $(WINSRC) $(HDRS)
+	$(SDL3_CHECK)
+	$(CC) $(CFLAGS) -Wno-conversion -Wno-unused-function -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(WINRES) $(WINSTRIP) -o $@ $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB) $(WINLIBS)
 
 gl: $(GLBIN)
 
