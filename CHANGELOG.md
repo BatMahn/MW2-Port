@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.42 (2026-11-20)
+
+Fixes from the latest bug report, each checked against the original DOS game in DOSBox.
+
+- **Mission briefing: SITUATION opens its own page, as in the original.** The briefing page now shows only the
+  orders. SITUATION opens a separate page with the BearNet text and the story, with EXIT to go back (and PREV PAGE /
+  NEXT PAGE when it runs past one page). The port had put both on one scrolling page, with SITUATION jumping
+  half-way down it. That was never intended; it had been that way since the first release.
+- **Mission briefing text laid out as in DOS.** The briefing and situation text now use the original's thin font,
+  its line breaks (no extra blank line after every line), its tab columns ("Codename:" / "Planet:" values line up)
+  and its word wrap. The buttons are grey and turn white under the pointer. The mission's aftermath page uses the
+  same text layout.
+- **Blade Splint: the helicopters' running lights show.** Each light is a small cube set into the helicopter's hull.
+  The original draws whole objects nearest-last, so the light on your side is drawn over the hull. The port's depth
+  buffer hid most of it (the green light looked flat, the red one was missing). The light nearer you is now drawn
+  in front of the hull, as in DOS.
+- **Blade Splint: the cars' headlight housings stand out of the car.** They are boxes that reach out of the nose from
+  inside it, listed after the body. The original draws an object's polygons in that order, so they show whole. The
+  port showed only the part outside the body. Small pieces attached to a moving vehicle are now drawn over its body
+  when they are on your side of it.
+- **Sable Flame: the Falcon dropships aim at your torso.** Turrets and turret-class dropships now aim their pitch
+  from their eye at your centre, not your feet. Aiming at your feet could put the shots into the ground in front of
+  you.
+
 ## v1.1.41 (2026-11-20)
 
 A fuller audit of the DOS look against the DOS MW2.EXE, closer to the one done for the Ghost Bear's Legacy port. Six

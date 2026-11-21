@@ -5323,6 +5323,38 @@ static size_t ordr_expand(const char *in, size_t len, char *out, size_t cap)
     out[o] = 0;
     return o;
 }
+/* The briefing text box (FUN_0001c080 -> 0x1caa0 / 0x3e500, as the archive's FUN_0003c410): DATABASE font 31 (the thin
+ * one), colour 5 (the font's colour 1 remapped, 187 grey), from the box's left edge, 12 px a line, tab stops every 36
+ * px, a word wrapped when it passes the box; \n ends a line (a blank line only for \n\n), \c centres it, the text's
+ * own line ends are spaces (DOSBox: Pyre Light's orders - "Codename:" / "Planet:\t\t" values in one column at +72).
+ * The port had drawn it in the bold list font, a blank line after every \n and tabs as four spaces. */
+enum { BRF_TAB = 36 };
+static int brf_w(const char *t)
+{
+    int x = 0;
+    char one[2] = {0, 0};
+    for (; *t; t++) {
+        if (*t == '\t') { x = (x / BRF_TAB + 1) * BRF_TAB; continue; }
+        one[0] = *t; x += text_width(&g_fthin, one);
+    }
+    return x;
+}
+static void brf_draw(int x0, int y, const char *t, const uint8_t (*pal)[3])
+{
+    char seg[96];
+    int x = 0, k = 0;
+    for (;; t++) {
+        if (*t == '\t' || !*t) {
+            seg[k] = 0;
+            if (k) { draw_text(&g_fthin, x0 + x, y, seg, pal, 5); x += text_width(&g_fthin, seg); }
+            k = 0;
+            if (!*t) break;
+            x = (x / BRF_TAB + 1) * BRF_TAB;
+            continue;
+        }
+        if (k < 94) seg[k++] = *t;
+    }
+}
 static int brf_lines(const char *txt, size_t len, char lines[][96], int *centre, int maxl, int width)
 {
     int n = 0;
@@ -5333,23 +5365,28 @@ static int brf_lines(const char *txt, size_t len, char lines[][96], int *centre,
         if (txt[i] == '\\' && i + 1 < len) {
             char c = txt[i + 1];
             i += 2;
-            if (c == 'n') { cur[cl] = 0; snprintf(lines[n], 96, "%s", cur); centre[n++] = cen; cl = 0; cen = 0; if (n < maxl) { lines[n][0] = 0; centre[n++] = 0; } }
+            if (c == 'n') { cur[cl] = 0; snprintf(lines[n], 96, "%s", cur); centre[n++] = cen; cl = 0; cen = 0; }
             else if (c == 'c') cen = 1;
-            else if (c == 't' && cl < 90) { do cur[cl++] = ' '; while (cl % 4 && cl < 90); }
+            else if (c == 't' && cl < 94) cur[cl++] = '\t';
             continue;
         }
-        if (txt[i] == '\r' || txt[i] == '\n') { if (cl && cur[cl - 1] != ' ' && cl < 94) cur[cl++] = ' '; i++; continue; }
+        if (txt[i] == '\r' || txt[i] == '\n') { if (cl && cur[cl - 1] != ' ' && cur[cl - 1] != '\t' && cl < 94) cur[cl++] = ' '; i++; continue; }
         if (cl < 94) cur[cl++] = txt[i];
         i++;
         cur[cl] = 0;
-        if (text_width(&g_flist, cur) > width) {   /* wrap at the last space */
-            int sp = cl - 1;
-            while (sp > 0 && cur[sp] != ' ') sp--;
-            if (sp <= 0) sp = cl - 1;
-            {
+        /* a word goes to the next line when it and the space after it pass the box (as the archive's text box); a word
+         * passing it before its space, likewise */
+        if (brf_w(cur) > width) {
+            int end = cl, sp;
+            while (end > 0 && cur[end - 1] == ' ') end--;   /* the word's end (before the spaces just added) */
+            sp = end - 1;
+            while (sp >= 0 && cur[sp] != ' ' && cur[sp] != '\t') sp--;
+            if (sp >= 0) {   /* the line before the word; the word (and its spaces) start the next */
                 char rest[96];
+                int le = sp;
                 snprintf(rest, sizeof rest, "%s", cur + sp + 1);
-                cur[sp] = 0;
+                while (le > 0 && cur[le - 1] == ' ') le--;
+                cur[le] = 0;
                 snprintf(lines[n], 96, "%s", cur); centre[n++] = cen;
                 snprintf(cur, sizeof cur, "%s", rest); cl = (int)strlen(cur);
             }
@@ -5358,11 +5395,20 @@ static int brf_lines(const char *txt, size_t len, char lines[][96], int *centre,
     if (cl && n < maxl) { cur[cl] = 0; snprintf(lines[n], 96, "%s", cur); centre[n++] = cen; }
     return n;
 }
+/* The SITUATION page (FUN_0001c080 hotspot 1 -> 0x1c37e): the briefing's text window is hidden and a window of its own
+ * opens on the text after the ORDR's \s mark ("SITUATIONS and AFTERMATHS are downloaded from BearNet ..." and the
+ * narrative), in the same box, until its EXIT; hotspots 0x7f20c + clan x 16 -> 0x7db30 / 0x7e498: EXIT (110,450)-
+ * (209,474), PREV PAGE (270,450)-(369,474), NEXT PAGE (430,450)-(529,474), labels centred at 160 / 320 / 480, y 455;
+ * PREV / NEXT only when there is such a page (DOSBox: a one-page situation shows EXIT alone). The briefing page
+ * itself ends at the mark. (The port had shown both on one scrolling page, SITUATION jumping half-way down.) */
+static const int SIT_HS[3][4] = {{110, 450, 209, 474}, {270, 450, 369, 474}, {430, 450, 529, 474}};
+static const char *SIT_LABEL[3] = {"EXIT", "PREV PAGE", "NEXT PAGE"};
+static const int SIT_LX[3] = {160, 320, 480};
 static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
-    static char lines[600][96];
-    static int centre[600];
-    int next = -1, f = 0, i, n = 0, top = 0, reg, m;
+    static char lines[600][96], slines[600][96];
+    static int centre[600], scentre[600];
+    int next = -1, f = 0, i, n = 0, ns = 0, top = 0, reg, m, sit = getenv("MW2_SHELL_SITUATION") && *getenv("MW2_SHELL_SITUATION"), spage = 0;   /* (MW2_SHELL_SITUATION: tests open the page) */
     int bx = clan == 1 ? 98 : 88, by = clan == 1 ? 51 : 30, bw = clan == 1 ? 403 : 454, bh = clan == 1 ? 372 : 400, lh = 12;
     char msg[96] = "";
     reg_load();
@@ -5382,7 +5428,13 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                 size_t o = 12;
                 while (o + 8 <= r.size) {
                     uint32_t sz = r.data[o + 4] | r.data[o + 5] << 8 | r.data[o + 6] << 16 | (uint32_t)r.data[o + 7] << 24;
-                    if (memcmp(r.data + o, "ORDR", 4) == 0) { static char ex[32768]; size_t el; g_sub_title = g_reg[reg].title; g_sub_honor = g_reg[reg].honor; g_sub_q[0] = 0; el = ordr_expand((const char *)r.data + o + 8, sz - 8, ex, sizeof ex); n = brf_lines(ex, el, lines, centre, 600, bw - 8); }
+                    if (memcmp(r.data + o, "ORDR", 4) == 0) { static char ex[32768]; size_t el; g_sub_title = g_reg[reg].title; g_sub_honor = g_reg[reg].honor; g_sub_q[0] = 0; el = ordr_expand((const char *)r.data + o + 8, sz - 8, ex, sizeof ex);
+                        {   /* the \s mark: the briefing before it, the SITUATION page after it */
+                            size_t k, cut = el;
+                            for (k = 0; k + 1 < el; k++) if (ex[k] == '\\' && (ex[k + 1] == 's' || ex[k + 1] == 'S')) { cut = k; break; }
+                            n = brf_lines(ex, cut, lines, centre, 600, bw);
+                            if (cut + 2 < el) ns = brf_lines(ex + cut + 2, el - cut - 2, slines, scentre, 600, bw);
+                        } }
                     if (sz < 8) break;
                     o += sz;
                 }
@@ -5400,7 +5452,25 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             while (shell_poll(&e)) {
                 if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
                 if (e.type == SDL_EVENT_MOUSE_MOTION) { *mx = e.motion.x; *my = e.motion.y; }
-                if (e.type == SDL_EVENT_MOUSE_WHEEL) top -= e.wheel.y * 3;
+                if (e.type == SDL_EVENT_MOUSE_WHEEL && !sit) top -= e.wheel.y * 3;
+                if (sit) {   /* the SITUATION page */
+                    const int pl = bh / lh;
+                    if (e.type == SDL_EVENT_KEY_DOWN) {
+                        if (e.key.key == SDLK_ESCAPE) sit = 0;
+                        if ((e.key.key == SDLK_PAGEDOWN || e.key.key == SDLK_DOWN) && (spage + 1) * pl < ns) spage++;
+                        if ((e.key.key == SDLK_PAGEUP || e.key.key == SDLK_UP) && spage > 0) spage--;
+                    }
+                    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+                        int x = e.button.x, y = e.button.y;
+                        for (i = 0; i < 3; i++) {
+                            if (x < SIT_HS[i][0] || x > SIT_HS[i][2] || y < SIT_HS[i][1] || y > SIT_HS[i][3]) continue;
+                            if (i == 0) sit = 0;
+                            else if (i == 1 && spage > 0) spage--;
+                            else if (i == 2 && (spage + 1) * pl < ns) spage++;
+                        }
+                    }
+                    continue;
+                }
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; continue; }   /* FUN_0001c080 -> 0x258e0 */
                 if (e.type == SDL_EVENT_KEY_DOWN) {
                     SDL_Keycode k = e.key.key;
@@ -5414,10 +5484,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                     for (i = 0; i < 4; i++) {
                         if (x < BRF_HS[i][0] || x > BRF_HS[i][2] || y < BRF_HS[i][1] || y > BRF_HS[i][3]) continue;
                         if (i == 0) next = 11;                             /* ABORT: the Ready Room */
-                        else if (i == 1) {                                  /* SITUATION: to that part of the text */
-                            int j;
-                            for (j = 0; j < n; j++) if (strncmp(lines[j], "SITUATION", 9) == 0) { top = j; break; }
-                        } else if (i == 2) {                                /* LAUNCH, then the debriefing */
+                        else if (i == 1) { if (ns > 0) { sit = 1; spage = 0; } }   /* SITUATION: its own page */ else if (i == 2) {                                /* LAUNCH, then the debriefing */
                             launch_campaign(clan, reg);
                             next = 3;
                         } else if (i == 3 && brf_skip(reg)) next = 3;       /* SKIP: straight to the debriefing */
@@ -5432,14 +5499,26 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
             const uint8_t (*pal)[3] = (const uint8_t (*)[3])g_bg.pal;
             char head[96];
             snprintf(head, sizeof head, "MISSION %d: %s", m + 1, CAMPAIGN_TITLE[clan][m]);
-            for (i = 0; i < bh / lh && top + i < n; i++) {
+            if (sit) {
+                const int pl = bh / lh;
+                for (i = 0; i < pl && spage * pl + i < ns; i++) {
+                    const char *ln = slines[spage * pl + i];
+                    brf_draw(scentre[spage * pl + i] ? bx + (bw - brf_w(ln)) / 2 : bx, by + i * lh, ln, pal);
+                }
+                for (i = 0; i < 3; i++) {
+                    const int on = *mx >= SIT_HS[i][0] && *mx <= SIT_HS[i][2] && *my >= SIT_HS[i][1] && *my <= SIT_HS[i][3];
+                    if ((i == 1 && spage == 0) || (i == 2 && (spage + 1) * pl >= ns)) continue;
+                    draw_text(&g_flabel, SIT_LX[i] - text_width(&g_flabel, SIT_LABEL[i]) / 2, 455, SIT_LABEL[i], pal, on ? -1 : 6);
+                }
+            } else for (i = 0; i < bh / lh && top + i < n; i++) {
                 const char *ln = lines[top + i];
-                int x = centre[top + i] ? bx + (bw - text_width(&g_flist, ln)) / 2 : bx + 4;
-                draw_text(&g_flist, x, by + i * lh, ln, pal, -1);
+                brf_draw(centre[top + i] ? bx + (bw - brf_w(ln)) / 2 : bx, by + i * lh, ln, pal);
             }
-            for (i = 0; i < 4; i++) {
+            for (i = 0; i < 4 && !sit; i++) {
+                const int on = *mx >= BRF_HS[i][0] && *mx <= BRF_HS[i][2] && *my >= BRF_HS[i][1] && *my <= BRF_HS[i][3];
                 if (i == 3 && !brf_skip(reg)) continue;   /* SKIP: only for the pilot FERRARI */
-                draw_text(&g_flabel, BRF_LX[i] - text_width(&g_flabel, BRF_LABEL[i]) / 2, 455, BRF_LABEL[i], pal, -1);
+                /* grey (palette 6), white under the pointer (DOSBox, as the roster's buttons) */
+                draw_text(&g_flabel, BRF_LX[i] - text_width(&g_flabel, BRF_LABEL[i]) / 2, 455, BRF_LABEL[i], pal, on ? -1 : 6);
             }
             if (msg[0]) draw_text(&g_flabel, 320 - text_width(&g_flabel, msg) / 2, 432, msg, pal, -1);
             (void)head; (void)hover;
@@ -5468,7 +5547,6 @@ static const char *DEB_LABEL[3] = {"EXIT", "AFTERMATH", "REPLAY"};
 static const int DEB_LX[3] = {320, 160, 480};
 typedef struct { char label[64]; char value[48]; int centre; } deb_line;
 static int u16at(const unsigned char *b, int o) { return b[o] | b[o + 1] << 8; }
-static int brf_lines(const char *txt, size_t len, char lines[][96], int *centre, int maxl, int width);
 /* a text page (AFTERMATH): ORDR of <mission><suffix>, scrollable, any button / Esc returns */
 static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan, const char *scen, const char *suffix)
 {
@@ -5480,7 +5558,7 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
     uint32_t len;
     const uint8_t *p;
     if (mission_record(scen, suffix, &r) == 0) {
-        if ((p = chunk_find(&r, "ORDR", &len))) { static char ex[32768]; const size_t el = ordr_expand((const char *)p, len, ex, sizeof ex); n = brf_lines(ex, el, lines, centre, 600, bw - 8); }
+        if ((p = chunk_find(&r, "ORDR", &len))) { static char ex[32768]; const size_t el = ordr_expand((const char *)p, len, ex, sizeof ex); n = brf_lines(ex, el, lines, centre, 600, bw); }
         prj_record_free(&r);
     }
     while (!done) {
@@ -5498,7 +5576,7 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
         draw_bg();
         for (i = 0; i < bh / lh && top + i < n; i++) {
             const char *ln = lines[top + i];
-            draw_text(&g_flist, centre[top + i] ? bx + (bw - text_width(&g_flist, ln)) / 2 : bx + 4, by + i * lh, ln, (const uint8_t (*)[3])g_bg.pal, -1);
+            brf_draw(centre[top + i] ? bx + (bw - brf_w(ln)) / 2 : bx, by + i * lh, ln, (const uint8_t (*)[3])g_bg.pal);   /* (the briefing's text box) */
         }
         draw_text(&g_flabel, 320 - text_width(&g_flabel, "EXIT") / 2, 455, "EXIT", (const uint8_t (*)[3])g_bg.pal, -1);
         if (!headless) {

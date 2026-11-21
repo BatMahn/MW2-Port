@@ -1,4 +1,4 @@
-# DOS MW2.EXE comparison (v1.1.41)
+# DOS MW2.EXE comparison (v1.1.42)
 
 The port's DOS look is checked against the original DOS MW2.EXE (1.1, md5 51634b60...) in two ways:
 
@@ -101,6 +101,22 @@ All 16 tests pass (about 18,500 checks at the default case counts).
   draws across the sky was missing. Only the first such shape counts: GOLD has two, and its second (a walkway) still
   culls.
 
+### v1.1.42
+
+- **Small objects hung on a moving one** (Blade Splint's helicopter running lights: 1 m cubes in the hull). The
+  engines draw whole objects in depth order, so the light nearer the eye than the helicopter is drawn over it. The
+  port now moves that light toward the eye and scales it by the same factor (the same pixels, in front of the hull).
+- **A moving vehicle's small attached pieces** (Blade Splint's car headlight housings: boxes reaching 1 m out of the
+  nose from inside it, listed after the body). The engines draw an object's polygons in list order, so they show
+  whole. Pieces that share no vertex with the body and are under 2.5 m across, on the eye's side of the body's centre,
+  have their vertices moved along their own eye rays by up to 1 m.
+- **Turret and dropship pitch** (Sable Flame's Falcon dropships). MW2.EXE takes the elevation between the two
+  objects' positions (0x2a210: +0x50..+0x58). The port aims from the eye (v1.1.40), now at the target's centre rather
+  than its feet, over the distance from the eye. Not compared frame by frame with DOSBox: the reported shots into the
+  ground did not reproduce on flat ground, where both aims hit.
+- **Shell briefing** (MW2SHELL.EXE FUN_0001c080, now read from an ELF made of MW2SHELL.EXE): the situation page and
+  the text layout, compared with DOSBox. See docs/SHELL.md.
+
 ## Differences kept
 
 - **Invulnerable player and BlowAmmo:** MW2.EXE's shutdown-above-100 branch (0x25130) calls BlowAmmo even for an
@@ -132,6 +148,10 @@ GREE, IREN, JACK, JENN, KIM_, MARO, PINK, PLUM, SABL, TAUP and YELL.
   - External and free-eye views: they have no key in the BattlePack's GAMEKEY.MAP.
 - **Noted, not fixed:** PINK's DOS frame shows "0 kph" in blue. In DOS the speed servo sits slightly negative on that
   slope.
+
+v1.1.42 added TEAL (Blade Splint): the start view and a drive to the first crossroads match DOSBox, its fire cards
+included (FIR1_2 by the road at the start, FIR1_1 at the crossroads). A reported stray flame at a later crossroads
+was not identified.
 
 Earlier render checks against DOSBox (v1.1.40): Wolf 3's roof lights and car headlights, the Sable Flame dome's
 outline colour and its view distance, the radar arms and power-up colours, Abort Mission's eject camera.

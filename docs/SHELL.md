@@ -240,6 +240,15 @@ pilot title index > 5: KTWOBRF1 / KTJFBRF1. Box Wolf (88,30) 454x400, Falcon (98
 0x7f1dc + clan x 16 -> 0x7dac0 / 0x7e428 (background slot 16 / 23): ABORT (430,450)-(529,474) -> 11, SITUATION
 (110,450)-(209,474), LAUNCH (270,450)-(369,474), SKIP (540,450)-(639,474) -> 3 (the debriefing, the mission not flown); SKIP exists only when the pilot is named exactly
 FERRARI (otherwise the hotspot count is set to 3).
+The ORDR's \s mark splits it: the briefing page shows the text before it; SITUATION (case 1, 0x1c37e) hides that
+text window and opens a window of its own (0x27a20, looping on 0x27160 while it returns 5) on the text after it
+("SITUATIONS and AFTERMATHS are downloaded from BearNet ..." and the narrative), in the same box. Its hotspots
+0x7f20c + clan x 16 -> 0x7db30 / 0x7e498 (4, background 16 / 23): EXIT (110,450)-(209,474), PREV PAGE
+(270,450)-(369,474), NEXT PAGE (430,450)-(529,474), labels centred at 160 / 320 / 480, y 455; PREV / NEXT only
+with such a page. Text: DATABASE font 31 (thin), colour 5, from the box's left edge, 12 px a line, tab stops every
+36 px, a word wrapped when it and the space after it pass the box; \n ends a line (\n\n a blank one). Button
+labels grey (palette 6), white under the pointer. DOSBox (Pyre Light, the shell run directly as MW2SHELL): both
+pages match the port line for line since 1.1.42.
 Other screens: 3 debriefing (FUN_00023890: Mission Completion, objectives, wingman deaths, kills, honor),
 9 mech lab (FUN_000339e0), 13 star configuration (FUN_0003b420), 14 cadet training (FUN_0003d980).
 

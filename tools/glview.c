@@ -4481,6 +4481,146 @@ static int dorcs_key(SDL_Keycode k, Uint16 mod)
  * 3Dfx 0x1003dfbc; YELLPLT1 64 / 50000, GREE 130000, JACK 250000 cm) - objects wholly beyond far are not drawn (0x3f500 /
  * 0x1002fba0), so from high up (the ejection camera) the terrain pieces go and the ground fill alone is left */
 static float g_view_far;
+/* A small path-carried object hung on a bigger one - the helicopters' running lights (TEALARE3 RUNLT: a 1 m cube 4 m fore
+ * and aft of the heli's origin, inside its hull, blinking red / green by colour frames): the DOS and 3D engines sort and
+ * draw whole objects by distance (the painter's way), so the light nearer the eye than the heli is drawn over it, whole,
+ * and the far one under it. In the depth buffer the hull hid most of both (user report, 1.1.40: the green light flat, the
+ * red one missing). The nearer one is moved toward the eye by the parent's size and scaled down by the same factor about
+ * the eye - the same pixels, in front of the hull */
+static void carried_in_front(const mech3d *w, int q, mech3d_part *cp, const float eye[3])
+{
+    const mech3d_part *lp = &w->parts[q], *pp = NULL;
+    const wtb_object *o;
+    float r = 0, pr = 0, dl, dp, s, d[3];
+    int j, k, c;
+    if (lp->parent_obj < 0 || !lp->has_rot || lp->model.object_count <= 0 || getenv("MW2_TEST_NO_INFRONT")) return;   /* (TEST hook: off) */
+    o = &lp->model.objects[0];
+    for (k = 0; k < o->vert_count; k++) {
+        float r2 = (float)o->verts[k].x * o->verts[k].x + (float)o->verts[k].y * o->verts[k].y + (float)o->verts[k].z * o->verts[k].z;
+        if (r2 > r) r = r2;
+    }
+    if (r > 200.0f * 200.0f) return;   /* lights: within 2 m of their origin */
+    for (j = 0; j < w->part_count && !pp; j++)
+        if (w->parts[j].obj_index == lp->parent_obj && strcmp(w->parts[j].rec, lp->rec) == 0 && w->parts[j].moving && w->parts[j].model.object_count > 0) pp = &w->parts[j];
+    if (!pp) return;
+    o = &pp->model.objects[0];
+    for (k = 0; k < o->vert_count; k++) {
+        float r2 = (float)o->verts[k].x * o->verts[k].x + (float)o->verts[k].y * o->verts[k].y + (float)o->verts[k].z * o->verts[k].z;
+        if (r2 > pr) pr = r2;
+    }
+    pr = sqrtf(pr);
+    if (pr * pr <= r) return;
+    for (c = 0; c < 3; c++) d[c] = (float)lp->pos[c] - eye[c];
+    dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    dp = sqrtf(((float)pp->pos[0] - eye[0]) * ((float)pp->pos[0] - eye[0]) + ((float)pp->pos[1] - eye[1]) * ((float)pp->pos[1] - eye[1])
+               + ((float)pp->pos[2] - eye[2]) * ((float)pp->pos[2] - eye[2]));
+    if (dl >= dp || dl < 1.0f) return;   /* the far one: drawn before its parent, under it */
+    s = (dl - (pr < dl * 0.5f ? pr : dl * 0.5f)) / dl;
+    for (c = 0; c < 3; c++) cp->pos[c] = (int32_t)lrintf(eye[c] + d[c] * s);
+    for (k = 0; k < 9; k++) cp->rot[k] = lp->rot[k] * s;
+}
+
+/* A carried vehicle's small attached pieces - Wolf 3's cars: the headlight housings (colour 0x1c40, boxes reaching 1 m out
+ * of the nose from inside it) and the yellow lamps (0x0030) come after the body in the model. The engines draw an
+ * object's polygons in that order over what is already there, so they stand out of the car whole; in the depth buffer
+ * the parts inside the hull were hidden and the lamps lay flat on the nose (user report, 1.1.40). An attachment is a
+ * group of polygons sharing no vertex with the largest group (the body) and under 2.5 m across; while it is nearer the
+ * eye than the body's centre each of its vertices moves along its own line to the eye by the group's size (at most 1 m)
+ * - the same pixels, in front of the hull. A per-part copy of the vertices (kept for the next frame) */
+static void carried_attachments(int q, mech3d_part *cp, const float eye[3])
+{
+    enum { MAXQ = 2048, MAXV = 1024 };
+    static struct { const wtb_vertex *src; int nv; signed char *grp; float size[64], cen[64][3]; int ngrp, body; wtb_object obj; wtb_vertex *buf; } C[MAXQ];
+    const wtb_object *o;
+    int k, e, g;
+    float bc[3] = {0, 0, 0}, db;
+    if (q < 0 || q >= MAXQ || !cp->has_rot || cp->model.object_count <= 0 || getenv("MW2_TEST_NO_INFRONT")) return;
+    o = &cp->model.objects[0];
+    if (o->vert_count <= 0 || o->vert_count > MAXV) return;
+    if (C[q].src != o->verts || C[q].nv != o->vert_count) {   /* the groups, once per model */
+        int par[MAXV], cnt[MAXV], big = -1, n = 0, id[MAXV];
+        float mn[64][3], mx[64][3];
+        C[q].src = o->verts; C[q].nv = o->vert_count; C[q].ngrp = 0; C[q].body = -1;
+        free(C[q].grp); C[q].grp = calloc((size_t)o->vert_count, 1);
+        free(C[q].buf); C[q].buf = malloc((size_t)o->vert_count * sizeof *C[q].buf);
+        if (!C[q].grp || !C[q].buf) { C[q].nv = -1; return; }
+        for (k = 0; k < o->vert_count; k++) { par[k] = k; cnt[k] = 0; id[k] = -1; }
+        for (k = 0; k < o->poly_count; k++)
+            for (e = 1; e < o->polys[k].n; e++) {
+                int a = o->polys[k].idx[0], b = o->polys[k].idx[e];
+                if (a >= o->vert_count || b >= o->vert_count) continue;
+                while (par[a] != a) a = par[a] = par[par[a]];
+                while (par[b] != b) b = par[b] = par[par[b]];
+                if (a != b) par[b] = a;
+            }
+        for (k = 0; k < o->poly_count; k++) if (o->polys[k].n >= 3 && o->polys[k].idx[0] < o->vert_count) {
+            int a = o->polys[k].idx[0];
+            while (par[a] != a) a = par[a];
+            cnt[a]++;
+        }
+        for (k = 0; k < o->vert_count; k++) if (par[k] == k && cnt[k] > 0 && (big < 0 || cnt[k] > cnt[big])) big = k;
+        for (k = 0; k < o->vert_count; k++) {
+            int a = k, c;
+            while (par[a] != a) a = par[a];
+            if (cnt[a] == 0) { C[q].grp[k] = -1; continue; }
+            if (id[a] < 0) {
+                if (n >= 64) { C[q].grp[k] = -1; continue; }
+                id[a] = n++;
+                for (c = 0; c < 3; c++) { mn[id[a]][c] = 1e30f; mx[id[a]][c] = -1e30f; }
+                if (a == big) C[q].body = id[a];
+            }
+            C[q].grp[k] = (signed char)id[a];
+            {
+                const float wv[3] = {(float)o->verts[k].x, (float)o->verts[k].y, (float)o->verts[k].z};
+                for (c = 0; c < 3; c++) { if (wv[c] < mn[id[a]][c]) mn[id[a]][c] = wv[c]; if (wv[c] > mx[id[a]][c]) mx[id[a]][c] = wv[c]; }
+            }
+        }
+        C[q].ngrp = n;
+        for (g = 0; g < n; g++) {
+            float dx = mx[g][0] - mn[g][0], dy = mx[g][1] - mn[g][1], dz = mx[g][2] - mn[g][2];
+            C[q].size[g] = sqrtf(dx * dx + dy * dy + dz * dz);
+            for (e = 0; e < 3; e++) C[q].cen[g][e] = (mn[g][e] + mx[g][e]) * 0.5f;
+        }
+    }
+    if (C[q].nv < 0 || C[q].body < 0 || C[q].ngrp < 2) return;
+    {   /* the body's centre, in the world */
+        const float *bm = C[q].cen[C[q].body], *R = cp->rot;
+        for (e = 0; e < 3; e++) bc[e] = R[e * 3] * bm[0] + R[e * 3 + 1] * bm[1] + R[e * 3 + 2] * bm[2] + (float)cp->pos[e] - eye[e];
+        db = sqrtf(bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2]);
+    }
+    memcpy(C[q].buf, o->verts, (size_t)o->vert_count * sizeof *C[q].buf);
+    {
+        int any = 0;
+        for (g = 0; g < C[q].ngrp; g++) {
+            const float *gm = C[q].cen[g], *R = cp->rot;
+            float gc[3], dg, pull;
+            if (g == C[q].body || C[q].size[g] >= 250.0f) continue;
+            for (e = 0; e < 3; e++) gc[e] = R[e * 3] * gm[0] + R[e * 3 + 1] * gm[1] + R[e * 3 + 2] * gm[2] + (float)cp->pos[e] - eye[e];
+            dg = sqrtf(gc[0] * gc[0] + gc[1] * gc[1] + gc[2] * gc[2]);
+            if (dg >= db) continue;   /* behind the body's centre: under it */
+            pull = C[q].size[g] < 100.0f ? C[q].size[g] : 100.0f;
+            for (k = 0; k < o->vert_count; k++) {
+                float wv[3], d[3], l, f, lv[3];
+                if (C[q].grp[k] != g) continue;
+                for (e = 0; e < 3; e++) wv[e] = R[e * 3] * (float)o->verts[k].x + R[e * 3 + 1] * (float)o->verts[k].y + R[e * 3 + 2] * (float)o->verts[k].z + (float)cp->pos[e];
+                for (e = 0; e < 3; e++) d[e] = wv[e] - eye[e];
+                l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (l < 2.0f * pull) continue;
+                f = (l - pull) / l;
+                for (e = 0; e < 3; e++) d[e] = eye[e] + d[e] * f - (float)cp->pos[e];
+                for (e = 0; e < 3; e++) lv[e] = R[e] * d[0] + R[3 + e] * d[1] + R[6 + e] * d[2];   /* R transposed (a rotation) */
+                C[q].buf[k].x = (int32_t)lrintf(lv[0]); C[q].buf[k].y = (int32_t)lrintf(lv[1]); C[q].buf[k].z = (int32_t)lrintf(lv[2]);
+                any = 1;
+            }
+        }
+        if (!any) return;
+    }
+    C[q].obj = *o;
+    C[q].obj.verts = C[q].buf;
+    cp->model.objects = &C[q].obj;
+    cp->model.object_count = 1;
+}
+
 static void load_view_far(prj_archive *ma, const char *scene)
 {
     bwd_mission bm;
@@ -4547,6 +4687,12 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s node %d pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->node, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
         }
         load_view_far(ma, scene);
+        if (getenv("MW2_DEBUG_CARDS")) {   /* TEST hook: the fire / smoke cards (class 0x10 / 0x60) and where they stand */
+            int q;
+            for (q = 0; q < m.part_count; q++) if (m.parts[q].facing)
+                fprintf(stderr, "card %d %s %s type %x obj %d parent %d pos %d %d %d hidden %d\n", q, m.parts[q].rec, m.parts[q].model_name,
+                        m.parts[q].objtype, m.parts[q].obj_index, m.parts[q].parent_obj, m.parts[q].pos[0], m.parts[q].pos[1], m.parts[q].pos[2], m.parts[q].hidden);
+        }
         g_exit_fade_t0 = -1;
         combat_jet_fuel_max = g_edition == PORTCFG_ED_DOS ? 1820.0f : 1810.0f;   /* the full jet tank: DOS 0x71c (0x4ce84), 3Dfx 0x712 */
         combat_jet_refill_dos = g_edition == PORTCFG_ED_DOS;   /* DOS: whole ticks >> 2 a 30 fps frame (0x27c63) */
@@ -8026,7 +8172,14 @@ int main(int argc, char **argv)
                     if (nm && (grown = realloc(all.parts, (size_t)(total + nm) * sizeof *all.parts))) {
                         all.parts = grown; total += nm;
                         for (q = 0; q < g_sim.world->part_count; q++)
-                            if (g_sim.world->parts[q].moving && !g_sim.world->parts[q].hidden) { all.parts[all.part_count] = g_sim.world->parts[q]; all.parts[all.part_count++].moving = 0; }
+                            if (g_sim.world->parts[q].moving && !g_sim.world->parts[q].hidden) {
+                                mech3d_part *cp = &all.parts[all.part_count];
+                                *cp = g_sim.world->parts[q];
+                                cp->moving = 0;
+                                carried_in_front(g_sim.world, q, cp, (g_camode == 3 || g_camode == 4) ? g_cam_eye : v.eye);
+                                carried_attachments(q, cp, (g_camode == 3 || g_camode == 4) ? g_cam_eye : v.eye);
+                                all.part_count++;
+                            }
                     }
                 }
                 if (all.parts && g_sim.world) {
@@ -10057,6 +10210,10 @@ int main(int argc, char **argv)
             }
             if (of) fclose(of);
             free(px);
+            if (getenv("MW2_DEBUG_PARTPOS")) {   /* TEST hook: where the named world parts are at the end */
+                int q; for (q = 0; q < g_mech.part_count; q++) if (strstr(getenv("MW2_DEBUG_PARTPOS"), g_mech.parts[q].model_name))
+                    printf("partpos %s %s %d %d %d hidden %d moving %d\n", g_mech.parts[q].rec, g_mech.parts[q].model_name, g_mech.parts[q].pos[0], g_mech.parts[q].pos[1], g_mech.parts[q].pos[2], g_mech.parts[q].hidden, g_mech.parts[q].moving);
+            }
             if (getenv("MW2_DEBUG_FIRE")) printf("fire: hits %d misses %d ending %d shots %d shutdown %d attacks %d mask %x w0 state %d ammo %d\n", g_sim.hits, g_sim.misses, g_sim.ending, g_sim.shot_count, g_sim.player_unit.shutdown, g_sim.player_attacks, g_sim.player_fire_mask, g_sim.player_unit.weapons[0].state, g_sim.player_unit.weapons[0].ammo);
             printf("autopilot: %.1f s, height %.1f m, at %d,%d heading %.0f, %.0f km/h, armour %d, %s\n", (double)g_auto_elapsed,
                    (double)(g_sim.player_unit.y / 100.0f),

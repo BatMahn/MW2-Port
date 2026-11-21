@@ -1774,6 +1774,7 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                 P->part_rec[q] = i; P->part_node[q] = pp->obj_index;
                 pp->moving = 1;
                 if (pp->model.object_count > 0) vehicle_decals(&pp->model.objects[0]);
+                if (getenv("MW2_DEBUG_CARDS")) fprintf(stderr, "carried %d %s %s\n", q, pp->rec, pp->model_name);   /* TEST hook */
                 break;
             }
     }

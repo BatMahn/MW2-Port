@@ -1802,9 +1802,18 @@ void msim_step(msim *s, int32_t dt_ms)
             /* turrets and the turret-class dropships (classes 3, 8): from their eye, where the guns are (user report, Sable
              * Flame: the dropships' eyes stand 23 m up, the elevation between the origins was ~0, and the level shots
              * passed over the player's head; in DOS they aim straight at you). Mechs keep the origins' elevation */
-            float eye_up = 0.0f;
-            if ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok) eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
-            v.enemy_elev = atan2f(v.enemy_height + s->units[i].ground - s->units[i].y - eye_up, v.enemy_dist > 1.0f ? v.enemy_dist : 1.0f) * 180.0f / 3.14159265f;
+            float eye_up = 0.0f, aim_up = 0.0f, hd = v.enemy_dist;
+            if ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok) {
+                /* ... at the target's centre (the player 1.1.40: from the eye at the FEET, every shot of a dropship
+                 * above you struck the ground in front - the eye ray never met you, so the aim range never took your
+                 * distance; in DOS they hit you in the torso standing still), over the distance from the eye */
+                float ex2 = v.enemy_x - (float)ac->mech.origin[0] - (ac->mech.eye_pos[0] - ac->mech.mount_from[0]);
+                float ez2 = v.enemy_z - (float)ac->mech.origin[2] - (ac->mech.eye_pos[2] - ac->mech.mount_from[2]);
+                eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
+                aim_up = enemy_who == -1 ? s->player_centre_h : enemy_who >= 0 && s->centre_h ? s->centre_h[enemy_who] : 0.0f;
+                hd = sqrtf(ex2 * ex2 + ez2 * ez2);
+            }
+            v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - s->units[i].y - eye_up, hd > 1.0f ? hd : 1.0f) * 180.0f / 3.14159265f;
         }
         {   /* the player's star (engine: the player leads it; "my leader" 0x2201 = the player) and its orders */
             int star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
