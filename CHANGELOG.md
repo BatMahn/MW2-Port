@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.53 (2026-11-22)
+
+- **Cockpit.** Ctrl+Z resets zoom to 1× and holds it there until the reset key is released. Looking down in
+  the Mad Dog no longer exposes the leg panels.
+- **Satellite View and target display.** Destroyed structures show as solid black silhouettes. Satellite View
+  uses the ground colour of the current renderer. Selected buildings and their attachments share a blue wireframe.
+- **Light amplification.** Palette fades update HUD textures when they are drawn and skip redundant DOS world
+  palette uploads.
+- **Aquiline Fire.** The crashed Wolf dropship has its flashing wing light. Destroying it sends five separate
+  fragments and four smaller chunks flying.
+- **Combat.** Titanium textures darken on damaged limbs. DOS heat override uses the current frame's whole ticks
+  for its cook-off roll.
+
 ## v1.1.52 (2026-11-22)
 
 - **DOS cockpit displays.** The rear view stays level as the pilot looks up or down, and the down view looks

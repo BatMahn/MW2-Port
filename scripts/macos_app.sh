@@ -7,8 +7,8 @@
 # the app runs without Homebrew (the graphics are Metal through SDL3's GPU API: nothing else to bundle). The bundle is ad-hoc signed (codesign -s -), not notarised: a downloaded copy
 # needs  xattr -dr com.apple.quarantine "MechWarrior 2.app"  once (README).
 set -e
-VERSION=${GITHUB_REF_NAME#v}   # the release tag (CI), else 1.1.52
-[ -n "$VERSION" ] || VERSION=1.1.52
+VERSION=${GITHUB_REF_NAME#v}   # the release tag (CI), else 1.1.53
+[ -n "$VERSION" ] || VERSION=1.1.53
 
 # bundle APP BINARY BUNDLE_ID NAME
 bundle() {
