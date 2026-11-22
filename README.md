@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-22, v1.1.46)
+## Status (2026-11-22, v1.1.47)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
@@ -266,8 +266,9 @@ If no folder is given, `mw2` looks in the current folder, next to itself (the ma
 system's folder picker (Linux: zenity or kdialog, when installed). Settings live in `~/Library/Application Support/mw2port/mw2port.cfg` (macOS) or
 `~/.config/mw2port/mw2port.cfg` (Linux).
 
-Optional: `make check MUSIC=/path/to/MW2-game/music MW2=/path/to/MW2-game/install` runs the test suite against your
-files.
+Optional: `make check MUSIC=/path/to/test-tones MW2=/path/to/complete-install TITANIUM=/path/to/titanium` runs the
+native test suite. The audio test expects `Track02.wav` and `Track03.wav` with 440 Hz and 660 Hz tones lasting at
+least 7 seconds. The complete install fixture needs `MW2.PRJ`, `DATABASE.MW2`, `GIDDI/` and `SMK/`.
 
 ## Your disc image
 Convert a BIN/CUE image once:

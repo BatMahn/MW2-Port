@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.47 (2026-11-22)
+
+- **Mission launch with anti-aliasing:** The GPU backend selects a sample count supported by both the colour
+  and depth buffers before warming up the mission pipelines. An 8× setting falls back on devices that do
+  not support it, including the M4 Pro from the crash report.
+- **CD soundtrack:** Mixed-mode CUE images use each track's sector size for the disc layout and audio offsets.
+  This fixes shifted audio track starts when a disc contains 2048-byte data sectors and 2352-byte audio sectors.
+- **Settings:** DOS filenames and the SC-55 ROM folder resolve case-insensitively, with their on-disk spelling.
+  The settings writer returns an error if a write fails.
+- **Tests:** `make check` builds the game on a clean checkout and accepts fixture paths with spaces.
+
 ## v1.1.46 (2026-11-22)
 
 - **Configuration:** Saving settings keeps explicit asset paths alongside `game=` and preserves

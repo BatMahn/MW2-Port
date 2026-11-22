@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int fails;
 #define CHECK(c, msg) do { if (c) printf("  ok   %s\n", msg); else { printf("  FAIL %s\n", msg); fails++; } } while (0)
@@ -21,6 +22,50 @@ static double peak(const float *b, size_t frames)
     double m = 0; size_t i;
     for (i = 0; i < frames * 2; i++) if (fabs(b[i]) > m) m = fabs(b[i]);
     return m;
+}
+
+static void test_cue_sector_sizes(void)
+{
+    char dir[] = "/tmp/mw2-cue-XXXXXX", cue[128], data[128], audio[128];
+    unsigned char data_sector[2048] = {0}, audio_sector[2352];
+    float sample[2];
+    if (!mkdtemp(dir)) { CHECK(0, "create CUE test directory"); return; }
+    snprintf(cue, sizeof cue, "%s/disc.cue", dir);
+    snprintf(data, sizeof data, "%s/data.bin", dir);
+    snprintf(audio, sizeof audio, "%s/audio.bin", dir);
+    for (size_t i = 0; i < sizeof audio_sector; i += 2) {
+        audio_sector[i] = 0;
+        audio_sector[i + 1] = 16;
+    }
+    for (int mixed = 0; mixed <= 1; mixed++) {
+        cdaudio *disc = NULL;
+        uint32_t start = 0, leadout = 0;
+        FILE *f = fopen(data, "wb");
+        if (!f) { CHECK(0, "create CUE data track"); break; }
+        CHECK(fwrite(data_sector, sizeof data_sector, 1, f) == 1, "write a 2048-byte data sector");
+        if (!mixed) { fclose(f); f = fopen(audio, "wb"); }
+        if (!f) { CHECK(0, "create CUE audio track"); break; }
+        CHECK(fwrite(audio_sector, sizeof audio_sector, 1, f) == 1, "write a 2352-byte audio sector");
+        fclose(f);
+        f = fopen(cue, "w");
+        if (!f) { CHECK(0, "create CUE index"); break; }
+        fprintf(f, "FILE \"data.bin\" BINARY\n TRACK 01 MODE1/2048\n INDEX 01 00:00:00\n%s"
+                " TRACK 02 AUDIO\n PREGAP 00:02:00\n INDEX 01 00:00:%02d\n",
+                mixed ? "" : "FILE \"audio.bin\" BINARY\n", mixed);
+        fclose(f);
+        if (cdaudio_open(&disc, cue, NULL) != 0) { CHECK(0, "open CUE with both sector sizes"); continue; }
+        cdaudio_track_info(disc, 2, &start, NULL);
+        cdaudio_disc_info(disc, NULL, NULL, &leadout);
+        CHECK(cdaudio_track_length(disc, 1) == 1 && start == 151 && leadout == 152,
+              "mixed sector widths and pregap produce the correct disc addresses");
+        CHECK(cdaudio_play_track(disc, 2) == 0 && cdaudio_render(disc, sample, 1) == 1 &&
+              fabsf(sample[0] - 0.125f) < 0.001f, "audio starts at the first PCM sample");
+        cdaudio_close(disc);
+    }
+    remove(cue);
+    remove(data);
+    remove(audio);
+    rmdir(dir);
 }
 
 int main(int argc, char **argv)
@@ -87,6 +132,7 @@ int main(int argc, char **argv)
         for (i = 0; i < got; i++) { if (fabs(buf[i*2]) > l) l = fabs(buf[i*2]); if (fabs(buf[i*2+1]) > r) r = fabs(buf[i*2+1]); }
         CHECK(fabs(l / full - 128.0 / 255.0) < 0.02 && r == 0, "per-channel volume (L=128, R=0)"); } }
     cdaudio_close(cd);
+    test_cue_sector_sizes();
 
     printf("datapath (against the real install)\n");
     CHECK(dp_add_root(argv[2]) == 0, "add install folder as root");

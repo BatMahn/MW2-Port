@@ -97,7 +97,7 @@ static rb_tex g_win_tex;
 static int g_win_samples = 1, g_win_made, g_win_w, g_win_h;
 /* the window's picture's format: on Vulkan the swapchain's (shown with a copy - a blit is a draw, 7 ms a frame at 1920 x
  * 1080 in Mesa's software Vulkan), else RGBA8 (shown with a blit, the documented way on Direct3D 12 and Metal) */
-static SDL_GPUTextureFormat g_win_fmt = COLOR_FMT;   /* g_win_made: the samples asked for when made */
+static SDL_GPUTextureFormat g_win_fmt = COLOR_FMT;
 static rpipe *g_pipes;
 static int g_npipes, g_cappipes;
 static rsamp *g_samps;
@@ -250,6 +250,27 @@ static int g_probing;   /* rb_init's check of the programs: a shader or pipeline
 static SDL_GPUShader *shader(int i);
 static SDL_GPUGraphicsPipeline *pipeline(int prog, int has_depth, int samples, int cmask, SDL_GPUTextureFormat cfmt);
 static char g_probe_err[256];
+
+static SDL_GPUSampleCount sample_mode(int samples)
+{
+    if (samples >= 8) return SDL_GPU_SAMPLECOUNT_8;
+    if (samples >= 4) return SDL_GPU_SAMPLECOUNT_4;
+    if (samples >= 2) return SDL_GPU_SAMPLECOUNT_2;
+    return SDL_GPU_SAMPLECOUNT_1;
+}
+
+/* Select one count for both attachments and every pipeline, including those made before the first frame. */
+static int window_samples(int requested)
+{
+    for (int n = 8; n > 1; n /= 2) {
+        if (n > requested) continue;
+        const SDL_GPUSampleCount mode = sample_mode(n);
+        if (SDL_GPUTextureSupportsSampleCount(g_dev, g_win_fmt, mode) &&
+            (g_depth_fmt == SDL_GPU_TEXTUREFORMAT_INVALID || SDL_GPUTextureSupportsSampleCount(g_dev, g_depth_fmt, mode)))
+            return n;
+    }
+    return 1;
+}
 /* every program's pipeline made once (the world ones with depth as drawn): a driver that has the device but can't take
  * the shaders (e.g. a Direct3D 12 translation layer without full DXIL support) fails here, in rb_init, so the next
  * backend is tried instead of the game stopping at its first draw. 0 if all were made (from the GBL port) */
@@ -329,7 +350,7 @@ retry:
     memset(&g_buf[0], 0, sizeof g_buf[0]);
     memset(&S, 0, sizeof S);
     S.dtest = 0; S.dwrite = 1; S.dfunc = RB_LESS;
-    g_win_samples = samples > 1 ? samples : 1;
+    g_win_samples = window_samples(samples);
     if (probe_programs() != 0) {
         if (err && errn) { size_t at = strlen(err); SDL_snprintf(err + at, errn - at, "%s%s (shaders): %s", at ? "; " : "", backend_sdl_name(g_backend), g_probe_err); }
         fprintf(stderr, "gpu: %s can't run the game's shaders (%s)%s\n", rb_backend_name(), g_probe_err, k < n ? " - trying the next" : "");
@@ -448,7 +469,7 @@ static SDL_GPUGraphicsPipeline *pipeline(int prog, int has_depth, int samples, i
         pi.rasterizer_state.depth_bias_slope_factor = S.slope;
         pi.rasterizer_state.depth_bias_constant_factor = S.units;
     }
-    pi.multisample_state.sample_count = samples >= 8 ? SDL_GPU_SAMPLECOUNT_8 : samples >= 4 ? SDL_GPU_SAMPLECOUNT_4 : samples >= 2 ? SDL_GPU_SAMPLECOUNT_2 : SDL_GPU_SAMPLECOUNT_1;
+    pi.multisample_state.sample_count = sample_mode(samples);
     pi.depth_stencil_state.enable_depth_test = dtest != 0;
     pi.depth_stencil_state.enable_depth_write = dwrite != 0;
     pi.depth_stencil_state.compare_op = dfunc == 2 ? SDL_GPU_COMPAREOP_ALWAYS : dfunc == RB_LEQUAL ? SDL_GPU_COMPAREOP_LESS_OR_EQUAL : SDL_GPU_COMPAREOP_LESS;
@@ -701,14 +722,9 @@ static void target_make(rtex *t, int w, int h, int depth, int samples, SDL_GPUTe
     ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
     t->t = SDL_CreateGPUTexture(g_dev, &ti);
     if (samples > 1) {
-        SDL_GPUSampleCount sc = samples >= 8 ? SDL_GPU_SAMPLECOUNT_8 : samples >= 4 ? SDL_GPU_SAMPLECOUNT_4 : SDL_GPU_SAMPLECOUNT_2;
-        while (sc > SDL_GPU_SAMPLECOUNT_1 && !SDL_GPUTextureSupportsSampleCount(g_dev, fmt, sc)) sc = (SDL_GPUSampleCount)(sc - 1);
-        samples = sc == SDL_GPU_SAMPLECOUNT_8 ? 8 : sc == SDL_GPU_SAMPLECOUNT_4 ? 4 : sc == SDL_GPU_SAMPLECOUNT_2 ? 2 : 1;
-        if (samples > 1) {
-            ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-            ti.sample_count = sc;
-            t->msaa = SDL_CreateGPUTexture(g_dev, &ti);
-        }
+        ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        ti.sample_count = sample_mode(samples);
+        t->msaa = SDL_CreateGPUTexture(g_dev, &ti);
     }
     if (depth && g_depth_fmt != SDL_GPU_TEXTUREFORMAT_INVALID) {
         ti.format = g_depth_fmt;
@@ -746,7 +762,7 @@ void rb_frame(int w, int h)
 
 void rb_samples(int samples)
 {
-    g_win_samples = samples > 1 ? samples : 1;
+    g_win_samples = window_samples(samples);
     if (g_win_tex && g_win_w) rb_frame(g_win_w, g_win_h);
 }
 

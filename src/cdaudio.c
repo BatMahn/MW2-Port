@@ -22,6 +22,7 @@ typedef int cd_lock;
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 #if !defined(MW2_CLASSIC_MAC)
 #ifdef _WIN32
 #include <windows.h>
@@ -174,9 +175,10 @@ static int cue_load(cdaudio *cd, const char *cue, int track_offset)
     char line[1024], dir[1024], file[1024] = "";
     const char *sl = strrchr(cue, '/');
     FILE *f = fopen(cue, "r");
-    struct { int num, audio, sector_size; char file[1024]; long i0, i1; uint64_t base, shift; } t[CDA_MAX_TRACKS + 1];
-    int nt = 0, k;
-    uint64_t base = 0, filesecs = 0, shift = 0;   /* shift: PREGAP sectors so far (on the disc, not in the files) */
+    struct { int num, audio, sector_size, file_id; char file[1024]; int64_t i0, i1; uint64_t bytes, shift; } t[CDA_MAX_TRACKS];
+    int nt = 0, k, file_id = 0, track_in_file = 0;
+    uint64_t base = 0, file_bytes = 0, shift = 0;   /* shift: PREGAP sectors so far (on the disc, not in the files) */
+    uint64_t file_sector = 0, file_offset = 0;
     if (!f) return -1;
 #ifdef _WIN32
     { const char *bs = strrchr(cue, '\\'); if (bs && (!sl || bs > sl)) sl = bs; }
@@ -189,63 +191,80 @@ static int cue_load(cdaudio *cd, const char *cue, int track_offset)
         if (sscanf(p, "%15s", kw) != 1) continue;
         if (strcasecmp(kw, "FILE") == 0) {
             char *q = strchr(p, '"'), *q2 = q ? strchr(q + 1, '"') : NULL, name[1024];
-            FILE *bf;
-            if (!q || !q2) continue;
+            struct stat info;
+            int len;
+            if (!q || !q2 || q2 == q + 1 || (size_t)(q2 - q - 1) >= sizeof name) goto invalid_cue;
             snprintf(name, sizeof name, "%.*s", (int)(q2 - q - 1), q + 1);
-            if (name[0] == '/' || (name[0] && name[1] == ':')) snprintf(file, sizeof file, "%s", name);
-            else if ((size_t)snprintf(file, sizeof file, "%s/%s", dir, name) >= sizeof file) continue;
-            base += filesecs;   /* this file's sectors come after the last one's */
-            filesecs = 0;
-            if ((bf = fopen(file, "rb"))) { fseek(bf, 0, SEEK_END); filesecs = (uint64_t)ftell(bf) / 2352u; fclose(bf); }
-        } else if (strcasecmp(kw, "TRACK") == 0 && nt < CDA_MAX_TRACKS) {
+            if (name[0] == '/' || name[1] == ':') len = snprintf(file, sizeof file, "%s", name);
+            else len = snprintf(file, sizeof file, "%s/%s", dir, name);
+            if (len < 0 || (size_t)len >= sizeof file || stat(file, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0)
+                goto invalid_cue;
+            file_bytes = (uint64_t)info.st_size;
+            file_id++;
+            track_in_file = 0;
+        } else if (strcasecmp(kw, "TRACK") == 0) {
             int num = 0;
             char mode[32] = "";
-            if (sscanf(p, "%*s %d %31s", &num, mode) != 2) continue;
+            if (nt >= CDA_MAX_TRACKS || !file_id || sscanf(p, "%*s %d %31s", &num, mode) != 2) goto invalid_cue;
             t[nt].num = num; t[nt].audio = strcasecmp(mode, "AUDIO") == 0;
             t[nt].sector_size = strstr(mode, "2048") ? 2048 : 2352;
             snprintf(t[nt].file, sizeof t[nt].file, "%s", file);
-            t[nt].i0 = t[nt].i1 = -1; t[nt].base = base; t[nt].shift = shift;
+            t[nt].i0 = t[nt].i1 = -1; t[nt].file_id = file_id; t[nt].bytes = file_bytes; t[nt].shift = shift;
             nt++;
-        } else if (strcasecmp(kw, "PREGAP") == 0 && nt > 0) {
+            track_in_file = 1;
+        } else if (strcasecmp(kw, "PREGAP") == 0 && track_in_file) {
             int m = 0, sec = 0, fr = 0;
-            if (sscanf(p, "%*s %d:%d:%d", &m, &sec, &fr) == 3) { shift += (uint64_t)(m * 4500 + sec * 75 + fr); t[nt - 1].shift = shift; }
-        } else if (strcasecmp(kw, "INDEX") == 0 && nt > 0) {
+            if (sscanf(p, "%*s %d:%d:%d", &m, &sec, &fr) != 3 || m < 0 || sec < 0 || sec >= 60 || fr < 0 || fr >= 75)
+                goto invalid_cue;
+            shift += (uint64_t)m * 4500 + (uint64_t)sec * 75 + (uint64_t)fr;
+            t[nt - 1].shift = shift;
+        } else if (strcasecmp(kw, "INDEX") == 0 && track_in_file) {
             int ix = 0, m = 0, sec = 0, fr = 0;
-            if (sscanf(p, "%*s %d %d:%d:%d", &ix, &m, &sec, &fr) != 4) continue;
-            if (ix == 0) t[nt - 1].i0 = (long)m * 4500 + sec * 75 + fr;
-            if (ix == 1) t[nt - 1].i1 = (long)m * 4500 + sec * 75 + fr;
+            if (sscanf(p, "%*s %d %d:%d:%d", &ix, &m, &sec, &fr) != 4 || m < 0 || sec < 0 || sec >= 60 || fr < 0 || fr >= 75)
+                goto invalid_cue;
+            if (ix == 0) t[nt - 1].i0 = (int64_t)m * 4500 + sec * 75 + fr;
+            if (ix == 1) t[nt - 1].i1 = (int64_t)m * 4500 + sec * 75 + fr;
         }
     }
     fclose(f);
-    base += filesecs;
     if (nt == 0) return -1;
     for (k = 0; k < nt; k++) {
-        int num = t[k].num + track_offset;
-        uint64_t st, en;
-        cda_track *ct;
-        if (num < 1 || num > CDA_MAX_TRACKS || t[k].i1 < 0) continue;
-        st = t[k].base + (uint64_t)t[k].i1;
-        if (k + 1 < nt && t[k + 1].base == t[k].base) en = t[k].base + (uint64_t)(t[k + 1].i0 >= 0 ? t[k + 1].i0 : t[k + 1].i1);
-        else if (k + 1 < nt) en = t[k + 1].base;   /* the file ends with the track */
-        else en = base;
-        st += t[k].shift; en += t[k].shift;
-        if (en <= st) continue;
-        ct = &cd->tracks[num];
-        ct->start = (uint32_t)st;
-        ct->length = (uint32_t)(en - st);
-        if (t[k].audio && t[k].sector_size == 2352) {
-            FILE *bf = fopen(t[k].file, "rb");
-            if (!bf) { fprintf(stderr, "cdaudio: %s (track %d) is missing\n", t[k].file, num); continue; }
-            fclose(bf);
-            ct->path = strdup(t[k].file);
-            ct->raw = 1; ct->raw_be = 0;
-            ct->raw_off = (uint64_t)t[k].i1 * 2352u;
+        const int64_t num = (int64_t)t[k].num + track_offset;
+        const int same_file = k + 1 < nt && t[k + 1].file_id == t[k].file_id;
+        const uint64_t stride = (uint64_t)t[k].sector_size;
+        const uint64_t remaining = (t[k].bytes - file_offset) / stride;
+        const int64_t next = same_file ? (t[k + 1].i0 >= 0 ? t[k + 1].i0 : t[k + 1].i1) : (int64_t)(file_sector + remaining);
+        if (t[k].i1 < (int64_t)file_sector || next <= t[k].i1 || (uint64_t)next > file_sector + remaining ||
+            base + (uint64_t)next + t[k].shift > UINT32_MAX) return -1;
+        if (num >= 1 && num <= CDA_MAX_TRACKS) {
+            cda_track *ct = &cd->tracks[num];
+            if (ct->length) return -1;
+            ct->start = (uint32_t)(base + (uint64_t)t[k].i1 + t[k].shift);
+            ct->length = (uint32_t)(next - t[k].i1);
+            if (t[k].audio) {
+                ct->path = strdup(t[k].file);
+                if (!ct->path) return -1;
+                ct->raw = 1;
+                ct->raw_off = file_offset + ((uint64_t)t[k].i1 - file_sector) * stride;
+            }
+            if (num > cd->last) cd->last = (int)num;
         }
-        if (num > cd->last) cd->last = num;
+        /* INDEX offsets count sectors. A data sector and an audio sector can use different byte widths. */
+        if (same_file) {
+            file_offset += ((uint64_t)next - file_sector) * stride;
+            file_sector = (uint64_t)next;
+        } else {
+            base += (uint64_t)next;
+            file_sector = file_offset = 0;
+        }
     }
     cd->first = 1;
     cd->leadout = (uint32_t)(base + shift);
     for (k = 1; k <= cd->last; k++) if (cd->tracks[k].path) return 0;
+    return -1;
+
+invalid_cue:
+    fclose(f);
     return -1;
 }
 

@@ -218,19 +218,19 @@ test_inputmap: tests/test_inputmap.c tools/inputmap.h tools/inputmap_defaults.h 
 
 # make check MUSIC=/path/to/rip MW2=/path/to/install [ISO=/path/to/mw2cd.iso] [TITANIUM=/path/to/MW2-game/titanium]
 TITANIUM ?= $(MW2)/../MW2-game/titanium
-check: all
-	./prjtool verify $(MW2)/MW2.PRJ
-	./mektool $(MW2)/MW2.PRJ list | tail -1
-	./bwdtool $(MW2)/MW2.PRJ verify
-	./mechview $(MW2)/MW2.PRJ verify
-	MW2_INSTALL_DIR=$(MW2) ./bwdtool $(MW2)/MW2.PRJ missions | tail -1
-	./test_port $(MUSIC) $(MW2) $(ISO)
-	./test_titanium $(TITANIUM)
+check: all mw2 test_inputmap test_cockpitcfg test_sc55
+	./prjtool verify "$(MW2)/MW2.PRJ"
+	./mektool "$(MW2)/MW2.PRJ" list
+	./bwdtool "$(MW2)/MW2.PRJ" verify
+	./mechview "$(MW2)/MW2.PRJ" verify
+	MW2_INSTALL_DIR="$(MW2)" ./bwdtool "$(MW2)/MW2.PRJ" missions
+	./test_port "$(MUSIC)" "$(MW2)" $(if $(ISO),"$(ISO)")
+	./test_titanium "$(TITANIUM)"
 	./test_gamefolder
-	$(MAKE) test_inputmap && ./test_inputmap $(MW2)
-	$(MAKE) test_cockpitcfg && ./test_cockpitcfg $(MW2)
-	$(MAKE) test_sc55 && ./test_sc55 $(MW2)
-	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 $(MW2) > /tmp/mw2lab.txt; r=$$?; tail -1 /tmp/mw2lab.txt; exit $$r
+	./test_inputmap "$(MW2)"
+	./test_cockpitcfg "$(MW2)"
+	./test_sc55 "$(MW2)"
+	MW2_LAB_MASSES=1 MW2_CONFIG=/tmp/mw2check.cfg ./mw2 "$(MW2)"
 
 clean:
 	rm -rf build $(BIN) $(GLBIN) mw2 mw2.exe test_sc55

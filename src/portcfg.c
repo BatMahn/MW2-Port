@@ -4,7 +4,9 @@
 #endif
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -26,18 +28,24 @@ static void mkdirs(const char *path)
     for (q = tmp + 1; *q; q++) if (*q == '/' || *q == '\\') { char sep = *q; *q = 0; mkdir(tmp, 0755); *q = sep; }
     mkdir(tmp, 0755);
 }
-/* a file in a folder, matching the name case-insensitively (DOS names) */
+/* Match DOS filenames and return the spelling stored on disk. */
 static int find_ci(const char *dir, const char *name, char *out, size_t outlen)
 {
-    char p[PORTCFG_PATH * 3];
-    char lower[256], upper[256];
-    size_t i;
-    for (i = 0; name[i] && i < 255; i++) { lower[i] = (char)(name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]); upper[i] = (char)(name[i] >= 'a' && name[i] <= 'z' ? name[i] - 32 : name[i]); }
-    lower[i] = upper[i] = 0;
-    snprintf(p, sizeof p, "%s/%s", dir, name); if (exists(p)) { snprintf(out, outlen, "%s", p); return 1; }
-    snprintf(p, sizeof p, "%s/%s", dir, upper); if (exists(p)) { snprintf(out, outlen, "%s", p); return 1; }
-    snprintf(p, sizeof p, "%s/%s", dir, lower); if (exists(p)) { snprintf(out, outlen, "%s", p); return 1; }
-    return 0;
+    DIR *entries;
+    struct dirent *entry;
+    int found = 0;
+    if (!dir || !*dir || !(entries = opendir(dir))) return 0;
+    while ((entry = readdir(entries)) != NULL) {
+        char path[PORTCFG_PATH * 3];
+        if (strcasecmp(entry->d_name, name) != 0) continue;
+        const int len = snprintf(path, sizeof path, "%s/%s", dir, entry->d_name);
+        if (len < 0 || (size_t)len >= sizeof path || (size_t)len >= outlen || !exists(path)) continue;
+        if (!found || strcmp(entry->d_name, name) == 0) memcpy(out, path, (size_t)len + 1);
+        found = 1;
+        if (strcmp(entry->d_name, name) == 0) break;
+    }
+    closedir(entries);
+    return found;
 }
 
 const char *portcfg_file(void)
@@ -156,8 +164,8 @@ int portcfg_save(const char *unused, const portcfg *c)
     fprintf(f, "videos=%s\n", PORTCFG_VID_NAME[c->videos > 0 && c->videos < PORTCFG_VID_COUNT ? c->videos : PORTCFG_VID_ORIGINAL]);
     fprintf(f, "video_fit=%s\n", PORTCFG_FIT_NAME[c->video_fit > 0 && c->video_fit < PORTCFG_FIT_COUNT ? c->video_fit : PORTCFG_FIT_43]);
     fprintf(f, "menu_music=%s\n", PORTCFG_MM_NAME[c->menu_music > 0 && c->menu_music < PORTCFG_MM_COUNT ? c->menu_music : PORTCFG_MM_AUTO]);
-    fclose(f);
-    return 0;
+    const int failed = ferror(f);
+    return fclose(f) != 0 || failed ? -1 : 0;
 }
 
 int portcfg_is_game_dir(const char *dir)

@@ -119,10 +119,10 @@ static void test_settings(void)
         CHECK(r.menu_music == PORTCFG_MM_AUTO, "menu_music=opl3 not auto");
     }
     /* the game folder's SC55/ (any case) */
-    mkd("game", game); mkd("game/install", d); mkd("game/SC55", d);
+    mkd("game", game); mkd("game/install", d); mkd("game/Sc55", d);
     portcfg_defaults(&c);
     CHECK(portcfg_resolve(&c, NULL, game) == 0, "resolve %s", game);
-    CHECK(strstr(c.sc55, "/game/SC55") != NULL, "sc55/ not found: '%s'", c.sc55);
+    CHECK(strcmp(c.sc55, d) == 0, "mixed-case sc55/ not found: '%s'", c.sc55);
     rmdir(d);
     snprintf(d, sizeof d, "%s/install", game); rmdir(d);
     rmdir(game);
