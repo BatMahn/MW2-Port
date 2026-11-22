@@ -207,7 +207,7 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
     release_due(u, cw);
 }
 
-void combat_tick(combat_unit *u, float dt)
+void combat_tick(combat_unit *u, float dt, int dos_ticks)
 {
     float ticks = dt * COMBAT_TICKS_PER_S, net;
     int i;
@@ -263,14 +263,12 @@ void combat_tick(combat_unit *u, float dt)
             u->seq_ticks = 0;
             u->auto_shutdown = 1;          /* message 0xd "Shutting down", nothing else that frame */
         } else if (h > 100 && u->override) {
-            if (!u->invulnerable && ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
-                /* a roll per frame: 0x250f0..0x2511c rand(500 x the frame's whole ticks) == 0 -> BlowAmmo 0x24ec0. The chance a
-                 * frame is 1 / (500 t), so a second's falls with the square of the frame's ticks; the port takes it at the 30 fps
-                 * reference its walking heat uses (6 ticks a frame: 1 in 18000 a tick, a cook-off every ~95 s on average). It had
-                 * the 3Dfx DLL's 3 in 4000 a tick, an overridden mech blowing up 14x sooner (found by the GBL port's emulated
-                 * comparison, GBL 0x25430; MW2.EXE the same code) */
-                u->rng = u->rng * 1103515245u + 12345u;
-                if ((float)(u->rng >> 8) / 16777216.0f < ticks / 18000.0f) { cook_off(u); if (u->destroyed) u->down_in_update = 1; }
+            if (!u->invulnerable && dos_ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
+                /* 0x250f0: one 15-bit draw modulo 500 times this frame's whole ticks. */
+                if (rnd(&u->rng) % (500ull * (unsigned)dos_ticks) == 0) {
+                    cook_off(u);
+                    if (u->destroyed) u->down_in_update = 1;
+                }
             }
         } else if (h > 100 && u->shutdown) {
             /* 0x25130: shut down above 100 for more than 0x71c ticks since the shutdown: BlowAmmo every frame */

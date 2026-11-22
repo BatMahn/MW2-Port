@@ -103,7 +103,7 @@ void shim_heat_frame(combat_unit *u, shim_heat *h)
     u->heat += (float)h->add16 / 65536.0f;
     u->override = h->override;
     u->heat_warning = u->seq_alarm = u->auto_shutdown = u->restarted = 0;
-    combat_tick(u, (float)h->ticks / COMBAT_TICKS_PER_S);
+    combat_tick(u, (float)h->ticks / COMBAT_TICKS_PER_S, h->ticks);
     h->heat = u->heat;
     h->shutdown = u->shutdown; h->pending = u->shutdown_pending; h->override = u->override;
     h->latch = u->alarm_latch; h->warn_latch = u->warn_latch; h->destroyed = u->destroyed;
@@ -121,18 +121,19 @@ float shim_unit_sink(int heat_sinking, int player, int difficulty, int temperatu
     if (player) combat_set_player_difficulty(&u, difficulty);
     return u.sink_per_tick;
 }
-/* frames of `ticks` until an overridden unit above 100 heat cooks off (max frames: -1) */
-int shim_override_frames(int ticks, int seed, int maxf)
+/* Try one heat override roll, returning bit 0 for a cook-off and bit 1 for a random draw. */
+int shim_override_roll(int ticks, unsigned seed, int invulnerable)
 {
-    combat_unit u; int f;
+    combat_unit u;
     memset(&u, 0, sizeof u);
-    u.human = 1; u.rng = (unsigned)seed; u.override = 1; u.shutdown_pending = 1;
-    for (f = 1; f <= maxf; f++) {
-        u.heat = u.heat_mark = 105.0f;
-        combat_tick(&u, (float)ticks / COMBAT_TICKS_PER_S);
-        if (u.destroyed) return f;
-    }
-    return -1;
+    u.human = 1;
+    u.rng = seed;
+    u.override = 1;
+    u.shutdown_pending = 1;
+    u.invulnerable = invulnerable;
+    u.heat = u.heat_mark = 105.0f;
+    combat_tick(&u, (float)ticks / COMBAT_TICKS_PER_S, ticks);
+    return u.destroyed | ((u.rng != seed) << 1);
 }
 /* collision damage: armour taken from each location (out[8]) for a collide() at the given speed / normal / bearing */
 void shim_collide(float speed, float ny, float rel, int other_tons, int own_tons, float out[8])

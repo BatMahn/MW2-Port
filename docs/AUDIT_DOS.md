@@ -41,7 +41,7 @@ found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records cr
 |---|---|---|---|
 | heat_state | 0x24f90 (sinking, 66 warning, 81 sequence, shutdown, BlowAmmo, restart) | combat_tick | PASS |
 | heat_sink_tiers | 0x4cd7b..0x4ce25 (dissipation by player, difficulty, temperature) | combat_set_player_difficulty | **fixed** (v1.1.39) |
-| heat_override_roll | 0x250f0 (rand(500 x ticks)) | combat_tick | PASS (mean time within 15 %) |
+| heat_override_roll | 0x250f0 (rand(500 x ticks)) | combat_tick | PASS (same 15-bit samples and frame tick counts) |
 | weapon_parameters | 0x9ee58 (31 weapon records); 0x2ea14 (AI firing-roll divisor) | weapon data and combat_ai_select | **fixed** (v1.1.50) |
 | jump_jet_fuel | 0x27ba7..0x27c87 (fuel, heat and effect dispatch) | combat_jets, combat_jets_firing, combat_jets_dy | **fixed** (v1.1.49) |
 | ai_nav_turn | 0x229e0 | ai_nav_turn | PASS |
@@ -243,7 +243,7 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - The player outline's front and rear damage levels (0x2f611..0x2f6e4) and message replacement (0x11020)
   each matched 3,000 differential cases. The message comparison used the active or expired status after
   normal message upkeep and the priorities used by the game.
-- All 20 differential test groups passed across seeds 47 and 149, covering 137,705 assertions.
+- At v1.1.52 all 20 differential test groups passed across seeds 47 and 149, covering 137,705 assertions.
   One segment case within 2 cm of a boundary remains outside the assertions. The heat override command's
   sampled mean at six ticks per frame was 92 seconds in the port and 99 in DOS.
 - ORANSCN1's pump station was inspected at 205 m in the DOS look and rejected in the 3Dfx look. The sequence
@@ -252,6 +252,15 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - The headless OpenGL sequence sweep passed 273 of 279 sequences across the shards and fixture reruns.
   The remaining failures cover reticle convergence at 300 m, the final autopilot heading from the right in
   TNJ4, the zero-time completion log for PROVSCN1 without actors, and three shell screenshot comparisons.
+
+### Heat override follow-up
+
+- DOS weapon heat above 100 with the shutdown overridden rolls a 15-bit value modulo `500 * frame_ticks`
+  (0x250f0, 0x4a070). The port uses whole elapsed ticks from the simulator clock. With no elapsed tick or
+  player invulnerability, the roll is skipped.
+- The differential test supplies the same raw sample to the original table entry and the port's per-unit
+  generator. The port still uses its own random sequence. DOS initializes a 127-entry table from the Watcom
+  generator at 0x49fe0 and shares the index with other simulation code.
 
 ## Not checked
 

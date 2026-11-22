@@ -210,8 +210,8 @@ void combat_set_player_difficulty(combat_unit *u, int difficulty);
  * for any other (enemy, neutral). combat_armor_mult gives the factor, combat_set_armor_mult applies it once */
 float combat_armor_mult(int player, int alliance, int difficulty);
 void combat_set_armor_mult(combat_unit *u, float mult);
-/* advance time: weapon cycles, heat, shutdown */
-void combat_tick(combat_unit *u, float dt);
+/* Advance weapon cycles, heat and shutdown by dt seconds. DOS heat override uses the whole clock ticks elapsed. */
+void combat_tick(combat_unit *u, float dt, int dos_ticks);
 /* trigger ready weapons in range at `target` and resolve projectiles now due.
  * distance in game units (cm). Returns damage dealt (rounded). */
 /* Trigger every ready weapon whose range covers `distance` (cm). Projectiles are then

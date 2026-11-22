@@ -7266,7 +7266,7 @@ int main(int argc, char **argv)
             if (g_mm_depth || g_paused) dt = 0;   /* the MAIN MENU (and PAUSE_GAME) pauses the game (WinMain 0x10009770: "pause timer TRUE") */
             int32_t frame_ms = g_sim_ok && ((g_pl_ok && g_pilot) || g_patrol) ? sim_ms(dt) : 0;
             /* DOS 0x40aad compares propagation delay to the current frame's whole ticks. */
-            g_snd_frame_ticks = (int)((((int64_t)g_sim.now + frame_ms) * 182 / 1000) - ((int64_t)g_sim.now * 182 / 1000));
+            g_snd_frame_ticks = msim_dos_frame_ticks(g_sim.now, frame_ms);
             mech3d all;
             int i;
             aprev = now;

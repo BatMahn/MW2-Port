@@ -319,6 +319,11 @@ extern const char *const MSIM_FORMATION_TEXT[7]; /* "Echelon Left" .. "No Format
 /* actors from world3d_actors(); the sim does not own them. */
 void msim_set_dos(int dos);   /* select edition rules before loading a mission */
 int  msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count);
+/* Count whole 182 Hz clock ticks crossed by a frame. */
+static inline int msim_dos_frame_ticks(int32_t now, int32_t dt_ms)
+{
+    return (int)((((int64_t)now + dt_ms) * 182 / 1000) - ((int64_t)now * 182 / 1000));
+}
 void msim_step(msim *s, int32_t dt_ms);
 /* STARTUP_MECH on a shut-down player (engine 0x1001b011: state 3 -> 0 when flag 4 is clear or overridden, "Powering
  * up..."): the mech is up again and the start-up runs - online 0x43e + rand(0x16a) ticks later (0x1001ab71). Returns 0

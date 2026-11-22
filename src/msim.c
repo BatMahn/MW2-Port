@@ -1095,7 +1095,7 @@ static float wrap180(float a)
     return a;
 }
 
-static void combat_step(msim *s, float dt);
+static void combat_step(msim *s, float dt, int dos_ticks);
 static void terrain_release(void *t);
 static float wrap180(float a);
 static int los_blocked(const msim *s, float x0, float y0, float z0, float x1, float y1, float z1);
@@ -1525,6 +1525,7 @@ void msim_step(msim *s, int32_t dt_ms)
     if (s->world_rebuild && s->world) { s->world_rebuild = 0; msim_set_world(s, s->world); }
     mtbl_world w;
     float dt = (float)dt_ms / 1000.0f;
+    int dos_ticks = msim_dos_frame_ticks(s->now, dt_ms);
     int i;
     w.user = s; w.targets = cb_targets; w.finished = cb_finished; w.started = cb_started;
     s->now += dt_ms;
@@ -1533,7 +1534,7 @@ void msim_step(msim *s, int32_t dt_ms)
         s->player_unit.ground = msim_ground(s, s->player[0], s->player[2], s->player_unit.y + s->player_centre_h);
         combat_jets(&s->player_unit, 0, dt, &s->rng);
     }
-    combat_step(s, dt);
+    combat_step(s, dt, dos_ticks);
     if (getenv("MW2_TEST_FALLSIM")) {   /* TEST ONLY: units (the player -1, wrecks too) under every type 5 surface at their x, z,
                                          * every 0.25 s: "FALLSIM t= unit= skel [WRECK] x= z= y= vy= ground= floor=lo..hi" */
         static int32_t fl_t = -100000;
@@ -3189,7 +3190,7 @@ static void player_lock_step(msim *s, float pl_h, float ticks)
     s->player_unit.lock_target = (s->player_lock & 0x80) ? e : -2;
 }
 
-static void combat_step(msim *s, float dt)
+static void combat_step(msim *s, float dt, int dos_ticks)
 {
     int i, k, w;
     float ticks = dt * COMBAT_TICKS_PER_S;
@@ -3216,12 +3217,12 @@ static void combat_step(msim *s, float dt)
     if (!s->player_unit.offline && !s->player_unit.shutdown) combat_damage_live = 1;   /* DAT_1024c570: the player's first start-up done (0x1001ac68) */
     for (i = 0; i < s->actor_count; i++)
         s->units[i].offline = (s->online_at && (float)s->now < s->online_at[i]) || (s->powered_down && s->powered_down[i]);
-    combat_tick(&s->player_unit, dt);
+    combat_tick(&s->player_unit, dt, dos_ticks);
     for (i = 0; i < s->actor_count; i++) if (s->armed[i]) {
         /* 0x1001a180: the weapon step (0x100437a0) runs before the AI (0x10011c50) - it sees the trigger the AI left
          * last frame */
         if (s->minds && s->ai_ok) combat_ai_trigger(&s->units[i]);
-        combat_tick(&s->units[i], dt);
+        combat_tick(&s->units[i], dt, dos_ticks);
     }
     if (s->cheat_kill > 0 && s->cheat_kill <= s->actor_count) {   /* the cheat codes "gankem" / "enolagay" */
         int u = s->cheat_kill - 1;

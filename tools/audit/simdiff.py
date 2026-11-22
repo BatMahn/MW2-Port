@@ -133,25 +133,37 @@ def heat_sink_tiers(rep, rnd, n):
 
 @test
 def heat_override_roll(rep, rnd, n):
-    """MW2.EXE 0x250f0..0x2511c: an overridden unit above 100 heat rolls rand(500 x frame ticks) == 0 a frame; the port
-    takes it at its 30 fps reference (1 / 18000 a tick). Checks the argument, and the port's mean time to a cook-off at
-    6-tick frames against DOS's (within 15 %)"""
+    """Exercise the DOS modulo roll with the same 15-bit sample on both sides."""
     L = lib('combat')
-    for t in range(1, 21):
-        e = emu()
-        args = []
-        e.stub(RAND, lambda em: args.append(em.reg('eax')) or 1)
-        e.stub(BLOW, ret=0); e.stub(MSG, ret=0); e.stub(SND, ret=0, pops=4)
-        dif_block(e)
-        obj = e.alloc(0x40); c = e.alloc(0x200); e.w32(c, obj); e.w32(c + 0xa0, 2)
-        e.w32(c + 0x98, 105 << 16); e.w16(c + 0x10c, 4 | 8); e.w32(c + 0x8c, 0)
-        e.w32(PLAYER, 0); e.w32(NOW, 100); e.w32(TICKS, t)
-        e.call(0x24f90, eax=c)
-        rep.check(args == [500 * t], 'ticks %d: rand args %s' % (t, args))
-    fr = [L.shim_override_frames(6, k + 1, 10 ** 7) for k in range(max(n, 200))]
-    mean_s = sum(fr) / len(fr) * 6 / 182.0; dos_s = 500.0 * 36 / 182.0
-    rep.notes.append('6-tick frames: port mean %.0f s, DOS %.0f s' % (mean_s, dos_s))
-    rep.check(abs(mean_s / dos_s - 1) < 0.15, 'port mean %.1f s vs DOS %.1f s' % (mean_s, dos_s))
+    L.shim_override_roll.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_int]
+    rng_index, rng_table = 0x9e8f4, 0x152ffc
+    modulus = 1 << 32
+    inverse = pow(1103515245, -1, modulus)
+    for ticks in (*range(21), 65, 66, 100):
+        bound = 500 * ticks
+        edge = {0, 1, 32767}
+        edge.update(k * bound + d for k in (1, 2) for d in (-1, 0, 1))
+        samples = sorted(x for x in edge if 0 <= x < 32768)
+        samples.extend(rnd.randrange(32768) for _ in range(n // 10))
+        for sample in samples:
+            for invulnerable in (0, 1):
+                e = emu()
+                blows = []
+                e.stub(BLOW, lambda em: blows.append(True) or 0)
+                e.stub(MSG, ret=0); e.stub(SND, ret=0, pops=4)
+                dif_block(e, invuln=invulnerable)
+                obj, ctrl = e.alloc(0x40), e.alloc(0x200)
+                e.w32(ctrl, obj); e.w32(ctrl + 0xa0, 2)
+                e.w32(ctrl + 0x98, 105 << 16); e.w16(ctrl + 0x10c, 4 | 8)
+                e.w32(PLAYER, 0); e.w32(obj + 4, 0)
+                e.w32(NOW, 100); e.w32(TICKS, ticks)
+                e.w32(rng_index, 0); e.w32(rng_table, sample)
+                e.call(0x24f90, eax=ctrl)
+                dos = bool(blows) | (e.rs32(rng_index) << 1)
+                seed = (((sample << 16) - 12345) * inverse) % modulus
+                port = L.shim_override_roll(ticks, seed, invulnerable)
+                rep.check(dos == port, 'ticks %d sample %d invulnerable %d: DOS %d port %d' %
+                          (ticks, sample, invulnerable, dos, port))
 
 @test
 def weapon_parameters(rep, rnd, n):
