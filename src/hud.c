@@ -26,14 +26,14 @@ struct hud_s {
 
 /* every loaded sprite's indices, kept so a palette change (hud_repalette) can redraw its texture */
 typedef struct {
-    unsigned tex; int w, h, from, to; uint8_t *pix, *mask; uint32_t used[8];
+    unsigned tex; int w, h, from, to, dirty; uint8_t *pix, *mask; uint32_t used[8];
     /* the texture's last two readings (the sprite's colours as a key, its upscaled RGBA): light amplification switches
      * between two palettes, and rebuilding every sprite (Scale3x and the edge bleed) each time stalled a frame */
     uint32_t ckey[2]; uint8_t *crgba[2]; int cw[2], ch[2], cnext;
 } hud_src;
 static void src_free(hud_src *e);
 static hud_src *g_src;
-static int      g_src_n, g_src_cap;
+static int      g_src_n, g_src_cap, g_src_dirty_n;
 static uint8_t  g_src_used[256];   /* the palette indices the loaded sprites use */
 
 hud *hud_create(prj_archive *a)
@@ -81,6 +81,7 @@ void hud_destroy(hud *h)
     if (h->font_tex3) rb_tex_delete(h->font_tex3);
     free(h);
     while (g_src_n > 0) { g_src_n--; src_free(&g_src[g_src_n]); }
+    g_src_dirty_n = 0;
     memset(g_src_used, 0, sizeof g_src_used);
 }
 
@@ -251,7 +252,10 @@ void hud_sprite_free(hud_sprite *s)
     int k;
     if (s->tex) {
         for (k = 0; k < g_src_n; k++)
-            if (g_src[k].tex == s->tex) { src_free(&g_src[k]); g_src[k] = g_src[--g_src_n]; break; }
+            if (g_src[k].tex == s->tex) {
+                g_src_dirty_n -= g_src[k].dirty;
+                src_free(&g_src[k]); g_src[k] = g_src[--g_src_n]; break;
+            }
         rb_tex_delete(s->tex);
     }
     memset(s, 0, sizeof *s);
@@ -276,7 +280,7 @@ int hud_repalette(hud *h, const uint8_t *p6)
         for (k = 0; k < g_src_n; k++) {
             int q, hit = 0;
             for (q = 0; q < 8 && !hit; q++) hit = (g_src[k].used[q] & diff[q]) != 0;
-            if (hit) src_reading(h, &g_src[k], 1);
+            if (hit && !g_src[k].dirty) { g_src[k].dirty = 1; g_src_dirty_n++; }
         }
     return 1;
 }
@@ -367,11 +371,27 @@ static void quad(hud *h, float x0, float y0, float x1, float y1, float u0, float
 /* Bind a sprite. Its texture is the Scale3x upscale of the art (sprite_upload): drawn at 1:1 it is sampled at each 3x3
  * block's centre (the original pixel); drawn larger it is filtered linearly - crisp, smooth edges on the digits and
  * ticks rather than blocky or uneven pixel doubling */
+static void bind_sprite_tex(const hud *h, const hud_sprite *s, int filter)
+{
+    /* Palette fades change on every frame. Rebuild a sprite only when it is actually shown. */
+    if (g_src_dirty_n) for (int k = 0; k < g_src_n; k++) {
+        hud_src *e = &g_src[k];
+        if (e->tex == s->tex) {
+            if (e->dirty) {
+                src_reading(h, e, 1);
+                e->dirty = 0;
+                g_src_dirty_n--;
+            }
+            break;
+        }
+    }
+    rb_texture(0, s->tex);
+    rb_tex_filter(s->tex, filter, filter);
+}
+
 static void bind_sprite(const hud *h, const hud_sprite *s, float scale)
 {
-    int f = s->smooth || scale * h->n > 1.01f ? RB_LINEAR : RB_NEAREST;
-    rb_texture(0, s->tex);
-    rb_tex_filter(s->tex, f, f);
+    bind_sprite_tex(h, s, s->smooth || scale * h->n > 1.01f ? RB_LINEAR : RB_NEAREST);
 }
 
 void hud_draw(hud *h, const hud_sprite *s, float x, float y, const float tint[4])
@@ -422,8 +442,7 @@ void hud_draw_rect_tex(hud *h, const hud_sprite *s, float x, float y, float w, f
 {
     static const float one[4] = {1, 1, 1, 1};
     if (!s->tex) return;
-    rb_texture(0, s->tex);
-    rb_tex_filter(s->tex, RB_NEAREST, RB_NEAREST);
+    bind_sprite_tex(h, s, RB_NEAREST);
     h->U.u_textured = 1;
     h->U.u_smooth = 0;
     memcpy(h->U.u_tint, tint ? tint : one, sizeof h->U.u_tint);

@@ -2872,10 +2872,12 @@ static void building_swap(msim *s, int b)
                 if (!parent_shown || j == bd->intact) continue;
                 if (c->gt_debris) {
                     c->gt_debris = 2;   /* spent: launched (or dropped) once */
-                    if (s->chunky && s->debris_count < MSIM_MAX_DEBRIS && c->model.object_count > 0) {
+                    int pieces = c->model.object_count;
+                    if (pieces > 0 && !(c->model.objects[0].flags & 0x2000)) pieces = 1;
+                    for (int piece = 0; s->chunky && piece < pieces && s->debris_count < MSIM_MAX_DEBRIS; piece++) {
                         msim_debris *dd = &s->debris[s->debris_count++];
                         int k;
-                        dd->kind = 3; dd->actor = -2; dd->part = q;
+                        dd->kind = 3; dd->actor = -2; dd->part = q; dd->object = piece;
                         for (k = 0; k < 3; k++) dd->p[k] = (float)c->pos[k];
                         dd->v[0] = gauss(&s->rng) * 5.5f;
                         dd->v[1] = (gauss(&s->rng) + 1.0f) * 5.5f;
@@ -2936,7 +2938,7 @@ static void building_damage(msim *s, int b, float dmg, int owner, const float at
     {   /* at the impact point (0x10046c20): class 0xb0 things one explosion 0x0d, everything else effect 3 and a debris
          * chunk (0x20b -> 0x10045d00 case 0xb -> 0x10046d40) */
         float p[3] = {at ? at[0] : (float)pi->pos[0], at ? at[1] : (float)pi->pos[1] + 200.0f, at ? at[2] : (float)pi->pos[2]};
-        if ((bd->type & 0xf0) == 0xb0) effect(s, 0x0d, p, 0);   /* a damaging type: area damage round it (0x10046490) */
+        if ((bd->type & 0xf0) == 0xb0 || (pi->objtype & 0xf0) == 0xb0) effect(s, 0x0d, p, 1);
         else { effect(s, 3, p, 1); spawn_debris(s, 4, p); }   /* 0x20b: (0x200 >> 8) & 2 -> four chunks */
     }
     s->buildings_destroyed++;

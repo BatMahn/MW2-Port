@@ -262,6 +262,30 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   generator. The port still uses its own random sequence. DOS initializes a 127-entry table from the Watcom
   generator at 0x49fe0 and shares the index with other simulation code.
 
+### Cockpit, Satellite View and Aquiline Fire reports
+
+- Ctrl+Z releases the zoom ramp and suppresses zoom input from the reset key until it is released. In a held
+  reset test the previous build climbed back to 4×. The reset now holds at 1× and a fresh Z press zooms normally.
+- The Mad Dog cockpit's four single-face leg proxies (WTB flags 2, polygon colour 0x7800) are omitted from
+  the cockpit draw. The original DOSBox look-down capture showed the struts without the leg panels.
+- The DOS satellite background uses palette entry 0xef from the current cockpit palette. Aquiline Fire,
+  Pyre Light and Flame Tongue were checked. The 3D map uses the currently installed renderer's ground texture
+  average. Destroyed structures and their children draw solid black on the map. The Silver Staff Chemical Plant
+  draws in blue throughout the left target display.
+- DOS palette fades refresh only HUD sprites that are actually drawn, and unchanged palette data skips the world
+  texture-table upload. The palette and vision sequences passed. The performance comparison used software OpenGL.
+- Aquiline Fire's wreck in AQUAARE2 uses a colour task on the S_1DUMMY model for the wing light.
+  The VCDDROPX debris record has five WTB objects marked 0x2000. Its destruction now launches five independently
+  moving fragments and four small chunks. The mission's wreck is named Hermione in the GT record.
+- Titanium texture lighting takes the damage nibble of the rendered location. The chase-view test confirmed that
+  the damaged arm darkens while the opposite arm retains its colour.
+
+The Blade Splint crossroads flame and the Aquiline Fire decals still need matched original captures. The intact
+Hermione's DOS model carries two pairs of insignia polygons (0x5814), and the Wolf texture exists in slot 0x14.
+The original DOS LOD selector at 0x37580 scales its tests by the camera field at +0xb8 (0x3f1c1). It also ranks
+nearby units before assigning their representations. The reported 450 m observation still needs a matched capture
+at the same resolution, zoom and detail setting.
+
 ## Not checked
 
 - **The manoeuvre steps** (the step table 0x2c1d0: 0 to 12 per tick) are not emulated. They need a live unit, its

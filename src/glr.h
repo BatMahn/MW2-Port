@@ -133,6 +133,7 @@ int  glr_set_actors(glr *r, const mech3d *m, const uint8_t palette[256][3],
 /* Sky and ground (3D-edition style; see skygnd.h). Either texture may be NULL
  * to disable that layer. Copies what it needs. */
 void glr_set_environment(glr *r, const texture *ground, const texture *sky, float tile_sky, float tile_ground);
+int glr_ground_colour(const glr *r, float rgb[3]);
 
 /* forget the uploaded slot textures (the next glr_set_mech / glr_set_actors uploads again) and the sprites': new texture set */
 void glr_flush_textures(glr *r);

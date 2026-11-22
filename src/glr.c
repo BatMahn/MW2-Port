@@ -30,6 +30,7 @@ typedef struct {
     uint8_t ramp;      /* kinds 1 / 2: the palette ramp x 16; 1 (textured): the switched-off shade's */
     uint8_t cls;       /* 1 (textured): its texture switch class (1 OBJECT, 2 TERRAIN, 0 none) - switched off, the kind 1
                         * shade (0x1001b47a..0x1001b4f3), drawn as kind 3 */
+    uint8_t damage;    /* the location's damage nibble */
     float   nrm[3], v0[3];   /* kinds 1 / 2: the polygon's normal and corner 0 in the model's frame (game coordinates) */
 } glr_tipoly;
 
@@ -71,6 +72,7 @@ struct glr {
     rb_tex ground_flat;                    /* 1x1: the ground texture's average colour (terrain textures off) */
     rb_tex sky_flat;                       /* 1x1: the sky texture's average colour (Textured Sky off) */
     int    env_has[2];
+    float  ground_colour[3];
     float  tile_sky, tile_ground;
     int    tex_w[GLR_SLOTS * 4], tex_h[GLR_SLOTS * 4], has_tex[GLR_SLOTS * 4];
     const texture *tex_src[GLR_SLOTS * 4];  /* skip re-uploading the same texture */
@@ -778,6 +780,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     tp->c = (uint8_t)(tik == 3 || tik == 1 ? k2c : (int)(q->color & 0xff) >> 1);
                     tp->ramp = (uint8_t)(((q->color >> 8) & 0xf) << 4);
                     tp->cls = (uint8_t)(tik == 1 && batch >= GLR_TI && batch < GLR_TB ? k2cls : 0);
+                    tp->damage = (uint8_t)part->dmg_nib;
                     memcpy(tp->nrm, q->normal, sizeof tp->nrm);
                     tp->v0[0] = (float)v0->x; tp->v0[1] = (float)v0->y; tp->v0[2] = (float)v0->z;
                 }
@@ -1032,6 +1035,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
     memcpy(key + 9, v->ti_lcol, 6 * sizeof *key);
     key[15] = (float)lt[0]; key[16] = (float)lt[1];
     key[17] = (float)notex;   /* (a texture switch changed: every polygon rewritten) */
+    key[18] = (float)r->dsign;
     if (!L->tistat) L->tistat = calloc((size_t)L->vertex_count * 3 + 1, sizeof *L->tistat);
     if (!L->tistat) return;
     if (!L->tic_static_ok || memcmp(key, L->tic_key, sizeof key) != 0) {   /* the static lights: once per mission */
@@ -1075,6 +1079,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
         const int off = tp->kind == 1 && (tp->cls & notex) != 0;
         if (tp->kind == 1 && !off) {
             float col[WTB_MAX_POLY_VERTS][3], S[3];
+            const float shade = 1.0f + (r->dsign ? 1.0f : -1.0f) * (float)tp->damage / 15.0f;
             if (!nh && L->tic_static_ok && !L->tic_dyn) continue;   /* (unchanged) */
             for (j = 0; j < tp->n; j++) memcpy(col[j], L->tistat + (size_t)ti_corner_vertex(tp, j) * 3, sizeof col[j]);
             memcpy(S, col[tp->n - 1], sizeof S);
@@ -1093,7 +1098,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
             }
             for (j = tp->first; j < e; j++) {
                 int t = (j - tp->first) / 3, a = (j - tp->first) % 3, cn = a == 0 ? 0 : t + a;
-                memcpy(L->tic + (size_t)j * 4, col[cn], 3 * sizeof(float));
+                for (c = 0; c < 3; c++) L->tic[(size_t)j * 4 + c] = fminf(1.0f, col[cn][c] * shade);
                 L->tic[(size_t)j * 4 + 3] = 1.0f;
             }
         } else if (sh->on || off) {   /* colour kinds 1 / 2 (and switched-off textured kinds): the shade, flat */
@@ -1210,11 +1215,19 @@ void glr_set_environment(glr *r, const texture *ground, const texture *sky, floa
             rb_tex *ft = k == 0 ? &r->ground_flat : &r->sky_flat;
             for (i = 0; i < n; i++) { sum[0] += by[i * 4]; sum[1] += by[i * 4 + 1]; sum[2] += by[i * 4 + 2]; }
             px[0] = (unsigned char)(n ? sum[0] / n : 0); px[1] = (unsigned char)(n ? sum[1] / n : 0); px[2] = (unsigned char)(n ? sum[2] / n : 0); px[3] = 255;
+            if (k == 0) for (int c = 0; c < 3; c++) r->ground_colour[c] = px[c] / 255.0f;
             if (!*ft) *ft = rb_tex_new();
             rb_tex_image(*ft, 1, 1, px, 0);
             rb_tex_wrap(*ft, RB_REPEAT, RB_REPEAT);
         }
     }
+}
+
+int glr_ground_colour(const glr *r, float rgb[3])
+{
+    if (!r->env_has[0]) return 0;
+    memcpy(rgb, r->ground_colour, sizeof r->ground_colour);
+    return 1;
 }
 
 /* Append a vertex in the mesh layout: pos, normal, uv, colour, texsel. */

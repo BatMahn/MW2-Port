@@ -23,6 +23,7 @@
 #define MSIM_MAX_DEBRIS 128
 typedef struct {
     int     kind;            /* 0 / 1: CHUNKER1 / CHUNKER2; 2: a blown-off part (actor, part); 3: a world debris node (world part) */
+    int     object;          /* WTB fragment index for a world debris node */
     int     actor, part;     /* kind 2: actor index (-1 = the player) and its part index */
     float   p[3], v[3];      /* cm, cm/tick */
     float   ang[3], spin[3]; /* degrees, degrees/tick */

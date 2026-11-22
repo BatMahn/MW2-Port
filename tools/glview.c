@@ -160,6 +160,8 @@ static FILE *im_open_game_file(const char *rel)
     return f;
 }
 static float      g_eye_pan, g_eye_tilt, g_zoom = 1.0f;   /* pilot_pan / pilot_tilt / zoom_factor (the cockpit view) */
+static key_ramp_t g_zoom_ramp;
+static SDL_Scancode g_zoom_reset_key = SDL_SCANCODE_UNKNOWN;
 #define A(name) (g_im_ok && im_action(&g_im, name, k, e.key.mod))
 /* the port's own development keys in a mission (G free camera, [ ] fog density): only with MW2_DEBUG_KEYS=1 - in play
  * every key belongs to GAMEKEY.MAP / INPUT.MAP (user report 2026-10-23: rebinding to G dropped the piloting) */
@@ -2195,25 +2197,8 @@ static void scene_anim(glr *r)
  *    per vertex in the 3D editions (Gouraud), flat here per polygon at its mean height.
  * Types 0x30 / 0x70 are skipped (0x100040b0), as are destroyed units. Drawn by the HUD's 2D primitives, lowest first. */
 static const int SAT_COL[13] = {0xe, 0xa, 0x6, 0xf, 0xb, 0xf5, 0x2, 0x3, 0xf9, 0xff, 0xf0, 0x1, 0x2};
-typedef struct { float y; int part_src, part; int side_col; int poly; } sat_item;   /* poly: -1 the whole part (a card), else one polygon */   /* side_col: -1 shaded, -2 bitmap, else a palette index */
-static float g_sat_gnd[4] = {0.3f, 0.3f, 0.3f, 1.0f};
-static const texture *g_sat_gnd_tex;
-static void sat_ground_colour(void)
-{
-    const texture *t = g_scene.slot[SKYGND_GROUND_SLOT];
-    if (t == g_sat_gnd_tex) return;
-    g_sat_gnd_tex = t;
-    if (t && t->rgba && t->w > 0 && t->h > 0) {
-        double acc[3] = {0, 0, 0};
-        size_t i, n = (size_t)t->w * (size_t)t->h;
-        for (i = 0; i < n; i++) {
-            uint32_t px = t->rgba[i];
-            if (g_tex_kind == 3) { const uint8_t *pc = g_scene.palette[px & 0xff]; acc[0] += pc[0]; acc[1] += pc[1]; acc[2] += pc[2]; }
-            else { acc[0] += px & 0xff; acc[1] += (px >> 8) & 0xff; acc[2] += (px >> 16) & 0xff; }
-        }
-        g_sat_gnd[0] = (float)(acc[0] / n / 255.0); g_sat_gnd[1] = (float)(acc[1] / n / 255.0); g_sat_gnd[2] = (float)(acc[2] / n / 255.0);
-    }
-}
+enum { SAT_SHADED = -1, SAT_BITMAP = -2, SAT_SILHOUETTE = -3 };
+typedef struct { float y; int part_src, part; int side_col; int poly; } sat_item;   /* poly -1 for a card; side_col is a mode or palette index */
 /* a part's vertex in the world (as msim's part_vertex) */
 static void sat_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3])
 {
@@ -2253,6 +2238,15 @@ static int sat_unit_visible(int src, int sky_root)
 static int sat_thing_visible(int thing)
 {
     return strcasecmp(g_sim.bld[thing].name, "none") != 0;
+}
+static int sat_rubble_part(const mech3d *world, int part)
+{
+    if (world->parts[part].parent_obj < 0) return 0;
+    for (int b = 0; b < g_sim.bld_count; b++) {
+        const struct msim_building *building = &g_sim.bld[b];
+        if (building->hp <= 0 && mech3d_part_in_tree(world, part, building->destroyed)) return 1;
+    }
+    return 0;
 }
 static struct { const texture *t; hud_sprite s; } g_sat_spr[64];
 static int g_sat_spr_next;
@@ -2316,7 +2310,6 @@ static void sat_draw(int w, int h)
     int n = 0, src, i, k;
     const int sky_root = sat_sky_root();
     static const float black[4] = {0, 0, 0, 1};
-    sat_ground_colour();
     for (src = -2; src < g_actor_count; src++) {
         const mech3d *m = sat_src(src);
         int sd = 0;
@@ -2341,19 +2334,21 @@ static void sat_draw(int w, int h)
                 /* a thing's object: the engine sets type bit 0x200 on the objects its GT record claims at load; the
                  * OBJ records themselves carry 0 / 0xc0, so the port goes by the GT link (user report: TEAL's enemy
                  * buildings were shaded like terrain, not outlined in red) */
-                if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
+                if (thing >= 0 && g_sim.bld[thing].hp <= 0) col = SAT_SILHOUETTE;
+                else if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
+                else if (sat_rubble_part(m, k)) col = SAT_SILHOUETTE;
                 else if (kd & 0x200) col = SAT_COL[5];
                 else if (kd & 0x100) col = SAT_COL[1];
                 else if (kd & 0x400) col = SAT_COL[6];
                 else if (ty == 0x40) col = SAT_COL[7];
                 else if (ty == 0x50) col = SAT_COL[8];
                 else if (ty == 0x80) col = SAT_COL[9];
-                else if (ty == 0x10 || ty == 0x20 || ty == 0x60 || pp->facing) col = -2;
-                else col = -1;
+                else if (ty == 0x10 || ty == 0x20 || ty == 0x60 || pp->facing) col = SAT_BITMAP;
+                else col = SAT_SHADED;
             }
             /* one entry per polygon, at its mean height: drawn lowest first as the engine's view from above paints its
              * polygons (a whole part at its top put a hill's part over a mech standing on its side - user report) */
-            if (col == -2) {
+            if (col == SAT_BITMAP) {
                 if (n == cap) { sat_item *g = realloc(it, (size_t)(cap ? cap * 2 : 1024) * sizeof *g); if (!g) break; it = g; cap = cap ? cap * 2 : 1024; }
                 it[n].y = top; it[n].part_src = src; it[n].part = k; it[n].side_col = col; it[n].poly = -1;
                 n++;
@@ -2387,7 +2382,7 @@ static void sat_draw(int w, int h)
         const mech3d_part *pp = &sat_src(it[i].part_src)->parts[it[i].part];
         const wtb_object *o = &pp->model.objects[0];
         int nt = 0, ns = 0, col = it[i].side_col, j;
-        if (col == -2) {   /* a card: its bitmap, upright on the map at its centre (the engine draws its polygon as it is) */
+        if (col == SAT_BITMAP) {   /* a card: its bitmap, upright on the map at its centre (the engine draws its polygon as it is) */
             float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f}, wd, hg;
             const hud_sprite *spr = NULL;
             for (j = 0; j < o->vert_count; j++) { float q[3]; int c3; sat_vertex(pp, &o->verts[j], q); for (c3 = 0; c3 < 3; c3++) { if (q[c3] < mn[c3]) mn[c3] = q[c3]; if (q[c3] > mx[c3]) mx[c3] = q[c3]; } }
@@ -2408,7 +2403,7 @@ static void sat_draw(int w, int h)
             for (c3 = 0; c3 < 3; c3++) { e1[c3] = pv[1][c3] - pv[0][c3]; e2[c3] = pv[2][c3] - pv[0][c3]; }
             ny = e1[2] * e2[0] - e1[0] * e2[2];
             if (ny >= 0) continue;   /* faces turned away from the sky (the port's winding: as the cockpit frame's cull) */
-            if (col == -1) {   /* shaded by height: one polygon at a time (its own colour) */
+            if (col == SAT_SHADED) {   /* shaded by height: one polygon at a time (its own colour) */
                 int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : (q->color & 0xf00) >> 4, shade;
                 float xy[6];
                 my /= (float)q->n;
@@ -2422,12 +2417,13 @@ static void sat_draw(int w, int h)
                 continue;
             }
             if (nt + q->n > tcap) { float *g = realloc(tri, (size_t)(tcap + q->n + 1024) * 6 * sizeof *g); if (!g) break; tri = g; tcap += q->n + 1024; }
-            if (ns + q->n > scap) { float *g = realloc(seg, (size_t)(scap + q->n + 1024) * 4 * sizeof *g); if (!g) break; seg = g; scap += q->n + 1024; }
             for (t = 1; t + 1 < q->n; t++) {
                 const int id[3] = {0, t, t + 1};
                 for (c3 = 0; c3 < 3; c3++) { tri[nt * 6 + c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; tri[nt * 6 + c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
                 nt++;
             }
+            if (col == SAT_SILHOUETTE) continue;
+            if (ns + q->n > scap) { float *g = realloc(seg, (size_t)(scap + q->n + 1024) * 4 * sizeof *g); if (!g) break; seg = g; scap += q->n + 1024; }
             for (t = 0; t < q->n; t++) {
                 const float *a = pv[t], *b = pv[(t + 1) % q->n];
                 seg[ns * 4] = 320.0f + (a[0] - ex) * sc; seg[ns * 4 + 1] = 240.0f - (a[2] - ez) * sc;
@@ -2435,10 +2431,8 @@ static void sat_draw(int w, int h)
                 ns++;
             }
         }
-        if (col >= 0) {   /* black, then its edges in the colour */
-            if (nt) hud_tris(g_hud, tri, nt, black);
-            if (ns) hud_lines(g_hud, seg, ns, 1.0f, HP(col));
-        }
+        if (nt) hud_tris(g_hud, tri, nt, black);
+        if (col >= 0 && ns) hud_lines(g_hud, seg, ns, 1.0f, HP(col));
     }
     /* the projectile pool (type word 0x400: [6]) - each shot a short line along its flight, in colour 2 */
     if (g_sim_ok) {
@@ -3701,12 +3695,12 @@ static uint8_t g_dos_from[768], g_dos_to[768], g_dos_cur[768];
 static int32_t g_dos_fade_t0, g_dos_fade_len, g_dos_next_eval;
 static void dos_apply_palette(glr *r, const uint8_t *p6)
 {
-    r_target holder;
-    if (r_init(&holder, 1, 1) != 0) return;
+    r_target holder = {0};
     r_set_palette(&holder, p6, 768);
-    memcpy(g_scene.palette, holder.palette, sizeof g_scene.palette);
-    r_free(&holder);
-    glr_set_dos_palette(r, (const uint8_t (*)[3])g_scene.palette);
+    if (memcmp(g_scene.palette, holder.palette, sizeof g_scene.palette) != 0) {
+        memcpy(g_scene.palette, holder.palette, sizeof g_scene.palette);
+        glr_set_dos_palette(r, (const uint8_t (*)[3])g_scene.palette);
+    }
     if (g_hud) {   /* the HUD is drawn in the same VGA palette (the time of day, light amplification) */
         int k;
         hud_repalette(g_hud, p6);
@@ -7088,7 +7082,11 @@ int main(int argc, char **argv)
                     lower_mode_set(lower_mode() == want ? 0 : want);
                 }
                 else if (g_world && (A("TOGGLE_TARGET_DISPLAY") && ui_click())) { g_tgtdisp = (g_tgtdisp + 1) % 3; g_tgtdisp_off = g_tgtdisp == 0; }   /* 1 -> 2 -> 0 */
-                else if (g_world && A("COCKPIT_RESET_ZOOM")) g_zoom = 1.0f;
+                else if (g_world && A("COCKPIT_RESET_ZOOM")) {
+                    g_zoom = 1.0f;
+                    g_zoom_ramp = (key_ramp_t){0};
+                    g_zoom_reset_key = e.key.scancode;
+                }
                 else if (g_world && g_sim_ok && A("PAUSE_GAME")) {   /* action 0x58: DAT_1024acd4 -> the pause timer */
                     g_paused = 1;
                     if (g_sfx) sfx_pause(g_sfx, 1);
@@ -7523,11 +7521,14 @@ int main(int argc, char **argv)
                      * shift 6 (16 /s^2 on the -1..1 control value at 30 fps: a 0.12 s tap 1.00 -> 1.17; DOS: 1.17, then 1.39;
                      * 1.5 s -> 4; Shift+Z 0.25 s 3.97 -> 3.47, measured from the radar's view cone); COCKPIT_RESET_ZOOM
                      * (Ctrl+Z) -> 1 */
-                    static key_ramp_t rz;
                     int zp = H("zoom_factor_plus"), zm = H("zoom_factor_minus");
-                    rz.val = (g_zoom - 1.0f) / 1.5f - 1.0f;
-                    key_ramp(&rz, zp, zm, 6, 0, dt);
-                    g_zoom = 1.0f + (rz.val + 1.0f) * 1.5f;
+                    if (g_zoom_reset_key != SDL_SCANCODE_UNKNOWN) {
+                        if (ks[g_zoom_reset_key]) zp = zm = 0;
+                        else g_zoom_reset_key = SDL_SCANCODE_UNKNOWN;
+                    }
+                    g_zoom_ramp.val = (g_zoom - 1.0f) / 1.5f - 1.0f;
+                    key_ramp(&g_zoom_ramp, zp, zm, 6, 0, dt);
+                    g_zoom = 1.0f + (g_zoom_ramp.val + 1.0f) * 1.5f;
                     if (getenv("MW2_RAMP_TRACE")) printf("RAMP t=%.3f pan=%.2f tilt=%.2f zoom=%.3f\n", g_sim.now / 1000.0, (double)g_eye_pan, (double)g_eye_tilt, (double)g_zoom);   /* tests */
                 }
                 if (g_eye_pan > 180) g_eye_pan = 180;
@@ -8357,7 +8358,14 @@ int main(int argc, char **argv)
                 for (k = 0; all.parts && g_proj_ok && k < g_sim.debris_count; k++) {   /* debris: tumbling chunks */
                     const msim_debris *d = &g_sim.debris[k];
                     mech3d_part pp;
-                    if (d->kind == 3) { if (!g_sim.world || d->part >= g_sim.world->part_count) continue; pp = g_sim.world->parts[d->part]; pp.hidden = 0; pp.moving = 0; }
+                    if (d->kind == 3) {
+                        if (!g_sim.world || d->part >= g_sim.world->part_count) continue;
+                        pp = g_sim.world->parts[d->part];
+                        if (d->object >= pp.model.object_count) continue;
+                        pp.model.objects += d->object;
+                        pp.model.object_count = 1;
+                        pp.hidden = 0; pp.moving = 0;
+                    }
                     else pp = d->kind == 2 ? (d->actor < 0 ? g_pl.parts[d->part] : g_actors[d->actor].mech.parts[d->part]) : projm[7 + d->kind];
                     if (d->kind == 2) {   /* TEXTURES TITANIUM: the Titanium mech's own piece */
                         const mech3d_part *tp = ti_debris_part(d->actor < 0 ? 64 : d->actor, d->actor < 0 ? &g_pl : &g_actors[d->actor].mech, d->part);
@@ -8467,6 +8475,8 @@ int main(int argc, char **argv)
                             int k3, n = 0;
                             if (!src->model.object_count) continue;
                             o = &src->model.objects[0];
+                            /* The single-face leg proxies in the Mad Dog cockpit set are collision geometry. */
+                            if (o->flags == 2 && o->poly_count == 1 && o->polys[0].color == 0x7800) continue;
                             if (ccap[q] < o->poly_count) { free(cpoly[q]); cpoly[q] = malloc(sizeof(wtb_poly) * (size_t)o->poly_count); ccap[q] = cpoly[q] ? o->poly_count : 0; }
                             if (!cpoly[q]) continue;
                             for (k3 = 0; k3 < o->poly_count; k3++) {
@@ -9035,9 +9045,12 @@ int main(int argc, char **argv)
         if (dorcs_world(r, &v, w, h, g_frame_tgt)) ;
         else if (g_world && g_satmap && g_pl_ok && g_hud && g_sim_ok) {   /* the satellite map: no 3D picture - the view wiped to the
                                                                           * ground colour (sat_draw draws the map in the HUD pass) */
-            sat_ground_colour();
+            float ground[4] = {0, 0, 0, 1};
+            if (g_tex_kind == 3 || !glr_ground_colour(r, ground)) {
+                for (int k = 0; k < 3; k++) ground[k] = g_scene.palette[0xef][k] / 255.0f;
+            }
             rb_viewport(0, 0, w, h);
-            rb_clear(g_sat_gnd, 1, 1);
+            rb_clear(ground, 1, 1);
         } else glr_draw(r, &v, w, h);
         perf_mark(1);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
@@ -10131,18 +10144,13 @@ int main(int argc, char **argv)
                         const struct msim_building *gb = &g_sim.bld[g_tgt_thing];
                         float cx = (gb->mn[0] + gb->mx[0]) * 0.5f - (float)g_pl.origin[0], cz = (gb->mn[2] + gb->mx[2]) * 0.5f - (float)g_pl.origin[2];
                         if (!shaded && !snow && g_world && gb->intact >= 0 && gb->intact < g_mech.part_count) {   /* the structure's wireframe */
-                            static const float wblue[4] = {0.0f, 48.0f / 255.0f, 215.0f / 255.0f, 1.0f};
                             const mech3d_part *bp = &g_mech.parts[gb->intact];
-                            float brg = atan2f(-cx, -cz) * 180.0f / 3.14159265f;
                             mech3d one;
                             memset(&one, 0, sizeof one);
-                            one.parts = (mech3d_part *)bp; one.part_count = 1;
                             {   /* world placed; the camera on the structure's centre, its radius the box's half diagonal
                                  * (the engine's bounding sphere +0x34..+0x40, 0x10029890 - the port keeps a box) */
                                 /* the thing's object and the objects under it in its record (the engine draws the object
-                                 * tree, 0x10021300): the TEALARE3 gunship's rotor, a child of the fuselage, had been left
-                                 * out (user report) - each in its type's colour, the projectile pool's 0x400 red (as image
-                                 * enhancement colours them: draw_target_view level 2) */
+                                 * tree, 0x10021300), all in the selected structure's blue. */
                                 static mech3d_part tmp[32];
                                 int nt = 0, q;
                                 float sr0 = g_wire_r[0], sr1 = g_wire_r[1], sf0 = g_wire_f[0], sf1 = g_wire_f[1];
@@ -10154,13 +10162,8 @@ int main(int argc, char **argv)
                                         tmp[nt++] = *cp;
                                 }
                                 one.parts = tmp; one.part_count = nt;
-                                (void)brg; (void)wblue;
                                 wire_camera((gb->mn[0] + gb->mx[0]) * 0.5f, (gb->mn[1] + gb->mx[1]) * 0.5f, (gb->mn[2] + gb->mx[2]) * 0.5f, sqrtf(hx * hx + hy * hy + hz * hz));
-                                /* the wireframe's colours by the shape's kind (0x1002a4b0, m_wireframeColors 0): the thing 0x200
-                                 * blue (7), an object of the projectile pool 0x400 red (0xb), any other (the rotor under the
-                                 * gunship) colour 8 */
-                                draw_target_wire(&one, 0, 1, head, bx, by, bw, bh, HP(7));
-                                if (nt > 1) { g_wire_persp = 1; draw_target_wire(&one, 1, nt, head, bx, by, bw, bh, HP(8)); }
+                                draw_target_wire(&one, 0, nt, head, bx, by, bw, bh, HP(7));
                                 g_wire_persp = 0;
                                 g_wire_r[0] = sr0; g_wire_r[1] = sr1; g_wire_f[0] = sf0; g_wire_f[1] = sf1;
                             }

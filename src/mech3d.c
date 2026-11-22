@@ -272,6 +272,7 @@ typedef struct {
     uint16_t model;
     int coll;
     int objtype;
+    int colour_task;
     int32_t scale[3];
 } wnode;
 
@@ -310,6 +311,9 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
     bwd_chunks(rec.data, rec.size, chunks, n);
     for (k = 0; k < n; k++) {
         bwd_obj o;
+        bwd_tsk task;
+        if (bwd_tsk_decode(&chunks[k], &task) == 0 && task.type == 1 && task.node >= 0 && task.node < max)
+            nodes[task.node].colour_task = 1;
         if (bwd_obj_decode(&chunks[k], &o) != 0 || o.index < 0 || o.index >= max) continue;
         nodes[o.index].present = 1;
         nodes[o.index].parent = o.parent;
@@ -332,7 +336,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         if (!nodes[i].present) continue;
         out->node_count++;
         if (prj_read(a, poly_type, nodes[i].model, &mr) != PRJ_OK) continue;
-        if (strcasecmp(mr.name, "DUMMY") == 0 || strncasecmp(mr.name, "S_1DUMMY", 8) == 0 || mr.size == 0 ||
+        if (strcasecmp(mr.name, "DUMMY") == 0 || (strncasecmp(mr.name, "S_1DUMMY", 8) == 0 && !nodes[i].colour_task) || mr.size == 0 ||
             (!with_damaged && strncasecmp(mr.name, "SA", 2) == 0)) { prj_record_free(&mr); continue; }
         if (wpos(nodes, i, pos, &yaw, 0) != 0) { prj_record_free(&mr); continue; }
         p = realloc(out->parts, (size_t)(out->part_count + 1) * sizeof *p);

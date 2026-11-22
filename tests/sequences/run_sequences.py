@@ -870,6 +870,18 @@ def override_death_mission_failed(c):
 
 
 @sequence
+def aquiline_wreck_light_and_debris(c):
+    """The Hermione's colour-task light loads and its five WTB fragments fly separately."""
+    r = c.run(secs=3, mission='AQUASCN1', nostart=True, dos_look=True,
+              env={'MW2_START': '-71830,-62590,0', 'MW2_START_HEADING': '0', 'MW2_DEBRIS_TRACE': '1',
+                   'MW2_TEST_BLD_KILL': '1:48', 'MW2_DEBUG_PARTPOS': 'S_1DUMMY'})
+    c('partpos AQUAARE2 S_1DUMMY' in r.out and re.search(r'S_1DUMMY .* hidden 1 moving 1', r.out),
+      'the animated light loads and is hidden when the wreck is destroyed')
+    c(re.search(r'debris [\d.]+s: 9 pieces \(5 world\), \d+ hidden world parts, 1 destroyed', r.out),
+      'the wreck throws five named fragments and four small chunks')
+
+
+@sequence
 def eject_mission_failed(c):
     """ejecting (state 5): the star fails when the end flag is set, 0x38e ticks on (DOS 0x16e80)"""
     r = c.run(secs=22, keys=[(10, 'ctrl+alt+e')], env={'MW2_RADIO_TRACE': '1'})
@@ -2518,6 +2530,29 @@ def titanium_models(c):
 
 
 @sequence
+def titanium_mech_damage_shading(c):
+    """Damage to a Timber Wolf arm darkens its Titanium textures in the chase view."""
+    import numpy as np
+    from PIL import Image
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no titanium/ folder: skipped')
+        return
+    def capture(suffix, hits):
+        env = titanium_chase_env(c.name + suffix, tdir, 4)
+        env.update(MW2_TEST_PHIT=hits, MW2_TEST_DSIGN='0')
+        return c.run(suffix, secs=4, mission='YELLSCN1', nostart=True, size='640x480', shots=[(2.8, 'view')], env=env)
+    healthy = capture('_healthy', '')
+    damaged = capture('_damaged', '2.2:5:23:16')
+    armour = lambda r: float(r.at(2.8)['parmor'].split(',')[4])
+    c(0 < armour(damaged) < armour(healthy), 'the arm was damaged and remains attached')
+    with Image.open(healthy.shots['view']) as before, Image.open(damaged.shots['view']) as after:
+        drop = (np.asarray(before, dtype=int) - np.asarray(after, dtype=int)).mean(2)
+    c((drop[272:364, 372:432] > 10).sum() > 500, 'the damaged arm darkens')
+    c((abs(drop[272:364, 200:260]) > 10).sum() < 30, 'the healthy arm keeps its colour')
+
+
+@sequence
 def titanium_lights(c):
     """the Titanium lights from SKYGND.PAR (mercsw 0x10053dc5..0x10053ec0 -> the light table 0x10097cc0): amb, wa, wb
     divided by 255, a 'P' light a point else a direction; the ground's one colour (0x1005527e) = amb + each directional
@@ -3393,6 +3428,55 @@ def structure_bracket_zoomed(c):
     e2 = dict(env, MW2_CONFIG=titanium_cfg('structure_bracket_zoomed_ti', tdir), MW2_SKYGND=os.path.join(tdir, 'SKYGND.PAR'), MW2_TEXTURES='titanium')
     t = c.run('_ti', secs=15, mission='ORANSCN1', env=e2, keys=keys, hold=hold, dump='/0.5')
     check(t, 'titanium')
+
+
+@sequence
+def cockpit_zoom_reset_held(c):
+    """The zoom stays at 1× while the reset key is held and accepts a fresh Z press."""
+    r = c.run(secs=5, nostart=True, dos_look=True, keys=[(2.1, 'ctrl+z')], dump='/0.1',
+              hold=[(1, 2, 'z'), (2.1, 3.1, 'ctrl+z'), (3.6, 4, 'z')])
+    c(r.at(1.95)['zoom'] > 3.9, 'the initial zoom reaches 4×')
+    reset = r.span(2.2, 3.4)
+    c(reset and all(s['zoom'] == 1 for s in reset), 'zoom stays at 1× through and after the reset')
+    c(r.at(3.92)['zoom'] > 2, 'a new Z press zooms in again')
+
+
+@sequence
+def dos_satellite_ground_and_rubble(c):
+    """The flat map background shares the DOS ground colour, and ruins have no red edges."""
+    from collections import Counter
+    from PIL import Image
+
+    def pixels(r, tag, box=None):
+        with Image.open(r.shots[tag]) as img:
+            frame = img.crop(box) if box else img
+            return Counter({rgb: count for count, rgb in frame.getcolors(frame.width * frame.height)})
+
+    for mission in ('AQUASCN1', 'YELLSCN1', 'ORANSCN1'):
+        r = c.run('_' + mission, secs=3.2, mission=mission, nostart=True, dos_look=True, size='640x480',
+                  shots=[(2.9, 'pit'), (3, 'map')], keys=[(2.95, 'f3')])
+        pit = pixels(r, 'pit').most_common(1)[0][0]
+        sat = pixels(r, 'map').most_common(1)[0][0]
+        c(pit == sat, mission + ' uses the cockpit ground colour', '%s / %s' % (pit, sat))
+    r = c.run('_rubble', secs=4, mission='SILVSCN1', nostart=True, dos_look=True, size='640x480',
+              shots=[(3.8, 'map')], keys=[(3, 'f3')],
+              env={'MW2_START': '3050,-8500', 'MW2_TEST_BLD_KILL': '1:40'})
+    colours = pixels(r, 'map', (253, 147, 394, 286))
+    c(r.last['bld_destroyed'] > 0 and colours[(0, 0, 0)] > 600, 'destroyed plant has a black silhouette')
+    c(colours[(207, 24, 24)] == 0, 'destroyed plant has no red edges')
+
+
+@sequence
+def structure_target_wireframe_blue(c):
+    """Silver Staff's Chemical Plant is one blue wireframe, including its attachments."""
+    from PIL import Image
+    import numpy as np
+    r = c.run(secs=4, mission='SILVSCN1', nostart=True, dos_look=True, size='1024x768', shots=[(3.8, 'wire')],
+              env={'MW2_TEST_THING': '2:40', 'MW2_START': '3050,-9500', 'MW2_START_HEADING': '0'})
+    with Image.open(r.shots['wire']) as img:
+        interior = np.asarray(img.crop((42, 568, 186, 677)))
+    c(r.last['thing'] == 40 and (interior[:, :, 2] > 100).sum() > 500, 'the plant is rendered in blue')
+    c(not (interior[:, :, 0] > interior[:, :, 2]).any(), 'the wireframe interior has no red faces')
 
 
 @sequence
