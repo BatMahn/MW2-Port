@@ -366,6 +366,8 @@ int msim_roof_overhead(const msim *s, float x, float y, float z, int sky_root);
  * centre height - DOSBox TAUPSCN1: the dropship hovers about 75 m up (DROPA int[0] 7500), UMBE's gunships (AIRCRFTX/Y,
  * ground-level geometry, int[0] 7500 / 5000) fly */
 float msim_draw_y(const msim *s, int i);
+/* First world part struck along a shot segment, or -1. */
+int msim_shot_obstruction(msim *s, const float from[3], const float to[3]);
 /* jump-jet flames for a unit jetting at (x, y, z) facing heading (via on_effect) */
 void msim_jet_flames(msim *s, float x, float y, float z, float heading);
 /* the same at the mech's jet mounts (POFO slots 6 / 7) when it has them */

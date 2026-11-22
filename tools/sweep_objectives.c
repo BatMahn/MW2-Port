@@ -2,10 +2,11 @@
  * sweep_objectives - the objective sweep: every mission scene run headless by a "perfect player" that works
  * through table 0's objectives, with a report of every objective node and of what looks wrong.
  *
- *   sweep_objectives MW2.PRJ [-dos] [-v] [-t max_seconds] [-nofire] [-installstars] [SCENE ...]
+ *   sweep_objectives MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [-nofire] [-installstars] [SCENE ...]
  *     -dos           use DOS simulation rules and weapon data
  *     -v             every node change and the sim's log
  *     -nofire        the player never fires (only the fallbacks destroy things)
+ *     -no-fallback   report an incomplete sweep instead of applying direct damage
  *     -installstars  use the install's USERSTAR / EN0nSTAR files instead of a fresh fixed lance (temp dir)
  *   env: MW2_SWEEP_TRACE=1 the player's state every second, MW2_SWEEP_BRG=1 the firing-position scores,
  *        MW2_SWEEP_ACTOR=n actor n's position / AI state every 5 s, MW2_SWEEP_STAR_SIZE=1..3 the player's star size
@@ -17,9 +18,8 @@
  *
  * The player (invulnerable, unlimited ammunition, no heat) is teleported:
  *   reach / finish (0x20) / scan of a nav point  -> to the target (nav centre, group leader)
- *   destroy -> 120 m from each living target in turn and fires real projectiles at it (mechs: aimed at the
- *              unit; structures: along the aim line at the box); after 25 s without a kill the target is
- *              finished directly (combat_hit / msim_damage_building) and the fallback is reported
+ *   destroy -> find a firing position and fire projectiles at each living target; if the attack stalls, report it
+ *              and use direct damage unless -no-fallback is set
  *   scan    -> next to each target and msim_inspect() it
  *   protect -> attacks hostile mechs within 800 m of the protected targets
  *   leave   -> outside the target's radius (only when the node is wanted)
@@ -50,8 +50,9 @@
 
 #define DT_MS 50
 #define PI_F 3.14159265f
+#define SWEEP_AIM_HEIGHT 665.0f  /* msim's default when the pilot has no posed camera */
 
-static int g_verbose, g_nofire;
+static int g_verbose, g_nofire, g_no_fallback;
 static const char *g_stars_dir;   /* own star files: USERSTAR is rewritten per scene with the mission's star size */
 static lance_slot g_fr[3];
 static float g_max_s = 1800.0f;
@@ -159,9 +160,11 @@ static void classify(const mtbl_logic *ml, int *wanted, int *bad)
 typedef struct {
     float  brg, dist;        /* where the player shoots from (chosen per target) */
     int    actor, bld;       /* the current destroy target, -1 */
+    int    shielded, generator;  /* structure and the live generator blocking it, -1 */
     float  since;            /* seconds spent on it */
     int    last_health, aim;
     float  stagnant;         /* seconds without damage taking effect */
+    float  since_damage;     /* elapsed attack time since the last damage, across aim changes */
     int    clamped, start_health;
     float  waited;           /* seconds held back at the mission area's edge */
     float  held;             /* seconds of fire held for a protected structure in the line of fire */
@@ -189,7 +192,8 @@ static int seg_box(const struct msim_building *g, float x0, float z0, float x1, 
 /* the bearing (of 16) from which a shot at (x, y, z) from dist crosses the fewest standing structures (skip: the target),
  * with the line of fire clear of the ground (msim_ground: terrain and the tops of standable boxes) and the player not
  * standing in an obstacle's footprint */
-static float clear_bearing(const msim *s, float x, float y, float z, float dist0, int skip, float *dist_out)
+static float clear_bearing(msim *s, float x, float y, float z, float dist0, int skip, float start,
+                           float *dist_out, int *blocker)
 {
     static const float DSCALE[4] = {1.0f, 0.6f, 0.3f, 1.7f};
     int k, b, q, best_n = 1 << 30;
@@ -197,9 +201,13 @@ static float clear_bearing(const msim *s, float x, float y, float z, float dist0
     *dist_out = dist0;
     for (k = 0; k < 64; k++) {
         float dist = dist0 * DSCALE[k / 16];
-        float brg = 180.0f + (float)(k % 16) * 22.5f, r = brg * PI_F / 180.0f, px = x + sinf(r) * dist, pz = z + cosf(r) * dist;
-        float py = msim_ground(s, px, pz, y + 1000.0f) + 800.0f;
+        float brg = start + (float)(k % 16) * 22.5f, r = brg * PI_F / 180.0f, px = x + sinf(r) * dist, pz = z + cosf(r) * dist;
+        float py = msim_ground(s, px, pz, y + 1000.0f) + SWEEP_AIM_HEIGHT;
+        const float from[3] = {px, py, pz}, to[3] = {x, y, z};
+        int hit = msim_shot_obstruction(s, from, to);
         int n = 0;
+        if (hit >= 0 && (skip < 0 || hit != s->bld[skip].intact)) n += 1000;
+        else hit = -1;
         for (b = 0; b < s->bld_count; b++)
             if (b != skip && s->bld[b].hp > 0 && !s->world->parts[s->bld[b].intact].hidden && seg_box(&s->bld[b], px, pz, x, z)) n++;
         for (q = 0; q < 40; q++) {   /* the ground along the line, from the muzzle (a box top within 10 m of it counts) */
@@ -211,9 +219,28 @@ static float clear_bearing(const msim *s, float x, float y, float z, float dist0
         for (q = 0; q < s->obstacle_count; q++)
             if (px >= s->obstacles[q][0] - 600 && px <= s->obstacles[q][1] + 600 && pz >= s->obstacles[q][2] - 600 && pz <= s->obstacles[q][3] + 600) { n += 50; break; }
         if (getenv("MW2_SWEEP_BRG")) printf("    bearing %5.1f dist %6.0f score %d\n", brg, dist, n);
-        if (n < best_n) { best_n = n; best = brg; *dist_out = dist; }
+        if (n < best_n) { best_n = n; best = brg; *dist_out = dist; if (blocker) *blocker = hit; }
     }
     return best;
+}
+
+static int shield_generator(const msim *s, int part, int target)
+{
+    if (part < 0 || s->world->parts[part].coll != 6) return -1;
+    for (int b = 0; b < s->bld_count; b++) {
+        const struct msim_building *g = &s->bld[b];
+        if (b != target && g->hp > 0 && g->hp != 0x7fffffff && g->intact != part &&
+            mech3d_part_in_tree(s->world, part, g->intact)) return b;
+    }
+    return -1;
+}
+
+static float aim_structure(msim *s, int b, float start, float *dist, int *blocker)
+{
+    const struct msim_building *g = &s->bld[b];
+    return clear_bearing(s, (g->mn[0] + g->mx[0]) * 0.5f, fminf((g->mn[1] + g->mx[1]) * 0.5f, g->mn[1] + 500.0f),
+                         (g->mn[2] + g->mx[2]) * 0.5f, 12000.0f + hypotf(g->mx[0] - g->mn[0], g->mx[2] - g->mn[2]) * 0.5f,
+                         b, start, dist, blocker);
 }
 
 static void place_near(msim *s, float x, float z, float dist, float brg_deg)
@@ -225,7 +252,7 @@ static void place_near(msim *s, float x, float z, float dist, float brg_deg)
 
 static void aim_at(msim *s, float x, float y, float z)
 {
-    float dx = x - s->player[0], dz = z - s->player[2], dy = y - (s->player_unit.y + 700.0f);
+    float dx = x - s->player[0], dz = z - s->player[2], dy = y - (s->player_unit.y + SWEEP_AIM_HEIGHT);
     s->player_facing = s->player_aim_yaw = atan2f(dx, dz) * 180.0f / PI_F;
     s->player_aim_pitch = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / PI_F;
 }
@@ -337,7 +364,7 @@ static int run_scene(prj_archive *a, const char *scene)
 
     memset(&at, 0, sizeof at);
     memset(displaced_noted, 0, sizeof displaced_noted);
-    at.brg = 180.0f; at.actor = at.bld = -1;
+    at.brg = 180.0f; at.actor = at.bld = at.shielded = at.generator = -1;
     printf("=== %s\n", scene);
     if (g_stars_dir) {   /* the campaign shell writes the star at the mission's size (BRF2 SDSC +8 default, capped at 3,
                           * FUN_000291b0 -> 0x0003ab50): a mate beyond it has no formation slot (RUST's "heyyou" has one) */
@@ -476,6 +503,7 @@ static int run_scene(prj_archive *a, const char *scene)
         int best = -1, k;
         int32_t best_t = 0x7fffffff;
         float now_s = (float)s.now / 1000.0f;
+        float aim_point[3] = {0};
         /* the next node to work on: the earliest activated, wanted, not bad, active one with something to do */
         for (k = 0; k < t0->node_count; k++) {
             const mtbl_node *nd = &t0->nodes[k];
@@ -558,26 +586,38 @@ static int run_scene(prj_archive *a, const char *scene)
                     e = live_member(&s, nd->target);
                     if (e < 0) b = live_bld(&s, nd->target, 3);
                 }
+                if (b >= 0 && b == at.shielded && s.bld[at.generator].hp > 0) b = at.generator;
                 if ((e >= 0 && e != at.actor) || (b >= 0 && b != at.bld) || (e < 0 && b < 0)) {
-                    at.actor = e; at.bld = b; at.since = 0; at.aim = 0; at.stagnant = 0; at.last_health = -1; at.waited = 0; at.held = 0;
+                    if (b >= 0) {
+                        int blocker = -1;
+                        at.brg = aim_structure(&s, b, 180.0f, &at.dist, &blocker);
+                        const int generator = shield_generator(&s, blocker, b);
+                        if (generator >= 0) {
+                            at.shielded = b;
+                            b = at.generator = generator;
+                            at.brg = aim_structure(&s, b, 180.0f, &at.dist, NULL);
+                            if (g_verbose) printf("    shield blocks %s; attacking %s first\n", bld_rec(&s, at.shielded), bld_rec(&s, b));
+                        }
+                    }
+                    at.actor = e; at.bld = b; at.since = 0; at.aim = 0; at.stagnant = 0;
+                    at.since_damage = 0; at.last_health = -1; at.waited = 0; at.held = 0;
                     at.start_health = e >= 0 ? combat_health(&s.units[e]) : b >= 0 ? s.bld[b].hp : 0;
                     if (g_verbose && b >= 0)
                         printf("  %7.1fs target structure %d %s (%s) rec %s type %#x hp %d box %.0f..%.0f, %.0f..%.0f, %.0f..%.0f coll %d hidden %d\n", now_s, b,
                                s.bld[b].name, s.bld[b].sub, bld_rec(&s, b), s.bld[b].type, s.bld[b].hp, s.bld[b].mn[0], s.bld[b].mx[0], s.bld[b].mn[1], s.bld[b].mx[1],
                                s.bld[b].mn[2], s.bld[b].mx[2], s.world->parts[s.bld[b].intact].coll, s.world->parts[s.bld[b].intact].hidden);
-                    if (e >= 0) at.brg = clear_bearing(&s, (float)s.actors[e].mech.origin[0], s.units[e].y + s.height[e] * 0.55f, (float)s.actors[e].mech.origin[2], 12000.0f, -1, &at.dist);
-                    else if (b >= 0) at.brg = clear_bearing(&s, (s.bld[b].mn[0] + s.bld[b].mx[0]) * 0.5f, fminf((s.bld[b].mn[1] + s.bld[b].mx[1]) * 0.5f, s.bld[b].mn[1] + 500.0f), (s.bld[b].mn[2] + s.bld[b].mx[2]) * 0.5f,
-                                                            12000.0f + sqrtf((s.bld[b].mx[0] - s.bld[b].mn[0]) * (s.bld[b].mx[0] - s.bld[b].mn[0]) + (s.bld[b].mx[2] - s.bld[b].mn[2]) * (s.bld[b].mx[2] - s.bld[b].mn[2])) * 0.5f, b, &at.dist);
                 }
                 if (at.clamped) at.waited += DT_MS / 1000.0f;   /* outside the mission area: it has to come to us */
                 else at.since += DT_MS / 1000.0f;
+                at.since_damage += DT_MS / 1000.0f;
                 if (at.waited > 60.0f) at.since = 1e9f;
                 if (e >= 0) {
                     static const float AIM_H[4] = {0.55f, 0.8f, 0.4f, 0.95f};
                     int hl = combat_health(&s.units[e]);
-                    if (hl != at.last_health) { at.last_health = hl; at.stagnant = 0; }
+                    int reposition = at.last_health < 0;
+                    if (hl != at.last_health) { at.last_health = hl; at.stagnant = 0; at.since_damage = 0; }
                     else if ((at.stagnant += DT_MS / 1000.0f) > 4.0f) {   /* hits that do nothing (a gone location): another side, another height */
-                        at.stagnant = 0; at.aim++; at.brg += 90.0f;
+                        at.stagnant = 0; at.aim++; reposition = 1;
                     }
                     float hc[3], hy0, hy1;
                     int displaced = hull_centre(&s, e, hc, &hy0, &hy1);
@@ -589,16 +629,20 @@ static int run_scene(prj_archive *a, const char *scene)
                                    (hc[2] - (float)s.actors[e].mech.origin[2]) * (hc[2] - (float)s.actors[e].mech.origin[2])) / 100.0f,
                              s.actors[e].mech.origin[0], s.units[e].y, s.actors[e].mech.origin[2]);
                     }
+                    aim_point[0] = hc[0];
+                    aim_point[1] = hy0 + (hy1 - hy0) * AIM_H[at.aim & 3];
+                    aim_point[2] = hc[2];
+                    if (reposition)
+                        at.brg = clear_bearing(&s, hc[0], aim_point[1], hc[2], 12000.0f, -1, at.aim ? at.brg + 67.5f : 180.0f, &at.dist, NULL);
                     place_near(&s, hc[0], hc[2], at.dist, at.brg);
                     place_y_ref = displaced ? hy0 : s.units[e].y;
-                    aim_at(&s, hc[0], hy0 + (hy1 - hy0) * AIM_H[at.aim & 3], hc[2]);
-                    s.player_target = e; s.player_attacks = 1;
-                    if (at.aim || displaced) { s.player_aim_free = 1; s.player_target = -1; }   /* along the aim line at the chosen height */
-                    if (at.since > 25.0f + (float)at.start_health / 40.0f) {   /* fallback: hits through the combat API until it goes */
+                    s.player_aim_free = s.player_attacks = 1;
+                    if ((at.since_damage > 40.0f && at.waited == 0) || at.since > 120.0f) {
                         int guard = 0, w0 = s.player_unit.weapon_count > 0 ? s.player_unit.weapons[0].weapon : 0;
-                        anom(&nanom, scene, "node %d %s: %s (%s, actor %d) not destroyed by projectiles (health %d of %d)%s - finished with combat_hit",
+                        anom(&nanom, scene, "node %d %s: %s (%s, actor %d) not destroyed by projectiles (health %d of %d)%s",
                              best, mtbl_kind_name(nd->kind), s.actors[e].name, s.actors[e].group, e, combat_health(&s.units[e]), at.start_health,
-                             at.waited > 60.0f ? (s.actors[e].have_anim ? " - stayed outside the mission area 60 s" : " - stayed outside the mission area 60 s (a vehicle: msim_step never moves actors without walk animations)") : "");
+                             at.waited > 60.0f ? " - firing position clamped by mission boundary" : "");
+                        if (g_no_fallback) { why_stop = "fallback disabled"; goto report; }
                         while (!s.units[e].destroyed && guard++ < 5000) combat_hit(&s.units[e], w0, 3, 0.0f, &s.rng);
                         if (!s.units[e].destroyed) anom(&nanom, scene, "  actor %d survives 5000 combat_hit calls", e);
                         at.since = 0; at.fallbacks++;
@@ -608,7 +652,7 @@ static int run_scene(prj_archive *a, const char *scene)
                     static const float AIM_H[4] = {0.0f, 0.5f, 0.75f, 0.25f};
                     const float height = g->mx[1] - g->mn[1];
                     float c[3] = {(g->mn[0] + g->mx[0]) * 0.5f, g->mn[1], (g->mn[2] + g->mx[2]) * 0.5f};
-                    if (g->hp != at.last_health) { at.last_health = g->hp; at.stagnant = 0; }
+                    if (g->hp != at.last_health) { at.last_health = g->hp; at.stagnant = 0; at.since_damage = 0; }
                     else if ((at.stagnant += DT_MS / 1000.0f) > 4.0f) {
                         /* A low, fixed sight line can pass under a model or hit intervening scenery. */
                         at.stagnant = 0;
@@ -624,12 +668,16 @@ static int run_scene(prj_archive *a, const char *scene)
                          * either side of a small target such as a 5.7 m training sphere aimed at its centre */
                         static const float SIDE[3] = {0.0f, 1.0f, -1.0f};
                         float bb = at.brg * PI_F / 180.0f, off = SIDE[((int)(at.since / 2.0f)) % 3] * 250.0f;
-                        aim_at(&s, c[0] - cosf(bb) * off, c[1], c[2] + sinf(bb) * off);
+                        aim_point[0] = c[0] - cosf(bb) * off;
+                        aim_point[1] = c[1];
+                        aim_point[2] = c[2] + sinf(bb) * off;
                     }
                     s.player_aim_free = 1; s.player_attacks = 1;
-                    if (at.since > 25.0f + (float)at.start_health / 40.0f) {
-                        anom(&nanom, scene, "node %d %s: structure %s (%s) of %s not destroyed by projectiles (hp %d of %d)%s - finished with msim_damage_building",
-                             best, mtbl_kind_name(nd->kind), g->name, g->sub, nd->target, g->hp, at.start_health, at.waited > 60.0f ? " - outside the mission area" : "");
+                    if ((at.since_damage > 40.0f && at.waited == 0) || at.since > 120.0f) {
+                        anom(&nanom, scene, "node %d %s: structure %s (%s) of %s not destroyed by projectiles (hp %d of %d)%s",
+                             best, mtbl_kind_name(nd->kind), g->name, g->sub, bld_rec(&s, b), g->hp, at.start_health,
+                             at.waited > 60.0f ? " - firing position clamped by mission boundary" : "");
+                        if (g_no_fallback) { why_stop = "fallback disabled"; goto report; }
                         msim_damage_building(&s, b, (float)g->hp + 1.0f);
                         at.since = 0; at.fallbacks++;
                     }
@@ -654,17 +702,21 @@ static int run_scene(prj_archive *a, const char *scene)
                     at.clamped = 1;
                     if (best >= 0 && !clamp_noted[best]) {
                         clamp_noted[best] = 1;
-                        printf("  note: node %d %s %s: target outside the mission area (leave node %d, %s): the player waits at its edge\n",
+                        printf("  note: node %d %s %s: firing position clamped (leave node %d, %s)\n",
                                best, mtbl_kind_name(t0->nodes[best].kind), t0->nodes[best].target, k, t0->nodes[k].target);
                     }
                 }
             }
         }
+        if (fabsf(s.player[0] - last_px) > 100.0f || fabsf(s.player[2] - last_pz) > 100.0f) {
+            /* Set the feet and aim after the boundary has adjusted the firing position. */
+            s.player_unit.y = msim_ground(&s, s.player[0], s.player[2], place_y_ref + 1000.0f);
+            s.player_unit.vy = 0;
+        }
         if (s.player_attacks && best >= 0) {   /* hold fire when a protected structure or unit is on or near the line of fire */
-            float tx, tz;
-            int b2, q;
-            if (s.player_target >= 0) { tx = (float)s.actors[s.player_target].mech.origin[0]; tz = (float)s.actors[s.player_target].mech.origin[2]; }
-            else { tx = s.player[0] + sinf(s.player_aim_yaw * PI_F / 180.0f) * 20000.0f; tz = s.player[2] + cosf(s.player_aim_yaw * PI_F / 180.0f) * 20000.0f; }
+            float tx = aim_point[0], tz = aim_point[2];
+            int b2, q, obstruction = -2;
+            aim_at(&s, tx, aim_point[1], tz);
             {   /* 40 m beyond the target too */
                 float dx = tx - s.player[0], dz = tz - s.player[2], d = sqrtf(dx * dx + dz * dz);
                 if (d > 1) { tx += dx / d * 4000.0f; tz += dz / d * 4000.0f; }
@@ -685,18 +737,17 @@ static int run_scene(prj_archive *a, const char *scene)
             }
             for (q = 0; q < t0->node_count && s.player_attacks; q++) {
                 if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) ||   /* hidden protects too: failing one fails the mission */
-                    
                     (t0->nodes[best].kind != MTBL_K_PROTECT && strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0)) continue;   /* (a record both
                                                                          * to destroy and to protect: destroy wins; defending it, its own protect counts too -
                                                                          * BROWSCN1's Command Vehicle stands between the player and the threat) */
                 for (b2 = 0; b2 < s.bld_count && s.player_attacks; b2++) {
-                    struct msim_building g = s.bld[b2];
-                    if (g.hp <= 0 || !(widen((unsigned)g.type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;
-                    if (getenv("MW2_SWEEP_HOLDDBG") && step % 20 == 0) printf("  holddbg %s box %.0f..%.0f x %.0f..%.0f line %.0f,%.0f -> %.0f,%.0f\n", bld_rec(&s, b2), g.mn[0], g.mx[0], g.mn[2], g.mx[2], s.player[0], s.player[2], tx, tz);
-                    g.mn[0] -= 2000; g.mn[2] -= 2000; g.mx[0] += 2000; g.mx[2] += 2000;
-                    float fx = tx - s.player[0], fz = tz - s.player[2], fl = sqrtf(fx * fx + fz * fz);
-                    if (fl > 1) { fx = s.player[0] + fx / fl * 150000.0f; fz = s.player[2] + fz / fl * 150000.0f; } else { fx = tx; fz = tz; }
-                    if (seg_box(&g, s.player[0], s.player[2], fx, fz)) {   /* 1500 m (the aim ray): misses fly on past the target */
+                    const struct msim_building *g = &s.bld[b2];
+                    if (g->hp <= 0 || !(widen((unsigned)g->type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;
+                    if (obstruction == -2) {
+                        const float from[3] = {s.player[0], s.player_unit.y + SWEEP_AIM_HEIGHT, s.player[2]};
+                        obstruction = msim_shot_obstruction(&s, from, aim_point);
+                    }
+                    if (obstruction == g->intact) {
                         s.player_attacks = 0;
                         if (at.since > 2.0f) { at.brg += 67.5f; at.since -= 1.0f; }   /* try another side */
                         /* every side passes the protected structure (GOLDENS4 fighting inside the palace complex): after
@@ -708,12 +759,6 @@ static int run_scene(prj_archive *a, const char *scene)
             }
         }
         if (g_nofire) s.player_attacks = 0;
-        if (fabsf(s.player[0] - last_px) > 100.0f || fabsf(s.player[2] - last_pz) > 100.0f) {
-            /* teleported: stand on the surface at about the target's level (a mesa top when the target is up there, not
-             * inside the mesa; the canyon floor when it is down there) */
-            s.player_unit.y = msim_ground(&s, s.player[0], s.player[2], place_y_ref + 1000.0f);
-            s.player_unit.vy = 0;
-        }
         last_px = s.player[0]; last_pz = s.player[2];
         if (getenv("MW2_SWEEP_ACTOR") && step % 100 == 0) {   /* tests: one actor's position every 5 s */
             int q = atoi(getenv("MW2_SWEEP_ACTOR"));
@@ -789,6 +834,7 @@ static int run_scene(prj_archive *a, const char *scene)
         }
     }
 
+report:
     /* the report */
     printf("  stop: %s at %.1f s; outcome %s%s\n", why_stop, (double)s.now / 1000.0,
            msim_outcome_text(&s) ? msim_outcome_text(&s) : "none", s.player_lost ? " (player lost)" : "");
@@ -847,10 +893,11 @@ int main(int argc, char **argv)
     int i, first = 2, nscenes = 0, fails = 0, own_stars = 1;
     const char *stars_dir = NULL;
     char **scenes = NULL;
-    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-dos] [-v] [-t max_seconds] [SCENE ...]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [SCENE ...]\n", argv[0]); return 2; }
     for (; first < argc && argv[first][0] == '-'; first++) {
         if (strcmp(argv[first], "-v") == 0) g_verbose = 1;
         else if (strcmp(argv[first], "-nofire") == 0) g_nofire = 1;   /* debugging: the player never fires (fallbacks only) */
+        else if (strcmp(argv[first], "-no-fallback") == 0) g_no_fallback = 1;
         else if (strcmp(argv[first], "-t") == 0 && first + 1 < argc) g_max_s = (float)atof(argv[++first]);
         else if (strcmp(argv[first], "-dos") == 0) msim_set_dos(1);
         else if (strcmp(argv[first], "-installstars") == 0) own_stars = 0;

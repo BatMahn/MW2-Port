@@ -3520,7 +3520,7 @@ static void combat_step(msim *s, float dt)
                     if (ft >= 0) effect(s, ft, hp3, missile_fx(sh->weapon));
                     building_damage(s, MSIM_THING_OF(tg), combat_weapon_damage(sh->weapon), sh->owner, hp3);
                     gone = 1;
-                    sh->life = 0; sh->y = -1.0f;
+                    sh->life = 0;
                     break;
                 }
                 if (!MSIM_IS_THING(tg) && !(tg == -1 ? s->player_unit.destroyed || !s->pl_mech_ok : (tg < 0 || tg >= s->actor_count || !s->armed[tg] || s->units[tg].destroyed))) {
@@ -3560,7 +3560,7 @@ static void combat_step(msim *s, float dt)
                         fprintf(stderr, "mhit %.3f object %s %.0f %.0f %.0f\n", s->now / 1000.0, s->world->parts[part].model_name, hp3[0], hp3[1], hp3[2]);
                     gone = 1;
                 }
-                if (gone) { sh->life = 0; sh->y = -1.0f; break; }
+                if (gone) { sh->life = 0; break; }
             }
             if (hit_unit == -2) {
                 float ov[3] = {sh->vx, sh->vy, sh->vz};
@@ -3605,7 +3605,7 @@ static void combat_step(msim *s, float dt)
                             if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
                                 fprintf(stderr, "mhit %.3f ground %.0f %.0f %.0f\n", s->now / 1000.0, gp[0], gp[1], gp[2]);
                         }
-                        sh->y = -1.0f;
+                        sh->life = 0;
                         break;
                     }
                 }
@@ -3683,7 +3683,12 @@ static void combat_step(msim *s, float dt)
                 s->log(s->log_user, line);
             }
             gone = 1;
-        } else if (sh->life <= 0 || sh->y < 0) { gone = 1; s->misses++; if (getenv("MW2_BLD_TRACE") && sh->owner == -1) fprintf(stderr, "miss w %d at %.0f,%.0f,%.0f life %.1f\n", sh->weapon, sh->x, sh->y, sh->z, sh->life); }
+        } else if (sh->life <= 0) {   /* Below-zero world height is valid; impact or expiry ends flight. */
+            gone = 1;
+            s->misses++;
+            if (getenv("MW2_BLD_TRACE") && sh->owner == -1)
+                fprintf(stderr, "miss w %d at %.0f,%.0f,%.0f life %.1f\n", sh->weapon, sh->x, sh->y, sh->z, sh->life);
+        }
         if (gone) { s->shots[k] = s->shots[--s->shot_count]; k--; }
     }
 }
@@ -4711,6 +4716,15 @@ static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb,
         }
     return found;
 }
+int msim_shot_obstruction(msim *s, const float from[3], const float to[3])
+{
+    const float dv[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+    float t = 1.0f;
+    int part = -1;
+    shot_objects(s, from, dv, &t, &part);
+    return part;
+}
+
 static int shot_thing(const msim *s, int part)
 {
     const terrain_t *t = (const terrain_t *)s->terrain;

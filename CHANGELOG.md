@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.51 (2026-11-22)
+
+- **Projectile flight:** Live shots continue below elevation zero until they hit something or expire.
+  This fixes shots vanishing on their way to Golden Spade's shield generator and other low targets.
+- **Mission sweep:** Recalculate aim from the final firing position and use world collision to find
+  clearer firing angles and detect protected structures in the way. The sweep follows the shield's
+  object hierarchy to attack its generator first. A stalled attack can be reported with
+  `-no-fallback` without applying direct damage.
+
 ## v1.1.50 (2026-11-22)
 
 - **DOS weapons:** Use the original DOS projectile lifetimes, launch intervals, cooldowns, damage, heat and

@@ -60,6 +60,18 @@ found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records cr
 
 ## Differences found and fixed
 
+### v1.1.51
+
+- The DOS projectile update checks the ground at negative height (0x50b4e..0x50b69). A shot above
+  that surface proceeds to the lifetime check and position update (0x50bc6..0x50c1e). The port
+  treated any shot below elevation zero as removed. In Golden Spade this discarded live shots
+  before impact with the shield generator, whose collider is below elevation zero.
+- Original GOLDARE8 data places the TL1SHIEL collision shape (OBJ 3, type 6) under its
+  destructible generator (OBJ 2). The strict Golden Spade sweep destroys the generator and then
+  the palace with projectiles. Use `sweep_objectives MW2.PRJ -dos -no-fallback GOLDSCN1` to reproduce it.
+- The sweep now aims from the permitted firing position after boundary clamping. It probes the world
+  collision list to choose firing angles and waits for a clear approach while guarding protected targets.
+
 ### v1.1.50
 
 - Compare each weapon's cooldown (+0x44), launch interval (+0x48), lifetime (+0x4c), damage (+0x30),
