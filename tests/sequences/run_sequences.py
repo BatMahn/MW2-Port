@@ -2698,6 +2698,8 @@ def target_viewer_camera(c):
     r = c.run(secs=UP + 1.5, shots=[(UP + 1.0, 'tv')], size='1024x768', dos_look=True, env={'MW2_TEST_TARGET': '0'})   # the Nova
     n = count_px(r.shots['tv'], blue, box)
     c(n > 400, 'the wireframe drawn', '%d px' % n)
+    dim = count_px(r.shots['tv'], lambda R, G, B: (R == 0) & (B > 0) & (B < 215), (0.035, 0.73, 0.19, 0.89))
+    c(dim == 0, 'the DOS wireframe uses solid palette pixels', '%d dim blue pixels' % dim)
     bot = count_px(r.shots['tv'], lambda R, G, B: ((B > 150) & (R < 60) & (G < 90)) | ((R > 150) & (G > 120) & (B < 60)), (0.045, 0.885, 0.185, 0.893))
     c(bot > 5, 'the model reaches the bottom edge (cut off, as DOS)', '%d px on the bottom rows' % bot)
 
@@ -6525,8 +6527,9 @@ def dos_mfd_backgrounds(c):
     from PIL import Image
     import numpy as np
 
-    r = c.run(secs=10, throttle=0, nostart=True, mech='maddog/mdg00std', size='1024x768', dos_look=True,
-              keys=[(7, 'f7'), (8.5, 'f9')], shots=[(8, 'rear'), (9.5, 'weapon_idle')])
+    r = c.run(secs=15, throttle=0, nostart=True, mech='maddog/mdg00std', size='1024x768', dos_look=True,
+              keys=[(7, 'f7'), (12, 'f9'), (13.5, 'f8')], hold=[(9, 10.6, 'up')],
+              shots=[(8, 'rear'), (11.25, 'rear_pitched'), (12.5, 'weapon_idle'), (14.5, 'down')])
     ref_path = os.path.join(REPO, 'docs', 'reference', 'dos_hud_yell_1024_rearview.png')
     crop = (837, 563, 865, 600)   # sky to the left of the MFD label and above the terrain
     with Image.open(ref_path) as ref, Image.open(r.shots['rear']) as rear, Image.open(r.shots['weapon_idle']) as idle:
@@ -6534,8 +6537,16 @@ def dos_mfd_backgrounds(c):
         rear_sky = np.array(rear.convert('RGB').crop(crop), dtype=np.int16)
         rear_error = np.abs(rear_sky - ref_sky).mean()
         idle_peak = np.array(idle.convert('RGB').crop(crop)).max()
+    sky = (837, 563, 865, 594)
+    with Image.open(r.shots['rear']) as rear, Image.open(r.shots['rear_pitched']) as pitched:
+        rear_level = np.array_equal(np.array(rear.crop(sky)), np.array(pitched.crop(sky)))
+    with Image.open(r.shots['down']) as down:
+        down_ground = (np.array(down.convert('RGB').crop(crop)) == (125, 109, 73)).all()
     c(rear_error < 4, 'rear-view haze matches the DOSBox sky ramp', 'mean RGB error %.2f' % rear_error)
+    c(abs(r.at(11.25)['campitch']) > 10, 'the cockpit camera pitches while the rear view is open')
+    c(rear_level, 'rear-view horizon stays level when the cockpit pitches')
     c(idle_peak == 0, 'idle weapon view is opaque black', 'maximum RGB channel %d' % idle_peak)
+    c(down_ground, 'the DOS down view shows the ground directly below the mech')
 
 
 def _gus_render(d, name, events, secs):

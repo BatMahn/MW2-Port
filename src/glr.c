@@ -1370,16 +1370,17 @@ static void perspective(float *m, float vfov_deg, float aspect, float zn, float 
     m[14] = 2 * zf * zn / (zn - zf);
 }
 
-static void look_at(float *m, const float eye[3], const float at[3])
+static void look_at(float *m, const float eye[3], const float at[3], float vertical_yaw)
 {
-    float f[3], s[3], u[3], up[3] = {0, 1, 0}, l;
+    float f[3], s[3], u[3], l;
     int i;
     for (i = 0; i < 3; i++) f[i] = at[i] - eye[i];
     l = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
     for (i = 0; i < 3; i++) f[i] /= l;
-    s[0] = f[1] * up[2] - f[2] * up[1]; s[1] = f[2] * up[0] - f[0] * up[2]; s[2] = f[0] * up[1] - f[1] * up[0];
-    l = sqrtf(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
-    for (i = 0; i < 3; i++) s[i] /= l;
+    l = sqrtf(f[0] * f[0] + f[2] * f[2]);
+    s[0] = l > 0.0f ? -f[2] / l : cosf(vertical_yaw);
+    s[1] = 0.0f;
+    s[2] = l > 0.0f ? f[0] / l : sinf(vertical_yaw);
     u[0] = s[1] * f[2] - s[2] * f[1]; u[1] = s[2] * f[0] - s[0] * f[2]; u[2] = s[0] * f[1] - s[1] * f[0];
     memset(m, 0, 16 * sizeof *m);
     m[0] = s[0]; m[4] = s[1]; m[8] = s[2];
@@ -1601,6 +1602,46 @@ static int64_t dos_round16(int64_t v) { return (v >> 16) + ((v >> 15) & 1); }
 
 static int64_t dos_rdiv(int64_t n, int64_t d) { int64_t q = (n < 0 ? -n : n) / (d < 0 ? -d : d); return (n < 0) != (d < 0) ? -q : q; }
 static int dos_pq64(int64_t c, int s, int64_t z) { return (int)((dos_rdiv(c * ((int64_t)1 << s), z) + 2) >> 2); }
+
+static void dos_scale_rows(int64_t rows[3][3], uint32_t zoom, uint32_t half_width, int shifts[2])
+{
+    uint32_t scale[2] = {zoom, (uint32_t)dos_round16((int64_t)zoom * 0xffff)};
+    for (int i = 0; i < 2; i++) {
+        uint64_t value = (uint64_t)scale[i] * half_width;
+        uint32_t mantissa = (uint32_t)value;
+        int top = 31;
+        while (top > 0 && !(mantissa >> top)) top--;
+        shifts[i] = 2;
+        if (top > 15) {
+            shifts[i] = top - 13;
+            mantissa = (uint32_t)(value >> (top - 15));
+        }
+        for (int j = 0; j < 3; j++) rows[i][j] = dos_round16((int64_t)mantissa * rows[i][j]);
+    }
+}
+
+void glr_dos_target_setup(glr_dos_target_camera *c, const float eye[3], float yaw, int w, int h)
+{
+    c->cx = w >> 1;
+    c->cy = h >> 1;
+    for (int i = 0; i < 3; i++) c->eye[i] = (int64_t)floor((double)eye[i] + 0.5);
+    dos_cam_rows(yaw, 0.0f, c->rows);
+    dos_scale_rows(c->rows, 0x20000, (uint32_t)(c->cx > 0 ? c->cx : 1), c->shift);
+}
+
+int glr_dos_target_project(const glr_dos_target_camera *c, const float p[3], int *x, int *y)
+{
+    int64_t d[3], v[3];
+    for (int i = 0; i < 3; i++) d[i] = (int64_t)floor((double)p[i] + 0.5) - c->eye[i];
+    for (int i = 0; i < 3; i++) {
+        int64_t dot = c->rows[i][0] * d[0] + c->rows[i][1] * d[1] + c->rows[i][2] * d[2];
+        v[i] = (dot >> 27) + ((dot >> 26) & 1);
+    }
+    if (v[2] <= 0) return 0;
+    *x = c->cx + dos_pq64(v[0], c->shift[0], v[2]);
+    *y = c->cy - dos_pq64(v[1], c->shift[1], v[2]);
+    return 1;
+}
 
 /* MW2.EXE 0x3f320: a point through the last DOS frame's projection integers (the HUD's markers: the target bracket
  * 0x298c0 / 0x29a30 and the nav marker 0x29470 by way of 0x29860). d = round(W) - round(E) (whole cm), each camera row
@@ -1883,6 +1924,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
 {
     float proj[16], view[16], mvp[16], eye[3], L[3], ll, dist;
     float yaw = v->yaw * 3.14159265f / 180.0f, pitch = v->pitch * 3.14159265f / 180.0f;
+    float ly = v->look_yaw * 3.14159265f / 180.0f;
     int s;
     int minf = v->bilinear ? RB_LINEAR_MIPMAP_LINEAR : RB_NEAREST, magf = v->bilinear ? RB_LINEAR : RB_NEAREST;
     int eminf, emagf;
@@ -1904,11 +1946,12 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
     eye[2] = r->center[2] + dist * cosf(pitch) * cosf(yaw);
     if (v->free_cam) {
         /* first person: game coords -> GL (z negated); look direction from yaw/pitch, yaw 0 = +z (game forward) */
-        float ly = v->look_yaw * 3.14159265f / 180.0f, lp = v->look_pitch * 3.14159265f / 180.0f;
+        float lp = v->look_pitch * 3.14159265f / 180.0f;
+        float flat = fabsf(v->look_pitch) == 90.0f ? 0.0f : cosf(lp);
         eye[0] = v->eye[0]; eye[1] = v->eye[1]; eye[2] = -v->eye[2];
-        r->center[0] = eye[0] + cosf(lp) * sinf(ly) * 1000.0f;
+        r->center[0] = eye[0] + flat * sinf(ly) * 1000.0f;
         r->center[1] = eye[1] + sinf(lp) * 1000.0f;
-        r->center[2] = eye[2] - cosf(lp) * cosf(ly) * 1000.0f;
+        r->center[2] = eye[2] - flat * cosf(ly) * 1000.0f;
         dist = 1200.0f; /* near plane = dist * 0.05 = 60 cm: the cockpit shell right at the eye isn't drawn (ASSUMED) */
     }
     perspective(proj, v->vfov, (float)w / (float)(h > 0 ? h : 1), dist * (v->use_target ? 0.01f : 0.05f),
@@ -1918,7 +1961,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
         memset(proj, 0, sizeof proj);
         proj[0] = 1.0f / hw; proj[5] = 1.0f / hh; proj[10] = -2.0f / (zf - zn); proj[14] = -(zf + zn) / (zf - zn); proj[15] = 1.0f;
     }
-    look_at(view, eye, r->center);
+    look_at(view, eye, r->center, ly);
     mat_mul(mvp, proj, view);
 
     ll = sqrtf(v->light[0] * v->light[0] + v->light[1] * v->light[1] + v->light[2] * v->light[2]);
@@ -2059,7 +2102,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
         }
         if (r->env_has[1] && !r->dos) {
             /* rotation-only view so the tent stays centred on the eye */
-            look_at(sview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]});
+            look_at(sview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]}, ly);
             perspective(sproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 1.0e5f, 2.0e8f);
             mat_mul(smvp, sproj, sview);
             rb_depth_test(0);
@@ -2119,7 +2162,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
                         float du = sl == 0x8c ? v->ti_scroll[0] : 0, dvv = sl == 0x8c ? v->ti_scroll[1] : 0;
                         f = env_vertex(f, q[0], q[1] - eye[1], q[2], 0, 0, 0, q[3] + du, q[4] + dvv);
                     }
-                look_at(dview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]});
+                look_at(dview, origin, (float[3]){r->center[0] - eye[0], r->center[1] - eye[1], r->center[2] - eye[2]}, ly);
                 perspective(dproj, v->vfov, (float)w / (float)(h > 0 ? h : 1), 100.0f, 2.0e8f);
                 mat_mul(dmvp, dproj, dview);
                 glr_bind_stream(glr_stream(dv, (size_t)r->dome_n * FLOATS_PER_VERTEX));
@@ -2193,32 +2236,19 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
         {   /* the projection's integers (MW2.EXE 0x3ef30): zoom 16.16 (from the x focal; clamped 0x8000..0x100000) x the
              * half width, normalised to a 16-bit mantissa (top bit 15) and a shift (top bit - 13); y the same from
              * round16(zoom x 0xffff) (the view's +0x44 - DOSBox 1024 x 768: DAT_0014fe44 = 0xffff, shifts 12 / 11) */
-            uint32_t hw = (uint32_t)w >> 1, zoom = (uint32_t)(proj[0] * 65536.0f + 0.5f), ms[2]; int sh2[2], k3, c3;
-            uint64_t val[2];
-            int64_t rows[3][3], R[3][3];
+            uint32_t hw = (uint32_t)w >> 1, zoom = (uint32_t)(proj[0] * 65536.0f + 0.5f);
+            int sh2[2], k3, c3;
+            int64_t R[3][3];
             if (zoom > 0x100000u) zoom = 0x100000u;
             if (zoom < 0x8000u) zoom = 0x8000u;
             if (hw < 1) hw = 1;
-            val[0] = (uint64_t)zoom * hw;
-            val[1] = (uint64_t)((((uint64_t)zoom * 0xffffu) >> 16) + ((((uint64_t)zoom * 0xffffu) >> 15) & 1)) * hw;
-            for (k3 = 0; k3 < 2; k3++) {
-                int t = 31;
-                uint32_t lo = (uint32_t)val[k3];
-                while (t > 0 && !(lo >> t)) t--;
-                sh2[k3] = 2; ms[k3] = lo;
-                if (t > 15) { sh2[k3] = t - 13; ms[k3] = (uint32_t)(val[k3] >> (t - 15)); }
-            }
-            if (v->free_cam) dos_cam_rows(v->look_yaw, v->look_pitch, rows);
+            if (v->free_cam) dos_cam_rows(v->look_yaw, v->look_pitch, R);
             else for (c3 = 0; c3 < 3; c3++) {   /* (other cameras: the view's rows, game coordinates) */
-                rows[0][c3] = (int64_t)llrint((c3 == 2 ? -view[8] : view[c3 * 4]) * 536870912.0);
-                rows[1][c3] = (int64_t)llrint((c3 == 2 ? -view[9] : view[c3 * 4 + 1]) * 536870912.0);
-                rows[2][c3] = (int64_t)llrint((c3 == 2 ? view[10] : -view[c3 * 4 + 2]) * 536870912.0);
+                R[0][c3] = (int64_t)llrint((c3 == 2 ? -view[8] : view[c3 * 4]) * 536870912.0);
+                R[1][c3] = (int64_t)llrint((c3 == 2 ? -view[9] : view[c3 * 4 + 1]) * 536870912.0);
+                R[2][c3] = (int64_t)llrint((c3 == 2 ? view[10] : -view[c3 * 4 + 2]) * 536870912.0);
             }
-            for (c3 = 0; c3 < 3; c3++) {   /* 0x3ece0: the x and y rows x the mantissas (round16) */
-                R[0][c3] = dos_round16((int64_t)ms[0] * rows[0][c3]);
-                R[1][c3] = dos_round16((int64_t)ms[1] * rows[1][c3]);
-                R[2][c3] = rows[2][c3];
-            }
+            dos_scale_rows(R, zoom, hw, sh2);
             U3(r->F.u_dos_eye, eye[0], eye[1], eye[2]);
             U3(r->F.u_dos_rx, (float)((double)R[0][0] / 134217728.0), (float)((double)R[0][1] / 134217728.0), (float)((double)R[0][2] / 134217728.0));
             U3(r->F.u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));

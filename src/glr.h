@@ -208,6 +208,16 @@ void glr_default_view(glr_view *v);
  * (top-left origin, the view's own pixels) and the camera z (quarter cm). 1 in front and in the view, 0 not, -1 no DOS
  * frame drawn yet */
 int glr_dos_project(const glr *r, const float p[3], int *sx, int *sy, int *sz);
+
+/* Integer DOS projection for the target viewer's level, zoom-2 camera. Positions are in game coordinates. */
+typedef struct {
+    int64_t rows[3][3];
+    int64_t eye[3];
+    int shift[2], cx, cy;
+} glr_dos_target_camera;
+void glr_dos_target_setup(glr_dos_target_camera *camera, const float eye[3], float yaw, int w, int h);
+int glr_dos_target_project(const glr_dos_target_camera *camera, const float p[3], int *x, int *y);
+
 /* MW2.EXE's sine / cosine (0x3a838 / 0x3a8a8: 16.16 degrees -> 2.29) and arctangent (0x3a9e5: the angle of (b, a),
  * 16.16 degrees) */
 int32_t glr_dos_sin(int32_t a);

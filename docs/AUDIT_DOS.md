@@ -197,11 +197,11 @@ GREE, IREN, JACK, JENN, KIM_, MARO, PINK, PLUM, SABL, TAUP and YELL.
     lengths of time.
 - **Not compared:**
   - JACK: DOS can't start it in this install (it needs en01star.bwd).
-  - The rear and down MFD views (F7 / F8) and the other F-key displays. In the DOSBox harness, function keys don't
-    reach MW2.EXE (letter keys do: the radar zoom key works), so there was no DOS frame to compare.
+  - The first capture batch left out the F-key views. The follow-up below uses `usescancodes=false` on the Xvfb display.
   - External and free-eye views: they have no key in the BattlePack's GAMEKEY.MAP.
-- **Noted, not fixed:** PINK's DOS frame shows "0 kph" in blue. In DOS the speed servo sits slightly negative on that
-  slope.
+- **Open:** In a matched PINKSCN1 cockpit capture at rest, DOS draws "0 kph" in blue and the port draws it in green.
+  DOS selects blue from the signed speed servo at 0x32106. The movement routine can add a ground-dependent correction
+  to that same servo at 0x2750f. The displayed speed alone does not establish the correction's magnitude.
 
 v1.1.42 added TEAL (Blade Splint): the start view and a drive to the first crossroads match DOSBox, its fire cards
 included (FIR1_2 by the road at the start, FIR1_1 at the crossroads). A reported stray flame at a later crossroads
@@ -209,6 +209,19 @@ was not identified.
 
 Earlier render checks against DOSBox (v1.1.40): Wolf 3's roof lights and car headlights, the Sable Flame dome's
 outline colour and its view distance, the radar arms and power-up colours, Abort Mission's eject camera.
+
+### Cockpit display follow-up
+
+The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at rest and native 1024 × 768 captures.
+
+- F7 uses the eye position and the legs' rear bearing, with zero pitch (0x30c30–0x30c70). The rear horizon now stays
+  level when the cockpit tilts. F8 points straight down from the unit's centre (0x30ad7–0x30b57).
+- The DOS insets use zoom 2 over their own viewport width (0x28810), and their haze band uses the full frame width.
+  F9 uses the missile's whole-centimetre model position (0x50c1e and 0x50c52). Live missile flight and return to the
+  idle display were checked. The missile's own visible fin edges still differ from DOSBox.
+- The selected Falcon Nova's target view now uses the DOS angle table, integer projection and solid palette pixels.
+  In the captured wireframe crop, the overlap divided by the union of the original and port blue pixels rose from
+  34% to 92%. This is a matched pose comparison, and some hidden-edge coverage still differs.
 
 ## Not checked
 

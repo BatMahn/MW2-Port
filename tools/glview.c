@@ -3285,7 +3285,7 @@ static float g_wire_r[2] = {1, 0}, g_wire_f[2] = {0, 1};   /* the camera's right
  * structure: its bounding sphere's centre, 0x10029890) less 3 x its radius (+0xe8 / the sphere's, 0x102475d4 = 3.0) along
  * the bearing from the player (+0xd4, 0x1001d970), at that point's height, heading the bearing, pitch and roll 0 (level),
  * zoom 2: focal length = 2 x half the window's width (0x1002f740). g_wire_persp: draw_target_wire projects through it */
-static float g_wire_eye[3];
+static float g_wire_eye[3], g_wire_yaw;
 static int   g_wire_persp;
 static void wire_camera(float tx, float ty, float tz, float R)
 {
@@ -3293,6 +3293,15 @@ static void wire_camera(float tx, float ty, float tz, float R)
     if (ll < 1.0f) { lx = 0; lz = 1; ll = 1; }
     g_wire_f[0] = lx / ll; g_wire_f[1] = lz / ll; g_wire_r[0] = g_wire_f[1]; g_wire_r[1] = -g_wire_f[0];
     g_wire_eye[0] = tx - g_wire_f[0] * 3.0f * R; g_wire_eye[1] = ty; g_wire_eye[2] = tz - g_wire_f[1] * 3.0f * R;
+    if (g_tex_kind == 3) {   /* 0x3057d: use the DOS angle tables and whole-centimetre camera offsets. */
+        int32_t angle = glr_dos_atan2((int32_t)lrintf(lx), (int32_t)lrintf(lz));
+        int64_t distance = lrintf(3.0f * R);
+        int64_t dx = distance * glr_dos_sin(angle), dz = distance * glr_dos_cos(angle);
+        g_wire_yaw = (float)angle / 65536.0f;
+        g_wire_eye[0] = roundf(tx) - (float)((dx >> 29) + ((dx >> 28) & 1));
+        g_wire_eye[1] = roundf(ty);
+        g_wire_eye[2] = roundf(tz) - (float)((dz >> 29) + ((dz >> 28) & 1));
+    }
     g_wire_persp = 1;
 }
 /* the target viewer's mech: its blown-off locations left out, as the view draws it (the engine renders the object
@@ -3376,10 +3385,109 @@ static int loc_level(const combat_unit *tu, int gq)
 }
 static const unsigned LOC_RGB[4] = {0x0030D7u, 0xFFCE00u, 0xFF1818u, 0x000000u};
 /* the viewer's model through its camera (wire_camera; DOS 0x28810 with colour 7): each polygon filled with the window's
- * black and outlined in the colour, drawn back to front (by its mean depth) - so the edges behind are hidden, as DOSBox
+ * black and outlined in the colour, drawn back to front (DOS sorts by the farthest corner) - the edges behind are hidden, as DOSBox
  * YELLSCN1 shows the Nova: its outline and front faces only, not every edge (the port had drawn every edge, seen
  * through) - clipped to the window. A location's outline colour by its damage (loc_level), a destroyed centre torso black */
 typedef struct { float d; int n, lvl; float xy[2 * WTB_MAX_POLY_VERTS]; } wire_poly;
+static hud_sprite g_wire_image;
+static uint32_t *g_wire_pixels;
+static size_t g_wire_capacity;
+
+static uint32_t wire_pixel(const float color[4])
+{
+    uint8_t rgba[4];
+    uint32_t pixel;
+    for (int i = 0; i < 4; i++) rgba[i] = (uint8_t)lrintf(color[i] * 255.0f);
+    memcpy(&pixel, rgba, sizeof pixel);
+    return pixel;
+}
+
+/* The DOS VFX line (0x53821), clipped in its original major-axis steps so its error phase stays the same. */
+static void wire_raster_line(int w, int h, int x0, int y0, int x1, int y1, uint32_t color)
+{
+    int dx = abs(x1 - x0), dy = abs(y1 - y0), steep = dy > dx;
+    int major = steep ? dy : dx, minor = steep ? dx : dy;
+    int start = steep ? y0 : x0, other = steep ? x0 : y0;
+    int limit = steep ? h : w, other_limit = steep ? w : h;
+    int direction = (steep ? y1 >= y0 : x1 >= x0) ? 1 : -1;
+    int other_direction = (steep ? x1 >= x0 : y1 >= y0) ? 1 : -1;
+    int first = direction > 0 ? -start : start - (limit - 1);
+    int last = direction > 0 ? (limit - 1) - start : start;
+    if (first < 0) first = 0;
+    if (last > major) last = major;
+    for (int step = first; step <= last; step++) {
+        int a = start + direction * step;
+        int b = other + other_direction * (major ? (int)(((int64_t)step * minor + (major - 1) / 2) / major) : 0);
+        if (b >= 0 && b < other_limit) {
+            int x = steep ? b : a, y = steep ? a : b;
+            g_wire_pixels[(size_t)y * (size_t)w + (size_t)x] = color;
+        }
+    }
+}
+
+/* Opaque face interiors hide the edges of farther faces. Use the same triangle fan as hud_poly. */
+static void wire_raster_triangle(int w, int h, const int x[3], const int y[3], uint32_t color)
+{
+    int first = y[0], last = y[0];
+    for (int i = 1; i < 3; i++) {
+        if (y[i] < first) first = y[i];
+        if (y[i] > last) last = y[i];
+    }
+    if (first < 0) first = 0;
+    if (last > h) last = h;
+    for (int row = first; row < last; row++) {
+        double screen_y = (double)row + 0.5, left = (double)w, right = -1.0;
+        for (int i = 0; i < 3; i++) {
+            int j = (i + 1) % 3;
+            if ((screen_y < y[i]) == (screen_y < y[j])) continue;
+            double intersection = x[i] + (screen_y - y[i]) * (x[j] - x[i]) / (y[j] - y[i]);
+            if (intersection < left) left = intersection;
+            if (intersection > right) right = intersection;
+        }
+        int x0 = (int)fmax(ceil(left - 0.5), 0.0);
+        int x1 = (int)fmin(floor(right - 0.5), (double)(w - 1));
+        for (int col = x0; col <= x1; col++) g_wire_pixels[(size_t)row * (size_t)w + (size_t)col] = color;
+    }
+}
+
+static int draw_dos_target_pixels(const wire_poly *polys, int count, float bx, float by, float bw, float bh, const float col[4])
+{
+    float ux = hud_px_x(g_hud, 1), uy = hud_px_y(g_hud, 1);
+    int w = (int)lrintf(bw / ux), h = (int)lrintf(bh / uy);
+    if (w <= 0 || h <= 0 || (size_t)w > SIZE_MAX / sizeof(*g_wire_pixels) / (size_t)h) return 0;
+    size_t cells = (size_t)w * (size_t)h;
+    if (g_wire_capacity < cells) {
+        uint32_t *pixels = realloc(g_wire_pixels, cells * sizeof *pixels);
+        if (!pixels) return 0;
+        g_wire_pixels = pixels;
+        g_wire_capacity = cells;
+    }
+    memset(g_wire_pixels, 0, cells * sizeof *g_wire_pixels);
+    uint32_t bg = wire_pixel(HP(0));
+    const uint32_t colors[3] = {wire_pixel(col), wire_pixel(HP(3)), wire_pixel(HP(11))};
+    for (int i = 0; i < count; i++) {
+        const wire_poly *p = &polys[i];
+        int x[WTB_MAX_POLY_VERTS], y[WTB_MAX_POLY_VERTS];
+        for (int j = 0; j < p->n; j++) {
+            /* Keep even off-screen vertices representable during the clipped line calculation. */
+            x[j] = (int)lrintf(fmaxf(-0x1p29f, fminf(0x1p29f, (p->xy[j * 2] - bx) / ux)));
+            y[j] = (int)lrintf(fmaxf(-0x1p29f, fminf(0x1p29f, (p->xy[j * 2 + 1] - by) / uy)));
+        }
+        for (int j = 1; j + 1 < p->n; j++)
+            wire_raster_triangle(w, h, (const int[3]){x[0], x[j], x[j + 1]}, (const int[3]){y[0], y[j], y[j + 1]}, bg);
+        if (p->lvl == 3) continue;
+        for (int j = 0; j < p->n; j++) {
+            int next = (j + 1) % p->n;
+            wire_raster_line(w, h, x[j], y[j], x[next], y[next], colors[p->lvl]);
+        }
+    }
+    if (!g_wire_image.tex) {
+        if (hud_sprite_rgba(&g_wire_image, (const uint8_t *)g_wire_pixels, w, h) != 0) return 0;
+    } else rb_tex_image(g_wire_image.tex, w, h, g_wire_pixels, 0);
+    hud_draw_rect_tex(g_hud, &g_wire_image, bx, by, bw, bh, NULL);
+    return 1;
+}
+
 static int wire_poly_cmp(const void *a, const void *b)
 {
     float da = ((const wire_poly *)a)->d, db = ((const wire_poly *)b)->d;
@@ -3390,7 +3498,12 @@ static void draw_target_view(const mech3d *m, int part_lo, int part_hi, float bx
     static wire_poly *P;
     static int cap;
     int np = 0, pi, q, a, i;
+    const int dos = g_tex_kind == 3;
     const float *bg = HP(0);
+    const float ux = hud_px_x(g_hud, 1), uy = hud_px_y(g_hud, 1);
+    glr_dos_target_camera dos_camera;
+    if (dos)
+        glr_dos_target_setup(&dos_camera, g_wire_eye, g_wire_yaw, (int)lrintf(bw / ux) + 1, (int)lrintf(bh / uy) + 1);
     for (pi = part_lo; pi < part_hi; pi++) {
         const mech3d_part *pt = &m->parts[pi];
         const wtb_object *o;
@@ -3403,7 +3516,7 @@ static void draw_target_view(const mech3d *m, int part_lo, int part_hi, float bx
         for (q = 0; q < o->poly_count; q++) {
             const wtb_poly *pg = &o->polys[q];
             wire_poly *w;
-            float dsum = 0;
+            float dsum = 0, farthest = 0;
             if (pg->n < 2) continue;
             if (np == cap) { wire_poly *g2 = realloc(P, (size_t)(cap ? cap * 2 : 1024) * sizeof *g2); if (!g2) break; P = g2; cap = cap ? cap * 2 : 1024; }
             w = &P[np];
@@ -3426,14 +3539,24 @@ static void draw_target_view(const mech3d *m, int part_lo, int part_hi, float bx
                 dep = g_wire_f[0] * dx + g_wire_f[1] * dz;
                 if (dep < 10.0f) dep = 10.0f;
                 dsum += dep;
+                if (dep > farthest) farthest = dep;
+                if (dos) {
+                    int ix, iy;
+                    if (glr_dos_target_project(&dos_camera, (const float[3]){x, y, z}, &ix, &iy)) {
+                        w->xy[a * 2] = bx + (float)ix * ux;
+                        w->xy[a * 2 + 1] = by + (float)iy * uy;
+                        continue;
+                    }
+                }
                 w->xy[a * 2] = bx + bw * 0.5f + bw * (g_wire_r[0] * dx + g_wire_r[1] * dz) / dep;   /* focal = 2 x half the width */
                 w->xy[a * 2 + 1] = by + bh * 0.5f - bw * dy / dep;
             }
-            w->d = dsum / (float)w->n;
+            w->d = dos ? farthest : dsum / (float)w->n;
             np++;
         }
     }
     qsort(P, (size_t)np, sizeof *P, wire_poly_cmp);
+    if (dos && draw_dos_target_pixels(P, np, bx, by, bw, bh, col)) return;
     hud_clip(g_hud, bx, by, bw, bh);
     for (i = 0; i < np; i++) {
         float seg[4 * WTB_MAX_POLY_VERTS], c[4];
@@ -8919,10 +9042,26 @@ int main(int argc, char **argv)
                 vv.look_yaw = atan2f(ms->vx, ms->vz) * 180.0f / 3.14159265f;
                 vv.look_pitch = 0.0f;
                 vv.eye[0] = ms->x; vv.eye[1] = ms->y; vv.eye[2] = ms->z;
-            } else if (g_vport == 1) vv.look_yaw = v.look_yaw + (g_cheat_front ? 0.0f : 180.0f); else vv.look_pitch = -89.0f;   /* rear / straight down */
+                if (g_tex_kind == 3) {   /* 0x50c1e / 0x50c52: the view uses the same whole-cm position as the model. */
+                    for (int axis = 0; axis < 3; axis++) vv.eye[axis] = truncf(vv.eye[axis]);
+                }
+            } else if (g_vport == 1) {
+                if (g_tex_kind == 3) {   /* MW2.EXE 0x30c30: the eye position, level along the legs' rear bearing. */
+                    vv.look_yaw = g_pl.heading + (g_cheat_front ? g_pl.twist : 180.0f);
+                    vv.look_pitch = 0.0f;
+                } else vv.look_yaw = v.look_yaw + (g_cheat_front ? 0.0f : 180.0f);
+            } else if (g_tex_kind == 3) {   /* MW2.EXE 0x30ad7: the unit's centre, straight down at the camera's yaw. */
+                vv.eye[0] = (float)g_pl.origin[0];
+                vv.eye[1] = g_sim.player_unit.y + g_sim.player_centre_h;
+                vv.eye[2] = (float)g_pl.origin[2];
+                vv.look_pitch = -90.0f;
+            } else vv.look_pitch = -89.0f;
             vv.vfov = 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / 2.0f) * 180.0f / 3.14159265f;   /* all three at zoom 2.0 (0x1001bc50) */
             /* DOSBox YELLSCN1 F7: the inset clips the haze band, whose height still scales with the full frame width. */
-            if (g_tex_kind == 3 && pw > 0) vv.dos_band *= (float)w / (float)pw;
+            if (g_tex_kind == 3 && pw > 0 && ph > 0) {
+                vv.vfov = 2.0f * atanf((float)ph / (2.0f * (float)pw)) * 180.0f / 3.14159265f;   /* 0x28810: zoom 2 over the inset. */
+                vv.dos_band *= (float)w / (float)pw;
+            }
             if (g_pit_first >= 0 && g_frame_layer.parts && g_pit_first < g_frame_layer.part_count) {
                 mech3d nopit = g_frame_layer;
                 nopit.part_count = g_pit_first;   /* without the cockpit piece */
@@ -10317,6 +10456,8 @@ int main(int argc, char **argv)
     if (g_pl_ok) mech3d_free(&g_pl);
     sfx_destroy(g_sfx);
     glr_destroy(r);
+    hud_sprite_free(&g_wire_image);
+    free(g_wire_pixels); g_wire_pixels = NULL; g_wire_capacity = 0;
     syskeys_update(0);   /* the system's shortcuts back (atexit too, for the other ways out) */
     rb_quit();
     if (g_im_dev.joy) { SDL_CloseJoystick(g_im_dev.joy); g_im_dev.joy = NULL; }
