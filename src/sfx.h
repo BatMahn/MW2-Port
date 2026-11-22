@@ -52,6 +52,7 @@ void sfx_play_at_h(sfx *s, int index, float dx, float dz, float listener_yaw, in
  * their pan is mirrored (DOSBox: an LRM explosion straight ahead with the view glanced right is heard on the right).
  * Volume and delay by the 3D distance */
 void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listener_yaw, int half);
+void sfx_play_positional(sfx *s, int index, int volume_percent, int pan, double delay);
 /* the engine's positional pan (0x10032c10) for that vector: 15..111, and as the port's pan */
 int   sfx_pos_pan_engine(float dx, float dz, float listener_yaw);
 float sfx_pos_pan(float dx, float dz, float listener_yaw);

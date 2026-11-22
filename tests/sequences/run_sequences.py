@@ -2942,6 +2942,25 @@ def missile_paths(r):
 
 
 @sequence
+def dos_missile_lock_order(c):
+    """DOS 0x27836 dispatches fire before 0x27a55 sets the lock. A volley latches the prior frame's lock."""
+    env = {'MW2_KILL_ACTOR': '0,9999', 'MW2_TEST_TARGET': '0', 'MW2_TEST_STANDOFF': 16000,
+           'MW2_TEST_HOLD_ACTOR': '0', 'MW2_MISSILE_TRACE': '1'}
+    select = [(0.15 + 0.25 * i, 0.25 + 0.25 * i, 'enter') for i in range(7)]
+    for j, want in enumerate((-2, 0)):
+        press = 3.688 + j / 30
+        r = c.run('_%d' % j, secs=6, nostart=True, dump='/0.02', dos_look=True, env=env,
+                  hold=select + [(press, press + 0.04, 'space')])
+        pressed = next((i for i, s in enumerate(r.states) if s['attacks']), 0)
+        c(pressed > 0 and r.states[pressed]['lock'] & 0x80 and
+          bool(r.states[pressed - 1]['lock'] & 0x80) == (j == 1),
+          'fire on the lock acquisition frame or the following frame')
+        paths, _ = missile_paths(r)
+        home = [p[0][4] for p in paths.values()]
+        c(len(home) >= 18 and all(h == want for h in home), 'every missile latches the previous lock', str(home))
+
+
+@sequence
 def missiles_track_strafing_target(c):
     """guided missiles home on a target moving sideways (0x10045910: acceleration unit(target - p) - unit(v), no gravity
     while guided): a Nova 300 m ahead slides east at 5 m/s (test hook MW2_TEST_STRAFE); an LRM 20 volley fired locked
@@ -2953,19 +2972,18 @@ def missiles_track_strafing_target(c):
     r = c.run(secs=15, env=env, hold=LRM_SELECT + [(11, 11.1, 'space'), (11.5, 11.6, 'enter')])
     c(r.at(10.9)['lock'] & 0x80, 'locked when fired', 'lock 0x%x' % r.at(10.9)['lock'])
     c(r.at(11.9)['lock'] & 0x80 == 0, 'lock dropped by the next weapon', 'lock 0x%x' % r.at(11.9)['lock'])
-    paths, tgt = missile_paths(r)
+    paths, _ = missile_paths(r)
     c(len(paths) >= 18, 'an LRM 20 volley in flight', '%d missiles' % len(paths))
     late = [k for k, p in paths.items() if p[0][0] > 11.7]
     c(len(late) >= 5, 'missiles leaving after the lock dropped', str(len(late)))
     c(all(p[0][4] == 0 for p in paths.values()), 'every missile of the volley homes on the latched target',
       str(sorted(set(p[0][4] for p in paths.values()))))
     for k, p in sorted(paths.items()):
-        t_end, x_end, z_end = p[-1][0], p[-1][1], p[-1][3]
-        tx = next((x for t, x, z in tgt if t >= t_end), tgt[-1][1] if tgt else 0)
-        if not c(x_end - p[0][1] > 600, 'missile %d curves east after the target' % k, 'launch x %.0f end x %.0f' % (p[0][1], x_end)):
-            break
-        if not c(abs(x_end - tx) < 500, 'missile %d ends at the target' % k, 'end x %.0f target x %d' % (x_end, tx)):
-            break
+        x_end = p[-1][1]
+        c(x_end - p[0][1] > 600, 'missile %d curves east after the target' % k,
+          'launch x %.0f final sampled x %.0f' % (p[0][1], x_end))
+    hits = {int(i) for i in re.findall(r'^mhit [\d.]+ unit 0 .* id (\d+)$', r.out, re.M)}
+    c(set(paths) == hits, 'each missile strikes the strafing target', 'missing hits %s' % sorted(paths.keys() - hits))
     h0, h1 = r.at(10.9)['tgt_health'], r.last['tgt_health']
     c(h1 < h0 - 20, 'the volley damages the strafing target', 'health %d -> %d' % (h0, h1))
     cyc = [(8 + 0.4 * i, 8.1 + 0.4 * i, 'enter') for i in range(7)]   # LRM selected at 10.4 s: no lock yet at 11

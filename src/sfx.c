@@ -439,9 +439,17 @@ int sfx_pos_pan_engine(float dx, float dz, float listener_yaw)
     return p < 15 ? 15 : p > 111 ? 111 : p;
 }
 float sfx_pos_pan(float dx, float dz, float listener_yaw) { return sfx_pan(sfx_pos_pan_engine(dx, dz, listener_yaw)); }
+void sfx_play_positional(sfx *s, int index, int volume_percent, int pan, double delay)
+{
+    if (!s) return;
+    s_delay = delay;
+    sfx_play(s, index, (float)volume_percent / 100.0f * 0.8f, sfx_pan(pan));
+    s_delay = 0;
+}
+
 void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listener_yaw, int half)
 {
-    float d3 = sqrtf(dx * dx + dy * dy + dz * dz), vol;
+    float d3 = sqrtf(dx * dx + dy * dy + dz * dz);
     if (!s) return;
     {   /* engine 0x10032ad0 (DOS 0x40bc0): the distance is the 3D one (0x1001d970's local_4 = horizontal / cos(pitch));
          * 0x10032f60: volume % = 100 - 100 (d / 500 m)^2 in whole metres, nothing beyond 500 m (half at 354 m); halved
@@ -454,10 +462,8 @@ void sfx_play_at3(sfx *s, int index, float dx, float dy, float dz, float listene
         if (m >= 500) return;
         v = 100 - m * m * 100 / 250000;
         if (half) v >>= 1;
-        vol = (float)v / 100.0f;
-        s_delay = ticks > 182.0f / 30.0f ? ticks / 182.0f : 0.0;
-        sfx_play(s, index, vol * 0.8f, sfx_pos_pan(dx, dz, listener_yaw));
-        s_delay = 0;
+        sfx_play_positional(s, index, v, sfx_pos_pan_engine(dx, dz, listener_yaw),
+                            ticks > 182.0f / 30.0f ? ticks / 182.0f : 0.0);
     }
 }
 

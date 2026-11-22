@@ -47,12 +47,14 @@ found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records cr
 | ai_nav_turn | 0x229e0 | ai_nav_turn | PASS |
 | leg_turn_demand | 0x27c87..0x27d70 | msim_leg_demand | **fixed** (v1.1.39) |
 | servo_step | 0x49b80 | drive_servo | PASS |
+| dos_drive_servo | 0x49b80 | DOS drive speed servo, including signed sub-threshold values | PASS |
 | servo_setup | 0x49b40 (T = chop(s x 182)) | servo T constants | PASS |
 | turret_twist | 0x2edc3..0x2ee2a + 0x49b80 | msim_twist_round | PASS |
 | collision_damage | 0x20890 / 0x20a50 -> 0x20930 | collide | PASS |
 | manoeuvre_start | 0x2cbf0 (limits, reverse, 11's jet, the +0x17e flag) | start_manoeuvre | **fixed** (v1.1.41) |
 | manoeuvre_choose | 0x2c880 (every class, the Elemental table) | choose_manoeuvre | **fixed** (v1.1.41) |
 | missile_warning | 0x2e450 (from the shooter test on; see below) | ai_missile_warning | **fixed** (v1.1.41) |
+| ai_weapon_pick | 0x2e980..0x2ea63 | combat_ai_select, stock AI weapon groups | PASS |
 | torso_inputs | 0x2e930..0x2e971 -> 0x22970 / 0x229a0 / 0x23a40 | dos_twist_q / dos_pitch_q | **fixed** (v1.1.41) |
 | patrol_sweep | 0x24710 (runs of 300 frames) | patrol_sweep_dos | PASS (new in v1.1.41) |
 | flank_pick | 0x2e6f0 | flank_pick | PASS (new in v1.1.41) |
@@ -179,9 +181,6 @@ found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records cr
 - **Sky-object draw order.** MW2.EXE draws the sky-object tree before the scene, so the scene always covers it. The
   port draws it with the scene in the depth buffer. A building beyond a dome strut would cover the strut in DOS and
   not in the port. No such view was found in the comparisons.
-- **Lock timing within a frame.** MW2.EXE updates the timed lock after the weapons fire, so a volley uses the lock
-  from the frame before. The port updates it first.
-
 ## Render comparison
 
 Sixteen missions were run to about 9 seconds in both, in the cockpit view at 640 x 480: AQUA, BLON, BROW, CYAN, GOLD,
@@ -200,8 +199,10 @@ GREE, IREN, JACK, JENN, KIM_, MARO, PINK, PLUM, SABL, TAUP and YELL.
   - The first capture batch left out the F-key views. The follow-up below uses `usescancodes=false` on the Xvfb display.
   - External and free-eye views: they have no key in the BattlePack's GAMEKEY.MAP.
 - **Open:** In a matched PINKSCN1 cockpit capture at rest, DOS draws "0 kph" in blue and the port draws it in green.
-  DOS selects blue from the signed speed servo at 0x32106. The movement routine can add a ground-dependent correction
-  to that same servo at 0x2750f. The displayed speed alone does not establish the correction's magnitude.
+  A private DOSBox trace recorded three zero velocity components and a drive servo of -1 at 0x32106.
+  The terrain query at 0x1d7d2 returned height zero without finding a polygon and reused the previous collision
+  normal, which an axis-aligned box query set at 0x1edbd. That fed the slope correction at 0x2750f on startup.
+  The port preserves the servo's signed residual. Reproducing the prior query's normal on the terrain fallback remains open.
 
 v1.1.42 added TEAL (Blade Splint): the start view and a drive to the first crossroads match DOSBox, its fire cards
 included (FIR1_2 by the road at the start, FIR1_1 at the crossroads). A reported stray flame at a later crossroads
@@ -223,20 +224,34 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   In the captured wireframe crop, the overlap divided by the union of the original and port blue pixels rose from
   34% to 92%. This is a matched pose comparison, and some hidden-edge coverage still differs.
 
+### Drive, audio and missile follow-up
+
+- The DOS drive servo steps in 16.16 cm/tick and keeps the signed residual when integer division yields zero.
+  The movement demand is zero strictly between -32 and 32 as at 0x26ae0. The cockpit readout also includes the
+  velocity across the heading after a collision.
+- DOS positional audio uses the original integer 3D range calculation (0x2ab60), whole-metre gain and rounded tick
+  delay (0x40bc0), and signed sine pan (0x40d10). A differential check matched all 3,954 vectors, including the range
+  cutoff, cockpit half volume and vertical-only vectors.
+- DOS player weapon dispatch (0x27836) uses the prior frame's missile lock before the update (0x27a55).
+  The sequence test fires on the lock acquisition frame and on the next frame. The first volley flies unguided
+  and the next homes.
+- The player outline's front and rear damage levels (0x2f611..0x2f6e4) and message replacement (0x11020)
+  each matched 3,000 differential cases. The message comparison used the active or expired status after
+  normal message upkeep and the priorities used by the game.
+
 ## Not checked
 
 - **The manoeuvre steps** (the step table 0x2c1d0: 0 to 12 per tick) are not emulated. They need a live unit, its
   target and the world for the line-of-sight and probe calls. They were ported by reading the disassembly; the
   chooser, the starts, the flank pick and the patrol sweep around them are emulated.
-- **The AI shooter's view tests before a missile warning** (0x2e50d..0x2e5a7: 0x29860, the line of sight 0x3f320,
-  and the 3 degree pitch and 15 degree bearing cones) are not ported. The port warns the target on any guided launch
-  or PPC shot by a computer-run unit of pilot level 2 or less. The emulated test enters from the player-type shooter
-  record, which skips these tests.
-- **The full weapon pick** (0x2e980) was compared by reading. The test checks the table and random bound.
-  The original requires range class 1-2, heat + weapon heat under 65, a ready weapon and ammunition.
-  The fire decision overwrites the pitch offset (0x2e971) set for weapon types 0 and 4.
-- **The damage display levels** (0x26570), **the sound distance level** (0x40bc0) and **the message pick** (0x11020)
-  were ported in v1.1.38 by reading the disassembly and are not emulated.
+- **Missile warning projection and target selection** (0x2e50d..0x2e5a7). DOS projects the shooter's convergence
+  point and the target's position through the current camera (0x29860 and 0x3f320), then checks bearing and a
+  scaled elevation. A live PINKSCN1 dump has type 0 for the player and type 2 for the computer-controlled units.
+  Type 2 skips this projection. The player had the warning eligibility bit set in this dump. The port still omits
+  the player warning and uses the computer-controlled shooter's current combat target.
+- **The weapon pick's follow-up** after 0x2ea63, including the pitch offset for weapon types 0 and 4. Selection
+  through 0x2ea63 now has differential coverage for the range, heat, readiness, ammunition and random roll.
+- **The damage nibble written into the world model on a hit** (0x26570) remains a disassembly comparison.
 - **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's
   IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
   jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule

@@ -892,6 +892,7 @@ static int view_in_cockpit(void);   /* VIEW_IN_COCKPIT (DAT_1024e678, the engine
  * "halve" argument of most callers) is set there too (0x1002dc90: 0, the cockpit camera 0x1002e640: 1) - g_snd_pit. */
 static float g_snd_eye[3], g_snd_yaw;
 static int   g_snd_ok, g_snd_pit = 1;
+static int   g_snd_frame_ticks = 6;
 static void snd_listener(float L[3], float *yaw)
 {
     if (g_snd_ok) { memcpy(L, g_snd_eye, sizeof g_snd_eye); *yaw = g_snd_yaw; return; }
@@ -901,6 +902,42 @@ static void snd_listener(float L[3], float *yaw)
     *yaw = g_pl.heading + g_pl.twist;
 }
 static int snd_cockpit(void) { return g_snd_ok ? g_snd_pit : view_in_cockpit(); }   /* DAT_1024e678 as the sounds see it */
+/* DOS 0x2ab60 / 0x40bc0 / 0x40d10. Recover the horizontal distance from the larger axis, then divide by
+ * cos(elevation). Both divisions truncate. The pan uses the signed high bits of the sine. */
+static int dos_positional_audio(int x, int y, int z, int32_t listener, int half, int *pan, int *delay)
+{
+    const int64_t one = INT64_C(1) << 29;
+    int32_t yaw = glr_dos_atan2(x, z);
+    int use_x = llabs(x) > llabs(z);
+    int32_t axis = use_x ? glr_dos_sin(yaw) : glr_dos_cos(yaw);
+    int32_t horizontal = axis ? (int32_t)((use_x ? x : z) * one / axis) : 0;
+    int32_t elevation = glr_dos_atan2(y, horizontal);
+    int32_t cosine = glr_dos_cos(elevation);
+    int64_t distance = cosine ? horizontal * one / cosine : 0;
+    int metres, volume;
+    if (distance >= 50000) return 0;
+    metres = (int)(distance / 100);
+    volume = 100 - metres * metres * 100 / 250000;
+    if (half) volume >>= 1;
+    int p = 64 + (glr_dos_sin(listener - yaw) >> 23);
+    *pan = p < 15 ? 15 : p > 111 ? 111 : p;
+    *delay = (int)((distance * 0x168 + 0x8000) >> 16);
+    return volume;
+}
+
+static void snd_vector_at(int snd, float x, float y, float z, float yaw, int half)
+{
+    if (msim_dos_int) {
+        int pan, delay;
+        int volume = dos_positional_audio((int)lrintf(x), (int)lrintf(y), (int)lrintf(z),
+                                          (int32_t)lrintf(yaw * 65536.0f), half, &pan, &delay);
+        if (volume > 0) sfx_play_positional(g_sfx, snd, volume, pan,
+                                            delay > g_snd_frame_ticks ? delay / 182.0 : 0.0);
+    } else {
+        sfx_play_at3(g_sfx, snd, x, y, z, yaw, half);
+    }
+}
+
 /* a positional sound at pos (world cm): mirror = 0 the caller passes position - camera (start-up 0x1001ac01, KICKCHNK
  * 0x1000bff2, landing / jets 0x1001c115 / 0x1001c090, MECSHTD1 0x1001b068), 1 camera - position (footsteps / gait
  * 0x1000b370, weapons 0x10043b59, effects 0x10045fca, object loops 0x10032cc0): the pan mirrored (sfx_play_at3) */
@@ -911,7 +948,7 @@ static void snd_at(int snd, const float pos[3], int mirror, int half)
     if (!g_sfx || snd <= 0) return;
     snd_listener(L, &yaw);
     for (k = 0; k < 3; k++) d[k] = mirror ? L[k] - pos[k] : pos[k] - L[k];
-    sfx_play_at3(g_sfx, snd, d[0], d[1], d[2], yaw, half);
+    snd_vector_at(snd, d[0], d[1], d[2], yaw, half);
 }
 /* the player's mech position (unit +0x50 / +0x54 / +0x58) */
 static void snd_player_pos(float p[3]) { p[0] = (float)g_pl.origin[0]; p[1] = g_sim.player_unit.y; p[2] = (float)g_pl.origin[2]; }
@@ -1863,8 +1900,8 @@ static int jolt_step(int32_t now, float off[4])
  * starts from the colours reached (DAT_1007c6b8 / DAT_0014fe0c) with no way back (DAT_1024e468 = -1). */
 static int32_t g_flash_t0 = -1;          /* the fade in's start (sim ms); -1 none */
 static float   g_flash_from, g_flash_in, g_flash_back;   /* start level; fade in / back lengths (ticks) */
-static int     g_flash_n;                /* DAT_1024cd5c */
 static float   g_frame_ticks = 182.0f / 30.0f;   /* the last frame's ticks (DAT_1024ab4c) */
+static int     g_flash_n;                /* DAT_1024cd5c */
 static float flash_level(int32_t now, int *in_phase)
 {
     float k;
@@ -4187,7 +4224,7 @@ static void mm_activate(int k)
         g_mm_stack[g_mm_depth++] = sub; g_mm_sel = 0;
         while (g_mm_sel < MM_PAGE[sub].n && MM_PAGE[sub].it[g_mm_sel].type == MI_LABEL) g_mm_sel++;
         mm_load_page(sub);
-        if (g_sfx) { float L[3], yaw; snd_listener(L, &yaw); sfx_play_at3(g_sfx, 0xe1, 0, 0, 0, yaw, 0); }   /* see mm_key */
+        if (g_sfx) { float L[3], yaw; snd_listener(L, &yaw); snd_vector_at(0xe1, 0, 0, 0, yaw, 0); }   /* see mm_key */
     } else if (it->type == MI_ACCEPT) { mm_commit_page(pg); mm_pop(); }
     else if (it->type == MI_CONFIRM) {
         mm_close_all();
@@ -4238,7 +4275,7 @@ static void mm_key(SDL_Keycode k, Uint16 mod)
      * zero vector, not halved (edx 0): level 100 (0.8), the pan by the camera's yaw against the zero vector's 45 degrees
      * (sfx_pos_pan). DOSBox YELLSCN1 (heading 158): MECGCLX1 / MECMENU1 L 0.790 / 0.794, R 0.197 / 0.200 (pan 111);
      * the view glanced right (yaw ~215): L 0.72 R 0.59 */
-    if (g_mm_depth && g_mm_sel != prev && g_mm_stack[g_mm_depth - 1] == pg && g_sfx) { float L[3], yaw; snd_listener(L, &yaw); sfx_play_at3(g_sfx, 0xdb, 0, 0, 0, yaw, 0); }
+    if (g_mm_depth && g_mm_sel != prev && g_mm_stack[g_mm_depth - 1] == pg && g_sfx) { float L[3], yaw; snd_listener(L, &yaw); snd_vector_at(0xdb, 0, 0, 0, yaw, 0); }
 }
 static void mm_draw(void)
 {
@@ -4633,7 +4670,7 @@ static int dorcs_key(SDL_Keycode k, Uint16 mod)
         int dir = k == SDLK_UP || (k == SDLK_TAB && (mod & SDL_KMOD_SHIFT)) ? -1 : 1;
         g_dorcs.sel = (g_dorcs.sel + dir + 15) % 15;
     }
-    if (g_sfx && g_dorcs.sel != prev) { float Lp[3], yaw; snd_listener(Lp, &yaw); sfx_play_at3(g_sfx, 0xdb, 0, 0, 0, yaw, 0); }   /* move sound 219 */
+    if (g_sfx && g_dorcs.sel != prev) { float Lp[3], yaw; snd_listener(Lp, &yaw); snd_vector_at(0xdb, 0, 0, 0, yaw, 0); }   /* move sound 219 */
     return 1;
 }
 
@@ -7207,6 +7244,9 @@ int main(int argc, char **argv)
              * and the fade forward. Port choice: the original's first frames ran on its own clock */
             if (!g_auto_on && g_sim_ok && g_sim.now < 4000 && dt > 0.05f) dt = 0.05f;
             if (g_mm_depth || g_paused) dt = 0;   /* the MAIN MENU (and PAUSE_GAME) pauses the game (WinMain 0x10009770: "pause timer TRUE") */
+            int32_t frame_ms = g_sim_ok && ((g_pl_ok && g_pilot) || g_patrol) ? sim_ms(dt) : 0;
+            /* DOS 0x40aad compares propagation delay to the current frame's whole ticks. */
+            g_snd_frame_ticks = (int)((((int64_t)g_sim.now + frame_ms) * 182 / 1000) - ((int64_t)g_sim.now * 182 / 1000));
             mech3d all;
             int i;
             aprev = now;
@@ -8082,7 +8122,7 @@ int main(int argc, char **argv)
                 /* the lock works on the selected target (T / E / Q): a unit, or a thing (kind 0x400, 0x10044560) */
                 g_sim.player_lock_target = g_tgt_sel >= 0 ? g_tgt_sel : g_tgt_thing >= 0 ? MSIM_TGT_THING(g_tgt_thing) : -1;
                 g_sim.radio_busy = g_radio_qn > 0 || g_vq_n > 0;   /* the engine's one queue (DAT_1024f6bc): radio and messages */
-                if (!g_mm_depth && !g_paused) msim_step(&g_sim, sim_ms(dt));
+                if (!g_mm_depth && !g_paused) msim_step(&g_sim, frame_ms);
                 if (!g_mm_depth && !g_paused) start_up_sounds();   /* the first frame's unit updates (0x1001ab71) */
                 if (!g_mm_depth && !g_paused) player_upkeep();   /* self-destruct countdown, automatic ejection */
                 if (!g_mm_depth && !g_paused) player_messages();   /* heat, shutdown, criticals: messages + voices */
@@ -8102,7 +8142,7 @@ int main(int argc, char **argv)
                 g_sim.player[0] = v.eye[0]; g_sim.player[1] = v.eye[1]; g_sim.player[2] = v.eye[2];
                 g_sim.player_target = -1;
                 g_sim.player_attacks = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_F] != 0;
-                if (!g_mm_depth && !g_paused) msim_step(&g_sim, sim_ms(dt));
+                if (!g_mm_depth && !g_paused) msim_step(&g_sim, frame_ms);
             }
             if (g_pl_ok && g_pilot) {
                 /* camera: chase (behind and above the torso's facing) or cockpit */
@@ -9961,7 +10001,9 @@ int main(int argc, char **argv)
                          * ORANSCN1 Nova, forward jets (GreyHome) from a standstill: 60 / 141 / 232 / 298 / 364 / 391 kph
                          * (the port had left the drift out and read 0) */
                         float hh = g_pl.heading * 3.14159265f / 180.0f, k16 = 65536.0f / 182.0f;
-                        float vx = (sinf(hh) * g_pl_speed + g_jet_vx) * k16, vz = (cosf(hh) * g_pl_speed + g_jet_vz) * k16;
+                        float sn = sinf(hh), cs = cosf(hh);
+                        float vx = (sn * g_pl_speed + cs * g_pl_across + g_jet_vx) * k16;
+                        float vz = (cs * g_pl_speed - sn * g_pl_across + g_jet_vz) * k16;
                         int32_t ax = (int32_t)fabsf(vx), az = (int32_t)fabsf(vz), ay = (int32_t)(fabsf(g_sim.player_unit.vy) * 65536.0f), t3;
                         if (ax < az) { t3 = ax; ax = az; az = t3; }
                         if (ax < ay) { t3 = ax; ax = ay; ay = t3; }

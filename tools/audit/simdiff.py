@@ -167,6 +167,54 @@ def weapon_parameters(rep, rnd, n):
         rep.check(tuple(result) == expected, 'weapon %d: DOS %s port %s' % (w, expected, tuple(result)))
 
 @test
+def ai_weapon_pick(rep, rnd, n):
+    """DOS 0x2e980..0x2ea63 through the real range, heat, slot and step checks, for stock AI weapon groups."""
+    L = lib('combat')
+    slot = ctypes.c_int * 3
+    rolls = ctypes.c_uint * 10
+    L.shim_ai_weapon_pick.argtypes = ([ctypes.c_int] * 3 + [ctypes.c_float, ctypes.POINTER(slot)] +
+                                     [ctypes.POINTER(ctypes.c_uint)] * 2 + [ctypes.POINTER(ctypes.c_int)])
+    for case in range(n * 20):
+        e = emu()
+        obj, ctrl, table = e.alloc(0x200), e.alloc(0x200), e.alloc(10 * 104, fill=255)
+        count = rnd.randrange(1, 11)
+        initial = rnd.randrange(count)
+        slots = (slot * count)(*(slot(rnd.randrange(28), rnd.choice([-1, 0, 1, 1, 1, 2, 3]),
+                                      rnd.choice([-1, 0, 0, 1, 20, 25])) for i in range(count)))
+        first = 0x9ee58 + slots[initial][0] * 88
+        distance = rnd.choice([rnd.randrange(120000), e.rs32(first + 0x3c) + rnd.randint(-1, 1),
+                               e.rs32(first + 0x40) + rnd.randint(-1, 1)])
+        heat = rnd.choice([0, rnd.randrange(65 << 16), (65 << 16) - e.rs32(first + 0x34) + rnd.randint(-4, 4)])
+        scripted = rolls(*(rnd.randrange(16) for _ in range(10)))
+        bounds = []
+        def roll(em):
+            bound = em.reg('eax')
+            result = scripted[len(bounds)] % bound
+            bounds.append(bound)
+            return result
+        e.stub(RAND, roll)
+        e.w32(obj + 0x20, ctrl)
+        e.w32(obj + 0xc0, distance)
+        e.w32(ctrl + 0x54, table)
+        e.w32(ctrl + 0x98, heat)
+        e.w32(ctrl + 0xa8, count)
+        e.w32(ctrl + 0xac, initial)
+        for i, (weapon, state, ammo) in enumerate(slots):
+            for offset, value in ((0, 1), (4, weapon), (8, state), (12, 0), (32, ammo)):
+                e.w32(table + i * 104 + offset, value)
+        e.run(0x2e980, 0x2ea63, eax=obj)
+        dos_sel = e.rs32(ctrl + 0xac)
+        dos = dos_sel if e.reg('esi') else -1
+        port_bounds, port_sel = rolls(), ctypes.c_int()
+        port = L.shim_ai_weapon_pick(count, initial, distance, heat / 65536.0, slots, scripted, port_bounds,
+                                     ctypes.byref(port_sel))
+        actual_bounds = [b for b in port_bounds if b]
+        rep.check((dos, dos_sel, bounds) == (port, port_sel.value, actual_bounds),
+                  '%d cm heat %.5f slots %s start %d: DOS %s port %s' %
+                  (distance, heat / 65536.0, [tuple(s) for s in slots], initial, (dos, dos_sel, bounds),
+                   (port, port_sel.value, actual_bounds)))
+
+@test
 def jump_jet_fuel(rep, rnd, n):
     """DOS jet controller 0x27ba7..0x27c87: the tank, active thrust and engine heat at six ticks per frame."""
     L = lib('combat')
@@ -255,6 +303,32 @@ def servo_step(rep, rnd, n):
             pv = L.msim_servo(pv, tgt / 65536.0, float(T), float(t))
             worst = max(worst, abs(e.rs32(sv + 8) / 65536.0 - pv))
         rep.check(worst < 0.01, 'T %d: worst |dos - port| %.5f' % (T, worst))
+
+@test
+def dos_drive_servo(rep, rnd, n):
+    """DOS drive servo's exact residual, including the sign of a stopped mech's speed readout."""
+    L = lib('msim')
+    L.shim_dos_drive_servo.argtypes = [ctypes.c_int32] * 4
+    L.shim_dos_drive_servo.restype = ctypes.c_int32
+    for case in range(n * 4):
+        e = emu()
+        sv = e.alloc(16)
+        tau = rnd.choice([36, 91])
+        value = rnd.choice([-32, -1, 0, 1, 32, rnd.randint(-0x240000, 0x240000)])
+        target = rnd.choice([0, rnd.randint(-0x240000, 0x240000)])
+        e.w32(sv + 4, target)
+        e.w32(sv + 8, value)
+        e.w32(sv + 12, tau)
+        now = 0
+        for frame in range(12):
+            ticks = rnd.choice([0, 1, 3, 6, 14, 24, tau - 1, tau, tau + 1])
+            now += ticks
+            e.w32(NOW, now)
+            dos = s32(e.call(0x49b80, eax=sv))
+            port = L.shim_dos_drive_servo(value, target, ticks, tau)
+            rep.check(dos == port, '%d -> %d over %d / %d ticks: DOS %d port %d' %
+                      (value, target, ticks, tau, dos, port))
+            value = dos
 
 @test
 def servo_setup(rep, rnd, n):
@@ -423,9 +497,8 @@ def missile_warning(rep, rnd, n):
     """MW2.EXE 0x2e450 (a guided launch or a PPC warns its target): the shooter's +0x198 bit 4 and rand(3); the target's
     +0x16e already 4; jets and heat < 65 (0x2e3d0 run); rand(3); the quadrant of the shooter off the target's heading
     (0x230d0 stubbed); rand(2) for the first side, the 50 m probes (0x2df30 / 0x1c3f0 stubbed, either side blocked) -> 11;
-    else a level <= 3 pilot with nothing forced jumps (4) - vs ai.c ai_missile_warning (DOS). The shooter is set up as
-    the player-type record (+0x10 == 2), which skips the AI shooter's view tests (0x29860 / 0x3f320 / the 3 and 15 degree
-    cones - not ported; see AUDIT_DOS.md)"""
+    else a level <= 3 pilot with nothing forced jumps (4) - vs ai.c ai_missile_warning (DOS). The type 2 shooter
+    skips the screen projection and angle checks (see AUDIT_DOS.md)."""
     L = lib('ai'); L.shim_warn.restype = ctypes.c_int
     U = ctypes.c_uint(); O = (ctypes.c_int * 2)(); F = ctypes.c_float
     for case in range(n * 40):

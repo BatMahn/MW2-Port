@@ -3137,6 +3137,45 @@ int msim_test_shot(msim *s, const float o[3], const float dv[3], int *unit, int 
     shot_units(s, -2, o, dv, t, unit, group);
     return *unit != -2;
 }
+/* missile lock (engine 0x10044560, per tick for the selected weapon): a guided weapon, a selected target within
+ * the weapon's range window (+0x3c .. +0x40) and within 16 degrees of the torso's aim both ways: on target (0x8000);
+ * held for 0x16a ticks (2 s) -> locked (0x80); any break restarts it */
+static void player_lock_step(msim *s, float pl_h, float ticks)
+{
+    int e = s->player_lock_target, sw = s->player_sel_w, wid = -1, in = 0;
+    s->player_lock &= ~0x80;
+    if (sw >= 0 && sw < s->player_unit.weapon_count) wid = s->player_unit.weapons[sw].weapon;
+    float tp[3];
+    /* a thing (kind 0x400) locks like a unit - 0x10044560 refuses only no target and kinds 0x100 (a nav point) /
+     * 0x1000: its point is its object's position (0x1001d2d0 -> 0x100257a0), taken from the player's feet (+0x50) */
+    int th = MSIM_IS_THING(e) && !s->player_unit.destroyed && thing_point(s, MSIM_THING_OF(e), tp);
+    if (wid >= 0 && msim_weapon_guided(wid) && (th || (e >= 0 && e < s->actor_count && s->armed[e] && !s->units[e].destroyed && !s->player_unit.destroyed))) {
+        float dx = th ? tp[0] - s->player[0] : (float)s->actors[e].mech.origin[0] - s->player[0];
+        float dz = th ? tp[2] - s->player[2] : (float)s->actors[e].mech.origin[2] - s->player[2];
+        float dy = th ? tp[1] - s->player_unit.y : (s->units[e].y + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
+        float d = sqrtf(dx * dx + dz * dz + dy * dy), yaw, pit;
+        if (d > (float)LOCK_MIN[wid] && (th ? d <= combat_weapon_range(wid) : d < combat_weapon_range(wid))) {
+            yaw = atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw;
+            while (yaw > 180.0f) yaw -= 360.0f;
+            while (yaw < -180.0f) yaw += 360.0f;
+            pit = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / 3.14159265f - s->player_aim_pitch;
+            in = fabsf(yaw) < 16.0f && fabsf(pit) < 16.0f;
+        }
+    }
+    if (in) {
+        s->player_lock |= 0x8000;
+        if (!(s->player_lock & 0x40)) { s->player_lock |= 0x40; s->player_lock_ticks = msim_dos_int ? 364.0f : 362.0f; }   /* DOS 0x52ea0 (also the player's, 0x27a55): 0x16c */
+        else if (s->player_lock_ticks < 1.0f) { s->player_lock_ticks = 0; s->player_lock |= 0x80; }
+        else s->player_lock_ticks -= ticks;
+    } else if (wid >= 0 && msim_weapon_guided(wid) && (e >= 0 || MSIM_IS_THING(e))) {
+        /* off target / out of the window (0x10044560): 0x8000 and 0x80 cleared, the timer counts back up by dt and
+         * 0x40 goes at 0x16a - so a brief break resumes where it was */
+        s->player_lock &= ~(0x8000 | 0x80);
+        if (s->player_lock & 0x40) { s->player_lock_ticks += ticks; if (s->player_lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) s->player_lock &= ~0x40; }
+    } else s->player_lock = 0;   /* no guided weapon or no target: everything cleared */
+    s->player_unit.lock_target = (s->player_lock & 0x80) ? e : -2;
+}
+
 static void combat_step(msim *s, float dt)
 {
     int i, k, w;
@@ -3377,42 +3416,7 @@ static void combat_step(msim *s, float dt)
             }
         }
     }
-    /* missile lock (engine 0x10044560, per tick for the selected weapon): a guided weapon, a selected target within
-     * the weapon's range window (+0x3c .. +0x40) and within 16 degrees of the torso's aim both ways: on target (0x8000);
-     * held for 0x16a ticks (2 s) -> locked (0x80); any break restarts it */
-    {
-        int e = s->player_lock_target, sw = s->player_sel_w, wid = -1, in = 0;
-        s->player_lock &= ~0x80;
-        if (sw >= 0 && sw < s->player_unit.weapon_count) wid = s->player_unit.weapons[sw].weapon;
-        float tp[3];
-        /* a thing (kind 0x400) locks like a unit - 0x10044560 refuses only no target and kinds 0x100 (a nav point) /
-         * 0x1000: its point is its object's position (0x1001d2d0 -> 0x100257a0), taken from the player's feet (+0x50) */
-        int th = MSIM_IS_THING(e) && !s->player_unit.destroyed && thing_point(s, MSIM_THING_OF(e), tp);
-        if (wid >= 0 && msim_weapon_guided(wid) && (th || (e >= 0 && e < s->actor_count && s->armed[e] && !s->units[e].destroyed && !s->player_unit.destroyed))) {
-            float dx = th ? tp[0] - s->player[0] : (float)s->actors[e].mech.origin[0] - s->player[0];
-            float dz = th ? tp[2] - s->player[2] : (float)s->actors[e].mech.origin[2] - s->player[2];
-            float dy = th ? tp[1] - s->player_unit.y : (s->units[e].y + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
-            float d = sqrtf(dx * dx + dz * dz + dy * dy), yaw, pit;
-            if (d > (float)LOCK_MIN[wid] && (th ? d <= combat_weapon_range(wid) : d < combat_weapon_range(wid))) {
-                yaw = atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw;
-                while (yaw > 180.0f) yaw -= 360.0f;
-                while (yaw < -180.0f) yaw += 360.0f;
-                pit = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / 3.14159265f - s->player_aim_pitch;
-                in = fabsf(yaw) < 16.0f && fabsf(pit) < 16.0f;
-            }
-        }
-        if (in) {
-            s->player_lock |= 0x8000;
-            if (!(s->player_lock & 0x40)) { s->player_lock |= 0x40; s->player_lock_ticks = msim_dos_int ? 364.0f : 362.0f; }   /* DOS 0x52ea0 (also the player's, 0x27a55): 0x16c */
-            else if (s->player_lock_ticks < 1.0f) { s->player_lock_ticks = 0; s->player_lock |= 0x80; }
-            else s->player_lock_ticks -= ticks;
-        } else if (wid >= 0 && msim_weapon_guided(wid) && (e >= 0 || MSIM_IS_THING(e))) {
-            /* off target / out of the window (0x10044560): 0x8000 and 0x80 cleared, the timer counts back up by dt and
-             * 0x40 goes at 0x16a - so a brief break resumes where it was */
-            s->player_lock &= ~(0x8000 | 0x80);
-            if (s->player_lock & 0x40) { s->player_lock_ticks += ticks; if (s->player_lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) s->player_lock &= ~0x40; }
-        } else s->player_lock = 0;   /* no guided weapon or no target: everything cleared */
-    }
+    if (!msim_dos_int) player_lock_step(s, pl_h, ticks);
     /* the player fires at the crosshair target, or with none along the aim line (engine 0x100448e0: shots follow the
      * aim line; the trigger needs no target) */
     if (!s->player_unit.destroyed) {
@@ -3450,7 +3454,6 @@ static void combat_step(msim *s, float dt)
             else { to[0] = from[0] + dx; to[1] = from[1] + sinf(ap) * 100000.0f; to[2] = from[2] + dz; }
             /* a volley triggered now latches the target if locked (0x100437a0 / 0x10044440: slot +0x18 / +0x1c from the
              * mech's +0xdc when the controller's 0x80 is set) - its later missiles home even if the lock breaks */
-            s->player_unit.lock_target = (s->player_lock & 0x80) ? s->player_lock_target : -2;
             if (s->player_attacks) combat_trigger_mask(&s->player_unit, tgt_ok ? sqrtf(dx * dx + dz * dz) : 0.0f, s->player_fire_mask ? s->player_fire_mask : 0xFFFFFFFFu);
             {
                 int first = 0;
@@ -3481,8 +3484,8 @@ static void combat_step(msim *s, float dt)
                         /* 0x10020ac0 (from 0x1004397b): the player (level 1) launching at its target - in its view: within
                          * 15 degrees of the aim - warns it */
                         float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
-                        /* DOS MW2.EXE 0x2e45e..0x2e46b: the shooter's +0x198 bit 4 (pilot level <= 2) is set for computer-run units
-                         * only - the player's shots never warn (the GBL port's DOSBox probe against MW2.EXE) */
+                        /* The DOS player path also projects the convergence point and selected target through
+                         * the camera before the warning (0x2e50d..0x2e5a7). See docs/AUDIT_DOS.md. */
                         if (fabsf(off) < 15.0f && !msim_dos_int) missile_warning(s, e, 1, s->player[0], s->player[2]);
                     }
                     s->shot_loc = loc;
@@ -3495,6 +3498,9 @@ static void combat_step(msim *s, float dt)
             while (combat_next_projectile(&s->player_unit) >= 0) {}
         }
     }
+
+    /* DOS 0x27780 calls weapon dispatch (0x27836) before target upkeep and lock (0x27a55). */
+    if (msim_dos_int) player_lock_step(s, pl_h, ticks);
 
     /* fly and collide */
     for (k = 0; k < s->shot_count; k++) {
@@ -3666,8 +3672,8 @@ static void combat_step(msim *s, float dt)
                 s->fx_player_hit = 0;
                 if (sh->owner == -1) aim_trace(s, sh, "unit", hp);   /* TEST ONLY */
                 if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
-                    fprintf(stderr, "mhit %.3f unit %d group %d prox %d up %.0f\n", s->now / 1000.0, hit_unit, hit_group, tbest == 0,
-                            hp[1] - (hit_unit == -1 ? s->player_unit.y : s->units[hit_unit].y));
+                    fprintf(stderr, "mhit %.3f unit %d group %d prox %d up %.0f id %u\n", s->now / 1000.0, hit_unit, hit_group, tbest == 0,
+                            hp[1] - (hit_unit == -1 ? s->player_unit.y : s->units[hit_unit].y), sh->id);
                 if (getenv("MW2_FX_TRACE") && hit_unit == -1) fprintf(stderr, "plfx %.2f group %d type %d\n", s->now / 1000.0, hit_group, ft);   /* TEST ONLY */
                 (void)was;   /* the death explosion comes from the death sequence (wrecks) */
             }
@@ -4547,6 +4553,15 @@ static float dos_thr_servo(float cur, float tgt, float ticks)
     if (labs(st) >= labs(d)) return (float)t / 1024.0f;
     return (float)(v + st) / 1024.0f;
 }
+
+/* DOS 0x49b80. The division toward zero leaves the last few 16.16 units in the servo when it settles. */
+static int32_t dos_drive_servo(int32_t value, int32_t target, int elapsed, int tau)
+{
+    int64_t diff = (int64_t)target - value;
+    if (elapsed >= tau) return target;
+    return value + (int32_t)(diff * elapsed / tau);
+}
+
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks)
 {
     float c10;
@@ -4554,8 +4569,19 @@ void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float
     /* DOS: tau 36 / 0x5b = 91 ticks (0x266e0 chop(0.2 x 182), 0x27f.. 0x5b); the 3Dfx DLL 36.2 / 90.5 (x 181) */
     *thr = msim_dos_int ? dos_thr_servo(*thr, thr_target, ticks) : drive_servo(*thr, thr_target, 36.2f, ticks);
     c10 = (!drive || fabsf(*thr) < 1.0f / 32.0f) ? 0.0f : *thr * top * (*thr < 0 ? 0.5f : 1.0f) * rev;
-    *spd = drive_servo(*spd, c10, slow ? (msim_dos_int ? 91.0f : 90.5f) : (msim_dos_int ? 36.0f : 36.2f), ticks);
-    *vel += (*spd - *vel) * (ticks < 45.0f ? ticks / 45.0f : 1.0f);
+    float demand;
+    if (msim_dos_int) {
+        const double scale = 65536.0 / 182.0;
+        int32_t value = dos_drive_servo((int32_t)llrint(*spd * scale), (int32_t)llrint(c10 * scale),
+                                       (int)lrintf(ticks), slow ? 91 : 36);
+        *spd = (float)(value / scale);
+        /* 0x26ae0. The signed servo still drives the HUD, but values strictly inside this band cannot move a mech. */
+        demand = value > -32 && value < 32 ? 0.0f : *spd;
+    } else {
+        *spd = drive_servo(*spd, c10, slow ? 90.5f : 36.2f, ticks);
+        demand = *spd;
+    }
+    *vel += (demand - *vel) * (ticks < 45.0f ? ticks / 45.0f : 1.0f);
 }
 /* DOS MW2.EXE keeps c[0x22] as an integer (cm/tick per 1/65536 of throttle over the stop level 0x400): walk MP x
  * 0x697e98 (105.49 in 16.16) rounded (0x4cd46), then (c22 << 16) / the gravity ratio 0x957b4, truncated (0x26973); the

@@ -32,6 +32,35 @@ void shim_weapon_parameters(int w, int out[7])
     out[6] = (int)bound;
 }
 
+struct weapon_rolls { const unsigned *values; unsigned *bounds; int used; };
+static unsigned scripted_weapon_roll(void *ctx, unsigned bound)
+{
+    struct weapon_rolls *r = ctx;
+    int i = r->used++;
+    r->bounds[i] = bound;
+    return r->values[i] % bound;
+}
+
+int shim_ai_weapon_pick(int n, int sel, int distance, float heat, const int (*slots)[3],
+                        const unsigned *rolls, unsigned *bounds, int *end_sel)
+{
+    combat_unit u = {0};
+    struct weapon_rolls r = {rolls, bounds, 0};
+    u.weapon_count = n;
+    u.ai_sel = sel;
+    u.heat = heat;
+    u.internal[MEK_CT] = 1.0f;
+    for (int i = 0; i < n; i++) {
+        u.weapons[i].weapon = slots[i][0];
+        u.weapons[i].state = slots[i][1];
+        u.weapons[i].ammo = slots[i][2];
+        u.weapons[i].location = MEK_CT;
+    }
+    int picked = combat_ai_select(&u, (float)distance, scripted_weapon_roll, &r);
+    *end_sel = u.ai_sel;
+    return picked;
+}
+
 void shim_jet_step(int fuel, int held, int power, int infinite, int out[5])
 {
     combat_unit u = {0};
