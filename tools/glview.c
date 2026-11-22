@@ -8921,6 +8921,8 @@ int main(int argc, char **argv)
                 vv.eye[0] = ms->x; vv.eye[1] = ms->y; vv.eye[2] = ms->z;
             } else if (g_vport == 1) vv.look_yaw = v.look_yaw + (g_cheat_front ? 0.0f : 180.0f); else vv.look_pitch = -89.0f;   /* rear / straight down */
             vv.vfov = 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / 2.0f) * 180.0f / 3.14159265f;   /* all three at zoom 2.0 (0x1001bc50) */
+            /* DOSBox YELLSCN1 F7: the inset clips the haze band, whose height still scales with the full frame width. */
+            if (g_tex_kind == 3 && pw > 0) vv.dos_band *= (float)w / (float)pw;
             if (g_pit_first >= 0 && g_frame_layer.parts && g_pit_first < g_frame_layer.part_count) {
                 mech3d nopit = g_frame_layer;
                 nopit.part_count = g_pit_first;   /* without the cockpit piece */
@@ -9651,7 +9653,8 @@ int main(int argc, char **argv)
                     float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f, hw = (x1 - x0) * 0.5f * vwf, hh = (y1 - y0) * 0.5f * vhf;
                     int full = vwf >= 1.0f && vhf >= 1.0f;
                     x0 = mx - hw; x1 = mx + hw; y0 = my - hh; y1 = my + hh;
-                    if (g_vport == 3 && !g_wcam_live) hud_rect(g_hud, x0, y0, x1 - x0, y1 - y0, black);   /* weapon view, nothing in flight: black (DOS) */
+                    if (g_vport == 3 && !g_wcam_live)   /* DOSBox fills the idle weapon view with opaque palette entry 0. */
+                        hud_rect(g_hud, x0, y0, x1 - x0, y1 - y0, g_tex_kind == 3 ? HP(0) : black);
                     if (g_snow_show[0]) draw_snow(x0, y0, x1 - x0, y1 - y0);   /* display damage: SNOWCLR instead of the view (0x10011a40),
                                                                                   * in the moving box while it opens / closes */
                     if (full) px_frame(&vw2, vblue);

@@ -4,7 +4,7 @@
  *   sweep_ai MODELS.PRJ SCENE SECONDS [attack]
  * Prints "aistuck SCENE actor k NAME state S from T1 to T2 (to the end) at X,Z y Y: <cause>" for every interval
  * of at least 10 s with under 1 m moved and the throttle over 0.1 (the end flag: still stuck when the run ended).
- * Cause: the refused step ahead (steep / wall1 / solid part + record + collision type), a mech in contact, or none.
+ * Cause: the unit or world part hit by a step probe in the direction of travel, or a clear probe.
  */
 #include <math.h>
 #include <stdio.h>
@@ -16,40 +16,28 @@
 
 static void quiet(void *u, const char *l) { (void)u; (void)l; }
 
-static void cause(msim *s, mech3d *w, int i, char *out, size_t n)
+static void cause(const msim *s, int i, char *out, size_t n)
 {
-    world_actor *ac = &s->actors[i];
-    float h = (ac->mech.heading + (s->minds && s->minds[i].speed < 0 ? 180.0f : 0.0f)) * 3.14159265f / 180.0f, x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2];
-    float nx = x0 + sinf(h) * 60.0f, nz = z0 + cosf(h) * 60.0f, y = s->units[i].y, H = s->centre_h[i], R = s->radius[i], g, nn[3];
-    int k, len = 0;
-    out[0] = 0;
-    for (k = 0; k < s->actor_count; k++) {
-        float dx, dz;
-        if (k == i || s->units[k].destroyed) continue;
-        dx = (float)s->actors[k].mech.origin[0] - x0; dz = (float)s->actors[k].mech.origin[2] - z0;
-        if (dx * dx + dz * dz < (R + s->radius[k] + 100.0f) * (R + s->radius[k] + 100.0f)) len += snprintf(out + len, n - (size_t)len, " mech %d", k);
+    const world_actor *actor = &s->actors[i];
+    float heading = (actor->mech.heading + (s->minds[i].speed < 0 ? 180.0f : 0.0f)) * 3.14159265f / 180.0f;
+    float y = s->units[i].y, height = s->centre_h[i];
+    float from[3] = {(float)actor->mech.origin[0], y + height, (float)actor->mech.origin[2]};
+    float to[3] = {from[0] + sinf(heading) * 60.0f, from[1], from[2] + cosf(heading) * 60.0f};
+    float normal[3], centre[3], radius, velocity[3];
+    int hit = msim_unit_contact(s, i, from, to, normal, centre, &radius, velocity);
+
+    if (hit == -1) {
+        snprintf(out, n, " step probe hit player");
+    } else if (hit >= 0) {
+        snprintf(out, n, " step probe hit actor %d (%s)", hit, s->actors[hit].name);
+    } else if (!msim_can_step_hr(s, from[0], from[2], to[0], to[2], y, height, s->radius[i])) {
+        const char *model = msim_block_what();
+        msim_block_normal(normal);
+        snprintf(out, n, " step probe hit %s (normal %.2f, %.2f, %.2f)",
+                 model && model[0] ? model : "unnamed world part", normal[0], normal[1], normal[2]);
+    } else {
+        snprintf(out, n, " step probe clear (check AI steering and avoidance)");
     }
-    {
-        float dx = s->player[0] - x0, dz = s->player[2] - z0;
-        if (!s->player_unit.destroyed && dx * dx + dz * dz < (R + s->player_radius + 100.0f) * (R + s->player_radius + 100.0f)) len += snprintf(out + len, n - (size_t)len, " player contact");
-    }
-    if (msim_can_step_hr(s, x0, z0, nx, nz, y, H, R)) { if (!len) snprintf(out, n, " step along the move free (AI steering / avoidance)"); return; }
-    g = msim_ground_n(s, nx, nz, y, nn);
-    if (nn[1] < 0.70710677f && g - y > H) len += snprintf(out + len, n - (size_t)len, " steep rise %.0f", g - y);
-    {
-        float ax = nx + sinf(h) * R, az = nz + cosf(h) * R, g2 = msim_ground_n(s, ax, az, y, nn);
-        if (nn[1] < 0.70710677f && g2 - y > H) len += snprintf(out + len, n - (size_t)len, " steep rise ahead %.0f (n.y %.2f)", g2 - y, nn[1]);
-    }
-    if (y - g < -9999.99f) len += snprintf(out + len, n - (size_t)len, " ground %.0f above (window)", g - y);
-    if (msim_wall_at(s, nx, nz, NULL)) len += snprintf(out + len, n - (size_t)len, " wall1");
-    for (k = 0; k < w->part_count && len < (int)n - 80; k++) {
-        mech3d_part *p = &w->parts[k];
-        if (p->hidden || (p->coll != 0 && p->coll != 2 && p->coll != 7)) continue;
-        p->hidden = 1;
-        if (msim_can_step_hr(s, x0, z0, nx, nz, y, H, R)) len += snprintf(out + len, n - (size_t)len, " solid part %d '%s' rec %s coll %d at %d,%d,%d", k, p->model_name, p->rec, p->coll, p->pos[0], p->pos[1], p->pos[2]);
-        p->hidden = 0;
-    }
-    if (!len) snprintf(out, n, " blocked (cause not found)");
 }
 
 int main(int argc, char **argv)
@@ -97,7 +85,7 @@ int main(int argc, char **argv)
             }
             if (!driven || dx * dx + dz * dz > 100.0f * 100.0f) { lx[k] = (float)ac[k].mech.origin[0]; lz[k] = (float)ac[k].mech.origin[2]; continue; }
             if (since[k] < 0) { since[k] = t; bx[k] = lx[k]; bz[k] = lz[k]; }
-            if (t - since[k] >= 5.0f && !why[k][0]) cause(&s, &world, k, why[k], sizeof why[k]);
+            if (t - since[k] >= 5.0f && !why[k][0]) cause(&s, k, why[k], sizeof why[k]);
             if (since[k] == t) why[k][0] = 0;
         }
     }

@@ -5984,7 +5984,7 @@ def dos_cockpit_projection(c):
     from PIL import Image
     import numpy as np
     ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_cockpit_yell_dosbox.png')).convert('RGB')).astype(np.int32)
-    r = c.run('', secs=8, throttle=0, nostart=True, mech=None, size='1024x768', dos_look=True, shots=[(7.5, 'cp')])
+    r = c.run('', secs=8, throttle=0, nostart=True, mech='maddog/mdg00std', size='1024x768', dos_look=True, shots=[(7.5, 'cp')])
     path = r.shots.get('cp')
     c(path and os.path.exists(path), 'picture')
     if not path or not os.path.exists(path):
@@ -6030,10 +6030,10 @@ def dos_unit_hips_eye(c):
     for the Mad Dog, every object's world position whole units). So the cockpit eye - the camera, DAT_0014fe94.. - is at
     (42388, 931, -32100) at the MARO start, not the port's (42371, 1052, -32100): the whole world had sat ~1.2 m too low
     in the DOS look (the MARO start view ~10-20 px lower than DOSBox). The 3D looks keep the port's placement"""
-    r = c.run('', secs=1.0, mission='MAROSCN1', mech=None, nostart=True, dos_look=True, env={'MW2_DEBUG_EYE': '1'})
+    r = c.run('', secs=1.0, mission='MAROSCN1', mech='maddog/mdg00std', nostart=True, dos_look=True, env={'MW2_DEBUG_EYE': '1'})
     e = re.findall(r'^eye (-?\d+) (-?\d+) (-?\d+)', r.out, re.M)
     c(e and e[-1] == ('42388', '931', '-32100'), 'DOS look: the eye where DOSBox has the camera', '%s' % e[-1:])
-    r3 = c.run('_3d', secs=1.0, mission='MAROSCN1', mech=None, nostart=True, env={'MW2_DEBUG_EYE': '1'})
+    r3 = c.run('_3d', secs=1.0, mission='MAROSCN1', mech='maddog/mdg00std', nostart=True, env={'MW2_DEBUG_EYE': '1'})
     e3 = re.findall(r'^eye (-?\d+) (-?\d+) (-?\d+)', r3.out, re.M)
     c(e3 and e3[-1] == ('42395', '1084', '-32109'), 'the 3D looks unchanged (the 3Dfx Mad Dog, hips at its OBJ offset)', '%s' % e3[-1:])
 
@@ -6517,6 +6517,26 @@ def dos_hud_windows_sweep(c):
                   keys=[(8.5, 'l'), (9.5, 'l'), (10.5, 'F7')], shots=[(9.2, 'msg'), (12.0, 'vp')])
         cmp(tag, k, r.shots.get('vp'), 'rearview', {'rear view frame and label': (826, 558, 993, 600), 'frame bottom': (826, 680, 993, 688)})
         cmp(tag, k, r.shots.get('msg'), 'message', {'message text': (0, 12, 400, 34)})   # (both sizes: dos_message_bar_window)
+
+
+@sequence
+def dos_mfd_backgrounds(c):
+    """DOSBox YELL, Mad Dog at rest: rear-view haze uses the main frame's width, and idle weapon view is opaque black."""
+    from PIL import Image
+    import numpy as np
+
+    r = c.run(secs=10, throttle=0, nostart=True, mech='maddog/mdg00std', size='1024x768', dos_look=True,
+              keys=[(7, 'f7'), (8.5, 'f9')], shots=[(8, 'rear'), (9.5, 'weapon_idle')])
+    ref_path = os.path.join(REPO, 'docs', 'reference', 'dos_hud_yell_1024_rearview.png')
+    crop = (837, 563, 865, 600)   # sky to the left of the MFD label and above the terrain
+    with Image.open(ref_path) as ref, Image.open(r.shots['rear']) as rear, Image.open(r.shots['weapon_idle']) as idle:
+        ref_sky = np.array(ref.convert('RGB').crop(crop), dtype=np.int16)
+        rear_sky = np.array(rear.convert('RGB').crop(crop), dtype=np.int16)
+        rear_error = np.abs(rear_sky - ref_sky).mean()
+        idle_peak = np.array(idle.convert('RGB').crop(crop)).max()
+    c(rear_error < 4, 'rear-view haze matches the DOSBox sky ramp', 'mean RGB error %.2f' % rear_error)
+    c(idle_peak == 0, 'idle weapon view is opaque black', 'maximum RGB channel %d' % idle_peak)
+
 
 def _gus_render(d, name, events, secs):
     """an XMIDI of [(delay ticks, bytes)] through xmiplay with the patches in d/MIDI -> mono samples at 44100"""
