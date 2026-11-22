@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.52 (2026-11-22)
+
+- **DOS cockpit displays.** The rear view stays level as the pilot looks up or down, and the down view looks
+  straight down from the mech's centre. The weapon camera follows the missile's position in whole centimetres.
+  The target wireframe uses the original integer projection, and off-screen markers handle signed offsets safely.
+- **DOS movement and audio.** The drive servo preserves its signed rounding residual. The cockpit speed readout
+  includes sideways motion from collisions. Positional sounds use the original distance, volume, pan and delay.
+- **DOS missiles.** A volley fired on the frame the lock appears stays unguided. The next volley can track.
+  Guided missiles and PPC shots can prompt the selected enemy to dodge when the pilot is looking at it.
+
 ## v1.1.51 (2026-11-22)
 
 - **Projectile flight:** Live shots continue below elevation zero until they hit something or expire.
