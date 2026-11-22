@@ -5461,12 +5461,13 @@ def inspect_structure_dos_radius(c):
     """INSPECT_TARGET on a structure: thing +0x10 + 200 m against the distance (3Dfx 0x1001d6xx, DOS 0x2a8d2). The 3Dfx DLL
     never sets +0x10 (200 m from the thing's point); DOS MW2.EXE sets it at the load to the model's bounding radius
     (0x4fdad: object model +0x40 from 0x37f60 - the vertex box's centre, the farthest vertex, rounded). ORANSCN1's pump
-    station (structure 12, 205 m away) taken with q q, then i: 3Dfx edition r = 200 m - out of range; DOS look 200 m + its
+    station (structure 12, 205 m away), then i: 3Dfx edition r = 200 m - out of range; DOS look 200 m + its
     radius 10.89 m - inspected"""
     seen = {}
     for ed in ('enhanced', 'dos'):
-        r = c.run('_' + ed, secs=11.4, mission='ORANSCN1', env={'MW2_START': '89807,-9120', 'MW2_START_HEADING': 0},
-                  keys=[(10, 'q'), (10.5, 'q'), (11, 'i')], dump='/0.1', dos_look=(ed == 'dos'))
+        r = c.run('_' + ed, secs=11.4, mission='ORANSCN1',
+                  env={'MW2_START': '89807,-9120', 'MW2_START_HEADING': 0, 'MW2_TEST_THING': '10.5:12'},
+                  keys=[(11, 'i')], dump='/0.1', dos_look=(ed == 'dos'))
         m = re.findall(r'INSPECT_THING d=(\d+) r=(\d+)', r.out)
         res = re.findall(r'INSPECT r=(\d)', r.out)
         c(r.at(10.7)['thing'] == 12 and len(m) == 1 and len(res) == 1, '%s: the pump station targeted, i pressed' % ed, '%s %s' % (r.at(10.7)['thing'], m))

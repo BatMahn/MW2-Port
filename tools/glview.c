@@ -6332,7 +6332,7 @@ static void dos_edge_point(int W, int H, int x, int y, int *ox, int *oy)
     const int p0 = W >> 1, p1 = H >> 1, dx = p0 - x, dy = p1 - y, i1 = p1 * 2;
     int fl = (dx >= 0 ? 1 : 0) | (dy >= 0 ? 2 : 0), sl = 0, i2 = p0 ? (int)(((int64_t)p1 << 16) / p0) : 0;
     if (dx == 0 || dy / dx > 0x7fff || dy / dx < -0x8000) fl |= 4;
-    else sl = (int)(((int64_t)dy << 16) / dx);
+    else sl = (int)(((int64_t)dy * 65536) / dx);
 #define R16(v) ((int)(((int64_t)(v) >> 16) + (((int64_t)(v) >> 15) & 1)))
     switch (fl) {
     case 0: if (i2 < sl) { *ox = p0 + (int)(((int64_t)p1 << 16) / sl); *oy = i1; return; } break;

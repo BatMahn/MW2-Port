@@ -243,6 +243,15 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - The player outline's front and rear damage levels (0x2f611..0x2f6e4) and message replacement (0x11020)
   each matched 3,000 differential cases. The message comparison used the active or expired status after
   normal message upkeep and the priorities used by the game.
+- All 20 differential test groups passed across seeds 47 and 149, covering 137,705 assertions.
+  One segment case within 2 cm of a boundary remains outside the assertions. The heat override command's
+  sampled mean at six ticks per frame was 92 seconds in the port and 99 in DOS.
+- ORANSCN1's pump station was inspected at 205 m in the DOS look and rejected in the 3Dfx look. The sequence
+  selects the same station in both looks before pressing `i`, so it exercises inspection independently of
+  target cycling. All 59 DOS and 54 3Dfx mission objective sweeps succeeded without a fallback.
+- The headless OpenGL sequence sweep passed 273 of 279 sequences across the shards and fixture reruns.
+  The remaining failures cover reticle convergence at 300 m, the final autopilot heading from the right in
+  TNJ4, the zero-time completion log for PROVSCN1 without actors, and three shell screenshot comparisons.
 
 ## Not checked
 
