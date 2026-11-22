@@ -121,6 +121,18 @@ int main(int argc, char **argv)
             }
         if ((fp = fopen(b, "w"))) { fprintf(fp, "videos=vhs\nvideo_fit=zoom\n"); fclose(fp); }
         CHECK(portcfg_load(NULL, &r) == 0 && r.videos == PORTCFG_VID_ORIGINAL && r.video_fit == PORTCFG_FIT_43, "unknown movie words: the defaults");
+        if ((fp = fopen(b, "w"))) {
+            fprintf(fp, "game=/games/MW2-game\ncd=/games/disc.iso\ntextures=/assets/custom.prj\n"
+                        "textures=titanium\ntextures_kind=3dfx\n");
+            fclose(fp);
+        }
+        CHECK(portcfg_load(NULL, &c) == 0, "load custom paths and texture settings");
+        c.videos = PORTCFG_VID_CRT;
+        CHECK(portcfg_save(NULL, &c) == 0 && portcfg_load(NULL, &r) == 0, "save and reload after changing a movie setting");
+        CHECK(strcmp(r.game, "/games/MW2-game") == 0 && strcmp(r.cd, "/games/disc.iso") == 0 &&
+              strcmp(r.textures, "/assets/custom.prj") == 0, "custom paths survive saving alongside game=");
+        CHECK(r.texset == PORTCFG_TX_TITANIUM && !r.textures_ati, "texture set and texture archive format survive saving");
+        CHECK(r.videos == PORTCFG_VID_CRT, "changed movie setting survives saving");
         unsetenv("MW2_CONFIG");
     }
 

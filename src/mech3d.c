@@ -2135,3 +2135,19 @@ void world3d_ti_free(wtb_model *store, int count)
     for (i = 0; i < count; i++) wtb_free(&store[i]);
     free(store);
 }
+
+int mech3d_part_in_tree(const mech3d *m, int part, int root)
+{
+    if (root < 0 || root >= m->part_count || part < 0 || part >= m->part_count) return 0;
+    if (strcmp(m->parts[part].rec, m->parts[root].rec) != 0) return 0;
+    for (int depth = 0; depth < 16 && part >= 0; depth++) {
+        const mech3d_part *p = &m->parts[part];
+        int parent;
+        if (part == root) return 1;
+        if (p->parent_obj < 0) break;
+        for (parent = 0; parent < m->part_count; parent++)
+            if (m->parts[parent].obj_index == p->parent_obj && strcmp(m->parts[parent].rec, p->rec) == 0) break;
+        part = parent < m->part_count ? parent : -1;
+    }
+    return 0;
+}

@@ -6137,7 +6137,7 @@ int main(int argc, char **argv)
             }
             return 2;
         }
-        if (!picked && !had_game && argc < 2) portcfg_save(NULL, &g_cfg);   /* found on its own: remember it */
+        if (!picked && !had_game && argc < 2) remember_game(g_cfg.game);   /* found on its own: remember the root */
         if (!picked && argc >= 2 && !getenv("MW2_CONFIG") && portcfg_is_game_dir(argv[1])) {   /* given: remember it too */
             portcfg keep = g_cfg;
             portcfg_load(NULL, &g_cfg);

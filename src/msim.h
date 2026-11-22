@@ -359,6 +359,8 @@ int  msim_nearest_enemy(const msim *s, float *distance);
  * polygon terrain (upward faces) and type 0 boxes (their tops), the highest surface within 10 m of y,
  * else the highest below y, else 0. */
 float msim_ground(const msim *s, float x, float z, float y);
+/* Is a structure's geometry directly above this point? The sky tree is ignored. */
+int msim_roof_overhead(const msim *s, float x, float y, float z, int sky_root);
 /* the height actor i's model root is drawn at: the feet, or (aircraft class 5 and dropships class 8) the feet + the MGEO
  * centre height - DOSBox TAUPSCN1: the dropship hovers about 75 m up (DROPA int[0] 7500), UMBE's gunships (AIRCRFTX/Y,
  * ground-level geometry, int[0] 7500 / 5000) fly */

@@ -85,12 +85,6 @@ static int        g_hud_wide = 1;
  * them), 1 smooth (their colours blended) */
 static int        g_dos_sky_smooth;
 #define HUD_SIDE(s) hud_side(g_hud, g_hud_wide ? (s) : 0)
-/* the same move in window pixels for the 3D pictures drawn into HUD windows (w x h the 3D frame): the side margin */
-static int hud_side_px(int w, int h, int side)
-{
-    int m = (w - h * 4 / 3) / 2;
-    return g_hud_wide && m > 0 ? side * m : 0;
-}
 static const char *HN(const char *base) { static char b[8][16]; static int k; k = (k + 1) & 7; snprintf(b[k], 16, "%s%s", base, g_hud_sfx); return b[k]; }
 static int        g_cockpit_frame;   /* the cockpit frame (the eye's hull piece): off until its rule is solved (ASSUMPTIONS
                                       * "Cockpit frames"); MW2_COCKPIT_FRAME=1 shows the current attempt */
@@ -323,6 +317,24 @@ static hud_win cpit_window(int k, int fx, int fy)
 {
     const int *r = g_layout[k];
     return hud_window(r[0], r[1], r[0] + r[2] - 1, r[1] + r[3] - 1, fx, fy);
+}
+/* Transform the CPIT edges into the 3D frame, using the HUD's pixel grid. */
+static void mfd_camera_rect(int window, int side, int w, int h, int lowres, int rect[4])
+{
+    const int *r = g_layout[window];
+    const float width = fminf((float)w, (float)h * 4.0f / 3.0f);
+    const float margin = ((float)w - width) * 0.5f;
+    const float ox = margin * (float)(1 + (g_hud_wide ? side : 0));
+    const float scale = h > 768 ? (float)h / 768.0f : 1.0f;
+    const int cols = lowres ? 320 : (int)lrintf(width / scale);
+    const int rows = lowres ? 200 : (int)lrintf(width * 0.75f / scale);
+    const float sx = lowres ? (float)w / 320.0f : scale;
+    const float sy = lowres ? (float)h / 200.0f : scale;
+    const int left = (int)lrintf(ox + sx * cpit_px(r[0], cols - 1, 319));
+    const int right = (int)lrintf(ox + sx * (cpit_px(r[0] + r[2] - 1, cols - 1, 319) + 1));
+    const int top = (int)lrintf(sy * cpit_px(r[1], rows - 1, 199));
+    const int bottom = (int)lrintf(sy * (cpit_px(r[1] + r[3] - 1, rows - 1, 199) + 1));
+    rect[0] = left; rect[1] = h - bottom; rect[2] = right - left; rect[3] = bottom - top;
 }
 /* engine-pixel drawing in a window's pixel grid: a filled span, both ends inclusive (the engine's lines 0x10061763 /
  * DOS 0x53821 are inclusive) */
@@ -1066,7 +1078,11 @@ static void on_radio(void *user, const char *name)
     static char queue[8][12];
     static int qn, qpri[8], flushed;
     (void)user;
-    g_radio_qn = qn + (g_sfx && sfx_voice_busy(g_sfx));
+    if (!g_sfx) {
+        qn = g_radio_qn = g_radio_waiting = 0;
+        return;
+    }
+    g_radio_qn = qn + sfx_voice_busy(g_sfx);
     g_radio_waiting = qn;
     if (!flushed && g_sim.end_flush_at && g_sim.now >= g_sim.end_flush_at) {
         /* the end sequence's flush (0x10031640(1)): queued lines below priority 0x50 dropped (the outcome line is 0x50) */
@@ -1083,7 +1099,7 @@ static void on_radio(void *user, const char *name)
          * the start node at t = 0) one frame after the power-up sound, TNJ1SCN1's trn1_01S as its node completes (2 s);
          * the port had waited 4 s from the start. A 1.2 s pause after each line (port, kept: the engine plays them back
          * to back) */
-        if (!g_sfx || sfx_voice_busy(g_sfx)) { t_free = now; return; }
+        if (sfx_voice_busy(g_sfx)) { t_free = now; return; }
         if (!qn || !g_ma || now - t_free < 1200) return;
         st = prj_find_type(g_ma, "SNDS");
         id = st >= 0 ? prj_find_id(g_ma, st, queue[0]) : -1;
@@ -1121,6 +1137,7 @@ static void on_radio(void *user, const char *name)
     if (getenv("MW2_RADIO_TRACE")) fprintf(stderr, "radio %s\n", name);
     if (qn < 8) {   /* lines queued together play in their numbered order (trn1_01S, the 41 s introduction, before trn1_02S) */
         int q2 = qn++;
+        g_sim.radio_busy = 1;
         snprintf(queue[q2], sizeof queue[0], "%s", name);
         qpri[q2] = g_sim.ending ? 0x50 : 0x32;   /* the outcome line (queued as the end begins) outranks the flush */
         while (q2 > 0 && strncasecmp(queue[q2 - 1], queue[q2], 5) == 0 && strcasecmp(queue[q2 - 1], queue[q2]) > 0) {   /* same series only */
@@ -2179,6 +2196,27 @@ static const mech3d *sat_src(int k)   /* -2 the world, -1 the player's mech, els
 {
     return k == -2 ? g_sim.world : k == -1 ? &g_pl : &g_actors[k].mech;
 }
+static int sat_sky_root(void)
+{
+    const mech3d *world = g_sim.world;
+    if (world) {
+        for (int i = 0; i < world->part_count; i++)
+            if ((world->parts[i].objtype & 0xf0) == 0x90) return i;
+    }
+    return -1;
+}
+static int sat_unit_visible(int src, int sky_root)
+{
+    const combat_unit *unit = src < 0 ? &g_sim.player_unit : &g_sim.units[src];
+    const mech3d *m = sat_src(src);
+    if (unit->destroyed || unit->shutdown || (src < 0 && !g_pl_ok)) return 0;
+    if (src >= 0 && g_sim.powered_down && g_sim.powered_down[src]) return 0;
+    return !msim_roof_overhead(&g_sim, (float)m->origin[0], unit->y, (float)m->origin[2], sky_root);
+}
+static int sat_thing_visible(int thing)
+{
+    return strcasecmp(g_sim.bld[thing].name, "none") != 0;
+}
 static struct { const texture *t; hud_sprite s; } g_sat_spr[64];
 static int g_sat_spr_next;
 static const hud_sprite *sat_sprite(const texture *t)
@@ -2239,24 +2277,22 @@ static void sat_draw(int w, int h)
     /* the view's half extents in world units (the window can be wider than 4:3) */
     const float hx = (float)w / ((float)h * 4.0f / 3.0f) * range * 0.5f + 2000.0f, hz = range * 0.375f + 2000.0f;
     int n = 0, src, i, k;
+    const int sky_root = sat_sky_root();
     static const float black[4] = {0, 0, 0, 1};
     sat_ground_colour();
     for (src = -2; src < g_actor_count; src++) {
         const mech3d *m = sat_src(src);
         int sd = 0;
         if (!m || !m->parts) continue;
-        if (src == -1 && (!g_pl_ok || g_sim.player_unit.destroyed)) continue;
-        if (src >= 0) {
-            if (g_sim.units && g_sim.units[src].destroyed) continue;
-            sd = g_actors[src].friendly ? 0 : g_actors[src].alliance == 2 ? 2 : 1;
-        }
+        if (src != -2 && !sat_unit_visible(src, sky_root)) continue;
+        if (src >= 0) sd = g_actors[src].friendly ? 0 : g_actors[src].alliance == 2 ? 2 : 1;
         for (k = 0; k < m->part_count; k++) {
             const mech3d_part *pp = &m->parts[k];
             const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
             float c[3] = {0, 0, 0}, top = -1e30f;
             int col, ty = pp->objtype & 0xf0, kd = pp->objtype & 0xf00, v;
             if (!o || o->vert_count <= 0 || pp->hidden) continue;
-            if (src == -2 && (ty == 0x30 || ty == 0x70)) continue;
+            if (src == -2 && (ty == 0x30 || ty == 0x70 || mech3d_part_in_tree(m, k, sky_root))) continue;
             /* (a quick reject on the part's origin: the world's parts are small next to the view) */
             if (fabsf((float)pp->pos[0] - ex) > hx + 20000.0f || fabsf((float)pp->pos[2] - ez) > hz + 20000.0f) continue;
             for (v = 0; v < o->vert_count; v++) { float q[3]; sat_vertex(pp, &o->verts[v], q); c[0] += q[0]; c[2] += q[2]; if (q[1] > top) top = q[1]; }
@@ -2264,6 +2300,7 @@ static void sat_draw(int w, int h)
             else {
                 int b, thing = -1;
                 for (b = 0; b < g_sim.bld_count; b++) if (g_sim.bld[b].intact == k || g_sim.bld[b].destroyed == k) { thing = b; break; }
+                if (thing >= 0 && !sat_thing_visible(thing)) continue;
                 /* a thing's object: the engine sets type bit 0x200 on the objects its GT record claims at load; the
                  * OBJ records themselves carry 0 / 0xc0, so the port goes by the GT link (user report: TEAL's enemy
                  * buildings were shaded like terrain, not outlined in red) */
@@ -6504,6 +6541,7 @@ int main(int argc, char **argv)
     }
     if (!(r = glr_create()) || load(r, ma, ta, ati, rec, mission, camo, clan) != 0) return 1;
     g_sfx = sfx_create(ma);   /* NULL without an audio device: silent */
+    g_voice_off = g_sfx == NULL;
     if (g_world && g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* the mission was loaded before the mixer existed (with the drop screen: as it fades) */
     if (g_sfx && getenv("MW2_INSTALL_DIR")) {   /* the EFFECTS and VOICE sliders: MW2SND.CFG +4 / +8, 16.16 */
         unsigned char snd[60];
@@ -8860,12 +8898,12 @@ int main(int argc, char **argv)
         }
         float vp_wf = 1, vp_hf = 1, td_wf = 1, td_hf = 1;
         int vp_on = pow_window(1, &vp_wf, &vp_hf), td_on = pow_window(1, &td_wf, &td_hf);   /* windows 2 and 13 (see pow_update) */
-        if (g_world && HUD_VIEW && ((g_vport >= 1 && g_vport <= 2) || wcam >= 0) && vp_on && !g_snow_show[0] && vp_wf * vp_hf > 0) {
-            /* DOS viewport box x 827-991, y 559-686 at 1024x768 = 516.9..619.4 x 349.4..428.8 in 640x480 units */
+        if (g_world && HUD_VIEW && g_layout_n > 2 && !g_hud_off &&
+            ((g_vport >= 1 && g_vport <= 2) || wcam >= 0) && vp_on && !g_snow_show[0] && vp_wf * vp_hf > 0) {
             glr_view vv = v;
-            float sx = (float)h * 4.0f / 3.0f, x0 = ((float)w - sx) * 0.5f;
-            int px = (int)(x0 + 516.9f * sx / 640.0f) + hud_side_px(w, h, 1), pw = (int)(102.5f * sx / 640.0f);   /* right-hand */
-            int ph = (int)(79.4f * (float)h / 480.0f), py = h - (int)(349.4f * (float)h / 480.0f) - ph;
+            int rect[4];
+            mfd_camera_rect(2, 1, w, h, g_render_w == 320 && g_lr_fbo[0], rect);
+            int px = rect[0], py = rect[1], pw = rect[2], ph = rect[3];
             if (vp_wf < 1.0f || vp_hf < 1.0f) {
                 /* powering up / down (0x10011aa0 / 0x10011b70): the view is drawn into the window as it stands - the camera's
                  * window is the moving rectangle (0x1002ab50), its centre the projection centre and its half width the focal
@@ -8894,86 +8932,111 @@ int main(int argc, char **argv)
             rb_viewport(0, 0, w, h);
         }
         g_wcam_live = wcam >= 0;
-        if (g_world && HUD_VIEW && (g_tgtdisp == 2 || (g_tgtdisp == 1 && g_tex_kind != 3)) && g_layout_n > 13 && g_tgt_sel >= 0 && g_tgt_sel < g_actor_count && !g_hud_off && td_on && g_pow == 2 && !g_snow_show[1]) {
-            /* (the model only with the mech up: 0x10021300 renders it when DAT_101de868 == 2 - starting up or shut down
-             * the box stays black, also while it opens / closes) */
-            /* the shaded target view (mode 2): the camera at the target's centre less 3 R along the player -> target
-             * bearing (0x102475d4 = 3.0), level, zoom 2.0 */
-            const world_actor *ta = &g_actors[g_tgt_sel];
-            const int *rr = g_layout[13];
+        int target_camera_drawn = 0;
+        const int target_actor = g_tgt_sel >= 0 && g_tgt_sel < g_actor_count;
+        const int target_thing = !target_actor && g_tgt_thing >= 0 && g_tgt_thing < g_sim.bld_count &&
+                                 g_sim.bld[g_tgt_thing].hp > 0;
+        const int target_solid = g_tgtdisp == 1 && g_tex_kind != 3 && target_actor;
+        if (g_world && HUD_VIEW && (target_solid || (g_tgtdisp == 2 && (target_actor || target_thing))) &&
+            g_layout_n > 13 && !g_hud_off && td_on && td_wf >= 1.0f && td_hf >= 1.0f &&
+            g_pow == 2 && !g_snow_show[1]) {
+            static mech3d_part *parts;
+            static int capacity;
+            mech3d one = {0};
             glr_view vv = v;
-            float R = g_sim.radius ? g_sim.radius[g_tgt_sel] : 545.0f, ch = g_sim.centre_h ? g_sim.centre_h[g_tgt_sel] : 550.0f;
-            float lx = (float)ta->mech.origin[0] - (float)g_pl.origin[0], lz = (float)ta->mech.origin[2] - (float)g_pl.origin[2], ll = sqrtf(lx * lx + lz * lz);
-            float sx = (float)h * 4.0f / 3.0f, x0 = ((float)w - sx) * 0.5f;
-            int px = (int)(x0 + ((float)rr[0] * 2.0f) * sx / 640.0f) + hud_side_px(w, h, -1), pw = (int)(((float)rr[2] * 2.0f) * sx / 640.0f);   /* left-hand */
-            int ph = (int)(((float)rr[3] * 2.4f) * (float)h / 480.0f), py = h - (int)(((float)rr[1] * 2.4f) * (float)h / 480.0f) - ph;
-            {   /* powering up / down: the window about its centre (0x10021730 / 0x100217f0 draw it there) */
-                int npw = (int)((float)pw * td_wf), nph = (int)((float)ph * td_hf);
-                px += (pw - npw) / 2; py += (ph - nph) / 2; pw = npw > 1 ? npw : 1; ph = nph > 1 ? nph : 1;
-            }
-            if (ll < 1.0f) { lx = 0; lz = 1; ll = 1; }
-            vv.free_cam = 1;
-            {   /* turrets (class 3): framed on their model as drawn - the unit's centre height (MGEO, 5.5 m by default) is
-                 * not where a turret's guns sit (user report, Scorching Sand: the TURRETFs at the box's lower edge, cut
-                 * off). The model's height span gives the centre, its size the distance */
-                float ymn = 1e30f, ymx = -1e30f, xzr = 0.0f;
-                int q3, k3;
-                if (ta->unit_class == 3)
-                    for (q3 = 0; q3 < ta->mech.part_count; q3++) {
-                        const mech3d_part *pp = &ta->mech.parts[q3];
-                        const wtb_object *o3 = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
-                        for (k3 = 0; o3 && k3 < o3->vert_count; k3++) {
-                            float w3[3];
-                            sat_vertex(pp, &o3->verts[k3], w3);
-                            if (w3[1] < ymn) ymn = w3[1];
-                            if (w3[1] > ymx) ymx = w3[1];
-                            {   const float dx3 = w3[0] - (float)ta->mech.origin[0], dz3 = w3[2] - (float)ta->mech.origin[2], r3 = sqrtf(dx3 * dx3 + dz3 * dz3); if (r3 > xzr) xzr = r3; }
-                        }
-                    }
-                if (ymn < ymx) {
-                    const float half = fmaxf((ymx - ymn) * 0.5f, xzr);
-                    if (half > R) R = half;
-                    vv.eye[1] = (ymn + ymx) * 0.5f;
-                } else vv.eye[1] = (g_tgt_sel < g_sim.actor_count ? g_sim.units[g_tgt_sel].y : (float)ta->mech.origin[1]) + ch;
-            }
-            vv.eye[0] = (float)ta->mech.origin[0] - lx / ll * 3.0f * R; vv.eye[2] = (float)ta->mech.origin[2] - lz / ll * 3.0f * R;
-            vv.look_yaw = atan2f(lx, lz) * 180.0f / 3.14159265f; vv.look_pitch = 0.0f;
-            vv.vfov = 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / 2.0f) * 180.0f / 3.14159265f;
-            if (g_tgtdisp == 1) {
-                /* mode 1 in the 3D editions: the target alone, solid in the HUD's dark blue (0, 48, 215), lit, on black
-                 * (the engine renders the object with its wire flag, 0x10021300 / 0x1002a4b0 class colour 7; the
-                 * user's 3D-edition memory: solid). Its blown-off locations left out */
-                static mech3d one;
-                static int cap;
-                const mech3d *src = &ta->mech;
-                int q2;
-                if (cap < src->part_count) { mech3d_part *np = realloc(one.parts, (size_t)src->part_count * sizeof *np); if (np) { one.parts = np; cap = src->part_count; } }
-                one.part_count = 0;
-                for (q2 = 0; q2 < src->part_count && q2 < cap; q2++) {
-                    int gq = src->parts[q2].group;
-                    if (g_sim.armed[g_tgt_sel] && gq >= 1 && gq <= 8 && gq != 3 && g_sim.units[g_tgt_sel].loc_gone[gq - 1]) continue;
-                    one.parts[one.part_count] = src->parts[q2];
-                    {   /* each location in its damage colour, as the damage outline (0x1001b620: levels 6 / 3 / 11 -
-                         * here the HUD blue, yellow, red): armour lost front or rear in fifteenths, 0 intact, 1-11 yellow,
-                         * 12+ red; blown off: gone */
-                        unsigned tint = 0x1000000u | LOC_RGB[loc_level(g_sim.armed[g_tgt_sel] ? &g_sim.units[g_tgt_sel] : NULL, gq)];
-                        one.parts[one.part_count].tint = tint;
-                    }
-                    one.part_count++;
+            float center[3], R;
+            const mech3d *model;
+            int root = -1, rect[4];
+            unsigned fly = 0;
+            const combat_unit *unit = NULL;
+
+            if (target_actor) {
+                const world_actor *ta = &g_actors[g_tgt_sel];
+                const float ch = g_sim.centre_h ? g_sim.centre_h[g_tgt_sel] : 550.0f;
+                model = &ta->mech;
+                if (!target_solid && c3d_ti && g_tex_kind != 3) {
+                    const mech3d *ti = ti_actor(g_tgt_sel, model, ta->skel, 0);
+                    if (ti) model = ti;
                 }
-                glr_set_actors(r, &one, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
-                vv.solo = 1; vv.fog_density = 0; vv.wire = 0;
-                vv.mono[0] = vv.mono[1] = vv.mono[2] = 0.0f; vv.mono[3] = 2.0f;   /* each part's tint */
-                vv.ambient = 0.35f; vv.point_light = 0;
-            } else if (g_pit_first >= 0 && g_frame_layer.parts && g_pit_first < g_frame_layer.part_count) {
-                mech3d nopit = g_frame_layer;
-                nopit.part_count = g_pit_first;
-                glr_set_actors(r, &nopit, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
+                if (g_sim.armed[g_tgt_sel]) {
+                    unit = &g_sim.units[g_tgt_sel];
+                    fly = mech3d_fly_mask(unit->loc_gone);
+                }
+                R = g_sim.radius ? g_sim.radius[g_tgt_sel] : 545.0f;
+                center[0] = (float)ta->mech.origin[0];
+                center[2] = (float)ta->mech.origin[2];
+                {   /* turrets (class 3): framed on their model as drawn - the unit's centre height (MGEO, 5.5 m by default) is
+                     * not where a turret's guns sit (user report, Scorching Sand: the TURRETFs at the box's lower edge, cut
+                     * off). The model's height span gives the centre, its size the distance */
+                    float ymn = 1e30f, ymx = -1e30f, xzr = 0.0f;
+                    int q3, k3;
+                    if (ta->unit_class == 3)
+                        for (q3 = 0; q3 < ta->mech.part_count; q3++) {
+                            const mech3d_part *pp = &ta->mech.parts[q3];
+                            const wtb_object *o3 = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
+                            for (k3 = 0; o3 && k3 < o3->vert_count; k3++) {
+                                float w3[3];
+                                sat_vertex(pp, &o3->verts[k3], w3);
+                                if (w3[1] < ymn) ymn = w3[1];
+                                if (w3[1] > ymx) ymx = w3[1];
+                                {   const float dx3 = w3[0] - (float)ta->mech.origin[0], dz3 = w3[2] - (float)ta->mech.origin[2], r3 = sqrtf(dx3 * dx3 + dz3 * dz3); if (r3 > xzr) xzr = r3; }
+                            }
+                        }
+                    if (ymn < ymx) {
+                        const float half = fmaxf((ymx - ymn) * 0.5f, xzr);
+                        if (half > R) R = half;
+                        center[1] = (ymn + ymx) * 0.5f;
+                    } else center[1] = (g_tgt_sel < g_sim.actor_count ? g_sim.units[g_tgt_sel].y : (float)ta->mech.origin[1]) + ch;
+                }
+            } else {
+                const struct msim_building *gb = &g_sim.bld[g_tgt_thing];
+                float half[3];
+                model = &g_mech;
+                root = gb->intact;
+                for (int axis = 0; axis < 3; axis++) {
+                    center[axis] = (gb->mn[axis] + gb->mx[axis]) * 0.5f;
+                    half[axis] = (gb->mx[axis] - gb->mn[axis]) * 0.5f;
+                }
+                R = sqrtf(half[0] * half[0] + half[1] * half[1] + half[2] * half[2]);
             }
-            glr_draw_rect(r, &vv, px, py, pw, ph);
-            rb_viewport(0, 0, w, h);
-        }
-        {
+            if (capacity < model->part_count) {
+                mech3d_part *grown = realloc(parts, (size_t)model->part_count * sizeof *parts);
+                if (grown) { parts = grown; capacity = model->part_count; }
+            }
+            one.parts = parts;
+            if (capacity >= model->part_count) {
+                for (int q = 0; q < model->part_count; q++) {
+                    const mech3d_part *part = &model->parts[q];
+                    if (part->hidden || (target_thing && !mech3d_part_in_tree(model, q, root)) ||
+                        (target_actor && mech3d_fly_loc(model, q, fly))) continue;
+                    mech3d_part *dst = &parts[one.part_count++];
+                    *dst = *part;
+                    dst->moving = 0;
+                    if (target_solid)
+                        dst->tint = 0x1000000u | LOC_RGB[loc_level(unit, part->group)];
+                }
+            }
+
+            if (one.part_count > 0 && glr_set_actors(r, &one, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan) == 0) {
+                const float lx = center[0] - (float)g_pl.origin[0], lz = center[2] - (float)g_pl.origin[2];
+                const float bearing = fabsf(lx) + fabsf(lz) < 1.0f ? 0.0f : atan2f(lx, lz);
+                const float distance = 3.0f * fmaxf(R, 1.0f);
+                vv.free_cam = 1; vv.ortho_w = 0; vv.solo = 1; vv.wire = 0; vv.fog_density = 0;
+                vv.eye[0] = center[0] - sinf(bearing) * distance;
+                vv.eye[1] = center[1];
+                vv.eye[2] = center[2] - cosf(bearing) * distance;
+                vv.look_yaw = bearing * 180.0f / 3.14159265f;
+                vv.look_pitch = 0.0f;
+                if (target_solid) {
+                    vv.mono[0] = vv.mono[1] = vv.mono[2] = 0.0f; vv.mono[3] = 2.0f;
+                    vv.ambient = 0.35f; vv.point_light = 0;
+                }
+                mfd_camera_rect(13, -1, w, h, g_render_w == 320 && g_lr_fbo[0], rect);
+                vv.vfov = 2.0f * atanf((float)rect[3] / (2.0f * (float)rect[2])) * 180.0f / 3.14159265f;
+                glr_draw_rect(r, &vv, rect[0], rect[1], rect[2], rect[3]);
+                rb_viewport(0, 0, w, h);
+                target_camera_drawn = 1;
+            }
         }
         if (g_render_w == 320 && g_world && g_lr_fbo[0]) {
             /* 320 x 200: the 3D picture (and the inset views) point-sampled down to the 320 x 200 frame; the HUD is then
@@ -9273,7 +9336,8 @@ int main(int argc, char **argv)
                     }
                 }
                 g_bracket = 0;
-                if (have && g_tex_kind == 3 && dos_hud_mark(r, w, h, wp, isnav, isthing, side, isthing ? thr : g_sim.radius ? g_sim.radius[tgt] : 545.0f)) {
+                if (have && g_tex_kind == 3 && dos_hud_mark(r, w, h, wp, isnav, isthing, side,
+                                                          isthing ? thr : tgt >= 0 && g_sim.radius ? g_sim.radius[tgt] : 545.0f)) {
                     /* the DOS look: MW2.EXE's integers (dos_hud_mark) */
                 } else if (have) {
                     /* through the view as drawn (its eye, yaw and pitch): the external camera (mode 1) turns after the mech
@@ -9414,6 +9478,7 @@ int main(int argc, char **argv)
                             float tp[3];
                             istgt = tgt < 0 && b == g_tgt_thing;
                             if (g_sim.bld[b].hp <= 0) continue;   /* destroyed (the thing's flag 4 / 2) */
+                            if (g_satmap && !sat_thing_visible(b)) continue;
                             if (!istgt && !(g_sim.bld[b].flags & 0x1400)) continue;   /* (bits 0x1e: runtime - destroyed - ASSUMED otherwise clear) */
                             if (!msim_thing_point(&g_sim, b, tp)) continue;
                             wx = tp[0]; wz = tp[2];
@@ -9421,6 +9486,7 @@ int main(int argc, char **argv)
                             set3 = !(g_sim.bld[b].flags & 0x1400);
                         } else if (q >= 0) {
                             if (!g_sim.armed[q] || g_sim.units[q].destroyed) continue;
+                            if (g_satmap && !sat_unit_visible(q, sat_sky_root())) continue;
                             istgt = q == tgt;
                             if (!istgt && ((g_sim.powered_down && g_sim.powered_down[q]) || g_sim.units[q].shutdown)) continue;   /* +0x14 & 0x10 */
                             wx = (float)g_actors[q].mech.origin[0]; wz = (float)g_actors[q].mech.origin[2];
@@ -9782,7 +9848,7 @@ int main(int argc, char **argv)
                 const hud_win tvw = cpit_window(13, 0, 0), txw = cpit_window(14, 0x28f, 0x28f);
                 HUD_SIDE(-1);   /* left-hand: the box, its picture and text lines */
                 float bx = (float)tvw.x0 * tvw.ux, by = (float)tvw.y0 * tvw.uy, bw = (float)(tvw.x1 - tvw.x0) * tvw.ux, bh = (float)(tvw.y1 - tvw.y0) * tvw.uy;
-                int shaded = (g_tgtdisp == 2 || (g_tgtdisp == 1 && g_tex_kind != 3)) && tgt >= 0 && g_cockpit && g_pow == 2;   /* drawn in 3D before the HUD */
+                int shaded = target_camera_drawn;
                 int full = tv_wf >= 1.0f && tv_hf >= 1.0f;
                 if (!full) { bx += bw * (1.0f - tv_wf) * 0.5f; by += bh * (1.0f - tv_hf) * 0.5f; bw *= tv_wf; bh *= tv_hf; }
                 const int snow = g_snow_show[1];   /* display damage: SNOWCLR instead of the contents (0x10021710), also in the moving box */
@@ -9862,7 +9928,7 @@ int main(int argc, char **argv)
                                                                                          * what it holds, and the range */
                         const struct msim_building *gb = &g_sim.bld[g_tgt_thing];
                         float cx = (gb->mn[0] + gb->mx[0]) * 0.5f - (float)g_pl.origin[0], cz = (gb->mn[2] + gb->mx[2]) * 0.5f - (float)g_pl.origin[2];
-                        if (!snow && g_world && gb->intact >= 0 && gb->intact < g_mech.part_count) {   /* the structure's wireframe */
+                        if (!shaded && !snow && g_world && gb->intact >= 0 && gb->intact < g_mech.part_count) {   /* the structure's wireframe */
                             static const float wblue[4] = {0.0f, 48.0f / 255.0f, 215.0f / 255.0f, 1.0f};
                             const mech3d_part *bp = &g_mech.parts[gb->intact];
                             float brg = atan2f(-cx, -cz) * 180.0f / 3.14159265f;
@@ -9882,15 +9948,8 @@ int main(int argc, char **argv)
                                 tmp[nt++] = *bp;
                                 for (q = 0; q < g_mech.part_count && nt < 32; q++) {
                                     const mech3d_part *cp = &g_mech.parts[q];
-                                    int up = cp->parent_obj, d;
-                                    if (q == gb->intact || cp->hidden || strcmp(cp->rec, bp->rec) != 0) continue;
-                                    for (d = 0; d < 16 && up >= 0 && up != bp->obj_index; d++) {   /* its ancestors in the record */
-                                        int r2, nx2 = -1;
-                                        for (r2 = 0; r2 < g_mech.part_count; r2++) if (g_mech.parts[r2].obj_index == up && strcmp(g_mech.parts[r2].rec, bp->rec) == 0) { nx2 = g_mech.parts[r2].parent_obj; break; }
-                                        if (r2 == g_mech.part_count) { up = -1; break; }
-                                        up = nx2;
-                                    }
-                                    if (up == bp->obj_index && up >= 0) tmp[nt++] = *cp;
+                                    if (q != gb->intact && !cp->hidden && mech3d_part_in_tree(&g_mech, q, gb->intact))
+                                        tmp[nt++] = *cp;
                                 }
                                 one.parts = tmp; one.part_count = nt;
                                 (void)brg; (void)wblue;

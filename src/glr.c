@@ -321,20 +321,9 @@ static void part_sphere(const mech3d_part *part, float out[4])
  * Marooned dome, its struts and windows are drawn at any distance */
 static int sky_tree(const mech3d *m, int pi)
 {
-    int depth, j, sky;
-    for (sky = 0; sky < m->part_count && (m->parts[sky].objtype & 0xf0) != 0x90; sky++) {}   /* the FIRST such shape only (the
-                                                                                               * loop breaks there): GOLD's
-                                                                                               * second, its walkway, culls */
-    if (sky >= m->part_count) return 0;
-    for (depth = 0; depth < 16 && pi >= 0; depth++) {
-        const mech3d_part *p = &m->parts[pi];
-        if (pi == sky) return 1;
-        if (p->parent_obj < 0) return 0;
-        for (j = 0; j < m->part_count; j++)
-            if (m->parts[j].obj_index == p->parent_obj && strcmp(m->parts[j].rec, p->rec) == 0) break;
-        pi = j < m->part_count ? j : -1;
-    }
-    return 0;
+    int sky;
+    for (sky = 0; sky < m->part_count && (m->parts[sky].objtype & 0xf0) != 0x90; sky++) {}
+    return mech3d_part_in_tree(m, pi, sky);
 }
 
 /* A Titanium colour kind 1 polygon's palette shade (mercsw 0x1001b5e4 -> 0x1002f5e3, the 16-bit build's DOS-style
@@ -1449,7 +1438,11 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
     rb_tex_wrap(r->dos_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
 }
 
-void glr_draw(glr *r, const glr_view *v, int w, int h) { glr_draw_rect(r, v, 0, 0, w, h); }
+static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, int primary);
+
+void glr_draw(glr *r, const glr_view *v, int w, int h) { draw_view(r, v, 0, 0, w, h, 1); }
+
+void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h) { draw_view(r, v, x0, y0, w, h, 0); }
 
 
 /* Draw into the window rectangle x, y (from the bottom left), w x h: a cockpit viewport (rear / down view). */
@@ -1886,7 +1879,7 @@ static void alpha_pass(glr *r, const glr_view *v, const float view[16], const fl
     r->D.u_alpha = 1.0f;
 }
 
-void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
+static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, int primary)
 {
     float proj[16], view[16], mvp[16], eye[3], L[3], ll, dist;
     float yaw = v->yaw * 3.14159265f / 180.0f, pitch = v->pitch * 3.14159265f / 180.0f;
@@ -2231,10 +2224,12 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h)
             U3(r->F.u_dos_ry, (float)((double)R[1][0] / 134217728.0), (float)((double)R[1][1] / 134217728.0), (float)((double)R[1][2] / 134217728.0));
             U3(r->F.u_dos_rz, (float)((double)R[2][0] / 134217728.0), (float)((double)R[2][1] / 134217728.0), (float)((double)R[2][2] / 134217728.0));
             U2(r->F.u_dos_ps, sh2[0], sh2[1]);
-            memcpy(r->dos_R, R, sizeof r->dos_R);   /* (glr_dos_project: the HUD's markers through the same integers) */
-            r->dos_sh[0] = sh2[0]; r->dos_sh[1] = sh2[1]; r->dos_vw = w; r->dos_vh = h; r->dos_ok = 1;
-            r->dos_zhw = (uint32_t)((uint64_t)zoom * hw);
-            memcpy(r->dos_eye, eye, sizeof r->dos_eye);
+            if (primary) {   /* the HUD's markers use the main camera, even after an inset draws */
+                memcpy(r->dos_R, R, sizeof r->dos_R);
+                r->dos_sh[0] = sh2[0]; r->dos_sh[1] = sh2[1]; r->dos_vw = w; r->dos_vh = h; r->dos_ok = 1;
+                r->dos_zhw = (uint32_t)((uint64_t)zoom * hw);
+                memcpy(r->dos_eye, eye, sizeof r->dos_eye);
+            }
             if (r->pit_n > 0) {   /* the cockpit set's draw order */
                 int rk[GLR_PIT_MAX];
                 dos_pit_ranks(r, (const int64_t (*)[3])R, eye, w, h, sh2, rk);

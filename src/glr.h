@@ -199,7 +199,7 @@ typedef struct {
 } glr_ti_shade;
 void glr_set_titanium_extra(glr *r, texture *const bank0[GLR_SLOTS], const glr_ti_shade *shade);
 
-/* Draw into the current target (rb_target), viewport w x h. */
+/* Draw the main view into the current target (rb_target), viewport w x h. */
 void glr_draw(glr *r, const glr_view *v, int w, int h);
 void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h);
 

@@ -1011,6 +1011,7 @@ static void node_assign(msim *s, int table, int leader)
     int cur = table < s->logic.table_count ? s->logic.current[table] : -1;
     const mtbl_node *n;
     int code[40], nt, members = 0, q, k, pick = -1, tcode = 0;
+    float nearest = 1e30f;
     uint32_t kind;
     if (cur < 0) return;
     n = &s->logic.tables[table].nodes[cur];
@@ -1020,14 +1021,26 @@ static void node_assign(msim *s, int table, int leader)
         if (s->actors[q].table == table && s->armed[q] && !s->units[q].destroyed && !(s->powered_down && s->powered_down[q])) members++;
     if (!members) return;
     nt = node_target_list(s, n, code, 40);
-    for (k = 0; k < nt && !tcode; k++) {
+    for (k = 0; k < nt; k++) {
         int left = n->need ? n->need : members;
         if (node_target_done(s, table, kind, code[k])) continue;
         for (q = 0; q < s->actor_count && left; q++) {
             if (s->actors[q].table != table || !s->armed[q] || s->units[q].destroyed || (s->powered_down && s->powered_down[q])) continue;
             if (on_target(s, q, code[k]) && node_state(kind, s->minds[q].state)) left--;
         }
-        if (left) tcode = code[k];
+        if (!left) continue;
+        if ((kind == 1 || kind == 2) && (code[k] >> 16) == 4) {
+            const struct msim_building *b = &s->bld[code[k] & 0xffff];
+            const float dx = (b->mn[0] + b->mx[0]) * 0.5f - (float)s->actors[leader].mech.origin[0];
+            const float dz = (b->mn[2] + b->mx[2]) * 0.5f - (float)s->actors[leader].mech.origin[2];
+            const float distance = dx * dx + dz * dz;
+            /* A record can place several equivalent targets, such as separate hangar doors.
+             * Attach the nearest one to the star so each star can clear its own exit. */
+            if (distance < nearest) { nearest = distance; tcode = code[k]; }
+        } else {
+            if (!tcode) tcode = code[k];
+            break;
+        }
     }
     if (!tcode) return;
     for (q = 0; q < s->actor_count && pick < 0; q++) {
@@ -2498,6 +2511,26 @@ static int seg_mech(const mech3d *m, const float o[3], const float d[3], float *
     return *tbest <= 1 ? group : 0;
 }
 
+int msim_roof_overhead(const msim *s, float x, float y, float z, int sky_root)
+{
+    const float from[3] = {x, y + 1.0f, z}, up[3] = {0, 2000000.0f, 0};
+    if (!s->world) return 0;
+    for (int i = 0; i < s->obstacle_count; i++) {
+        const float *box = s->obstacles[i];
+        if (x < box[0] || x > box[1] || z < box[2] || z > box[3]) continue;
+        const int index = s->obstacle_part[i];
+        const mech3d_part *part = &s->world->parts[index];
+        if (part->hidden || part->facing || part->shadow || part->coll == 5 ||
+            mech3d_part_in_tree(s->world, index, sky_root)) continue;
+        mech3d roof = {0};
+        float t;
+        roof.parts = (mech3d_part *)part;
+        roof.part_count = 1;
+        if (seg_mech(&roof, from, up, &t)) return 1;
+    }
+    return 0;
+}
+
 
 /* the volley's muzzle flashes at the weapon (engine 0x10043aa8: the weapon table's two muzzle types) */
 static void muzzle(msim *s, int weapon, const float from[3], const mech3d *m, int slot, float heading)
@@ -3069,6 +3102,18 @@ static int los_unit_first(msim *s, int self, int who, float x0, float y0, float 
     shot_units(s, self, o, dv, &t, &unit, &group);
     return unit != -2 && unit != who;
 }
+
+/* For a scripted structure target, hitting its front face is a clear shot.
+ * Use the same collision list and first-hit ordering as the projectile. */
+static int los_thing_clear(msim *s, int self, int thing, const float from[3], const float to[3])
+{
+    const float ray[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+    float dist = 1.0f;
+    int unit = -2, group = 0, part = -1;
+    shot_units(s, self, from, ray, &dist, &unit, &group);
+    if (shot_objects(s, from, ray, &dist, &part)) return shot_thing(s, part) == thing;
+    return unit == -2;
+}
 int msim_test_fire_line(msim *s, int k)   /* TEST ONLY: the fire decision's line test (combat_step) at the player */
 {
     float x0, y0, z0, y1;
@@ -3234,10 +3279,13 @@ static void combat_step(msim *s, float dt)
                             s->units[i].lock_target = who >= -1 ? who : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
                     }
                     if (fw >= 0 && who == -1 && msim_weapon_guided(cu->weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
-                    cu->ai_trigger = fw >= 0 && !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f,
-                                                             (float)s->actors[i].mech.origin[2], ex, aim_h, ez) &&
-                                     !los_unit_first(s, i, who, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f,
-                                                     (float)s->actors[i].mech.origin[2], ex, aim_h, ez);
+                    if (fw >= 0 && who == -3 && (m->node_tgt >> 16) == 4) {
+                        const float target[3] = {ex, aim_h, ez};
+                        cu->ai_trigger = los_thing_clear(s, i, m->node_tgt & 0xffff, from, target);
+                    } else {
+                        cu->ai_trigger = fw >= 0 && !los_blocked(s, from[0], from[1], from[2], ex, aim_h, ez) &&
+                                         !los_unit_first(s, i, who, from[0], from[1], from[2], ex, aim_h, ez);
+                    }
                 }
             }
         } else if (who == -1 && order_attacks_player(s, i) &&

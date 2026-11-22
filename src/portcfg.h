@@ -134,7 +134,7 @@ int  portcfg_look(const portcfg *c, int renderer, int texset, char *models, char
 void portcfg_defaults(portcfg *c);
 const char *portcfg_file(void);                       /* the per-user file's path */
 int  portcfg_load(const char *unused, portcfg *c);    /* 0 if read; defaults otherwise (the argument is ignored) */
-int  portcfg_save(const char *unused, const portcfg *c);
+int  portcfg_save(const char *unused, const portcfg *c);  /* save unresolved settings, including explicit path overrides */
 /* Find the game folder (if not configured) and fill in every part left empty. exe_dir: the executable's folder;
  * hint: a folder from the command line, or NULL. Returns 0 if an install folder was found. */
 int  portcfg_resolve(portcfg *c, const char *exe_dir, const char *hint);

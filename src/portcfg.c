@@ -137,7 +137,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     if (!(f = fopen(portcfg_file(), "w"))) return -1;
     fprintf(f, "# MechWarrior 2 port settings (see portcfg.h). Paths left out are taken from the game folder.\n");
     if (c->game[0]) fprintf(f, "game=%s\n", c->game);
-#define OPT(k) if (c->k[0] && !c->game[0]) fprintf(f, #k "=%s\n", c->k)
+#define OPT(k) if (c->k[0]) fprintf(f, #k "=%s\n", c->k)
     OPT(install); OPT(cd); OPT(music); OPT(ultrasnd); OPT(mt32); OPT(sc55); OPT(models); OPT(textures); OPT(skygnd); OPT(skygnd_fog); OPT(titanium);
 #undef OPT
     if (c->mode == 0) fprintf(f, "resolution=desktop\n");
@@ -147,6 +147,7 @@ int portcfg_save(const char *unused, const portcfg *c)
     if (c->render_w) fprintf(f, "render=%dx%d\n", c->render_w, c->render_h); else fprintf(f, "render=native\n");
     fprintf(f, "speed=%.2f\n", (double)(c->speed > 0 ? c->speed : 0.85f));
     fprintf(f, "renderer=%s\n", PORTCFG_ED_NAME[c->renderer >= 0 && c->renderer < PORTCFG_ED_COUNT ? c->renderer : 0]);
+    fprintf(f, "textures_kind=%s\n", c->textures_ati ? "ati" : "3dfx");
     fprintf(f, "textures=%s\n", PORTCFG_TX_NAME[c->texset == PORTCFG_TX_TITANIUM ? 1 : 0]);
     fprintf(f, "system_shortcuts=%s\n", c->system_shortcuts ? "allow" : "block");
     fprintf(f, "hud_layout=%s\n", c->hud_original ? "original" : "wide");

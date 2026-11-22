@@ -110,6 +110,8 @@ typedef struct {
 } mech3d;
 /* the mount slot for a weapon in MEK location loc (H, LT, CT, RT, LA, RA, LL, RL), -1 if none */
 int  mech3d_mount_slot(int loc);
+/* True for the root itself and for parts parented under it in the same world record. */
+int mech3d_part_in_tree(const mech3d *m, int part, int root);
 /* a mount's world position for the mech placed at origin with heading: from its last mech3d_pose (animation and
  * torso twist included, moved to origin) when it has been posed, else the rest pose turned to heading; returns 0,
  * or -1 if the mech has no such mount */

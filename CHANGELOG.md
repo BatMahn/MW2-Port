@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.46 (2026-11-22)
+
+- **Configuration:** Saving settings keeps explicit asset paths alongside `game=` and preserves
+  `textures_kind=3dfx`.
+- **Cockpit MFDs:** Rear, Down, Weapon and Target Camera keep target brackets aligned in the main cockpit view.
+  Target Camera fits the Target Wireframe border and shows only the selected mech or building at full detail
+  against a black background.
+- **Satellite View:** Powered-down units and units under roofs are hidden. The overhead dome and the unnamed
+  hangar doors are also excluded, clearing stray shapes from the Velvet Hammer map.
+- **Velvet Hammer:** The Falcon Nova and Mad Dog can shoot their own hangar doors under the existing mission
+  orders. Mission completion can proceed when the audio device is unavailable, even if the mission has radio lines.
+
 ## v1.1.45 (2026-11-21)
 
 - **GitHub release pages show the changelog.** Each release's notes are now this file's section for its tag; until
