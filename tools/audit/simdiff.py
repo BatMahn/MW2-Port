@@ -154,6 +154,48 @@ def heat_override_roll(rep, rnd, n):
     rep.check(abs(mean_s / dos_s - 1) < 0.15, 'port mean %.1f s vs DOS %.1f s' % (mean_s, dos_s))
 
 @test
+def weapon_parameters(rep, rnd, n):
+    """Check the live DOS weapon table and the AI's random bound for every weapon."""
+    L = lib('combat')
+    e = emu()
+    result = (ctypes.c_int * 7)()
+    for w in range(31):
+        row = 0x9ee58 + w * 0x58
+        offsets = (0x44, 0x48, 0x4c, 0x30, 0x34, 0x20)
+        expected = tuple(e.rs32(row + off) for off in offsets) + (e.rs32(row + 0x44) // 91 + 1,)
+        L.shim_weapon_parameters(w, result)
+        rep.check(tuple(result) == expected, 'weapon %d: DOS %s port %s' % (w, expected, tuple(result)))
+
+@test
+def jump_jet_fuel(rep, rnd, n):
+    """DOS jet controller 0x27ba7..0x27c87: the tank, active thrust and engine heat at six ticks per frame."""
+    L = lib('combat')
+    result = (ctypes.c_int * 5)()
+    for fuel in (-2, 0, 1, 5, 6, 7, 12, 1819, 1820):
+        for held in (0, 1):
+            for power in (0, 1, 2, 3):
+                for infinite in (0, 1):
+                    e = emu()
+                    ctrl, obj, inputs = e.alloc(0x200), e.alloc(0xa0), e.alloc(0x50)
+                    e.w32(ctrl, obj)
+                    e.w32(obj + 0x4c, inputs)
+                    e.w8(inputs + 0x1d, held)
+                    e.w32(ctrl + 0xa0, power)
+                    e.w32(ctrl + 0xc0, fuel)
+                    e.w32(ctrl + 0xc4, 3)
+                    e.w32(TICKS, 6)
+                    e.w32(0x961ec, infinite)
+                    thrust = []
+                    e.stub(0x28ae0, lambda em: thrust.append(True) or 0)  # only observe the effect call
+                    e.w32(mw2emu.STACK_TOP - 0x808, 1)  # local at EBP-8: the player
+                    e.run(0x27ba7, 0x27c87, esi=ctrl)
+                    fired = int(bool(thrust))
+                    expected = (e.rs32(ctrl + 0xc0), fired, e.rs32(ctrl + 0x94), fired, fired)
+                    L.shim_jet_step(fuel, held, power, infinite, result)
+                    rep.check(tuple(result) == expected, 'fuel %d held %d power %d infinite %d: DOS %s port %s' %
+                              (fuel, held, power, infinite, expected, tuple(result)))
+
+@test
 def ai_nav_turn(rep, rnd, n):
     """MW2.EXE 0x229e0 (the nav steering: the leg-turn demand from the heading error) vs ai_nav_turn"""
     e = emu(); L = lib('ai'); L.shim_nav_turn.restype = ctypes.c_float; L.shim_nav_turn.argtypes = [ctypes.c_float]

@@ -1744,14 +1744,17 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                     float rad = 0, secs = 0;
                     int on = 0;
                     ok = sscanf(tk.params, "%f,%f,%d", &rad, &secs, &on) >= 3 && secs != 0 && on;
-                    t->k[0] = 360.0f / secs;                       /* yaw degrees per second (0x102471d0: 360.0) */
-                    t->k[1] = rad * 6.2831853f / secs;             /* cm per second (0x102471d8: 2 pi) */
-                    t->k[3] = (float)on;
-                    if (secs != 0) {   /* DOS 0x1b66e: trunc(x + 0.5) (frndint under control word 0x1f..: chop) */
-                        t->dyaw = (int32_t)trunc(360.0 / secs * 65536.0 + 0.5);
-                        t->dspd = (int32_t)trunc(rad * 6.283185307179586 / secs * 65536.0 + 0.5);
+                    if (ok) {
+                        t->k[0] = 360.0f / secs;                       /* yaw degrees per second (0x102471d0: 360.0) */
+                        t->k[1] = rad * 6.2831853f / secs;             /* cm per second (0x102471d8: 2 pi) */
+                        t->k[3] = (float)on;
+                        /* DOS 0x1b66e: FRNDINT truncates; the subsequent FISTP stores 0x80000000 on overflow. */
+                        double yaw = trunc(360.0 / secs * 65536.0 + 0.5);
+                        double speed = trunc(rad * 6.283185307179586 / secs * 65536.0 + 0.5);
+                        t->dyaw = yaw >= INT32_MIN && yaw <= INT32_MAX ? (int32_t)yaw : INT32_MIN;
+                        t->dspd = speed >= INT32_MIN && speed <= INT32_MAX ? (int32_t)speed : INT32_MIN;
+                        P->recs[ri].anim[tk.node] = 1;
                     }
-                    if (ok) P->recs[ri].anim[tk.node] = 1;
                 } else if (tk.type == 1) { /* up to 16 comma-separated palette indices, stored << 4 */
                     char buf[128], *s, *e;
                     snprintf(buf, sizeof buf, "%s", tk.params);

@@ -1,4 +1,4 @@
-# DOS MW2.EXE comparison (v1.1.44)
+# DOS MW2.EXE comparison
 
 The port's DOS look is checked against the original DOS MW2.EXE (1.1, md5 51634b60...) in two ways:
 
@@ -21,6 +21,8 @@ tools/audit/build.sh
 MW2_ELF=mw2dos.elf python3 tools/audit/simdiff.py [-n cases] [-s seed] [test ...]
 ```
 
+The suite runs in Linux with Python and Unicorn. Use a Linux container or VM if macOS terminates Unicorn's JIT.
+
 - `mw2emu.py` loads the image and runs functions with Watcom's register calling convention. It runs the start-up
   maths tables (0x3aa90) first and restores the data segment between cases. A test can stub any callee.
 - `shim_*.c` include the port's `combat.c`, `ai.c` and `msim.c` so their static functions can be called. The
@@ -31,13 +33,17 @@ MW2_ELF=mw2dos.elf python3 tools/audit/simdiff.py [-n cases] [-s seed] [test ...
 
 ## Sim tests and results
 
-All 16 tests pass (about 18,500 checks at the default case counts).
+For v1.1.49, all 17 tests passed at 100 cases each across seeds 47 and 149. The jump-jet test
+found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records crossing points within
+2 cm of an edge, plane or segment end separately from its pass count.
 
 | Test | MW2.EXE | Port | Result |
 |---|---|---|---|
 | heat_state | 0x24f90 (sinking, 66 warning, 81 sequence, shutdown, BlowAmmo, restart) | combat_tick | PASS |
 | heat_sink_tiers | 0x4cd7b..0x4ce25 (dissipation by player, difficulty, temperature) | combat_set_player_difficulty | **fixed** (v1.1.39) |
 | heat_override_roll | 0x250f0 (rand(500 x ticks)) | combat_tick | PASS (mean time within 15 %) |
+| weapon_parameters | 0x9ee58 (31 weapon records); 0x2ea14 (AI firing-roll divisor) | weapon data and combat_ai_select | **fixed** (v1.1.50) |
+| jump_jet_fuel | 0x27ba7..0x27c87 (fuel, heat and effect dispatch) | combat_jets, combat_jets_firing, combat_jets_dy | **fixed** (v1.1.49) |
 | ai_nav_turn | 0x229e0 | ai_nav_turn | PASS |
 | leg_turn_demand | 0x27c87..0x27d70 | msim_leg_demand | **fixed** (v1.1.39) |
 | servo_step | 0x49b80 | drive_servo | PASS |
@@ -53,6 +59,18 @@ All 16 tests pass (about 18,500 checks at the default case counts).
 | seg_poly | 0x1ca00 / 0x1cd60 / 0x1cbb0 | cpoly_in | PASS (new in v1.1.41) |
 
 ## Differences found and fixed
+
+### v1.1.50
+
+- Compare each weapon's cooldown (+0x44), launch interval (+0x48), lifetime (+0x4c), damage (+0x30),
+  heat (+0x34) and ammunition capacity (+0x20) to the DOS table at 0x9ee58. Original consumers include
+  0x523a0 / 0x52449 / 0x524a5 (weapon state and heat), 0x52777 / 0x5278b (projectile), and 0x4cbb9 (ammo bins).
+  The native comparison found differences for 30 of 31 weapons in v1.1.49. All 31 matched after the fix.
+- The DOS circling-object initializer at 0x1b66e converts speed and turn rate with x87 FRNDINT and FISTP.
+  Masked overflow stores 0x80000000. The DOS archive's BRO2SCN1 produced a value above INT32_MAX and the
+  host cast raised an undefined-behavior diagnostic. The port now handles that value explicitly.
+- Use `sweep_objectives MW2.PRJ -dos` to test the campaign with DOS simulation rules. This selects the
+  same initialization as the DOS renderer, including the world placement rules needed by the Velvet Hammer escort.
 
 ### v1.1.39
 
@@ -189,9 +207,9 @@ outline colour and its view distance, the radar arms and power-up colours, Abort
   and the 3 degree pitch and 15 degree bearing cones) are not ported. The port warns the target on any guided launch
   or PPC shot by a computer-run unit of pilot level 2 or less. The emulated test enters from the player-type shooter
   record, which skips these tests.
-- **The weapon pick** (0x2e980) was compared by reading only. It matches the port's combat ai_choose: range class
-  1-2, heat + weapon heat under 65, ready, ammunition, rand(refire / 91 + 1) == 0. It also adds a pitch offset for
-  weapon types 0 and 4, which the fire decision overwrites straight after (0x2e971), so it has no effect.
+- **The full weapon pick** (0x2e980) was compared by reading. The test checks the table and random bound.
+  The original requires range class 1-2, heat + weapon heat under 65, a ready weapon and ammunition.
+  The fire decision overwrites the pitch offset (0x2e971) set for weapon types 0 and 4.
 - **The damage display levels** (0x26570), **the sound distance level** (0x40bc0) and **the message pick** (0x11020)
   were ported in v1.1.38 by reading the disassembly and are not emulated.
 - **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's

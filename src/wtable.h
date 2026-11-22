@@ -64,4 +64,44 @@ static const char *const sim_weapon_short[31] = {
     "LRM20", "LRM15", "LRM10", "LRM5", "SRM6", "SRM4", "SRM2", "SSRM6", "SSRM4", "SSRM2", "MGun", "GAUSS", "xAC2", "xAC5", "xAC10", "xAC20", "uAC2", "uAC5", "uAC10", "uAC20", "FLAMER", "PPC", "LLASER", "MLASER", "SLASER", "LPLAS", "MPLAS", "SPLAS", "NARC", "AMS", "NUKE"
 };
 
+/* DOS 1.1 MW2.EXE, 0x9ee58. Only fields with edition differences are listed.
+ * Heat at +0x34 is stored in 16.16 and damage at +0x30 in whole points. */
+typedef struct {
+    int refire, interval, life, damage, heat16, ammo_per_ton;
+} dos_weapon_values;
+
+static const dos_weapon_values dos_weapons[31] = {
+    {2548,  11, 1001,   2,  39321,   6},  /* LRM 20 */
+    {2184,  18, 1001,   2,  39321,   8},  /* LRM 15 */
+    {1820,  45, 1001,   2,  52428,  12},  /* LRM 10 */
+    {1456,  45, 1001,   2,  52428,  12},  /* LRM 5 */
+    {1456,  60,  709,   3,  87818,  15},  /* SRM 6 */
+    {1274,  45,  709,   3,  98304,  25},  /* SRM 4 */
+    {1092,  45,  709,   3, 131072,  50},  /* SRM 2 */
+    {1092,  45,  709,   3,  87425,  15},  /* Streak SRM-6 */
+    {1456,  45,  709,   3,  98304,  25},  /* Streak SRM-4 */
+    {1456,  45,  709,   3, 131072,  50},  /* Streak SRM-2 */
+    {  11,  11,   58,   1,      0, 200},  /* Machine Gun */
+    { 728,  91,  649,  18,  32768,   8},  /* Gauss Rifle */
+    {  45,  45,  333,   3,  32768,  45},  /* LB 2-X AC */
+    {  45,  45,  291,   7,  32768,  20},  /* LB 5-X AC */
+    {  45,  11,  249,  15,  65536,  10},  /* LB 10-X AC */
+    {  45,  11,  187,  30, 196608,   5},  /* LB 20-X AC */
+    {  22,  11,  318,   3,  32768,  45},  /* Ultra AC/2 */
+    {  22,  11,  273,   7,  32768,  20},  /* Ultra AC/5 */
+    {  22,  11,  227,  15,  98304,  10},  /* Ultra AC/10 */
+    {  22,  11,  182,  30, 229376,   5},  /* Ultra AC/20 */
+    {  91, 182,  182,  20,     12,   8},  /* Flamer */
+    { 455,  22, 1714,  17, 819200,  -1},  /* ER PPC */
+    { 109,  60,  364,   8, 393216,  -1},  /* ER Laser (Large) */
+    {  91,  60,  182,   5, 163840,  -1},  /* ER Laser (Medium) */
+    {  72,  60,   91,   3,  65536,  -1},  /* ER Laser (Small) */
+    {  45,  60,  291,   4, 229376,  -1},  /* Pulse Laser (Large) */
+    {  36,  11,  145,   2,  98304,  -1},  /* Pulse Laser (Medium) */
+    {  18,  11,   72,   1,  32768,  -1},  /* Pulse Laser (Small) */
+    {2548,  45, 1456,   0,      4,  -1},  /* Narc Missile Beacon */
+    {  11,   5,  273,   1,      0,  24},  /* Anti-Missile System */
+    {36400,182, 5460, 100,      0,   1},  /* Nuke */
+};
+
 #endif

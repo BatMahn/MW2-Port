@@ -255,7 +255,7 @@ dist: mw2
 	cd dist && tar czf mw2port-linux-x86_64.tar.gz mw2port
 	@echo "dist/mw2port-linux-x86_64.tar.gz"
 
-# The objective sweep: every mission run headless by a perfect player (tools/sweep_objectives.c).
+# The objective sweep: single-player missions run headless by a scripted player (tools/sweep_objectives.c).
 # make sweep MW2=/path/to/install   (SWEEP_ARGS="-v CYANSCN1" for one scene, verbose)
 SWEEP_SRC = tools/sweep_objectives.c src/lance.c src/msim.c src/fx.c src/ai.c src/combat.c src/mtbl.c src/anim.c src/mek.c src/mech3d.c src/wtb.c src/bwd.c src/prj.c src/datapath.c
 sweep_objectives: $(SWEEP_SRC) $(HDRS)
@@ -263,7 +263,7 @@ sweep_objectives: $(SWEEP_SRC) $(HDRS)
 sweep_objectives_asan: $(SWEEP_SRC) $(HDRS)
 	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc $(SWEEP_SRC) -o $@ -lm
 sweep: sweep_objectives
-	MW2_INSTALL_DIR=$(MW2) ./sweep_objectives $(MW2)/MW2.PRJ $(SWEEP_ARGS)
+	MW2_INSTALL_DIR="$(MW2)" ./sweep_objectives "$(MW2)/MW2.PRJ" $(SWEEP_ARGS)
 .PHONY: sweep
 
 # static audit of every mission's set-up (units off their group or the boundary, strays at the map origin, wrecks shown early)

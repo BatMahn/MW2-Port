@@ -189,7 +189,7 @@ extern int combat_ct_split;
 extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 2 a 30 fps frame (0x27c63); 0: ticks / 4 */
 extern float combat_test_wheat[31];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
                                         table (DOSBox: MW2.EXE copy, the large pulse laser's heat 3.5 -> 85 at file 0xb1f24) */
-extern int combat_heat_dos;        /* 1: the DOS edition's heat states (MW2.EXE 0x24f90); 0: the 3Dfx DLL's (0x10015f50) */
+extern int combat_dos;             /* 1: DOS combat rules and weapon data; 0: 3Dfx */
 extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
 /* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */
@@ -221,7 +221,7 @@ void combat_trigger(combat_unit *u, float distance);
 void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask);
 /* AI fire (engine 0x100232b0): one weapon per decision - starting at the unit's selected weapon, each in turn is
  * tried: in its range window (+0x3c .. +0x40), heat + its heat under 65, ready, ammunition, and a roll of
- * rand(refire / 90 + 1) == 0; the first that passes fires (and stays selected), else the selection moves on.
+ * rand(refire / (DOS ? 91 : 90) + 1) == 0; the first that passes fires (and stays selected), else the selection moves on.
  * rng(ctx, n) returns 0..n-1. Returns the weapon slot fired, -1 none */
 int  combat_ai_fire(combat_unit *u, float distance, unsigned (*rng)(void *ctx, unsigned n), void *ctx);
 /* As combat_ai_fire, but only the choice (0x100232b0 with an AI program): the weapon that passes stays selected and is

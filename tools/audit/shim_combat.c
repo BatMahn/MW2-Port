@@ -3,7 +3,56 @@
 
 combat_unit *shim_unit_new(void) { combat_unit *u = calloc(1, sizeof *u); return u; }
 void shim_unit_free(combat_unit *u) { free(u); }
-void shim_set_dos(int on) { combat_heat_dos = on; }
+void shim_set_dos(int on) { combat_dos = on; }
+
+static unsigned record_weapon_roll(void *ctx, unsigned bound)
+{
+    *(unsigned *)ctx = bound;
+    return 0;
+}
+
+void shim_weapon_parameters(int w, int out[7])
+{
+    const sim_weapon sw = weapon_spec(w);
+    combat_unit u = {0};
+    unsigned bound = 0;
+    u.weapon_count = 1;
+    u.weapons[0].weapon = w;
+    u.weapons[0].ammo = -1;
+    u.weapons[0].state = CW_READY;
+    u.weapons[0].location = MEK_CT;
+    u.internal[MEK_CT] = 1.0f;
+    combat_ai_select(&u, 10000.0f, record_weapon_roll, &bound);
+    out[0] = sw.refire;
+    out[1] = sw.interval;
+    out[2] = combat_weapon_life(w);
+    out[3] = (int)combat_weapon_damage(w);
+    out[4] = (int)lroundf(sw.heat * 65536.0f);
+    out[5] = sw.ammo_per_ton;
+    out[6] = (int)bound;
+}
+
+void shim_jet_step(int fuel, int held, int power, int infinite, int out[5])
+{
+    combat_unit u = {0};
+    const float dt = 6.0f / COMBAT_TICKS_PER_S;
+    unsigned rng = 1;
+    combat_jet_fuel_max = 1820;
+    combat_jet_refill_dos = 1;
+    u.jets = fuel < 0 ? 0 : 3;
+    u.jet_fuel = (float)fuel;
+    u.jet_refill_acc = 0.5f;  /* the six-tick step crosses a 30 Hz recharge boundary */
+    u.jet_ddy = 0.12f;
+    u.offline = power < 2;
+    u.shutdown = power == 3;
+    u.infinite_jets = infinite;
+    out[3] = combat_jets_firing(&u, held, dt);
+    out[4] = combat_jets_dy(&u, held, dt) > 0.0f;
+    combat_jets(&u, held, dt, &rng);
+    out[0] = (int)lroundf(u.jet_fuel);
+    out[1] = u.jet_on;
+    out[2] = (int)(u.heat * 65536.0f);
+}
 
 /* heat: one frame - `add` heat (16.16) arrives, `ticks` whole ticks pass (the DOS frame) */
 typedef struct {

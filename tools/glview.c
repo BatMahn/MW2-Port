@@ -1690,9 +1690,9 @@ static void player_messages(void)
      * 0); the 3Dfx 0x10015f50 dropped the call (only 0x100161cf message 0). DOSBox YELLSCN1 (held group fire, SB16
      * via the AVI): MECOVHW1 at the warning AND 1.2 s later at the sequence (shutdown 6.0 s after the second) -
      * so the DOS look plays both, the 3D looks the 3Dfx rule. DOS reaches the warning at any heat from 66 once a
-     * sequence is pending (combat_heat_dos): a jump past 80 in one frame gives the sequence's alarm, then the warning's
+     * sequence is pending (combat_dos): a jump past 80 in one frame gives the sequence's alarm, then the warning's
      * on the next frame of net gain */
-    if (pu->heat_warning) { hud_message_v("Heat level critical", 64); if (combat_heat_dos && g_sfx) sfx_play(g_sfx, 0xe9, SFX_V64, 0.0f); g_sim.player_unit.heat_warning = 0; }
+    if (pu->heat_warning) { hud_message_v("Heat level critical", 64); if (combat_dos && g_sfx) sfx_play(g_sfx, 0xe9, SFX_V64, 0.0f); g_sim.player_unit.heat_warning = 0; }
     if (pu->auto_shutdown) { hud_message_v("Shutting down", 14); g_sim.player_unit.auto_shutdown = 0; }
     /* 0x10016175: with message 3 the overheat alarm MECOVHW1 0xe9 (0x10032b60: edx 0x64 volume, pan 0x40 centre,
      * 0x50 the channel priority) - only when the sequence starts with the latch 0x1000 clear (combat.c seq_alarm: cleared
@@ -4735,14 +4735,11 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                         m.parts[q].objtype, m.parts[q].obj_index, m.parts[q].parent_obj, m.parts[q].pos[0], m.parts[q].pos[1], m.parts[q].pos[2], m.parts[q].hidden);
         }
         g_exit_fade_t0 = -1;
-        combat_jet_fuel_max = g_edition == PORTCFG_ED_DOS ? 1820.0f : 1810.0f;   /* the full jet tank: DOS 0x71c (0x4ce84), 3Dfx 0x712 */
-        combat_jet_refill_dos = g_edition == PORTCFG_ED_DOS;   /* DOS: whole ticks >> 2 a 30 fps frame (0x27c63) */
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         int0_capture();   /* the starting structure (the DOS look's damage levels) */
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
-        g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = sfx_loops_apart = g_edition == PORTCFG_ED_DOS;   /* an AI self-destruct: DOS at once, 3D editions 0x16a ticks on; DOS: the integer throttle servo (0x49b80) */
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
@@ -6539,6 +6536,8 @@ int main(int argc, char **argv)
         if (ati == 3 || (g_texset == PORTCFG_TX_TITANIUM && titanium_open(1) != 0)) g_texset = PORTCFG_TX_ORIGINAL;   /* (DOS; no folder) */
         if (g_edition == PORTCFG_ED_RENDITION && g_texset != PORTCFG_TX_TITANIUM) g_edition = PORTCFG_ED_ENHANCED;   /* (a Titanium plugin: no folder, no RENDITION) */
     }
+    sfx_loops_apart = g_edition == PORTCFG_ED_DOS;
+    msim_set_dos(g_edition == PORTCFG_ED_DOS);
     if (!(r = glr_create()) || load(r, ma, ta, ati, rec, mission, camo, clan) != 0) return 1;
     g_sfx = sfx_create(ma);   /* NULL without an audio device: silent */
     g_voice_off = g_sfx == NULL;
@@ -6558,7 +6557,6 @@ int main(int argc, char **argv)
         }
     }
     g_show_objectives = getenv("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
-    g_sim.dos_end = g_sim.sd_at_once = g_edition == PORTCFG_ED_DOS; combat_ct_split = g_edition == PORTCFG_ED_DOS ? 2 : 3; combat_heat_dos = g_edition == PORTCFG_ED_DOS; msim_dos_int = ai_dos_int = sfx_loops_apart = g_edition == PORTCFG_ED_DOS;   /* DOS: the integer throttle servo (0x49b80) */
     edition_look(&v);
     if (getenv("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
         const char *p = getenv("MW2_GROUPS");
@@ -7377,7 +7375,7 @@ int main(int argc, char **argv)
                     const combat_unit *pu = &g_sim.player_unit;
                     int jh = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || pu->shutdown);
                     if (jh && pu->jets > 0 && !pu->no_jump && !pu->destroyed && pu->jet_fuel >= 0)
-                        turn = pu->jet_fuel - dt * 182.0f > 0 ? 180.0f : 0.0f;
+                        turn = combat_jets_firing(pu, jh, dt) ? 180.0f : 0.0f;
                     else if (pu->immobile) turn = 0.0f;   /* a leg gone: the legs no longer turn, only the torso twists
                                                           * (user report against the original: a one-legged mech could
                                                           * not come about, so you circle behind it; msim the same) */
@@ -7756,7 +7754,7 @@ int main(int argc, char **argv)
                         }
                         g_pl_imp3 = 0;
                     }
-                    if (jet && g_sim.player_unit.jet_fuel > 0) msim_jet_flames_at(&g_sim, &g_pl, (float)g_pl.origin[0], g_sim.player_unit.y, (float)g_pl.origin[2], g_pl.heading);
+                    if (g_sim.player_unit.jet_on) msim_jet_flames_at(&g_sim, &g_pl, (float)g_pl.origin[0], g_sim.player_unit.y, (float)g_pl.origin[2], g_pl.heading);
                     /* the damage alarm 0xd0: with each announced critical (below, by the messages: 0x100167b0 is its only caller) */
                     /* touching down on the terrain from a fall or a jump (engine 0x10019310 at 0x10019e28: faster than 5.384
                      * cm/tick -> 0x1001c0a0): MECMTNSF 0xe6 up to 16.154 cm/tick, MECMTNHD 0xe5 faster (0xe5 + (vy >= -16.154)),
@@ -7807,7 +7805,7 @@ int main(int argc, char **argv)
                          * tone 0xde */
                         static float prev_fuel = -1;
                         float fuel = g_sim.player_unit.jet_fuel;
-                        if (jet && fuel > 0 && g_sfx && !sfx_playing(g_sfx, 0xdf)) { float p3[3]; snd_player_pos(p3); snd_at(0xdf, p3, 0, snd_cockpit()); }   /* 0x1001c090: at the mech (the mech minus the camera; level 100 = 0.8), halved in the cockpit */
+                        if (g_sim.player_unit.jet_on && g_sfx && !sfx_playing(g_sfx, 0xdf)) { float p3[3]; snd_player_pos(p3); snd_at(0xdf, p3, 0, snd_cockpit()); }   /* 0x1001c090: at the mech (the mech minus the camera; level 100 = 0.8), halved in the cockpit */
                         if (prev_fuel >= 452.0f && fuel < 452.0f && g_sfx) sfx_play(g_sfx, 0xde, SFX_V64, 0.0f);   /* 0x1001c06a: 0x10032b60(0xde, 0x64, 0x40, 5, 0x50) */
                         prev_fuel = fuel;
                     }

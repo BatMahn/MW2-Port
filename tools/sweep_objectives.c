@@ -2,7 +2,8 @@
  * sweep_objectives - the objective sweep: every mission scene run headless by a "perfect player" that works
  * through table 0's objectives, with a report of every objective node and of what looks wrong.
  *
- *   sweep_objectives MW2.PRJ [-v] [-t max_seconds] [-nofire] [-installstars] [SCENE ...]
+ *   sweep_objectives MW2.PRJ [-dos] [-v] [-t max_seconds] [-nofire] [-installstars] [SCENE ...]
+ *     -dos           use DOS simulation rules and weapon data
  *     -v             every node change and the sim's log
  *     -nofire        the player never fires (only the fallbacks destroy things)
  *     -installstars  use the install's USERSTAR / EN0nSTAR files instead of a fresh fixed lance (temp dir)
@@ -10,9 +11,9 @@
  *        MW2_SWEEP_ACTOR=n actor n's position / AI state every 5 s, MW2_SWEEP_STAR_SIZE=1..3 the player's star size
  *        (default: the mission's BRF2 SDSC default, as the campaign shell starts it; capped at the SDSC maximum)
  *
- * With no scene, every *SCN1 record is run, each in its own child process (crashes and hangs are caught: a
+ * With no scene, every single-player *SCN1 record is run, each in its own child process (crashes and hangs are caught: a
  * signal, a nonzero exit or the alarm). Set MW2_INSTALL_DIR to the install so USERSTAR / EN0nSTAR are read
- * (the harness never writes MW2MSN.CFG / MW2CAR.CFG).
+ * (the harness never writes MW2MSN.CFG / MW2CAR.CFG). Scenes with a NetMech roster are reported as skipped.
  *
  * The player (invulnerable, unlimited ammunition, no heat) is teleported:
  *   reach / finish (0x20) / scan of a nav point  -> to the target (nav centre, group leader)
@@ -54,6 +55,7 @@ static int g_verbose, g_nofire;
 static const char *g_stars_dir;   /* own star files: USERSTAR is rewritten per scene with the mission's star size */
 static lance_slot g_fr[3];
 static float g_max_s = 1800.0f;
+enum { SWEEP_OK, SWEEP_ERROR, SWEEP_INCOMPLETE };
 
 static void logline(void *u, const char *l) { (void)u; if (g_verbose) printf("    log %s\n", l); }
 
@@ -72,6 +74,21 @@ typedef struct {
 static unsigned widen(unsigned c) { if (c & 0x730) c |= 0x730; if (c & 3) c |= 3; return c; }
 
 static const char *bld_rec(const msim *s, int b) { return s->world->parts[s->bld[b].intact].rec; }
+
+/* The original NetMech scene includes the session's player as EN00STAR alongside
+ * the other network stars. Single-player Instant Action uses USERSTAR instead. */
+static int has_network_roster(const bwd_mission *m)
+{
+    if (m->record_count < 1) return 0;
+    const bwd_record *scene = &m->records[0];
+    for (int i = 0; i < scene->chunk_count; i++) {
+        uint16_t id;
+        char name[11];
+        if (bwd_incl(&scene->chunks[i], &id, name) == 0 && id == BWD_EXTERNAL_ID &&
+            strcasecmp(name, "EN00STAR") == 0) return 1;
+    }
+    return 0;
+}
 
 static int nav_index(const msim *s, const char *t)
 {
@@ -307,7 +324,7 @@ static int run_scene(prj_archive *a, const char *scene)
     static msim s;
     static mech3d world;
     bwd_mission bm;
-    int have_bm;
+    int result = SWEEP_ERROR;
     int32_t stuck_since[MTBL_MAX_NODES];   /* ms: the node's condition is met (by our test) but it is still active */
     int reported[MTBL_MAX_NODES], clamp_noted[MTBL_MAX_NODES], gave_up[MTBL_MAX_NODES];
     float worked[MTBL_MAX_NODES];
@@ -350,11 +367,29 @@ static int run_scene(prj_archive *a, const char *scene)
         lance_write_star(a, path, g_fr, size, 0, 0);
         printf("  star size %d (BRF2 SDSC)\n", size);
     }
-    if (world3d_actors(a, scene, &ac, &n) != 0) { printf("  ERROR world3d_actors failed\n"); return 1; }
-    if (msim_init(&s, a, scene, ac, n) != 0) { printf("  ERROR msim_init failed\n"); world3d_free_actors(ac, n); return 1; }
+    if (bwd_mission_load(a, scene, &bm) != 0 || bm.record_count == 0) {
+        printf("  ERROR cannot load mission data\n");
+        bwd_mission_free(&bm);
+        return SWEEP_ERROR;
+    }
+    if (has_network_roster(&bm)) {
+        printf("SKIP %-9s NetMech roster (EN00STAR); single-player sweep\n", scene);
+        bwd_mission_free(&bm);
+        return SWEEP_OK;
+    }
+    if (world3d_actors(a, scene, &ac, &n) != 0) {
+        printf("  ERROR world3d_actors failed\n");
+        bwd_mission_free(&bm);
+        return SWEEP_ERROR;
+    }
+    if (msim_init(&s, a, scene, ac, n) != 0) {
+        printf("  ERROR msim_init failed\n");
+        world3d_free_actors(ac, n);
+        bwd_mission_free(&bm);
+        return SWEEP_ERROR;
+    }
     memset(&world, 0, sizeof world);
     if (world3d_mission(a, scene, 1, &world) > 0) msim_set_world(&s, &world);
-    have_bm = bwd_mission_load(a, scene, &bm) == 0;
     s.player_vertical = 1;
     s.log = logline;
     s.debug_invulnerable = 1;
@@ -372,15 +407,12 @@ static int run_scene(prj_archive *a, const char *scene)
          * each other (a note), or a unit within 10 m of the player (an anomaly); and the mission tree's player GPSs (+0x0e == 0, engine
          * 0x1003f36b) - exactly one, or none (then msim falls back to USERSTAR.BWD on disk) */
         int j, nplayer = 0;
-        if (have_bm) {
-            int r, c;
-            for (r = 0; r < bm.record_count; r++)
-                for (c = 0; c < bm.records[r].chunk_count; c++) {
-                    bwd_gps g;
-                    if (bwd_gps_decode(&bm.records[r].chunks[c], &g) == 0 && g.is_player) nplayer++;
-                }
-            if (nplayer > 1) anom(&nanom, scene, "spawn: %d player GPS records (+0x0e == 0) in the mission tree", nplayer);
-        }
+        for (int r = 0; r < bm.record_count; r++)
+            for (int c = 0; c < bm.records[r].chunk_count; c++) {
+                bwd_gps g;
+                if (bwd_gps_decode(&bm.records[r].chunks[c], &g) == 0 && g.is_player) nplayer++;
+            }
+        if (nplayer > 1) anom(&nanom, scene, "spawn: %d player GPS records (+0x0e == 0) in the mission tree", nplayer);
         for (i = 0; i < n; i++) {
             float dx = (float)ac[i].mech.origin[0] - s.player[0], dz = (float)ac[i].mech.origin[2] - s.player[2];
             if (dx * dx + dz * dz < 1000.0f * 1000.0f)
@@ -414,7 +446,7 @@ static int run_scene(prj_archive *a, const char *scene)
         if (nd->kind & 0xFFFF0000u) continue;   /* table-control kinds: no target list */
         if (nd->kind == MTBL_K_START || nd->kind == MTBL_K_TIMER || nd->kind == MTBL_K_TIMER2 || nd->kind == MTBL_K_INSTANT ||
             nd->kind == MTBL_K_ORDER || nd->kind == MTBL_K_HOLD) continue;
-        resolve(&s, have_bm ? &bm : NULL, nd->target, mask, &ti);
+        resolve(&s, &bm, nd->target, mask, &ti);
         if (!ti.user && ti.nav < 0 && !ti.actors && !ti.bld_all)
             anom(&nanom, scene, "node %d %s target %s resolves to nothing (%s)%s", i, mtbl_kind_name(nd->kind), nd->target,
                  ti.record ? "a record of the mission tree with no nav, spawn or structure" : "no such record in the mission",
@@ -436,9 +468,6 @@ static int run_scene(prj_archive *a, const char *scene)
         if ((nd->kind == MTBL_K_SCAN || nd->kind == MTBL_K_ALLMAIN) && ti.nav >= 0 && !ti.actors && !ti.bld_all)
             printf("  note: node %d %s targets nav %s (engine: visited flag 0x20 set by 0x10009b80 / 0x1001d510 when the player is in its radius)\n",
                    i, mtbl_kind_name(nd->kind), nd->target);
-        if ((nd->kind == MTBL_K_REACH || nd->kind == MTBL_K_LEAVE) && ti.nav < 0 && !ti.actors && !ti.user && ti.bld_all)
-            anom(&nanom, scene, "node %d %s %s targets structures (engine 0x10009b80 type 4: within 200 m) - msim's within() only knows navs and groups",
-                 i, mtbl_kind_name(nd->kind), nd->target);
     }
 
     steps = (int)(g_max_s * 1000.0f / DT_MS);
@@ -576,8 +605,18 @@ static int run_scene(prj_archive *a, const char *scene)
                     }
                 } else if (b >= 0) {
                     const struct msim_building *g = &s.bld[b];
-                    float c[3] = {(g->mn[0] + g->mx[0]) * 0.5f, (g->mn[1] + g->mx[1]) * 0.5f, (g->mn[2] + g->mx[2]) * 0.5f};
-                    if (c[1] > g->mn[1] + 500.0f) c[1] = g->mn[1] + 500.0f;
+                    static const float AIM_H[4] = {0.0f, 0.5f, 0.75f, 0.25f};
+                    const float height = g->mx[1] - g->mn[1];
+                    float c[3] = {(g->mn[0] + g->mx[0]) * 0.5f, g->mn[1], (g->mn[2] + g->mx[2]) * 0.5f};
+                    if (g->hp != at.last_health) { at.last_health = g->hp; at.stagnant = 0; }
+                    else if ((at.stagnant += DT_MS / 1000.0f) > 4.0f) {
+                        /* A low, fixed sight line can pass under a model or hit intervening scenery. */
+                        at.stagnant = 0;
+                        at.aim++;
+                        at.brg += 45.0f;
+                    }
+                    const float fraction = AIM_H[at.aim % 4];
+                    c[1] += fraction > 0.0f ? fraction * height : fminf(height * 0.5f, 500.0f);
                     place_near(&s, c[0], c[2], at.dist, at.brg);
                     place_y_ref = g->mn[1];
                     {   /* the aim swings sideways every 2 s (centre, right, left): with nothing of class 0x300 on the ray the
@@ -780,12 +819,13 @@ static int run_scene(prj_archive *a, const char *scene)
     printf("RESULT %-9s %-22s %7.1f s  anomalies %d  fallbacks %d\n", scene,
            msim_outcome_text(&s) ? msim_outcome_text(&s) : (s.logic.tables[0].node_count <= 1 ? "none (no objectives)" : "none (running)"),
            (double)(s.ending ? s.end_at - (0x71c * 1000 / 182) : s.now) / 1000.0, nanom, at.fallbacks);
+    result = s.outcome == 2 ? SWEEP_OK : SWEEP_INCOMPLETE;
 done:
-    if (have_bm) bwd_mission_free(&bm);
+    bwd_mission_free(&bm);
     msim_free(&s);
     mech3d_free(&world);
     world3d_free_actors(ac, n);
-    return 0;
+    return result;
 }
 
 static void cleanup_stars(const char *dir)
@@ -807,11 +847,12 @@ int main(int argc, char **argv)
     int i, first = 2, nscenes = 0, fails = 0, own_stars = 1;
     const char *stars_dir = NULL;
     char **scenes = NULL;
-    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-v] [-t max_seconds] [SCENE ...]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-dos] [-v] [-t max_seconds] [SCENE ...]\n", argv[0]); return 2; }
     for (; first < argc && argv[first][0] == '-'; first++) {
         if (strcmp(argv[first], "-v") == 0) g_verbose = 1;
         else if (strcmp(argv[first], "-nofire") == 0) g_nofire = 1;   /* debugging: the player never fires (fallbacks only) */
         else if (strcmp(argv[first], "-t") == 0 && first + 1 < argc) g_max_s = (float)atof(argv[++first]);
+        else if (strcmp(argv[first], "-dos") == 0) msim_set_dos(1);
         else if (strcmp(argv[first], "-installstars") == 0) own_stars = 0;
     }
     if (!(a = prj_open(argv[1], err, sizeof err))) { fprintf(stderr, "%s\n", err); return 1; }
@@ -856,7 +897,10 @@ int main(int argc, char **argv)
         if (p == 0) { int r; setvbuf(stdout, NULL, _IOLBF, 0); alarm(600); r = run_scene(a, scenes[i]); fflush(stdout); _exit(r); }
         if (p < 0 || waitpid(p, &st, 0) < 0) { printf("RESULT %-9s HARNESS fork/wait failed\n", scenes[i]); fails++; continue; }
         if (WIFSIGNALED(st)) { printf("RESULT %-9s CRASH signal %d%s\n", scenes[i], WTERMSIG(st), WTERMSIG(st) == SIGALRM ? " (timeout)" : ""); fails++; }
-        else if (WEXITSTATUS(st) != 0) { printf("RESULT %-9s ERROR exit %d\n", scenes[i], WEXITSTATUS(st)); fails++; }
+        else if (WEXITSTATUS(st) != SWEEP_OK) {
+            if (WEXITSTATUS(st) != SWEEP_INCOMPLETE) printf("RESULT %-9s ERROR exit %d\n", scenes[i], WEXITSTATUS(st));
+            fails++;
+        }
     }
     prj_close(a);
     cleanup_stars(stars_dir);

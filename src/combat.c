@@ -22,6 +22,21 @@ static int rand_n(unsigned *s, int n) { return n > 0 ? (int)(rnd(s) % (unsigned)
 
 static float range_cm(int w) { return (float)sim_weapons[w].range; }   /* table +0x40 */
 
+static inline sim_weapon weapon_spec(int w)
+{
+    sim_weapon spec = sim_weapons[w];
+    if (combat_dos) {
+        const dos_weapon_values *dos = &dos_weapons[w];
+        spec.refire = dos->refire;
+        spec.interval = dos->interval;
+        spec.life = dos->life;
+        spec.damage = (float)dos->damage;
+        spec.heat = (float)dos->heat16 / 65536.0f;
+        spec.ammo_per_ton = dos->ammo_per_ton;
+    }
+    return spec;
+}
+
 /* The loadout rating (DOS 0x4cf20 -> object +0x14c; 3Dfx 0x10041c80 -> +0x150, called by 0x10041410 on the MEK
  * record): a 16-bit sum (wrapping), starting at the tonnage. For each of the 8 locations in turn: every
  * critical-slot id above 5000 counts in the band of the highest threshold below it (5000, 5050, .. 5900 in steps of
@@ -103,14 +118,16 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
         int wi, loc = MEK_CT;
         if (!w) continue;
         wi = (int)(w - mek_weapons);
-        if (wi < 0 || wi >= 31 || sim_weapons[wi].damage <= 0 || sim_weapons[wi].per_volley <= 0) continue;
+        if (wi < 0 || wi >= 31) continue;
+        sim_weapon sw = weapon_spec(wi);
+        if (sw.damage <= 0 || sw.per_volley <= 0) continue;
         for (l = 0; l < MEK_LOC_COUNT; l++)
             for (k = 0; k < MEK_SLOTS; k++)
                 if (d.loc[l].slots[k] == d.items[i].id) { loc = l; l = MEK_LOC_COUNT; break; }
         cw = &u->weapons[u->weapon_count];
         cw->weapon = wi;
         cw->item = d.items[i].id;
-        cw->ammo = sim_weapons[wi].ammo_per_ton != -1 ? 0 : -1;
+        cw->ammo = sw.ammo_per_ton != -1 ? 0 : -1;
         cw->location = loc;
         cw->state = CW_READY;
         cw->homing = -2;
@@ -122,7 +139,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
             b = &u->bins[u->bin_count++];
             b->id = d.items[j].id;
             b->weapon = u->weapon_count;
-            b->rounds = (int)(short)(sim_weapons[wi].per_volley * sim_weapons[wi].ammo_per_ton);
+            b->rounds = (int)(short)(sw.per_volley * sw.ammo_per_ton);
             if (cw->ammo != -1) cw->ammo += b->rounds;
             cw->bin_n++;
         }
@@ -154,7 +171,7 @@ static int take_round(combat_unit *u, combat_weapon *cw)
 /* engine 0x100437a0, state 2: release every projectile due (`interval` ticks apart, the time carried over) */
 static void release_due(combat_unit *u, combat_weapon *cw)
 {
-    const sim_weapon *sw = &sim_weapons[cw->weapon];
+    const sim_weapon spec = weapon_spec(cw->weapon), *sw = &spec;
     while (cw->state == CW_FIRING && cw->shots > 0 && cw->t >= (float)sw->interval) {
         int ok = take_round(u, cw);
         /* 0x100437a0 calls the spawn (0x10043cc0) before it takes the interval off: the projectile's life is the
@@ -204,16 +221,16 @@ void combat_tick(combat_unit *u, float dt)
     u->restarted = 0;
     for (i = 0; i < u->weapon_count; i++) {
         combat_weapon *cw = &u->weapons[i];
-        const sim_weapon *sw = &sim_weapons[cw->weapon];
         if (cw->state < 0) continue;   /* destroyed by a critical hit, or out of ammunition */
+        const int refire = weapon_spec(cw->weapon).refire;
         /* 0x100437a0 runs only while the mech is up (state 2): a volley's timer stands still while shut down; the
          * recycle and repeat waits are measured from a start time, so they run on */
         if ((u->shutdown || u->offline) && cw->state == CW_FIRING) continue;
         cw->t10 = cw->t;
         cw->t += ticks;
         if (u->shutdown || u->offline) continue;
-        if (cw->state == CW_RECYCLE && cw->t >= (float)sw->refire) { cw->state = CW_READY; cw->t = 0; }
-        else if (cw->state == CW_REPEAT && cw->t >= (float)sw->refire) {
+        if (cw->state == CW_RECYCLE && cw->t >= (float)refire) { cw->state = CW_READY; cw->t = 0; }
+        else if (cw->state == CW_REPEAT && cw->t >= (float)refire) {
             /* still held: the next volley (counted from 0); released: ready */
             if (u->fire_held & (1u << i)) { cw->state = CW_FIRING; cw->volley_start = 1; } else cw->state = CW_READY;
             cw->t = 0;
@@ -235,7 +252,7 @@ void combat_tick(combat_unit *u, float dt)
     if (u->heat < 0) u->heat = 0;
     u->seq_ticks += ticks;
     u->warn_ticks += ticks;
-    if (combat_heat_dos) {
+    if (combat_dos) {
         /* DOS MW2.EXE 0x24f90: the heat's whole part (16.16 >> 16) against 0x64 / 0x50 / 0x41, one branch a frame in
          * this order. Unlike the 3Dfx DLL, a sequence starts at 81 whatever the heat above it (a jump past 100 with
          * flag 4 clear starts one, with message 3 and MECOVHW1, 0x25162..0x251f9), and the 66 warning (message 0 and
@@ -333,7 +350,7 @@ static void cook_off(combat_unit *u)
     /* DOS MW2.EXE 0x24ec0 (BlowAmmo): with bins (+0x5c set) but none of them still in a location, a computer-run unit -
      * or the player with automatic ejection on (0x961d0) - goes to state 5, then 0x25340 as an ejection (0x24f3d..0x24f53).
      * Without bins it is simply destroyed */
-    if (combat_heat_dos && u->bin_count > 0 && (g_auto_eject || !u->human) && !(u->human && u->invulnerable)) {
+    if (combat_dos && u->bin_count > 0 && (g_auto_eject || !u->human) && !(u->human && u->invulnerable)) {
         u->ejected = g_planet.hostile ? 2 : 1;
         u->intact_out = u->human && !g_planet.hostile;
     }
@@ -399,9 +416,10 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
                 if (cw->ammo == 0) { cw->state = -1; cw->shots = 0; }
                 if (!silent && bn->rounds != 0) {
                     /* the bin explodes: rounds x per-round damage (bin +10 = table +0x30) into this location's structure */
-                    t->internal[i] -= (float)bn->rounds * sim_weapons[cw->weapon].damage;
+                    const float blast = (float)bn->rounds * combat_weapon_damage(cw->weapon);
+                    t->internal[i] -= blast;
                     if (getenv("MW2_DAMAGE_LOG"))   /* TEST ONLY */
-                        fprintf(stderr, "damage ammo %s %s loc %d %.3f\n", t->human ? "player" : "ai", t->loadout, loc, (double)((float)bn->rounds * sim_weapons[cw->weapon].damage));
+                        fprintf(stderr, "damage ammo %s %s loc %d %.3f\n", t->human ? "player" : "ai", t->loadout, loc, (double)blast);
                     t->ammo_blown = 1;
                     t->ammo_boom_loc = loc;   /* 0x100167b0: explosion 7 at the location's node (msim) */
                     if (t->human) t->red_flash = 1;   /* 0x10016b11: the player's bin - DAT_1024cce0 (the red flash) */
@@ -410,7 +428,7 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
                         t->slots[i][idx] = 0;
                         destroy_location(t, loc);
                     }
-                    if (g_auto_eject || (combat_heat_dos && !t->human)) {
+                    if (g_auto_eject || (combat_dos && !t->human)) {
                         /* DOS MW2.EXE 0x25c7d..0x25c9f: after the explosion's damage a computer-run unit ALWAYS goes to state 5
                          * and 0x25340 - every AI 'Mech whose ammunition explodes is out at once - the player only with
                          * automatic ejection on (0x961d0); the 3D editions only with automatic ejection.
@@ -503,7 +521,7 @@ float combat_jet_fuel_max = 1810.0f;
 int combat_jet_refill_dos = 0;
 int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
 float combat_test_wheat[31];   /* TEST ONLY */
-int combat_heat_dos = 0;   /* the DOS heat states (combat_tick; the front end sets it by edition) */
+int combat_dos = 0;   /* combat rules and weapon data for the DOS edition */
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsigned *rng)
 {
@@ -558,7 +576,7 @@ int combat_fire(combat_unit *u, combat_unit *t, float distance, float rel_angle,
     if (u->destroyed || t->destroyed) return 0;
     for (i = 0; i < u->weapon_count; i++) {
         combat_weapon *cw = &u->weapons[i];
-        const sim_weapon *sw = &sim_weapons[cw->weapon];
+        const sim_weapon spec = weapon_spec(cw->weapon), *sw = &spec;
         float range = range_cm(cw->weapon), p;
         /* trigger */
         if (cw->state == CW_READY && !u->shutdown && u->internal[cw->location] > 0 && distance <= range &&
@@ -625,11 +643,10 @@ void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
     for (i = 0; i < u->weapon_count; i++) {
         combat_weapon *cw = &u->weapons[i];
         if (i < 32 && !(mask & (1u << i))) continue;
-        const sim_weapon *sw = &sim_weapons[cw->weapon];
         if (cw->state == CW_READY && cw->ammo != 0 && u->internal[cw->location] > 0 && !u->loc_gone[cw->location] &&
             (u->human || distance <= range_cm(cw->weapon)) &&
             /* AI (0x100232b0): fire a weapon only if heat + its heat stays under 65 */
-            !(u->hold_fire_above > 0 && u->heat + sw->heat >= u->hold_fire_above))
+            !(u->hold_fire_above > 0 && u->heat + weapon_spec(cw->weapon).heat >= u->hold_fire_above))
             start_volley(u, cw);
     }
 }
@@ -653,12 +670,12 @@ static int ai_choose(combat_unit *u, float distance, unsigned (*rng)(void *ctx, 
     for (tries = 0; tries < n; tries++) {
         int i = u->ai_sel;
         combat_weapon *cw = &u->weapons[i];
-        const sim_weapon *sw = &sim_weapons[cw->weapon];
+        const sim_weapon sw = weapon_spec(cw->weapon);
         int usable = cw->state >= 0 && u->internal[cw->location] > 0 && !u->loc_gone[cw->location];
         /* 0x100151a0: 3 inside the minimum range (+0x3c), 2 inside the range, 1 at it, 0 beyond: fires on 1-2 */
-        if (usable && distance >= (float)sw->field3c && distance <= range_cm(cw->weapon) &&
-            sw->heat + u->heat < 65.0f && cw->state == CW_READY && cw->ammo != 0 &&
-            rng(ctx, (unsigned)(sw->refire / 90 + 1)) == 0)
+        if (usable && distance >= (float)sw.field3c && distance <= range_cm(cw->weapon) &&
+            sw.heat + u->heat < 65.0f && cw->state == CW_READY && cw->ammo != 0 &&
+            rng(ctx, (unsigned)(sw.refire / (combat_dos ? 91 : 90) + 1)) == 0)
             return i;
         ai_next_weapon(u);
     }
@@ -731,7 +748,7 @@ int combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing)
 int combat_next_projectile(combat_unit *u) { return combat_next_projectile_ex(u, NULL); }
 int combat_weapon_kind(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].type : -1; }
 int combat_weapon_has_object(int w) { return w >= 0 && w < 31 && !(sim_weapons[w].type == 7 && sim_weapons[w].visual < 0); }   /* +0x14: 0 only for the flamer (3D edition table) */
-float combat_weapon_damage(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].damage : 0; }
+float combat_weapon_damage(int w) { return (w >= 0 && w < 31) ? weapon_spec(w).damage : 0; }
 int combat_weapon_sound(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].sound : 0; }
 int combat_weapon_visual(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].visual : -1; }
 
@@ -750,9 +767,10 @@ int combat_hit(combat_unit *t, int w, int loc, float rel_angle, unsigned *rng)
     while (rel_angle > 180.0f) rel_angle -= 360.0f;
     while (rel_angle < -180.0f) rel_angle += 360.0f;
     rear = rel_angle > -90.0f && rel_angle < 90.0f;
-    apply_damage_at(t, sim_weapons[w].damage, rear, loc, rng);
+    float damage = combat_weapon_damage(w);
+    apply_damage_at(t, damage, rear, loc, rng);
     t->heat += sim_weapons[w].target_heat;
-    return (int)(sim_weapons[w].damage + 0.5f);
+    return (int)(damage + 0.5f);
 }
 
 int combat_crit_ammo(combat_unit *u)
@@ -792,13 +810,19 @@ int combat_has_masc(const combat_unit *u)
 
 float combat_weapon_range(int w) { return (w >= 0 && w < 31) ? range_cm(w) : 0; }
 float combat_weapon_speed(int w) { return (w >= 0 && w < 31) ? (float)sim_weapons[w].speed : 0; }
-int   combat_weapon_life(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].life : 0; }
+int   combat_weapon_life(int w) { return (w >= 0 && w < 31) ? weapon_spec(w).life : 0; }
 int   combat_weapon_drop(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].drop : 0; }
+
+static int jets_held(const combat_unit *u, int jetting)
+{
+    return jetting && u->jets > 0 && u->jet_fuel >= 0 &&
+           !u->no_jump && !u->offline && !u->shutdown && !u->destroyed;
+}
 
 void combat_jets_forward(combat_unit *u, int on, float dt, float *hvel)
 {
     u->jet_forward = on;
-    if (on && u->jets > 0 && u->jet_fuel > 0 && !u->no_jump && !u->shutdown) *hvel += u->jet_ddy * dt * COMBAT_TICKS_PER_S;
+    if (jets_held(u, on) && u->jet_fuel > 0) *hvel += u->jet_ddy * dt * COMBAT_TICKS_PER_S;
 }
 
 int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
@@ -812,7 +836,7 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
     if (u->grant_jets && (u->jets <= 0 || u->jet_fuel == -2)) {   /* "flygirl": tank -2 (no jets) -> 0x712, 3 jets, thrust 3 g */
         u->jet_fuel = combat_jet_fuel_max; u->jets = 3; u->jet_ddy = 3.0f * g; u->no_jump = 0;
     }
-    held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0;
+    held = jets_held(u, jetting);
     u->landed_vy = 0;
     if (u->jets > 0 && u->jet_fuel >= 0) {
         if (held) {
@@ -885,8 +909,8 @@ void combat_land(combat_unit *u, float vy, unsigned *rng)
 
 int combat_jets_firing(const combat_unit *u, int jetting, float dt)
 {
-    int held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0;
-    return held && u->jet_fuel - dt * COMBAT_TICKS_PER_S > 0;
+    float burn = u->infinite_jets ? 0.0f : dt * COMBAT_TICKS_PER_S;
+    return jets_held(u, jetting) && u->jet_fuel > burn;
 }
 
 float combat_jets_dy(const combat_unit *u, int jetting, float dt)
@@ -894,10 +918,8 @@ float combat_jets_dy(const combat_unit *u, int jetting, float dt)
     /* combat_jets' vertical move for this frame without making it (engine 0x10019310: the move 0x1000b5e0 gets
      * (v + a ticks / 2) ticks in y with the x / z parts) - the same fuel, thrust and standing rules */
     const float g = 0.0296f * g_planet.gravity_g;
-    float ticks = dt * COMBAT_TICKS_PER_S, a, fuel = u->jet_fuel;
-    int held = jetting && u->jets > 0 && !u->no_jump && !u->shutdown && !u->destroyed && u->jet_fuel >= 0, jet;
-    if (held && u->jets > 0 && fuel >= 0) { fuel -= ticks; if (fuel <= 0) fuel = 0; }
-    jet = held && fuel > 0;
+    float ticks = dt * COMBAT_TICKS_PER_S, a;
+    int jet = combat_jets_firing(u, jetting, dt);
     if (!jet && fabsf(u->vy) < 1e-7f && u->y <= u->ground) return 0.0f;
     a = -g;
     if (jet) a = u->jet_ddy - g + (u->vy > 1e-7f ? (g - u->jet_ddy) / g_planet.jet_damping * u->vy * 3620.0f : 0);
@@ -914,7 +936,7 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
 {
     /* DOS MW2.EXE 0x208fb..0x20916 / 0x20aa5: S over 200000 (16.16 cm/tick): ((S - 200000) << 16) / 1300000 x 3 (the 3Dfx
      * DLL 3.069 / 0.0501 x 3, nearly the same) */
-    float dmg = combat_heat_dos ? (speed - 200000.0f / 65536.0f) * (3.0f * 65536.0f / 1300000.0f) : (speed - 3.0693676f) * 0.050123077f * 3.0f;
+    float dmg = combat_dos ? (speed - 200000.0f / 65536.0f) * (3.0f * 65536.0f / 1300000.0f) : (speed - 3.0693676f) * 0.050123077f * 3.0f;
     if (latch) u->blocked = 1;   /* terrain (0x10019d84 -> 0x1000c3c0) and a unit (0x10019d77 -> 0x1000c160) alike: every contact
                                   * frame - the impact cuts the velocity to a quarter (msim_world_impact), so pressing on stays
                                   * under the threshold; blocked = the contact (the player's impact-sound latch 0x1007c338) */
@@ -922,7 +944,7 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
     if (ny < -0.8660254f) {                       /* from above: the head (0x1000c212) */
         if (other_tons > 0) {
             /* x 2 x the other's tonnage / its own in the 3Dfx DLL; DOS x 4 (0x2094c..0x20969: lea [esi*4], at least x 1) */
-            float k = (combat_heat_dos ? 4.0f : 2.0f) * (float)other_tons / (float)(u->tons > 0 ? u->tons : 1);
+            float k = (combat_dos ? 4.0f : 2.0f) * (float)other_tons / (float)(u->tons > 0 ? u->tons : 1);
             if (k > 1.0f) dmg *= k;
         }
         apply_damage_at(u, dmg, 0, 1, rng);
@@ -935,7 +957,7 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
     }
     while (rel_deg > 180.0f) rel_deg -= 360.0f;
     while (rel_deg < -180.0f) rel_deg += 360.0f;
-    if (combat_heat_dos) {   /* DOS 0x209d5..: (0, 180] 45-135 the right arm (5) else the right torso (2); else -135..-45 the left
+    if (combat_dos) {   /* DOS 0x209d5..: (0, 180] 45-135 the right arm (5) else the right torso (2); else -135..-45 the left
                               * arm (6) else the left torso (4) - the band edges included */
         if (rel_deg > 0) apply_damage_at(u, dmg, 0, (rel_deg >= 45.0f && rel_deg <= 135.0f) ? 5 : 2, rng);
         else apply_damage_at(u, dmg, 0, (rel_deg >= -135.0f && rel_deg <= -45.0f) ? 6 : 4, rng);
@@ -994,6 +1016,6 @@ void combat_set_player_difficulty(combat_unit *u, int difficulty)
     if (difficulty < 0 || difficulty > 2) difficulty = 1;
     float f = F[difficulty][t];
     /* DOS MW2.EXE 0x4cdf7: Hard below -30 is 67 (16.16 per tick), not the 3Dfx engine's 67.5 (tools/audit/simdiff.py) */
-    if (combat_heat_dos && difficulty == 2 && t == 1) f = 67.0f / 65536.0f;
+    if (combat_dos && difficulty == 2 && t == 1) f = 67.0f / 65536.0f;
     u->sink_per_tick = u->sink_per_tick / F[1][t] * f;   /* the unit was set up at Medium */
 }

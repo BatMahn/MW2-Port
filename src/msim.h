@@ -314,6 +314,7 @@ extern const char *const MSIM_STATUS_TEXT[14];   /* "None " .. "Destroyed " (0x1
 extern const char *const MSIM_FORMATION_TEXT[7]; /* "Echelon Left" .. "No Formation" (0x10260958) */
 
 /* actors from world3d_actors(); the sim does not own them. */
+void msim_set_dos(int dos);   /* select edition rules before loading a mission */
 int  msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count);
 void msim_step(msim *s, int32_t dt_ms);
 /* STARTUP_MECH on a shut-down player (engine 0x1001b011: state 3 -> 0 when flag 4 is clear or overridden, "Powering

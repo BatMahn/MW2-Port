@@ -302,6 +302,13 @@ static void cb_finished(void *u, int t, int i, int ok)
     }
 }
 
+void msim_set_dos(int dos)
+{
+    combat_dos = msim_dos_int = ai_dos_int = combat_jet_refill_dos = mech3d_dos_hips = dos != 0;
+    combat_ct_split = dos ? 2 : 3;
+    combat_jet_fuel_max = dos ? 1820.0f : 1810.0f;
+}
+
 int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count)
 {
     int player_table;
@@ -310,6 +317,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     int i, k;
     const char *pl_rec;
     memset(s, 0, sizeof *s);
+    s->dos_end = s->sd_at_once = msim_dos_int;
     snprintf(s->scene, sizeof s->scene, "%s", scene);
     s->actors = actors;
     s->actor_count = count;
@@ -2098,7 +2106,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 kmh = fabsf(m->spd_servo) * 0.036f;
                 rate = m->turn / 1024.0f * 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);   /* by c[0xb] x 6.516 (0x1001a180) */
                 if (m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)
-                    rate = s->units[i].jet_fuel - sdt * 182.0f > 0 ? m->turn / 1024.0f * 90.0f * 2.0f : 0.0f;   /* the jets held (a
+                    rate = combat_jets_firing(&s->units[i], m->jet, sdt) ? m->turn / 1024.0f * 90.0f * 2.0f : 0.0f;   /* the jets held (a
                                    * tank, state 2): x2 (0x102473d4) while fuel is left after the burn, else no turn (0x1001a180) */
                 if (s->units[i].immobile && !(m->jet && s->units[i].jets > 0 && !s->units[i].no_jump && !s->units[i].shutdown && s->units[i].jet_fuel >= 0)) rate = 0.0f;   /* a leg gone: no leg turn (user report against the
                                    * original: a legged mech cannot come about - circle behind it; it still twists its torso) */
@@ -2325,7 +2333,7 @@ void msim_step(msim *s, int32_t dt_ms)
                     s->on_sound(s->shot_user, s->units[i].landed_vy >= -16.154f ? 0xe6 : 0xe5, p3);
                 }
             }
-            if (m->jet && s->on_effect) msim_jet_flames_at(s, &ac->mech, (float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2], ac->mech.heading);
+            if (s->units[i].jet_on && s->on_effect) msim_jet_flames_at(s, &ac->mech, (float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2], ac->mech.heading);
             ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
         if (getenv("MW2_TEST_LEG") && s->now >= atoi(getenv("MW2_TEST_LEG")) && s->armed[i] && !s->units[i].loc_gone[7]) {   /* tests: the left leg shot off */

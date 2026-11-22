@@ -5,7 +5,7 @@ MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on mac
 (from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
 of the game (see "Setting up the game folder").
 
-## Status (2026-11-22, v1.1.47)
+## Status (2026-11-22, v1.1.50)
 Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
 a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
 New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
@@ -36,7 +36,7 @@ almost no testing on real hardware; see "The classic Mac build (ALPHA)".
 Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
 AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 270 of them) and
-`make sweep` (every mission's objectives).
+`make sweep` (single-player mission objectives, with NetMech records reported as skipped).
 
 ## System requirements
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.1.50 (2026-11-22)
+
+- **DOS weapons:** Use the original DOS projectile lifetimes, launch intervals, cooldowns, damage, heat and
+  ammunition capacities. LRM-15 volleys fire at the DOS cadence, SRMs stay in flight longer, and each LRM-5
+  ammo bin holds 60 missiles. DOS AI weapon selection uses the original firing-roll divisor.
+- **DOS mission objects:** Circling-object tasks now reproduce the original x86 fixed-point conversion when
+  a speed or turn rate overflows. The DOS mission record BRO2SCN1 hit undefined behavior in this calculation.
+- **Mission audit:** The headless sweep supports `-dos` and shares the game's edition setup, including
+  DOS unit placement, terrain physics and weapon data.
+
+## v1.1.49 (2026-11-22)
+
+- **Jump jets:** Jets recharge during startup even when the jet key is held. The infinite-fuel cheat
+  keeps movement prediction and steering active with a nearly empty tank. Player and AI jet flames and
+  the player's jet sound now follow the controller's thrust state.
+- **DOS comparison:** Added 144 cases that run the original DOS jump-jet controller beside the port
+  and compare fuel, firing state and heat. The port's movement prediction is checked against the same firing state.
+
+## v1.1.48 (2026-11-22)
+
+- **Mission sweep:** Reports NetMech records as skipped when their original scene data calls for a network roster.
+  The single-player sweep previously attempted to run those records with Instant Action lances. A playable mission
+  that stalls or fails now produces a nonzero exit status.
+- **Aquiline Fire sweep:** The scripted pilot tries a different firing angle and aim height when shots fail to
+  damage a structure. It now destroys the dropship wreckage with projectiles and completes the mission without
+  a forced kill in the 3D archive sweep.
+
 ## v1.1.47 (2026-11-22)
 
 - **Mission launch with anti-aliasing:** The GPU backend selects a sample count supported by both the colour
