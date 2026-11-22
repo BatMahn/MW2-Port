@@ -497,8 +497,8 @@ def missile_warning(rep, rnd, n):
     """MW2.EXE 0x2e450 (a guided launch or a PPC warns its target): the shooter's +0x198 bit 4 and rand(3); the target's
     +0x16e already 4; jets and heat < 65 (0x2e3d0 run); rand(3); the quadrant of the shooter off the target's heading
     (0x230d0 stubbed); rand(2) for the first side, the 50 m probes (0x2df30 / 0x1c3f0 stubbed, either side blocked) -> 11;
-    else a level <= 3 pilot with nothing forced jumps (4) - vs ai.c ai_missile_warning (DOS). The type 2 shooter
-    skips the screen projection and angle checks (see AUDIT_DOS.md)."""
+    else a level <= 3 pilot with nothing forced jumps (4) - vs ai.c ai_missile_warning (DOS). Type 0 tests the
+    convergence point and target projection (stubbed) and the angle limits. Type 2 skips the window tests."""
     L = lib('ai'); L.shim_warn.restype = ctypes.c_int
     U = ctypes.c_uint(); O = (ctypes.c_int * 2)(); F = ctypes.c_float
     for case in range(n * 40):
@@ -506,15 +506,24 @@ def missile_warning(rep, rnd, n):
         lv_s = rnd.randint(1, 4); lv_t = rnd.randint(1, 4); can_jump = rnd.random() < 0.75
         heat = rnd.choice([0, 30, 64, 65, 80]); forced = rnd.choice([0, 0, 0, 4, 10])
         rel = rnd.choice([rnd.uniform(-180, 180), rnd.randint(-4, 4) * 90.0, 89.999, -0.001])
+        shooter_type = rnd.choice([0, 2])
+        aim_visible, target_visible = rnd.randrange(2), rnd.randrange(2)
+        bearing = int(rnd.choice([-15, -14.01, -14, 0, 14.99, 15, rnd.uniform(-20, 20)]) * 65536)
+        elevation = int(rnd.choice([-11521, -11520, -89, 0, 89, 11520, 11521]) * 65536)
+        in_view = shooter_type == 2 or (aim_visible and target_visible and -15 < bearing >> 16 < 15
+                                        and -0x30000 < int(elevation / 0xf00) < 0x30000)
         fp, fm = rnd.random() < 0.6, rnd.random() < 0.6; seed = rnd.randint(1, 1 << 30); t = 5
         shot = e.alloc(0x40); sh = e.alloc(0x200); sp = e.alloc(8); tg = e.alloc(0x200); tc = e.alloc(0x200)
-        e.w32(shot + 4, 0x15); e.w32(sp, sh); e.w32(sh + 0x10, 2); e.w8(sh + 0x198, 4 if lv_s <= 2 else 0)
+        e.w32(shot + 4, 0x15); e.w32(sp, sh); e.w32(sh + 0x10, shooter_type); e.w8(sh + 0x198, 4 if lv_s <= 2 else 0)
+        e.w32(sh + 0xd8, elevation)
         e.w32(sh + 0xdc, 0x200 | t); e.w16(sh + 4, 0); e.w32(0xf8a40 + 4 * t, tg)
         e.w32(tg + 0x16e, forced); e.w32(tg + 0x20, tc); e.w32(tg + 0xdc, 0x200)
         e.w32(tc + 0xc0, 100 if can_jump else 0); e.w32(tc + 0xec, 1); e.w32(tc + 0x98, heat << 16)
         e.w8(tg + 0x198, 2 if lv_t <= 3 else 0)
         g = Lcg(seed); e.stub(RAND, g)
-        e.stub(0x22850, ret=0); e.stub(0x230d0, ret=int(math.floor(rel * 65536)) & 0xffffffff)
+        e.stub(0x22850, ret=0)
+        e.stub(0x230d0, lambda em: bearing if em.reg('eax') == sh else math.floor(rel * 65536))
+        e.stub(0x29860, ret=aim_visible); e.stub(0x3f320, ret=target_visible)
         probed = []
         def p0(em):
             probed.append(s32(em.reg('ebx')) if em.reg('ebx') & 0x8000 == 0 else s32(em.reg('ebx') | 0xffff0000)); return 0
@@ -522,7 +531,7 @@ def missile_warning(rep, rnd, n):
         e.stub(0x1c3f0, lambda em: 0 if (fp if probed[-1] > 0 else fm) else 1)
         e.call(0x2e450, eax=shot, edx=sp)
         df = s32(e.r32(tg + 0x16e))
-        pf = L.shim_warn(seed, lv_s, F(rel), can_jump, F(heat), lv_t, -1 if forced == 0 else forced, fp, fm, O, ctypes.byref(U))
+        pf = L.shim_warn(seed, lv_s, in_view, F(rel), can_jump, F(heat), lv_t, -1 if forced == 0 else forced, fp, fm, O, ctypes.byref(U))
         pf = 0 if pf == -1 else pf
         po = [x for x in O if x]
         rep.check(df == pf and probed == po and U.value == g.s,

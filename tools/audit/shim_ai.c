@@ -59,7 +59,7 @@ int shim_start_q5(int man) { ai_mind m; ai_view v; ai_init(&m, 0); memset(&v, 0,
  * order asked (order_out: up to two sides) */
 static int g_free[2], g_order[2], g_on;
 static int shim_side(void *ctx, int side) { (void)ctx; if (g_on < 2) g_order[g_on++] = side; return g_free[side > 0 ? 0 : 1]; }
-int shim_warn(unsigned seed, int shooter_level, float rel, int can_jump, float heat, int level, int forced_in, int free_plus,
+int shim_warn(unsigned seed, int shooter_level, int in_view, float rel, int can_jump, float heat, int level, int forced_in, int free_plus,
               int free_minus, int *order_out, unsigned *rng_out)
 {
     ai_mind m; ai_view v;
@@ -67,7 +67,7 @@ int shim_warn(unsigned seed, int shooter_level, float rel, int can_jump, float h
     m.rng = seed; m.forced_man = forced_in; m.state = AI_ATTACK;
     v.can_jump = can_jump; v.heat = heat; v.pilot_level = level;
     g_free[0] = free_plus; g_free[1] = free_minus; g_on = 0; g_order[0] = g_order[1] = 0;
-    ai_missile_warning(&m, &v, shooter_level, rel, shim_side, NULL);
+    ai_missile_warning(&m, &v, shooter_level, in_view, rel, shim_side, NULL);
     order_out[0] = g_order[0]; order_out[1] = g_order[1];
     *rng_out = m.rng;
     return m.forced_man;

@@ -698,7 +698,8 @@ static int program_allows(const ai_library *lib, const ai_mind *m, int state)
 
 int ai_allows(const ai_library *lib, const ai_mind *m, int state) { return program_allows(lib, m, state); }
 
-void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, float shooter_rel, int (*side_free)(void *ctx, int side), void *ctx)
+void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int in_view, float shooter_rel,
+                        int (*side_free)(void *ctx, int side), void *ctx)
 {
     if (ai_dos_int) {
         /* DOS MW2.EXE 0x2e450: the shooter's +0x198 bit 4 (pilot level <= 2) and rand(3) != 0; a guided weapon or the PPC; the
@@ -709,7 +710,7 @@ void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, float s
         int side, k, q;
         float r;
         if (shooter_level > 2 || ai_rand(m, 3) == 0) return;
-        if (m->forced_man == 4) return;   /* (no state test: the forced manoeuvre waits for the next chooser call, +0x16e) */
+        if (!in_view || m->forced_man == 4) return;   /* the forced manoeuvre waits for the next chooser call, +0x16e */
         if (!jets_ok(v, 65.0f)) return;
         if (ai_rand(m, 3) != 0) {
             r = fmodf(shooter_rel + 360.0f, 360.0f);

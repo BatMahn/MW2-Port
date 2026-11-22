@@ -548,6 +548,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->contact_hold = calloc((size_t)(count ? count : 1), sizeof *s->contact_hold);
     s->player_sel_w = 0;
     s->player_lock_target = -1;
+    s->dos_warning_target = -1;
     s->inspected = calloc((size_t)(count ? count : 1), 1);
     s->player_nav = -1;
     s->star_formation = -1;
@@ -3040,7 +3041,7 @@ static int side_free(void *ctx, int side)
     return !probe_engine(c->s, c->i, p0, p1, &climb, &ox, &oz);
 }
 /* a guided launch at AI mech t by a shooter of pilot level lv (the player 1): engine 0x10020ac0 */
-static void missile_warning(msim *s, int t, int lv, float sx, float sz)
+static void missile_warning(msim *s, int t, int lv, float sx, float sz, int in_view)
 {
     ai_view v;
     struct side_ctx c;
@@ -3052,7 +3053,19 @@ static void missile_warning(msim *s, int t, int lv, float sx, float sz)
     v.heat = s->units[t].heat;
     v.pilot_level = s->actors[t].ai_level >= 1 && s->actors[t].ai_level <= 4 ? s->actors[t].ai_level : 1;
     c.s = s; c.i = t;
-    ai_missile_warning(&s->minds[t], &v, lv, rel, side_free, &c);
+    ai_missile_warning(&s->minds[t], &v, lv, in_view, rel, side_free, &c);
+}
+
+static void dos_player_warning(msim *s, const float aim[3])
+{
+    int t = s->dos_warning_target;
+    if (!s->dos_warning_view || t < 0 || t >= s->actor_count || !s->armed[t] || s->units[t].destroyed) return;
+    const int32_t *origin = s->actors[t].mech.origin;
+    const float target[3] = {(float)origin[0], s->units[t].y + (s->centre_h ? s->centre_h[t] : 550.0f), (float)origin[2]};
+    const float shooter[3] = {s->player[0], s->player_unit.y + s->player_centre_h, s->player[2]};
+    int in_view = s->dos_warning_view(s->shot_user, aim, target, shooter, s->player_facing);
+    if (getenv("MW2_MISSILE_TRACE")) fprintf(stderr, "mwarn unit %d view %d\n", t, in_view);
+    missile_warning(s, t, 1, shooter[0], shooter[2], in_view);
 }
 
 static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
@@ -3409,7 +3422,7 @@ static void combat_step(msim *s, float dt)
                 }
                 if (who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* the target dodges (0x10020ac0 from 0x1004397b) */
                     int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
-                    missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2]);
+                    missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2], 1);
                 }
                 if (s->on_shot) s->on_shot(s->shot_user, w, i, first, src[0], src[2]);
                 if (first) muzzle(s, w, src, src == mf ? &s->actors[i].mech : NULL, mech3d_mount_slot(loc), s->actors[i].mech.heading);
@@ -3480,13 +3493,12 @@ static void combat_step(msim *s, float dt)
                         memcpy(ns->aim_o, s->player_eye_ok ? s->player_eye : from, sizeof ns->aim_o);
                         ns->aim_d[0] = sinf(ay2) * cosf(ap2); ns->aim_d[1] = sinf(ap2); ns->aim_d[2] = cosf(ay2) * cosf(ap2);
                     }
-                    if (tgt_ok && (msim_weapon_guided(w) || w == 0x15)) {
-                        /* 0x10020ac0 (from 0x1004397b): the player (level 1) launching at its target - in its view: within
-                         * 15 degrees of the aim - warns it */
-                        float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
-                        /* The DOS player path also projects the convergence point and selected target through
-                         * the camera before the warning (0x2e50d..0x2e5a7). See docs/AUDIT_DOS.md. */
-                        if (fabsf(off) < 15.0f && !msim_dos_int) missile_warning(s, e, 1, s->player[0], s->player[2]);
+                    if (msim_weapon_guided(w) || w == 0x15) {
+                        if (msim_dos_int) dos_player_warning(s, to);
+                        else if (tgt_ok) {   /* 0x10020ac0: within 15 degrees of torso aim */
+                            float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
+                            if (fabsf(off) < 15.0f) missile_warning(s, e, 1, s->player[0], s->player[2], 1);
+                        }
                     }
                     s->shot_loc = loc;
                     if (s->on_shot) s->on_shot(s->shot_user, w, -1, first, src[0], src[2]);
@@ -3500,7 +3512,10 @@ static void combat_step(msim *s, float dt)
     }
 
     /* DOS 0x27780 calls weapon dispatch (0x27836) before target upkeep and lock (0x27a55). */
-    if (msim_dos_int) player_lock_step(s, pl_h, ticks);
+    if (msim_dos_int) {
+        player_lock_step(s, pl_h, ticks);
+        s->dos_warning_target = s->player_lock_target;
+    }
 
     /* fly and collide */
     for (k = 0; k < s->shot_count; k++) {

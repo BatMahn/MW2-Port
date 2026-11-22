@@ -2961,6 +2961,20 @@ def dos_missile_lock_order(c):
 
 
 @sequence
+def dos_missile_warning_window(c):
+    """The DOS player warning requires both the convergence point and the selected unit in the main view."""
+    env = {'MW2_KILL_ACTOR': '0,9999', 'MW2_TEST_TARGET': '0', 'MW2_TEST_STANDOFF': 16000,
+           'MW2_TEST_HOLD_ACTOR': '0', 'MW2_MISSILE_TRACE': '1'}
+    select = [(0.15 + 0.25 * i, 0.25 + 0.25 * i, 'enter') for i in range(7)]
+    for view, glance in ((1, []), (0, [(3, 6, 'kp9')])):
+        r = c.run('_%d' % view, secs=6, nostart=True, dos_look=True, env=env,
+                  hold=select + [(4, 4.08, 'space')] + glance)
+        windows = [int(v) for v in re.findall(r'^mwarn unit 0 view (\d+)$', r.out, re.M)]
+        c(len(windows) >= 18 and all(v == view for v in windows),
+          'warning window follows the main camera while firing at the selected unit', str(windows))
+
+
+@sequence
 def missiles_track_strafing_target(c):
     """guided missiles home on a target moving sideways (0x10045910: acceleration unit(target - p) - unit(v), no gravity
     while guided): a Nova 300 m ahead slides east at 5 m/s (test hook MW2_TEST_STRAFE); an LRM 20 volley fired locked

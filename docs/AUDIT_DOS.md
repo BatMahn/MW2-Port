@@ -235,6 +235,11 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - DOS player weapon dispatch (0x27836) uses the prior frame's missile lock before the update (0x27a55).
   The sequence test fires on the lock acquisition frame and on the next frame. The first volley flies unguided
   and the next homes.
+- The player can trigger the selected unit's dodge with a guided launch or PPC shot. DOS checks whether the
+  convergence point and the unit's position project onto the main view, and whether the whole-degree bearing
+  off the legs is strictly between -15 and 15. A cockpit glance away suppresses the warning. The emulator
+  checks the angle boundaries and the order of random draws. Type 2 computer-controlled shooters skip the
+  projection, as seen in the player and AI records from a live PINKSCN1 dump.
 - The player outline's front and rear damage levels (0x2f611..0x2f6e4) and message replacement (0x11020)
   each matched 3,000 differential cases. The message comparison used the active or expired status after
   normal message upkeep and the priorities used by the game.
@@ -244,11 +249,8 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - **The manoeuvre steps** (the step table 0x2c1d0: 0 to 12 per tick) are not emulated. They need a live unit, its
   target and the world for the line-of-sight and probe calls. They were ported by reading the disassembly; the
   chooser, the starts, the flank pick and the patrol sweep around them are emulated.
-- **Missile warning projection and target selection** (0x2e50d..0x2e5a7). DOS projects the shooter's convergence
-  point and the target's position through the current camera (0x29860 and 0x3f320), then checks bearing and a
-  scaled elevation. A live PINKSCN1 dump has type 0 for the player and type 2 for the computer-controlled units.
-  Type 2 skips this projection. The player had the warning eligibility bit set in this dump. The port still omits
-  the player warning and uses the computer-controlled shooter's current combat target.
+- **The missile warning's AI target bookkeeping.** DOS type 2 takes the unit's current target word. The port uses
+  its combat target. These can diverge if the AI changes targets between selecting a weapon and releasing a projectile.
 - **The weapon pick's follow-up** after 0x2ea63, including the pitch offset for weapon types 0 and 4. Selection
   through 0x2ea63 now has differential coverage for the range, heat, readiness, ammunition and random roll.
 - **The damage nibble written into the world model on a hit** (0x26570) remains a disassembly comparison.

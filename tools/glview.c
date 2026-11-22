@@ -4840,6 +4840,24 @@ static void load_view_far(prj_archive *ma, const char *scene)
     if (getenv("MW2_DEBUG_VIEW")) fprintf(stderr, "view far %.0f (%s)\n", (double)g_view_far, scene);   /* tests */
 }
 
+/* DOS 0x2e50d..0x2e5a7 tests the projected convergence point and selected unit's position.
+ * The bearing is off the legs and floored to whole degrees before the strict comparison.
+ * The elevation is divided by 0xf00 before the 16.16 comparison, so a unit's actual elevation passes. */
+static int dos_warning_view(void *user, const float convergence[3], const float target[3], const float shooter[3], float heading)
+{
+    glr *renderer = user;
+    const float a[3] = {convergence[0], convergence[1], -convergence[2]};
+    const float p[3] = {target[0], target[1], -target[2]};
+    int x, y;
+    if (!g_snd_ok || glr_dos_project(renderer, a, &x, &y, NULL) != 1 ||
+        glr_dos_project(renderer, p, &x, &y, NULL) != 1) return 0;
+    int32_t bearing = glr_dos_atan2((int32_t)lrintf(target[0] - shooter[0]), (int32_t)lrintf(target[2] - shooter[2]));
+    int32_t offset = (bearing - (int32_t)lrintf(heading * 65536.0f)) % 0x1680000;
+    if (offset > 0xb40000) offset -= 0x1680000;
+    if (offset < -0xb40000) offset += 0x1680000;
+    return (offset >> 16) > -15 && (offset >> 16) < 15;
+}
+
 static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *rec, const char *mission, int camo, int clan)
 {
     mech3d m;
@@ -4903,6 +4921,8 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
+        g_sim.shot_user = r;
+        g_sim.dos_warning_view = dos_warning_view;
         g_sim.on_effect = on_effect;
         g_sim.on_sound = on_sound;
         g_sim.on_player_down = on_player_down;

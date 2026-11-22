@@ -115,6 +115,8 @@ typedef struct {
     combat_planet planet;        /* the mission's PLNT values */
     /* called for every projectile launched; first = the volley's first (weapon sound) */
     void       (*on_shot)(void *user, int weapon, int owner, int first, float x, float z);
+    int        (*dos_warning_view)(void *user, const float convergence[3], const float target[3],
+                                  const float shooter[3], float heading);
     int          shot_loc;       /* during a player's on_shot (owner -1): the weapon's MEK location (slot +0x28) */
     /* weapon effects (fx.h): type and position (cm, game coordinates) - impacts on mechs and the
      * ground (engine 0x10045d00), and a mech's death explosion */
@@ -239,6 +241,7 @@ typedef struct {
      * (torso facing / pitch, degrees); kept here - player_lock: bit 0x8000 target in the 16-degree window and range,
      * 0x40 acquiring, 0x80 locked (after 0x16a ticks) */
     int          player_sel_w, player_lock_target;   /* -1: none; an actor, or MSIM_TGT_THING(b) a structure */
+    int          dos_warning_target;                /* target from the previous frame's selection update */
     int          player_aim_free;  /* 1: with no target the player fires along the aim (the front end; missionsim keeps the nearest enemy) */
     float        player_aim_yaw, player_aim_pitch;
     float        player_eye[3];    /* the aim ray's origin: the player's eye object (unit +0x44, the EYEO node - the camera's), */
