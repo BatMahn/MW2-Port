@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.1.45 (2026-11-21)
+
+- **GitHub release pages show the changelog.** Each release's notes are now this file's section for its tag; until
+  now the release pages had no notes at all.
+
+## v1.1.44 (2026-11-21)
+
+- **Blade Splint: the helicopter's searchlight runs ahead of it, as in DOS.** The light pool hangs under the
+  helicopter on a tiny backwards circle (1 cm across). DOS works that circle out in whole centimetres each frame and
+  rounds the backwards step down to a full centimetre, so the pool creeps away from under the helicopter all mission
+  long and ends up well in front of it. Checked by reading the helicopter's and the light's positions straight out of
+  DOSBox's memory: the port now matches them to within a few metres. The helicopter's own flight path follows DOS more
+  closely for the same reason (other circling objects too).
+
+## v1.1.43 (2026-11-21)
+
+Fixes from the latest bug report.
+
+- **Blade Splint: the cars' headlight beams lie on the road.** The beam is a flat shape at road level. The roads are
+  lifted 4 cm above the ground, and so were the cars' beams, so the two fought and the beam broke up into the road.
+  Moving vehicles' ground-level parts now sit 8 cm up, above the roads.
+- **Blade Splint: both of the helicopter's running lights stand out.** Since 1.1.42 only the light on your side did;
+  the other was sunk into the hull, and the two swapped as the helicopter turned. The original draws polygons by
+  their farthest corner, so both small lights end up over the hull's big faces. Both now draw in front of the hull.
+- **Scorching Sand: turrets sit in the middle of the target display.** Turrets and doors have their centre at their
+  base, but the port read that as "no centre given" and used 5.5 m, so the target display framed the space above the
+  turret and drew it at the lower edge. Their centre is now their base, as in the data.
+
 ## v1.1.42 (2026-11-20)
 
 Fixes from the latest bug report, each checked against the original DOS game in DOSBox.

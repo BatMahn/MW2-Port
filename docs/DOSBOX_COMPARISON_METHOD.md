@@ -270,3 +270,23 @@ Fixes the BattlePack files need for the DOS 1.1 executable:
 
 DOSBox's own screenshot key (Ctrl+F5, `captures=` in the conf) saves an indexed PNG whose palette is the VGA DAC as it
 stands. That is the quickest way to read the original's live palette.
+
+## Keys that are not characters (arrows, F-keys)
+
+DOSBox 0.74 under Xvfb reads raw X scancodes by default, and Xvfb's codes for the arrows and F-keys do not match its
+table, so those keys never reached MW2.EXE (letters and digits did). Add `usescancodes=false` to the `[sdl]` section
+and DOSBox maps by keysym; the arrows then turn the mech. A partial `mapperfile` is no substitute: it unbinds every
+event it does not list, Ctrl+F5 included.
+
+Other useful keys in a mission: `a` the autopilot to the selected nav point (`n` the next one), `0` full throttle,
+`1` stop. MW2DIF.CFG byte +1 = 1 makes the player invulnerable for long drives (the Ctrl+Alt+Shift cheat sequence
+dropped the game to DOS). The shell runs directly as `MW2SHELL` (no MECH2.EXE needed); the harness's `click X Y`
+units are about pixel x / 2.46, y / 2.1.
+
+## Reading DOS memory (dosbox-debug)
+
+`dosbox-debug` (in the dosbox package) runs the same game with the debugger on its terminal. Run it inside tmux so the
+debugger can be driven: Alt+Pause in the game window breaks in, `MEMDUMPBIN 0168:<offset> <length>` (hex; DS = 0168
+is DOS4GW's flat selector) writes MEMDUMP.BIN to the current directory, F5 resumes. World nodes are 124 bytes: local
+3x3 (2.29 fixed) and translation, then world 3x3 and translation (cm). Blade Splint's helicopter node sits at 0x393f7c,
+its searchlight's circling task at 0x411fbc (angle, yaw, speed in 16.16, on, last tick at 182 a second).

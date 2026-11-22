@@ -579,7 +579,10 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                 if (r > 0 && r < 5000) s->radius[i] = (float)r;
                 int air = actors[i].unit_class == 5 || actors[i].unit_class == 8;
                 /* aircraft and dropships: int[0] is their flying height (AIRCRFT* 30-100 m, DROPA 75 m) */
-                if (hc > 0 && (hc < 5000 || (air && hc <= 20000))) s->centre_h[i] = (float)hc;
+                /* 0 counts (doors and turrets: DOORA / B, TURRET*, the centre at their base) - it had fallen back to 5.5 m,
+                 * and the target viewer, framed on the centre (DOS: the object's position), showed Scorching Sand's
+                 * turrets at the box's lower edge (user report) */
+                if (hc >= 0 && (hc < 5000 || (air && hc <= 20000))) s->centre_h[i] = (float)hc;
                 if (air && s->draw_lift) s->draw_lift[i] = s->centre_h[i];
             }
             prj_record_free(&mg);

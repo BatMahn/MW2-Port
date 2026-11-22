@@ -1291,6 +1291,11 @@ int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone
 /* the path tasks' clock: the 3Dfx DLL's 181 ticks a second (0x10248490, 0x102471c4, 0x102471e4); the DOS edition's 182
  * (MW2.EXE 0x1b9a0 / 0x1b729 0xb6, the servos chop(0.3 x 182) = 54 - the GBL port's audit; MW2.EXE the same code) */
 #define WP_CLOCK (mech3d_dos_hips ? 182.0f : 181.0f)
+/* DOS runs its tasks once a frame, and its circling step (0x1b6ef) works in whole centimetres per run, so how far a node
+ * strays depends on the frame rate: the port runs it at a fixed rate measured in DOSBox (Blade Splint's
+ * helicopter and its searchlight discs, read from memory dumps at known ticks, match a 52 a second run: 30.2 s in, the
+ * helicopter at -6102, -15045 and the light 796, 718 from it in DOSBox, -6096, -15297 and 814, 752 here) */
+#define WP_DOS_RUN_HZ 52.0
 #define WP_TAU (mech3d_dos_hips ? 54.0f : 0.3f * 181.0f)   /* the filters' time constant */
 typedef struct { float R[9], t[3]; } wp_xf;
 typedef struct { float last, target, cur; } wp_filt;
@@ -1317,6 +1322,8 @@ typedef struct {
     int      range;               /* type 4: audible range, cm */
     char     snd[24];             /* type 4: the sound's SNDTABLE name */
     int      runs;                /* type 4: runs so far (the caller acts once per run, 0x1000ec90 case 1) */
+    int32_t  dyaw, dspd, dang;    /* type 2, DOS (0x1b5e0): yaw deg / s and cm / s in 16.16, the angle in 16.16 */
+    double   dclock;              /* type 2, DOS: the fixed-rate run clock (ticks, WP_DOS_RUN_HZ) */
 } wp_task;
 struct world3d_paths {
     wp_rec   *recs;
@@ -1531,6 +1538,32 @@ static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now)
         wp_turn(x, t->k[0] * q, t->k[1] * q, t->k[2] * q);
         return 1;
     }
+    if (t->type == 2 && mech3d_dos_hips) {   /* circling, DOS (0x1b6ef): the same step and turn in integers */
+        if (t->k[3] == 0) return 0;
+        while (t->dclock + WP_CLOCK / WP_DOS_RUN_HZ <= now) {
+            int32_t nw, dt16, d16, c, dx, dz, y16;
+            int64_t v;
+            double a;
+            t->dclock += WP_CLOCK / WP_DOS_RUN_HZ;
+            nw = (int32_t)t->dclock;
+            dt16 = (int32_t)(((int64_t)(nw - (int32_t)t->last) << 16) / 182);   /* 0x1b750: (now - last) << 16 / 0xb6 */
+            t->last = (float)nw;
+            d16 = (int32_t)(((int64_t)t->dspd * dt16 + 0x8000) >> 16);          /* rounded (shrd, adc) */
+            c = d16 >> 16;                                                      /* whole cm, floored (sar): a step
+                                                                                 * under 1 cm backwards is -1 cm */
+            a = t->dang / 65536.0 * 0.017453292519943295;
+            v = (int64_t)llround(cos(a) * 536870912.0) * c;                     /* 0x3a8a8 / 0x3a838: 2^29 sin, cos */
+            dx = (int32_t)((v + 0x8000) >> 16) >> 13;
+            v = (int64_t)(-llround(sin(a) * 536870912.0)) * c;
+            dz = (int32_t)((v + 0x8000) >> 16) >> 13;
+            x->t[0] += (float)dx;                                               /* MoveObj 0x1dfc0: the local translation */
+            x->t[2] += (float)dz;
+            y16 = (int32_t)(((int64_t)t->dyaw * dt16 + 0x8000) >> 16);
+            wp_turn(x, 0.0f, (float)(y16 / 65536.0), 0.0f);
+            t->dang = (int32_t)(((int64_t)t->dang + y16) % (360 * 65536));     /* idiv 0x1680000: the remainder */
+        }
+        return 1;
+    }
     if (t->type == 2) {   /* circling (0x1000ea50): a step along the heading + 90, then a yaw turn */
         float dts = (now - t->last) * (1.0f / WP_CLOCK), d, a = t->k[2] * 0.017453292f, dy;   /* 0x102471e4: 1 / 181 */
         if (t->k[3] == 0) return 0;
@@ -1581,7 +1614,7 @@ static void wp_place_parts(world3d_paths *P, mech3d *world, int only_rec, int on
  * show: Wolf 3's cars carry their headlight beam (colour 0x1170) and underside at height 0, in the road, and their
  * yellow headlamps (0x0030) about a centimetre in front of the nose. In a depth buffer the road hid the beam and the
  * nose fought the lamps, a lamp sinking into the car from some angles (user report, 1.1.37). Here (once per model):
- * the vertices at height 0 or below go 4 cm up, and a polygon lying within 3 cm of another face of the model, over it,
+ * the vertices at height 0 or below go 8 cm up (over the roads' 4), and a polygon lying within 3 cm of another face of the model, over it,
  * comes 3 cm out along that face's outward normal. */
 static void vehicle_decals(wtb_object *o)
 {
@@ -1640,7 +1673,9 @@ static void vehicle_decals(wtb_object *o)
             break;
         }
     }
-    for (j = 0; j < o->vert_count; j++) if (o->verts[j].y <= 0) o->verts[j].y += 4;
+    /* 8 cm: above the roads (S_BSTRTE ...), which the ground-plane rule lifts 4 cm - level with them, the beam fought the
+     * road (user report, 1.1.42: the headlight beam dithered into the road) */
+    for (j = 0; j < o->vert_count; j++) if (o->verts[j].y <= 0) o->verts[j].y += 8;
     free(mv);
 }
 
@@ -1712,6 +1747,10 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                     t->k[0] = 360.0f / secs;                       /* yaw degrees per second (0x102471d0: 360.0) */
                     t->k[1] = rad * 6.2831853f / secs;             /* cm per second (0x102471d8: 2 pi) */
                     t->k[3] = (float)on;
+                    if (secs != 0) {   /* DOS 0x1b66e: trunc(x + 0.5) (frndint under control word 0x1f..: chop) */
+                        t->dyaw = (int32_t)trunc(360.0 / secs * 65536.0 + 0.5);
+                        t->dspd = (int32_t)trunc(rad * 6.283185307179586 / secs * 65536.0 + 0.5);
+                    }
                     if (ok) P->recs[ri].anim[tk.node] = 1;
                 } else if (tk.type == 1) { /* up to 16 comma-separated palette indices, stored << 4 */
                     char buf[128], *s, *e;

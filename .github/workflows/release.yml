@@ -211,6 +211,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v tag="${{ github.ref_name }}" '
+            /^## / { if (on) exit; if ($2 == tag) { on = 1; next } }
+            on' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then echo "See CHANGELOG.md." > release-notes.md; fi
+          cat release-notes.md
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -219,3 +229,4 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: release-notes.md

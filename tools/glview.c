@@ -4483,9 +4483,9 @@ static int dorcs_key(SDL_Keycode k, Uint16 mod)
 static float g_view_far;
 /* A small path-carried object hung on a bigger one - the helicopters' running lights (TEALARE3 RUNLT: a 1 m cube 4 m fore
  * and aft of the heli's origin, inside its hull, blinking red / green by colour frames): the DOS and 3D engines sort and
- * draw whole objects by distance (the painter's way), so the light nearer the eye than the heli is drawn over it, whole,
- * and the far one under it. In the depth buffer the hull hid most of both (user report, 1.1.40: the green light flat, the
- * red one missing). The nearer one is moved toward the eye by the parent's size and scaled down by the same factor about
+ * draw polygons by their farthest corner (the painter's way), so both lights are drawn over the heli's hull, whole. In
+ * the depth buffer the hull hid most of both (user reports, 1.1.40: the green light flat, the red one missing; 1.1.42:
+ * the far one still sunk). Each is moved toward the eye by the parent's size and scaled down by the same factor about
  * the eye - the same pixels, in front of the hull */
 static void carried_in_front(const mech3d *w, int q, mech3d_part *cp, const float eye[3])
 {
@@ -4514,7 +4514,11 @@ static void carried_in_front(const mech3d *w, int q, mech3d_part *cp, const floa
     dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     dp = sqrtf(((float)pp->pos[0] - eye[0]) * ((float)pp->pos[0] - eye[0]) + ((float)pp->pos[1] - eye[1]) * ((float)pp->pos[1] - eye[1])
                + ((float)pp->pos[2] - eye[2]) * ((float)pp->pos[2] - eye[2]));
-    if (dl >= dp || dl < 1.0f) return;   /* the far one: drawn before its parent, under it */
+    /* the far one too (user report, 1.1.42: the far light sunk into the hull, the two swapping as the heli turned): the
+     * engines sort polygons by their farthest corner (0x1002a080), so the hull's big faces go down first and both small
+     * cubes paint over them */
+    if (dl < 1.0f) return;
+    (void)dp;
     s = (dl - (pr < dl * 0.5f ? pr : dl * 0.5f)) / dl;
     for (c = 0; c < 3; c++) cp->pos[c] = (int32_t)lrintf(eye[c] + d[c] * s);
     for (k = 0; k < 9; k++) cp->rot[k] = lp->rot[k] * s;
@@ -4787,6 +4791,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 if (getenv("MW2_DEBUG_STARALL")) fprintf(stderr, "player star tex %d\n", g_sim.player_tex);
             }
             g_frame_mech++;
+            if (getenv("MW2_DEBUG_NAVS")) { int q; for (q = 0; q < g_sim.nav_count; q++) fprintf(stderr, "nav %d %s '%s' %.0f %.0f %.0f shown %d sel %d\n", q, g_sim.navs[q].name, g_sim.navs[q].label, (double)g_sim.navs[q].x, (double)g_sim.navs[q].y, (double)g_sim.navs[q].z, g_sim.navs[q].shown, g_sim.navs[q].selectable); }   /* TEST hook */
             if (getenv("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
                 float sx0 = 0, sz0 = 0, sy0 = 0;
                 int nst = sscanf(getenv("MW2_START"), "%f,%f,%f", &sx0, &sz0, &sy0);
@@ -10211,7 +10216,7 @@ int main(int argc, char **argv)
             if (of) fclose(of);
             free(px);
             if (getenv("MW2_DEBUG_PARTPOS")) {   /* TEST hook: where the named world parts are at the end */
-                int q; for (q = 0; q < g_mech.part_count; q++) if (strstr(getenv("MW2_DEBUG_PARTPOS"), g_mech.parts[q].model_name))
+                int q; for (q = 0; q < g_mech.part_count; q++) if (strstr(getenv("MW2_DEBUG_PARTPOS"), g_mech.parts[q].model_name) || (!strcmp(getenv("MW2_DEBUG_PARTPOS"), "*moving") && g_mech.parts[q].moving))
                     printf("partpos %s %s %d %d %d hidden %d moving %d\n", g_mech.parts[q].rec, g_mech.parts[q].model_name, g_mech.parts[q].pos[0], g_mech.parts[q].pos[1], g_mech.parts[q].pos[2], g_mech.parts[q].hidden, g_mech.parts[q].moving);
             }
             if (getenv("MW2_DEBUG_FIRE")) printf("fire: hits %d misses %d ending %d shots %d shutdown %d attacks %d mask %x w0 state %d ammo %d\n", g_sim.hits, g_sim.misses, g_sim.ending, g_sim.shot_count, g_sim.player_unit.shutdown, g_sim.player_attacks, g_sim.player_fire_mask, g_sim.player_unit.weapons[0].state, g_sim.player_unit.weapons[0].ammo);

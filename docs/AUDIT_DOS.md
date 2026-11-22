@@ -1,4 +1,4 @@
-# DOS MW2.EXE comparison (v1.1.42)
+# DOS MW2.EXE comparison (v1.1.44)
 
 The port's DOS look is checked against the original DOS MW2.EXE (1.1, md5 51634b60...) in two ways:
 
@@ -116,6 +116,30 @@ All 16 tests pass (about 18,500 checks at the default case counts).
   ground did not reproduce on flat ground, where both aims hit.
 - **Shell briefing** (MW2SHELL.EXE FUN_0001c080, now read from an ELF made of MW2SHELL.EXE): the situation page and
   the text layout, compared with DOSBox. See docs/SHELL.md.
+
+### v1.1.43
+
+- **Both small hung objects in front.** v1.1.42 drew only the light nearer the eye than the helicopter over it. The
+  engines' polygon sort key is the farthest corner (0x1002a080), so the hull's big faces go down before both small
+  cubes: both are now pulled in front.
+- **Moving vehicles' ground-level vertices 8 cm up**, above the roads (S_BSTRTE), which the ground-plane rule lifts 4 cm.
+- **MGEO int[0] = 0** (doors, TURRET*): the centre at the base, not the 550 cm default. Used by the target viewer's
+  camera (DOS frames the object's position), the contact sphere and the turret / dropship aim at a target.
+- **Blade Splint's helicopter searchlight:** see v1.1.44.
+
+### v1.1.44
+
+- **Circling tasks (type 2) in integers, as DOS (parse 0x1b5e0, run 0x1b6ef).** Load: yaw rate and speed in 16.16,
+  trunc(360 / s x 65536 + 0.5) and trunc(2 pi r / s x 65536 + 0.5). Each run: dt = (now - last) << 16 / 182; the step
+  d = speed x dt, then whole centimetres by sar 16 (floored); MoveObj (0x1dfc0) adds (cos a x d, 0, -sin a x d) >> 29
+  (each floored) to the node's local translation; the turn (0x1e140) by yaw x dt; a += turn, remainder of 360.
+  Blade Splint's searchlight discs (LIGHTA / B / C, TEALARE3 nodes 10-12) run "1,-30,1": a 1 cm circle backwards, so
+  every run steps -1 cm on each axis whose term is negative and the discs creep off in the helicopter's frame without
+  end. Measured with dosbox-debug MEMDUMPBIN (the node array at 0x393f7c, the task at 0x411fbc: angle, yaw, speed,
+  on, last tick): at tick 5491 the helicopter at -6102, 8200, -15045 and the disc's local offset -771, -8500, -745.
+  DOS runs tasks once a frame, so the drift goes with the frame rate; the port runs these steps at a fixed 52 a
+  second, which matches the dumps (port at the same tick: helicopter -6096, -15297, disc 814, 752 from it; DOS 796,
+  718). The 3D looks keep the float step.
 
 ## Differences kept
 
