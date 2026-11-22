@@ -2801,8 +2801,7 @@ def gait_sounds(c):
 def star_in_mw2prm(c):
     """agent U: the star configuration lives where the original keeps it - MW2PRM.CFG record 0x840dc at +0x10 (formation,
     slot, maximum, size, tonnage, 3 x {mech, loadout[16], pilot[16]}; FUN_0003a810 / FUN_0003a850, written at launch,
-    read at every shell start). The DOS-written file's star (Mad Dog, MIKE, Friend 1 / 2) loads; a change is written
-    back in place, the rest of the file untouched"""
+    read at every shell start). The fixture's pilots load and changing the formation writes it in place."""
     mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
     d = os.path.join(OUT, 'star_in_mw2prm')
     os.makedirs(d, exist_ok=True)
@@ -2810,15 +2809,29 @@ def star_in_mw2prm(c):
     if not os.path.exists(src):
         c.note('no MW2PRM.CFG in %s: skipped' % mech2)
         return
-    shutil.copy(src, os.path.join(d, 'MW2PRM.CFG'))
+    dest = os.path.join(d, 'MW2PRM.CFG')
+    with open(src, 'rb') as f:
+        old = bytearray(f.read())
+    c(len(old) == 536, 'the DOS params file is 536 bytes', str(len(old)))
+    if len(old) != 536:
+        return
+    # The disc's stock file leaves the current-record flag clear. Stage the existing-star round trip with it set.
+    struct.pack_into('<I', old, 0xc, 1)
+    with open(dest, 'wb') as f:
+        f.write(old)
     e = dict(os.environ, MW2_STAR_PRM=d, **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'))
     out = subprocess.run([os.path.join(os.path.dirname(GLVIEW), 'mw2'), mech2], env=e, capture_output=True, text=True, timeout=120).stdout
     lines = [l for l in out.splitlines() if l.startswith('star ')]
-    old, new = open(src, 'rb').read(), open(os.path.join(d, 'MW2PRM.CFG'), 'rb').read()
+    with open(dest, 'rb') as f:
+        new = f.read()
     c(len(lines) == 2, 'loaded, saved, reloaded', out[-300:])
     if len(lines) == 2:
         f0 = int(lines[0].split()[2])
-        c('MIKE' in lines[0] and 'Friend 1' in lines[0], 'the DOS-written star (pilot names) loads', lines[0])
+        slots = lines[0].split(' | ')[1:]
+        stored_names = [bytes(old[p:p + 15]).split(b'\0', 1)[0].decode('latin-1')
+                        for p in (0x38, 0x5c, 0x80)]
+        c(len(slots) == 3 and all(not name or slot.split(' ', 2)[-1] == name for slot, name in zip(slots, stored_names)),
+          'the DOS star loads the fixture pilots', lines[0])
         c(int(lines[1].split()[2]) == (f0 + 1) % 6, 'the changed formation comes back', lines[1])
     diff = [i for i in range(min(len(old), len(new))) if old[i] != new[i]]
     c(len(new) == 536 and diff == [0x10], 'only the formation word changed (536 bytes)', '%d bytes, diff at %s' % (len(new), diff[:8]))
@@ -4509,7 +4522,9 @@ def target_cycle_unit_rules(c):
     r = c.run(secs=25.2, keys=keys, dump='/0.1', nostart=True)
     seq = [(r.at(t + 0.2)['tgt'], r.at(t + 0.2)['thing']) for t, _ in keys]
     c([x[0] for x in seq] == [0, 2, 3, 0, 2, 3] and all(x[1] == -1 for x in seq), 't: Nova, Jenner, Firemoth, round again (not the resting actor 1)', str(seq))
-    r = c.run('_q', secs=4, keys=[(2, 'q'), (2.5, 'q'), (3, 't')], dump='/0.1', nostart=True, env={'MW2_TEST_AIM': '1,30000,0'})
+    # The 300 m staging can wake this actor. Hold the power state the selector test is meant to exercise.
+    r = c.run('_q', secs=4, keys=[(2, 'q'), (2.5, 'q'), (3, 't')], dump='/0.1', nostart=True,
+              env={'MW2_TEST_AIM': '1,30000,0', 'MW2_TEST_APOWER': '1.9:1:0'})
     a, b, t = r.at(2.2)['tgt'], r.at(2.7)['tgt'], r.at(3.2)['tgt']
     c(a == -1 and b == 1, 'q on the resting Firemoth: refused, then taken by the second q', '%d %d' % (a, b))
     c(t != 1 and t >= 0, 't from it: on to the next live unit', str(t))
