@@ -898,6 +898,20 @@ def aquiline_wreck_light_and_debris(c):
 
 
 @sequence
+def distant_navigation_beacons(c):
+    """At 1920x1080 the animation's bright phase remains legible at 200 m and 600 m."""
+    cases = (
+        ('AQUASCN1', '-76106,-32190,2330', 180, (0.48, 0.40, 0.52, 0.45)),
+        ('CYANSCN1', '-84795,130810,4352', 0, (0.48, 0.46, 0.52, 0.49)),
+    )
+    for scene, start, heading, crop in cases:
+        r = c.run('_' + scene, secs=1, mission=scene, nostart=True, dos_look=True, mech='maddog/mdg00std',
+                  size='1920x1080', shots=[(0.75, 'beacon')], env={'MW2_START': start, 'MW2_START_HEADING': heading})
+        pixels = count_px(r.shots['beacon'], lambda red, green, blue: (red > 200) & (green < 50) & (blue < 50), crop)
+        c(pixels >= 20, scene + ' beacon is visible at range', '%d bright red pixels' % pixels)
+
+
+@sequence
 def eject_mission_failed(c):
     """ejecting (state 5): the star fails when the end flag is set, 0x38e ticks on (DOS 0x16e80)"""
     r = c.run(secs=22, keys=[(10, 'ctrl+alt+e')], env={'MW2_RADIO_TRACE': '1'})
@@ -3131,6 +3145,46 @@ def titanium_sky_scrub(c):
 
 
 @sequence
+def elemental_fires_both_weapons(c):
+    """The DOS Elemental has working arm weapons even though its MEK gives those arms zero internal structure."""
+    r = c.run(secs=5, mech='elementl/ele00std', nostart=True, dos_look=True, dump='/0.1',
+              hold=[(1, 1.5, 'space'), (2, 2.5, 'space')])
+    c(r.at(1.8).get('fired') == 1, 'the first press fires the laser')
+    c(r.last.get('fired') == 2 and r.last['w'][1][2] < r.at(0.5)['w'][1][2], 'the second press fires the machine gun')
+
+
+@sequence
+def targeting_waits_for_startup(c):
+    keys = [(1, 'e'), (2, 't'), (3, 'q'), (4, 'n'), (5, 'a'), (8.5, 't')]
+    r = c.run(secs=10, mission='ORANSCN1', keys=keys, dump='/0.2')
+    offline = [st for st in r.states if st.get('pow') == 1]
+    c(offline and all(st['tgt'] == st['thing'] == st['nav'] == -1 for st in offline),
+      'target and nav selectors stay clear while starting up')
+    c(r.last.get('thing', -1) >= 0 or r.last.get('tgt', -1) >= 0, 'T selects a target once online')
+
+
+@sequence
+def golden_spade_palace_guards_stay_inside(c):
+    """The original DOS mission spawns the palace guards inside the shield sphere."""
+    for actor, spawn in ((3, (0, -7600)), (4, (7600, 0)), (5, (7600, -7600))):
+        r = c.run('_%d' % actor, secs=2, mission='GOLDSCN1', dos_look=True, env={'MW2_WATCH_ACTOR': actor})
+        c(r.states and all((st.get('w_x'), st.get('w_z')) == spawn for st in r.states),
+          'guard %d stays at its mission start after collision updates' % actor,
+          str((r.last.get('w_x'), r.last.get('w_z'))))
+
+
+@sequence
+def golden_spade_satellite_shield_stays_blue(c):
+    r = c.run(secs=2, mission='GOLDSCN1', dos_look=True, nostart=True, size='1024x768',
+              keys=[(0.3, 'f3')], shots=[(1.5, 'shield')], env={'MW2_START': '0,15000,5000'})
+    dome = (0.43, 0.67, 0.57, 0.78)
+    blue = count_px(r.shots['shield'], lambda r, g, b: (r < 60) & (g < 100) & (b > 110), dome)
+    red = count_px(r.shots['shield'], lambda r, g, b: (r > 170) & (g < 60) & (b < 60), dome)
+    c(blue > 2000 and red == 0, 'the shield marker stays blue across its footprint',
+      '%d blue, %d red pixels' % (blue, red))
+
+
+@sequence
 def hidden_mechs_playable(c):
     """the shell's easter egg (FUN_000295c0: pilot "Enzo" 18 chassis, "Hobbes" 17, "Calvin" 16) is unlocked for good, in
     Instant Action and the campaigns' Mech Lab: Elemental, Tarantula and Battle Master IIC each load and walk in a mission"""
@@ -3613,18 +3667,29 @@ def userstar_with_mate(skel='timbrwlf', loadout='tbr00std'):
 
 
 @sequence
+def golden_spade_starmate_hits_low_turret(c):
+    star = bytearray(userstar_with_mate('maddog', 'mdg00std'))
+    mate = star.index(b'GPS\0', star.index(b'GPS\0') + 4)
+    struct.pack_into('<H', star, mate + 10, 29)  # MADDOG in the DOS archive
+    r = c.run(secs=18, mission='GOLDSCN1', dos_look=True, nostart=True, files={'USERSTAR.BWD': star},
+              keys=[(10, 'e'), (10.5, 'ctrl+f2'), (11, '1')],
+              env={'MW2_START': '1932,-59000,200', 'MW2_START_HEADING': 0, 'MW2_AI_AIM_TRACE': 1,
+                   'MW2_DEBUG_INVULN': 1})
+    c(r.msg_time('Point 2 attacking your target') is not None, 'the starmate accepts Attack My Target')
+    c(re.search(r'aiaim .* actor 0 .* pitch -[0-9]', r.out) is not None and 'hits Turret (GOLDENT1)' in r.out,
+      'the starmate pitches down and lands a shot on the turret')
+
+
+@sequence
 def unit_state_messages(c):
-    """0x10031870 / 0x10031810 posted by units' state changes. A starmate (its group led by the player, 0x10018f90)
-    destroyed: 0x10016280 -> 0x10031810(6, its point +0xc): "Point 2" "destroyed" (voices 264, 0x23). An enemy unit back
-    up after a shutdown or a node's power-down (object +0x14 bit 0x10, set in state 3): on reaching state 2 (0x1001a180
-    case 2) with the player up (+0x15 & 0x20) 0x1a "Enemy power-up detected" (74); its start-up (state 0 -> 1,
-    0x1001ab71) sounds NONPSTRT 0x104 at the mech for an enemy once the player is up (MECTURX2 for others). TEST ONLY:
-    MW2_TEST_APOWER powers actor 0 (an enemy) down at 10 s and wakes it at 12 s: online 0x43e + rand(0x16a) ticks later"""
-    r = c.run(secs=22, env={'MW2_TEST_APOWER': '10:0:0,12:0:1', 'MW2_SFX_LOG': '1'})
+    """Deaths are announced once, and an enemy wake is announced when its radar contact appears."""
+    r = c.run(secs=22, env={'MW2_TEST_APOWER': '10:0:0,12:0:1', 'MW2_SFX_LOG': '1', 'MW2_SFX_SIMCLOCK': '1'})
     m = re.search(r'MSGV now=(\d+) voice=74 Enemy power-up detected', r.out)
-    c(m is not None and 12000 + 0x43e * 1000 / 182 - 100 <= int(m.group(1)) <= 12000 + (0x43e + 0x16a) * 1000 / 182 + 100,
-      '"Enemy power-up detected" (74) once the woken enemy is online', m.group(0) if m else 'none')
+    c(m is not None and 11900 <= int(m.group(1)) <= 12100,
+      '"Enemy power-up detected" (74) at the beginning of startup', m.group(0) if m else 'none')
     c(len(re.findall(r'voice=74 ', r.out)) == 1, 'said once')
+    audio = re.search(r'SFXLOG (\d+\.\d+) snd 74 .* voice', r.out)
+    c(audio is not None and 11.9 <= float(audio[1]) <= 12.1, 'the alert plays immediately over the radio queue')
     r = c.run('_mate', secs=14, files={'USERSTAR.BWD': userstar_with_mate()}, env={'MW2_DEBUG_SPAWN': '1'})
     sp = [l for l in r.out.splitlines() if l.startswith('spawn ')]
     mate = next((i for i, l in enumerate(sp) if l.split()[1].upper() == 'USERSTAR'), None)
@@ -4606,6 +4671,20 @@ def jets_while_turning(c):
     f0, f1 = r.at(UP + 11.2)['vy'], r.at(UP + 11.7)['vy']   # released, still rising: the planet's -g (ORANSCN1 0.6 g)
     c(v1 < v0 and abs((v1 - v0) - (f1 - f0)) < 0.05, 'then J + legs while rising: -g as with the jets off (no lift)',
       'vy %.2f -> %.2f, released %.2f -> %.2f' % (v0, v1, f0, f1))
+
+
+@sequence
+def directional_jets_steer_in_flight(c):
+    hold = [(0.5, 1.7, 'j'), (1.7, 4.5, 'home'), (2.5, 3.1, 'left')]
+    r = c.run(secs=5, nostart=True, dos_look=True, mission='ORANSCN1', mech='summoner/smn00std',
+              hold=hold, dump='/0.1')
+    if not c(r.states, 'flight state recorded'):
+        return
+    before, turning, after = (r.at(t) for t in (2.4, 3.1, 3.8))
+    c(turning['y'] > turning['gnd'] + 200 and abs(turning['heading'] - before['heading']) > 35,
+      'the mech rotates while the directional jets are firing in the air')
+    c(abs(turning['x'] - before['x']) > 100 and abs(after['x'] - turning['x']) > 150,
+      'directional thrust redirects travel during the turn')
 
 
 @sequence

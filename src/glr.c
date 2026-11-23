@@ -686,11 +686,15 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 face[0] = e1[1] * e2[2] - e1[2] * e2[1];
                 face[1] = e1[2] * e2[0] - e1[0] * e2[2];
                 face[2] = e1[0] * e2[1] - e1[1] * e2[0];
-                if (batch < GLR_SLOTS && (q->color & 0xff) == GLR_SLOT_INSIGNIA && strcmp(part->model_name, "V_BDROPX") == 0) {
-                    /* This wreck's two insignia sit up to 316 cm inside its slanted hull. DOS draws them over the
-                     * hull in polygon order. Move just the rendered decals clear of the hull for depth-buffered draws. */
-                    float len = sqrtf(face[0] * face[0] + face[1] * face[1] + face[2] * face[2]);
-                    if (len > 0.0f) for (int c = 0; c < 3; c++) decal_offset[c] = face[c] * (-325.0f / len);
+                if (batch < GLR_SLOTS && (q->color & 0xff) == GLR_SLOT_INSIGNIA) {
+                    /* Lift decals with recessed geometry clear of their surfaces for depth-buffered draws. */
+                    float offset = 0.0f;
+                    if (strcmp(part->model_name, "V_BDROPX") == 0) offset = 325.0f;
+                    else if (strcmp(part->model_name, "DW1DECLR") == 0) offset = 12.0f;
+                    if (offset > 0.0f) {
+                        float len = sqrtf(face[0] * face[0] + face[1] * face[1] + face[2] * face[2]);
+                        if (len > 0.0f) for (int c = 0; c < 3; c++) decal_offset[c] = face[c] * (-offset / len);
+                    }
                 }
                 int wface = 0;   /* face[] already in world (game) coordinates */
                 if (r->dos && !model->extended && part->has_rot) {

@@ -40,6 +40,8 @@ static inline float sfx_pan(int p)
  * by voice instead. */
 void sfx_set_gains(sfx *s, float effects, float voice);
 void sfx_play_voice(sfx *s, int index, float volume);
+/* Play the alert now and resume any other speech after it finishes. */
+void sfx_play_priority_voice(sfx *s, int index, float volume);
 int  sfx_voice_audible(sfx *s, int index);   /* the VOICE slider up and the clip present */
 /* Play at a world position relative to the listener (cm; listener facing yaw degrees). */
 void sfx_play_at(sfx *s, int index, float dx, float dz, float listener_yaw);

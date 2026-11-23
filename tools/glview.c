@@ -2197,7 +2197,7 @@ static void scene_anim(glr *r)
  *    per vertex in the 3D editions (Gouraud), flat here per polygon at its mean height.
  * Types 0x30 / 0x70 are skipped (0x100040b0), as are destroyed units. Drawn by the HUD's 2D primitives, lowest first. */
 static const int SAT_COL[13] = {0xe, 0xa, 0x6, 0xf, 0xb, 0xf5, 0x2, 0x3, 0xf9, 0xff, 0xf0, 0x1, 0x2};
-enum { SAT_SHADED = -1, SAT_BITMAP = -2, SAT_SILHOUETTE = -3 };
+enum { SAT_SHADED = -1, SAT_BITMAP = -2, SAT_SILHOUETTE = -3, SAT_FLAT = -4 };
 typedef struct { float y; int part_src, part; int side_col; int poly; } sat_item;   /* poly -1 for a card; side_col is a mode or palette index */
 /* a part's vertex in the world (as msim's part_vertex) */
 static void sat_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3])
@@ -2237,7 +2237,9 @@ static int sat_unit_visible(int src, int sky_root)
 }
 static int sat_thing_visible(int thing)
 {
-    return strcasecmp(g_sim.bld[thing].name, "none") != 0;
+    const char *name = g_sim.bld[thing].name;
+    return strcasecmp(name, "none") != 0 &&
+           !(strcasecmp(g_sim.scene, "GOLDSCN1") == 0 && strcasecmp(name, "Shield-Generator") == 0);
 }
 static int sat_rubble_part(const mech3d *world, int part)
 {
@@ -2337,6 +2339,8 @@ static void sat_draw(int w, int h)
                 if (thing >= 0 && g_sim.bld[thing].hp <= 0) col = SAT_SILHOUETTE;
                 else if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
                 else if (sat_rubble_part(m, k)) col = SAT_SILHOUETTE;
+                else if (strcmp(pp->rec, "GOLDARE8") == 0 && strcmp(pp->model_name, "TL1SHIEL") == 0)
+                    col = SAT_FLAT;   /* The force shield uses its blue palette colours on the map. */
                 else if (kd & 0x200) col = SAT_COL[5];
                 else if (kd & 0x100) col = SAT_COL[1];
                 else if (kd & 0x400) col = SAT_COL[6];
@@ -2403,16 +2407,19 @@ static void sat_draw(int w, int h)
             for (c3 = 0; c3 < 3; c3++) { e1[c3] = pv[1][c3] - pv[0][c3]; e2[c3] = pv[2][c3] - pv[0][c3]; }
             ny = e1[2] * e2[0] - e1[0] * e2[2];
             if (ny >= 0) continue;   /* faces turned away from the sky (the port's winding: as the cockpit frame's cull) */
-            if (col == SAT_SHADED) {   /* shaded by height: one polygon at a time (its own colour) */
-                int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : (q->color & 0xf00) >> 4, shade;
+            if (col == SAT_SHADED || col == SAT_FLAT) {
+                int colour = (q->color >> 4) & 0xff;
                 float xy[6];
-                my /= (float)q->n;
-                shade = (int)floorf(16.0f * my / 6400.0f);
-                if (shade < 0) shade = 0; else if (shade > 15) shade = 15;
+                if (col == SAT_SHADED) {
+                    int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : colour;
+                    int shade = (int)floorf(16.0f * my / ((float)q->n * 6400.0f));
+                    if (shade < 0) shade = 0; else if (shade > 15) shade = 15;
+                    colour = (grp & 0xf0) | shade;
+                }
                 for (t = 1; t + 1 < q->n; t++) {
                     const int id[3] = {0, t, t + 1};
                     for (c3 = 0; c3 < 3; c3++) { xy[c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; xy[c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
-                    hud_tris(g_hud, xy, 1, HP((grp & 0xf0) | shade));
+                    hud_tris(g_hud, xy, 1, HP(colour));
                 }
                 continue;
             }
@@ -2643,6 +2650,11 @@ static void hud_message_v2(const char *m, int voice, int suffix)
         return;
     }
     if (getenv("MW2_VOICE_TEXT")) hud_message_ex(txt, 0x712, 0x32);
+    if (v1 == 74 && !v2) {   /* Enemy power-up detected: play as the contact appears on radar. */
+        sfx_play_priority_voice(g_sfx, v1, 0.9f);
+        g_sim.radio_busy = 1;
+        return;
+    }
     pri = v1 ? vq_rec(v1, 1) : -1;   /* +0x18 from the first voice's record (param -1) */
     lim = v1 ? vq_rec(v1, 2) : -1;
     for (k = g_vq_phase ? 1 : 0, at = g_vq_n; k < g_vq_n; k++) {
@@ -5009,6 +5021,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
+            g_tgt_sel = g_tgt_thing = g_nav_sel = -1;
             g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_jet_fire = 0; g_pl_anim_held = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_pl_reset_legs = 1; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_masc_key = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
@@ -5776,6 +5789,12 @@ static void draw_snow(float x, float y, float w, float h)
             for (tx = x; tx < x + w; tx += sw) hud_draw(g_hud, &g_hs_snow[f], tx, ty, NULL);
     } else hud_draw(g_hud, &g_hs_snow[f], x, y, NULL);
     hud_clip_off(g_hud);
+}
+
+static int targeting_online(void)
+{
+    return !g_sim.player_unit.destroyed && !g_sim.player_unit.shutdown &&
+           (g_sim.now >= g_sim.player_online_at || getenv("MW2_NO_STARTUP"));
 }
 
 /* TARGET_AT_RETICLE (engine 0x1001d870): the unit the player's aim ray last struck (msim reticle_actor / reticle_bld,
@@ -6976,6 +6995,7 @@ int main(int argc, char **argv)
                     int best = -1, nxt = A("NEXT_TARGET");
                     float bd = 1e30f;
                     int had = g_tgt_sel * 65536 + g_tgt_thing;
+                    if (!targeting_online()) continue;
                     if (A("TARGET_AT_RETICLE")) target_at_reticle();   /* keeps the target when nothing may be taken */
                     else if (!A("RESET_TARGETTING")) g_tgt_any = 0;   /* 0x1001cca0: the cycling keys clear DAT_1024c8b0 */
                     if (A("RESET_TARGETTING")) { g_tgt_sel = -1; g_tgt_thing = -1; }   /* 0x1001ce80: DAT_1024c8b0 left as it is */
@@ -7015,6 +7035,7 @@ int main(int argc, char **argv)
                     if (A("RESET_TARGETTING") || (A("TARGET_AT_RETICLE") ? g_tgt_sel * 65536 + g_tgt_thing != had : had != -1)) g_nav_sel = -1;
                 }
                 else if (g_world && g_sim_ok && (A("NEXT_NAVPOINT") || A("PREV_NAVPOINT")) && g_sim.nav_count > 0) {
+                    if (!targeting_online()) continue;
                     /* nothing selected yet (the player's selector +0xdc = 0x1000 at the mission load, 0x100235e0
                      * at 0x100237fe): 0x1001cca0 restarts at the first entry going forward whatever the key (step 1), so
                      * NEXT and PREV both pick the first selectable nav point - Nav Alpha on TNJ1 (DOSBox: nothing in
@@ -7060,6 +7081,7 @@ int main(int argc, char **argv)
                     else { pu2->shutdown = 1; pu2->manual_down = 1; g_throttle = 0; hud_message_v("Shutting down", 14); if (g_sfx) { float p3[3]; snd_player_pos(p3); snd_at(0xf2, p3, 0, snd_cockpit()); } }   /* message 0xd {14, "Shutting down"}; MECSHTD1 0xf2 at the mech (0x1001b060, positional, halved in the cockpit 0x1001b04e; DOSBox: at s, not on a heat shutdown 0x10016054) */
                 }
                 else if (g_world && g_sim_ok && A("TOGGLE_AUTOPILOT") && g_pilot) {
+                    if (!targeting_online()) continue;
                     g_autopilot = !g_autopilot;   /* 0x1001a4b5: toggles whether or not there is a nav (none: no steering) */
                     hud_message_v2(g_autopilot ? "Autopilot engaged." : "Autopilot disengaged.", 65, g_autopilot ? 80 : 84);
                 }
@@ -7868,8 +7890,7 @@ int main(int argc, char **argv)
                     const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
-                         * the jets; engine physics 0x10019310, DOS 0x26990): while jetting and the legs are not turning, the
-                         * FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
+                         * the jets): while jetting, the FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
                          * along it - forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile.
                          * The engine has ONE velocity vector (+0xf4 / +0xfc): the thrust and the drag act on all of it, the
                          * walking part included, so the terminal speed is L = 2.5 x the top walking speed whether the jets
@@ -7890,16 +7911,13 @@ int main(int argc, char **argv)
                             jvx += sinf(h0) * g_pl_speed - wx; jvz += cosf(h0) * g_pl_speed - wz;
                         }
                         g_pl_free_h = g_pl_free ? g_pl.heading : 1e9f;
-                        if (legs_turning) l2 = r2 = f2 = b2 = 0;
                         if (f2) { dx += sinf(hh); dz += cosf(hh); }
                         if (b2) { dx -= sinf(hh); dz -= cosf(hh); }
                         if (r2) { dx += cosf(hh); dz -= sinf(hh); }
                         if (l2) { dx -= cosf(hh); dz += sinf(hh); }
                         float vx = (wx + jvx) / 182.0f, vz = (wz + jvz) / 182.0f;   /* the velocity before this frame's step */
                         combat_jets_forward(&g_sim.player_unit, (f2 || b2 || l2 || r2) && jet, dt, &dv);
-                        /* engine 0x100196cc..0x10019711: with the jets firing and the leg input +0xc not 0 (|+0xc| >=
-                         * 1e-7, 0x102473bc) no directional thrust and no lift - the vertical acceleration 0, -g while
-                         * rising (combat_jets: jet_forward); the jets only double the turn rate (above) */
+                        /* A turn without a directional jet uses fuel to rotate, with no lift. */
                         if (legs_turning && jet) g_sim.player_unit.jet_forward = 1;
                         jvx += dx * dv * 182.0f; jvz += dz * dv * 182.0f;                      /* cm/tick -> cm/s */
                         if (dv > 0) {   /* the drag inside the directional branch (0x100194fa..0x10019618; DOS 0x26ba2), cm/tick:
@@ -8036,7 +8054,7 @@ int main(int argc, char **argv)
                         int q, n2 = g_actor_count;
                         for (q = 0; q < (int)(sizeof PRESS / sizeof PRESS[0]); q++) {
                             int now_on = H(PRESS[q]);
-                            if (now_on && !was[q] && !g_sim.ending) {
+                            if (now_on && !was[q] && !g_sim.ending && (q < 3 || targeting_online())) {
                                 switch (q) {
                                 case 0: if (g_sim.player_unit.weapon_count > 0) g_sel_weapon = weapon_next(&g_sim.player_unit, g_sel_weapon, 0, 0);   /* panel order (0x10044030) */
                                         if (g_sfx) sfx_play(g_sfx, 0xfd, SFX_VOL(0x32), 0.0f);   /* engine 0x1001adf0: the selector click (0x1001ae5a / 0x1001ae96: volume 0x32, centred) */
@@ -8811,11 +8829,25 @@ int main(int argc, char **argv)
                     const mech3d_part *pp = &wm->parts[q2];
                     const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
                     int pk, has_pt = 0;
-                    float pr = 0, ddx, ddy, ddz;
+                    float pr = 0, range = 0;
                     if (!o || pp->hidden || o->vert_count < 1) continue;
+                    int beacon = pp->moving && o->vert_count == 4 && o->poly_count == 4 && strcmp(pp->model_name, "S_1DUMMY") == 0;
+                    float centre[3] = {(float)pp->pos[0], (float)pp->pos[1], (float)pp->pos[2]};
                     for (pk = 0; pk < o->poly_count && !has_pt; pk++) has_pt = o->polys[pk].n == 1;
-                    if (!has_pt) continue;
-                    if (g_view_far > 0) {
+                    if (!has_pt && !beacon) continue;
+                    if (beacon) {
+                        /* Some beacon meshes are offset metres from the node that carries them. */
+                        float corner[4][3];
+                        memset(centre, 0, sizeof centre);
+                        for (pk = 0; pk < 4; pk++) {
+                            sat_vertex(pp, &o->verts[pk], corner[pk]);
+                            for (int axis = 0; axis < 3; axis++) centre[axis] += corner[pk][axis] * 0.25f;
+                        }
+                        for (pk = 0; pk < 4; pk++) {
+                            float dx = corner[pk][0] - centre[0], dy = corner[pk][1] - centre[1], dz = corner[pk][2] - centre[2];
+                            pr = fmaxf(pr, dx * dx + dy * dy + dz * dz);
+                        }
+                    } else if (g_view_far > 0) {
                         /* the object's view-distance cull (DOS 0x3f500: its position and radius wholly beyond the planet's
                          * VIEW far, not drawn) - the dots had shown across the whole map, before the buildings (user report,
                          * Wolf 3, 1.1.37) */
@@ -8823,38 +8855,38 @@ int main(int argc, char **argv)
                             const float r2 = (float)o->verts[pk].x * o->verts[pk].x + (float)o->verts[pk].y * o->verts[pk].y + (float)o->verts[pk].z * o->verts[pk].z;
                             if (r2 > pr) pr = r2;
                         }
-                        pr = sqrtf(pr);
-                        ddx = (float)pp->pos[0] - v.eye[0]; ddy = (float)pp->pos[1] - v.eye[1]; ddz = (float)pp->pos[2] - v.eye[2];
-                        if (ddx * ddx + ddy * ddy + ddz * ddz > (g_view_far + pr) * (g_view_far + pr)) continue;
                     }
-                    for (pk = 0; pk < o->poly_count && n < GLR_MAX_SPRITES; pk++) {
+                    if (g_view_far > 0 || beacon) {
+                        pr = sqrtf(pr);
+                        float dx = centre[0] - v.eye[0], dy = centre[1] - v.eye[1], dz = centre[2] - v.eye[2];
+                        range = sqrtf(dx * dx + dy * dy + dz * dz);
+                        if (g_view_far > 0 && range > g_view_far + pr) continue;
+                    }
+                    /* Use the animated beacon's palette colour on a small, depth-tested card once the
+                     * mesh is below three pixels at the 640x480 reference size. */
+                    const float dot_scale = (0.75f / 480.0f) / fmaxf(g_zoom, 1.0f);
+                    const float beacon_radius = 3.0f * range * dot_scale;
+                    if (beacon && beacon_radius <= pr) continue;
+                    int polygons = beacon ? 1 : o->poly_count;
+                    for (pk = 0; pk < polygons && n < GLR_MAX_SPRITES; pk++) {
                         const wtb_poly *pl = &o->polys[pk];
-                        const wtb_vertex *vv;
                         int ci;
-                        if (pl->n != 1) continue;
+                        if (!beacon && pl->n != 1) continue;
                         ci = (pl->color >> 12) == 0 ? (pl->color >> 4) & 0xff : pl->color >> 8;
                         if (ci == 0) continue;   /* (the cycle's dark step: off) */
-                        vv = &o->verts[pl->idx[0]];
                         if (!dot[ci].rgba) {
                             dotpx[ci] = (uint32_t)g_scene.palette[ci][0] | (uint32_t)g_scene.palette[ci][1] << 8 | (uint32_t)g_scene.palette[ci][2] << 16 | 0xff000000u;
                             dot[ci].w = dot[ci].h = 1; dot[ci].rgba = &dotpx[ci];
                         }
-                        if (pp->has_rot) {
-                            const float *R = pp->rot;
-                            spr[n].pos[0] = R[0] * vv->x + R[1] * vv->y + R[2] * vv->z + (float)pp->pos[0];
-                            spr[n].pos[1] = R[3] * vv->x + R[4] * vv->y + R[5] * vv->z + (float)pp->pos[1];
-                            spr[n].pos[2] = R[6] * vv->x + R[7] * vv->y + R[8] * vv->z + (float)pp->pos[2];
+                        if (beacon) {
+                            /* Advance just past the beacon's own mesh to avoid fighting it for depth. */
+                            for (int axis = 0; axis < 3; axis++)
+                                spr[n].pos[axis] = centre[axis] + (v.eye[axis] - centre[axis]) * (pr / range);
+                            spr[n].half_w = spr[n].half_h = beacon_radius;
                         } else {
-                            const float cy = cosf(pp->yaw * 3.14159265f / 180.0f), sy = sinf(pp->yaw * 3.14159265f / 180.0f);
-                            spr[n].pos[0] = cy * vv->x + sy * vv->z + (float)pp->pos[0];
-                            spr[n].pos[1] = (float)vv->y + (float)pp->pos[1];
-                            spr[n].pos[2] = -sy * vv->x + cy * vv->z + (float)pp->pos[2];
-                        }
-                        {   /* a dot: one pixel of the 640 x 480 screen (the DOS look's VESA mode; the vertical tangent 0.75 over
-                             * 240 rows) at any distance - a pinprick, as the engines plot it; the port's 1.2 m card had grown
-                             * to large squares close by (user report, 1.1.37) */
+                            sat_vertex(pp, &o->verts[pl->idx[0]], spr[n].pos);
                             const float ex = spr[n].pos[0] - v.eye[0], ey = spr[n].pos[1] - v.eye[1], ez = spr[n].pos[2] - v.eye[2];
-                            spr[n].half_w = spr[n].half_h = 0.5f * sqrtf(ex * ex + ey * ey + ez * ez) * (0.75f / 240.0f) / (g_zoom > 1 ? g_zoom : 1.0f);
+                            spr[n].half_w = spr[n].half_h = sqrtf(ex * ex + ey * ey + ez * ez) * dot_scale;
                         }
                         spr[n].tex = &dot[ci];
                         spr[n].bb = 0; spr[n].quad = 0; spr[n].ti = 0; spr[n].wire_code = 0; spr[n].has_tri = 0;

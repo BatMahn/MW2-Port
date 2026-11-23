@@ -577,7 +577,7 @@ int combat_fire(combat_unit *u, combat_unit *t, float distance, float rel_angle,
         const sim_weapon spec = weapon_spec(cw->weapon), *sw = &spec;
         float range = range_cm(cw->weapon), p;
         /* trigger */
-        if (cw->state == CW_READY && !u->shutdown && u->internal[cw->location] > 0 && distance <= range &&
+        if (cw->state == CW_READY && !u->shutdown && !u->loc_gone[cw->location] && distance <= range &&
             !(u->hold_fire_above > 0 && u->heat > u->hold_fire_above)) {
             start_volley(u, cw);
         }
@@ -638,10 +638,12 @@ void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
     /* a human pilot (0x100437a0 / 0x10044440): a weapon fires on the press of its trigger, not while it is held (a
      * repeating weapon re-fires from the volley's end, see release_due), and with no range check */
     if (u->human) mask &= u->fire_edge;
+    /* A stock DOS Elemental starts with zero internal structure in its weapon locations.
+     * A location is disabled when damage marks it gone. */
     for (i = 0; i < u->weapon_count; i++) {
         combat_weapon *cw = &u->weapons[i];
         if (i < 32 && !(mask & (1u << i))) continue;
-        if (cw->state == CW_READY && cw->ammo != 0 && u->internal[cw->location] > 0 && !u->loc_gone[cw->location] &&
+        if (cw->state == CW_READY && cw->ammo != 0 && !u->loc_gone[cw->location] &&
             (u->human || distance <= range_cm(cw->weapon)) &&
             /* AI (0x100232b0): fire a weapon only if heat + its heat stays under 65 */
             !(u->hold_fire_above > 0 && u->heat + weapon_spec(cw->weapon).heat >= u->hold_fire_above))
@@ -655,7 +657,7 @@ static void ai_next_weapon(combat_unit *u)
     int k, n = u->weapon_count, i = u->ai_sel;
     for (k = 1; k <= n; k++) {
         int j = (i + k) % n;
-        if (u->weapons[j].state >= 0 && !u->loc_gone[u->weapons[j].location] && u->internal[u->weapons[j].location] > 0) { u->ai_sel = j; break; }
+        if (u->weapons[j].state >= 0 && !u->loc_gone[u->weapons[j].location]) { u->ai_sel = j; break; }
     }
 }
 
@@ -669,7 +671,7 @@ static int ai_choose(combat_unit *u, float distance, unsigned (*rng)(void *ctx, 
         int i = u->ai_sel;
         combat_weapon *cw = &u->weapons[i];
         const sim_weapon sw = weapon_spec(cw->weapon);
-        int usable = cw->state >= 0 && u->internal[cw->location] > 0 && !u->loc_gone[cw->location];
+        int usable = cw->state >= 0 && !u->loc_gone[cw->location];
         /* 0x100151a0: 3 inside the minimum range (+0x3c), 2 inside the range, 1 at it, 0 beyond: fires on 1-2 */
         if (usable && distance >= (float)sw.field3c && distance <= range_cm(cw->weapon) &&
             sw.heat + u->heat < 65.0f && cw->state == CW_READY && cw->ammo != 0 &&

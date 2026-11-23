@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.56 (2026-11-23)
+
+- **Dire Wolf and Elemental.** The Dire Wolf's right-arm Clan decal clears the armour, and both stock Elemental
+  weapons fire with the normal trigger.
+- **Cockpit and audio.** Target selection waits until the player's mech is online. The enemy power-up alert plays
+  when the contact appears on radar. It pauses any speech already playing, then lets it resume.
+- **Golden Spade.** The palace guards stay at their mission-defined positions inside the shield. Satellite View
+  hides the Shield-Generator and shows the Force Shield in blue.
+- **Starmates and jump jets.** Starmates aim at a target's body, including low turrets. Directional jets keep
+  applying thrust while turning in flight.
+- **Navigation lights.** The Aquiline Fire wreck beacon and the Cold Crescent monorail and base lights stay legible
+  at range with a minimum apparent size that scales with display height.
+
 ## v1.1.55 (2026-11-22)
 
 - **Classic Mac on OS X.** Use the native Navigation Services folder picker at startup with matching reply

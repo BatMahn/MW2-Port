@@ -704,20 +704,28 @@ static unsigned rnd_ms(unsigned *x);
 static void ai_power_down(msim *s, int i) { if (s->powered_down) s->powered_down[i] = 1; }
 /* a unit's state 0 -> 1 (0x1001ab71): an enemy (0x10019040 == 1) NONPSTRT 0x104 only once the player is up (+0x15 &
  * 0x20), any other MECTURX2 0xf7 - both at the mech */
-static void unit_startup_sound(msim *s, int i)
+static void unit_startup(msim *s, int i)
 {
     float p3[3] = {(float)s->actors[i].mech.origin[0], s->units[i].y, (float)s->actors[i].mech.origin[2]};
-    int enemy = (s->actors[i].friendly ? 0 : s->actors[i].alliance) == 1;
-    if (!s->on_sound) return;
-    if (!enemy) s->on_sound(s->shot_user, 0xf7, p3);
-    else if (s->now >= s->player_online_at && !s->player_unit.destroyed) s->on_sound(s->shot_user, 0x104, p3);   /* +0x15 & 0x20: set at state 2, kept through a shutdown (state 3), cleared in states 0 / 4 */
+    const world_actor *ac = &s->actors[i];
+    int enemy = !ac->friendly && ac->alliance == 1;
+    if (!s->armed[i] || s->units[i].destroyed) return;
+    if (!enemy) {
+        if (s->on_sound) s->on_sound(s->shot_user, 0xf7, p3);
+        return;
+    }
+    if (s->player_unit.destroyed || (s->now < s->player_online_at && !getenv("MW2_NO_STARTUP"))) return;
+    if (s->on_sound) s->on_sound(s->shot_user, 0x104, p3);
+    /* The radar contact appears as the sequence begins. Artillery and doors have no voice cue. */
+    if (s->on_message && ac->unit_class != 3 && ac->unit_class != 7)
+        s->on_message(s->message_user, "Enemy power-up detected", 74);
 }
 static void ai_wake(msim *s, int i)
 {
     if (!s->powered_down || !s->powered_down[i]) return;
     s->powered_down[i] = 0;
     if (s->online_at) s->online_at[i] = (float)s->now + (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
-    unit_startup_sound(s, i);
+    unit_startup(s, i);
 }
 /* TEST ONLY (glview MW2_TEST_APOWER): power actor i down (up = 0) or wake it (up = 1) as a mission node would */
 void msim_test_power(msim *s, int i, int up)
@@ -736,6 +744,10 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
      * until the player hits it (0x10014110 -> 0x10013370, s->player_victim). A unit turned on its attacker
      * (0x10012520, s->ai_focus) takes that one. */
     int self_al = ac->friendly ? 0 : ac->alliance, f = s->ai_focus ? s->ai_focus[i] : -2;
+    if (ac->friendly && s->cmd && s->cmd[i] == MSIM_CMD_ATTACK) {
+        f = s->cmd_target[i];
+        if (f < 0 || f >= s->actor_count || !s->armed[f] || s->units[f].destroyed) return 0;
+    }
     if (f == -1 && !s->player_unit.destroyed) {
         *ex = s->player[0]; *ez = s->player[2]; *ey = s->player_unit.y; *eface = s->player_facing; *eh = 0; *who = -1;
         return 1;
@@ -1484,13 +1496,10 @@ static void self_destruct(msim *s, int i)
  *    0x10019040 == 1) by its class (unit +0, jump table 0x100165d8): 1 mech -> 0x15 "Enemy mech destroyed" (voice 70),
  *    2 hovercraft / 4 tank -> 0x16 "Enemy vehicle destroyed" (71), 3 turret -> 0x19 "Enemy target destroyed" (73),
  *    5 aircraft / 8 dropship -> 0x17 "Enemy aircraft destroyed" (72), 6 / 7 (doors) nothing; and a starmate (its group
- *    led by the player, 0x10018f90) -> 0x10031810(6, its point): "Point n" "destroyed";
- *  - an enemy unit back up after a shutdown (0x1001a180 state 2 with object +0x14 bit 0x10, set in state 3), the
- *    player up (+0x15 & 0x20): 0x1a "Enemy power-up detected" (74) */
+ *    led by the player, 0x10018f90) -> 0x10031810(6, its point): "Point n" "destroyed" */
 static void unit_messages(msim *s)
 {
     int i;
-    int pl_up = !s->player_unit.destroyed && !((float)s->now < s->player_online_at && !getenv("MW2_NO_STARTUP"));   /* +0x15 & 0x20 (kept while shut down) */
     if (!s->msg_seen || !s->armed) return;
     for (i = 0; i < s->actor_count; i++) {
         const world_actor *ac = &s->actors[i];
@@ -1505,14 +1514,6 @@ static void unit_messages(msim *s)
             s->msg_seen[i] |= 1;
             if (enemy && c >= 0 && c < 9 && KILL[c] && s->on_message) s->on_message(s->message_user, KILL[c], KILL_VOICE[c]);
             if (ac->friendly && ac->table == 0) msim_order_message(s, star_point(s, i), 6);   /* "Point n destroyed" */
-            continue;
-        }
-        if (u->shutdown || (s->powered_down && s->powered_down[i])) s->msg_seen[i] |= 2;
-        else if ((s->msg_seen[i] & 2) && !(s->online_at && (float)s->now < s->online_at[i])) {   /* the start-up done */
-            s->msg_seen[i] &= ~2;
-            /* (posted by the mech controller's power state machine, 0x1001a180 - classes 1, 2, 4, 5, 6, 8; turrets and the
-             * turret-class dropships (3) power up in LateUpdateArtillery, which posts nothing: user report, Sable Flame) */
-            if (enemy && pl_up && ac->unit_class != 3 && ac->unit_class != 7 && s->on_message) s->on_message(s->message_user, "Enemy power-up detected", 74);
         }
     }
 }
@@ -1823,24 +1824,6 @@ void msim_step(msim *s, int32_t dt_ms)
         /* the manoeuvre 1 counters: the target's (the player's, or a unit's: DOS +0x19c per record) and the unit's own */
         v.flank_slots = !v.has_enemy ? NULL : enemy_who == -1 ? s->flank_slots : enemy_who >= 0 && s->unit_flank ? s->unit_flank[enemy_who] : NULL;
         v.own_flank = s->unit_flank ? s->unit_flank[i] : NULL;
-        /* elevation between the unit origins (the pitch demand, 0x100231a0 -> 0x100135d0) */
-        {
-            /* turrets and the turret-class dropships (classes 3, 8): from their eye, where the guns are (user report, Sable
-             * Flame: the dropships' eyes stand 23 m up, the elevation between the origins was ~0, and the level shots
-             * passed over the player's head; in DOS they aim straight at you). Mechs keep the origins' elevation */
-            float eye_up = 0.0f, aim_up = 0.0f, hd = v.enemy_dist;
-            if ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok) {
-                /* ... at the target's centre (the player 1.1.40: from the eye at the FEET, every shot of a dropship
-                 * above you struck the ground in front - the eye ray never met you, so the aim range never took your
-                 * distance; in DOS they hit you in the torso standing still), over the distance from the eye */
-                float ex2 = v.enemy_x - (float)ac->mech.origin[0] - (ac->mech.eye_pos[0] - ac->mech.mount_from[0]);
-                float ez2 = v.enemy_z - (float)ac->mech.origin[2] - (ac->mech.eye_pos[2] - ac->mech.mount_from[2]);
-                eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
-                aim_up = enemy_who == -1 ? s->player_centre_h : enemy_who >= 0 && s->centre_h ? s->centre_h[enemy_who] : 0.0f;
-                hd = sqrtf(ex2 * ex2 + ez2 * ez2);
-            }
-            v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - s->units[i].y - eye_up, hd > 1.0f ? hd : 1.0f) * 180.0f / 3.14159265f;
-        }
         {   /* the player's star (engine: the player leads it; "my leader" 0x2201 = the player) and its orders */
             int star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
             int c = s->cmd ? s->cmd[i] : 0, t = s->cmd_target ? s->cmd_target[i] : -1;
@@ -1957,6 +1940,25 @@ void msim_step(msim *s, int32_t dt_ms)
             }
         }
     star_done:
+        {
+            float eye_up = 0.0f, aim_up = 0.0f, hd = v.enemy_dist;
+            int starmate = ac->friendly && ac->table == 0;
+            if (starmate || ((ac->unit_class == 3 || ac->unit_class == 8) && ac->mech.eye_ok)) {
+                /* The firing ray starts at the eye. Aim at the target's body even when both units are on level ground. */
+                float dx_eye = v.enemy_x - (float)ac->mech.origin[0];
+                float dz_eye = v.enemy_z - (float)ac->mech.origin[2];
+                if (ac->mech.eye_ok) {
+                    dx_eye -= ac->mech.eye_pos[0] - ac->mech.mount_from[0];
+                    dz_eye -= ac->mech.eye_pos[2] - ac->mech.mount_from[2];
+                    eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
+                } else eye_up = s->height[i] * 0.7f;
+                if (enemy_who == -1) aim_up = s->player_centre_h;
+                else if (enemy_who >= 0) aim_up = starmate ? s->height[enemy_who] * 0.55f : s->centre_h[enemy_who];
+                hd = hypotf(dx_eye, dz_eye);
+            }
+            v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - s->units[i].y - eye_up,
+                                  fmaxf(hd, 1.0f)) * 180.0f / 3.14159265f;
+        }
         v.speed_kmh = fabsf(m->speed) * 0.036f;   /* actual speed */
         /* powered down: a shut-down unit (state 11) runs no rules - it waits for an event; a RESTING one (state 10, a hold node)
          * runs its state's rules as any other (RunAIRules 0x10011d20 for every AI player): DEFLT's rest rule posts a sighting
@@ -3280,7 +3282,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
     for (i = 0; s->online_at && i < s->actor_count; i++)
         if (s->armed[i] && s->units[i].restarted) {
             s->online_at[i] = (float)s->now + (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
-            unit_startup_sound(s, i);   /* state 0 again (0x10015f50 -> 0x1001ab71) */
+            unit_startup(s, i);   /* state 0 again (0x10015f50 -> 0x1001ab71) */
         }
 
     /* triggers and launches: the AI's fire decisions */
@@ -4490,7 +4492,7 @@ static int clist_seg(const msim *s, const float p0[3], const float p1[3], int wa
  * dropships, towers): closer than the two radii (the unit's +0xe8 and the sphere's +0x40) it is set on the sphere's
  * surface along the line from its centre (no direction: +z), the first such in list order. (Class 0x50 spheres are
  * knocked away instead, 0x10015230 / 0x10015920, and do not stop it - no world object has class 0x50.) */
-static int sphere_push(const msim *s, const float c[3], float R, float out[3], float n[3], int *ci)
+static int sphere_push(const msim *s, const float start[3], const float c[3], float R, float out[3], float n[3], int *ci)
 {
     const terrain_t *t = (const terrain_t *)s->terrain;
     int k;
@@ -4503,7 +4505,14 @@ static int sphere_push(const msim *s, const float c[3], float R, float out[3], f
         d[0] = c[0] - sph[0]; d[1] = c[1] - sph[1]; d[2] = c[2] - sph[2];
         dl = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]); rr = R + sph[3];
         if (!(dl < rr)) continue;
-        if ((s->world->parts[o->part].objtype & 0xf0) == 0x50) return 0;
+        const mech3d_part *part = &s->world->parts[o->part];
+        if ((part->objtype & 0xf0) == 0x50) return 0;
+        if (strcmp(part->rec, "GOLDARE8") == 0 && strcmp(part->model_name, "TL1SHIEL") == 0) {
+            /* Golden Spade starts three defenders inside the shield. A move originating inside
+             * must not eject them from their mission-defined positions as soon as physics runs. */
+            float dx = start[0] - sph[0], dy = start[1] - sph[1], dz = start[2] - sph[2];
+            if (dx * dx + dy * dy + dz * dz < sph[3] * sph[3]) continue;
+        }
         if (dl < 1e-7f) { n[0] = 0; n[1] = 0; n[2] = 1.0f; }
         else { n[0] = d[0] / dl; n[1] = d[1] / dl; n[2] = d[2] / dl; }
         out[0] = sph[0] + n[0] * rr; out[1] = sph[1] + n[1] * rr; out[2] = sph[2] + n[2] * rr;
@@ -5026,7 +5035,7 @@ int msim_can_move(const msim *s, float x0, float z0, float x, float z, float y, 
     g_block_id = -1;
     g_hit_kind = 0;
     if (!tt || !tt->co) return 1;
-    if (sphere_push(s, p1, R, g_push, n, &ci)) {
+    if (sphere_push(s, p0, p1, R, g_push, n, &ci)) {
         g_hit_kind = 2; g_block_id = tt->co[ci].part; g_block_what = s->world->parts[g_block_id].model_name;
         { float box[6]; cobj_now(s, &tt->co[ci], box, g_hit_at); }
         return refuse(n);

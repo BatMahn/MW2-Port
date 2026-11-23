@@ -12,6 +12,7 @@
  * with this set, a loop does not count against the effects' eight (the front end sets it for the DOS edition) */
 int sfx_loops_apart = 0;
 #define SFX_CACHE  512
+enum { SFX_SPEECH = 1, SFX_PRIORITY_SPEECH };
 
 typedef struct { unsigned char *data; int len; Uint32 last; } clip;
 typedef struct { const clip *c; double pos, step; float l, r; int loop, is_voice, index, prio; clip own; } voice;   /* pos < 0: a delayed start (sfx_play_at) */
@@ -278,10 +279,18 @@ static void mix(void *user, Uint8 *stream, int len)
     s->callbacks++;
     if (s->paused) return;   /* everything held where it was */
     if (s->music) s->music(s->music_user, o, frames);
+    int speech_hold = 0;
+    for (k = 0; k < SFX_VOICES; k++) {
+        const voice *vc = &s->v[k];
+        if (vc->c && vc->is_voice == SFX_PRIORITY_SPEECH) {
+            double remaining = ceil(((double)vc->c->len - vc->pos) / vc->step);
+            if (remaining > speech_hold) speech_hold = remaining < frames ? (int)remaining : frames;
+        }
+    }
     for (k = 0; k < SFX_VOICES; k++) {
         voice *vc = &s->v[k];
         if (!vc->c) continue;
-        for (f = 0; f < frames; f++) {
+        for (f = vc->is_voice == SFX_SPEECH ? speech_hold : 0; f < frames; f++) {
             int i, n = vc->c->len;
             if (vc->pos < 0) { vc->pos += vc->step; continue; }   /* not started yet: the sound's travel time */
             i = (int)vc->pos;
@@ -374,7 +383,15 @@ int sfx_voice_audible(sfx *s, int index)
     return c->data && c->len > 0;
 }
 void sfx_play(sfx *s, int index, float volume, float pan) { if (s) sfx_play_g(s, index, volume * gain_of(s->gain_fx), pan); }
-void sfx_play_voice(sfx *s, int index, float volume) { if (s) { s->next_is_voice = 1; sfx_play_g(s, index, volume * gain_of(s->gain_voice), 0.0f); s->next_is_voice = 0; } }
+void sfx_play_voice(sfx *s, int index, float volume) { if (s) { s->next_is_voice = SFX_SPEECH; sfx_play_g(s, index, volume * gain_of(s->gain_voice), 0.0f); s->next_is_voice = 0; } }
+void sfx_play_priority_voice(sfx *s, int index, float volume)
+{
+    if (!s || sfx_playing(s, index)) return;
+    s->next_is_voice = SFX_PRIORITY_SPEECH;
+    sfx_play_g(s, index, volume * gain_of(s->gain_voice), 0.0f);
+    s->next_is_voice = 0;
+}
+
 double sfx_log_time = -1;   /* TEST ONLY (MW2_SFX_LOG): the caller's clock (s) printed with each play */
 /* TEST ONLY (MW2_SFX_SIMCLOCK=1): the voice channel counts as busy for each line's length on that clock (sfx_log_time),
  * not while the audio device plays it - headless runs go faster than real time, so voice order is checkable */
@@ -416,7 +433,12 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     if (pan > 1) pan = 1;
     s->v[best].c = c;
     s->v[best].loop = 0;
-    if (s->next_is_voice) sim_voice(c->len);   /* TEST ONLY */
+    if (s->next_is_voice) {   /* TEST ONLY: talk time is extended while the earlier line is held */
+        double old_end = s_sim_voice_end;
+        sim_voice(c->len);
+        if (getenv("MW2_SFX_SIMCLOCK") && s->next_is_voice == SFX_PRIORITY_SPEECH && old_end > sfx_log_time)
+            s_sim_voice_end += old_end - sfx_log_time;
+    }
     s->v[best].is_voice = s->next_is_voice; s->next_is_voice = 0;
     s->v[best].pos = -s_delay * 11025.0;   /* the handle is taken now, the sample starts after the delay (0x100328e0 +0x3a8) */
     s->v[best].step = 11025.0 / (double)s->rate;    /* engine rate: 11025 Hz */
@@ -494,7 +516,7 @@ void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume)
     if (!s) return;
     volume *= gain_of(s->gain_voice);   /* the VOICE slider, not EFFECTS (dividing the EFFECTS gain back out gave
                                          * inf x 0 = NaN with EFFECTS at 0 - a silent line and a NaN in the mix) */
-    s->next_is_voice = 1;
+    s->next_is_voice = SFX_SPEECH;
     sim_voice(len);   /* TEST ONLY */
     sfx_play_pcm(s, pcm, len, 11025, volume, 0);
     s->next_is_voice = 0;

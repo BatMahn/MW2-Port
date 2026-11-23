@@ -225,8 +225,7 @@ typedef struct {
     int          star_formation; /* the player's star formation (0..5 echelon left .. wedge), -1 = as spawned */
     int          last_cmd[8];    /* per point (0 = all): the last command's menu index (0x10264468; 7 = "No Cmd") */
     void       (*on_message)(void *user, const char *text, int voice);   /* order acknowledgements (0x10031810) */
-    unsigned char *msg_seen;     /* per actor: bit 0 its death announced (0x10016280 runs once a unit), bit 1 it was shut
-                                  * down / powered down (object +0x14 bit 0x10, set in state 3: 0x1001accc) */
+    unsigned char *msg_seen;     /* per actor: its death has been announced */
     /* destructible world objects: GT chunks {i16 intact node, i16 destroyed node, .., +16 i16 hit points, +18 type,
      * +20 flags, +24 name[22], +46 sub-name[22]} (engine OBJ/GT handler 0x1003eb5c -> thing table 0x101e0280:
      * +0 flags, +8 hit points; damage 0x10046c20; destroyed: explosion 0x10045c30, swap 0x10046a90) */
