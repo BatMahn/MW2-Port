@@ -128,9 +128,14 @@ What fills the card (measured on the Linux stand-in, `MW2_GL12_TRACE=1` reports 
 | textures in play | 0.2 - 0.4 MB | | |
 
 To get there the Mac build (each switch overrides it, for tests): uploads 16-bit textures - RGB5, RGB5_A1 or RGBA4
-by the texture's alpha (`MW2_GL12_TEX16=0` for RGBA8); cuts large or odd-sized images (the cockpit screens, the HUD
+by the texture's alpha (`MW2_GL12_TEX16=0` for RGBA8), with RGBA8 for textures up to 4096 texels, including DOS
+palette lookups; cuts large or odd-sized images (the cockpit screens, the HUD
 strips) into power-of-two tiles that fit them instead of padding them whole; keeps the HUD sprites at their own size
 instead of their Scale3x upscale (`MW2_HUD_SCALE3X=1` for it); asks for a 16-bit display when fullscreen.
+
+The DOS dithered sky and Gouraud fills share the same palette-pair texture for flat bands and both checkerboard
+phases. This cuts OpenGL state changes on G3-era cards. The shell also keeps recently drawn TrueType strings as
+textures so settings screens can reuse them across frames.
 
 ## What has been checked, and how
 

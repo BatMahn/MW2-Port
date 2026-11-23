@@ -1,5 +1,5 @@
 # MechWarrior 2 - the classic Mac OS / Carbon build (PowerPC: Mac OS 9 with CarbonLib 1.6+, Mac OS X 10.1-10.4).
-# Retro68 with Apple's Universal Interfaces 3.4 (see docs/CARBON.md):
+# Retro68 with Multiversal or Apple's Universal Interfaces (see docs/CARBON.md):
 #   mkdir build-carbon && cd build-carbon
 #   cmake ../platform/carbon -DCMAKE_TOOLCHAIN_FILE=<Retro68>/toolchain/powerpc-apple-macos/cmake/retrocarbon.toolchain.cmake
 #   make

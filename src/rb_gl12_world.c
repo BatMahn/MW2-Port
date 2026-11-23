@@ -429,17 +429,22 @@ static void emit_poly_blend(const gl12_key *k0, const sv *p, int n, int m)
 typedef struct { float y0, y1; int even; } dstrip;
 static dstrip g_strip[1100];
 static int g_nstrip;
+static gl12_key g_pkey;
+static int g_pal_ok;
+static void pal_poly(const gl12_key *key, const sv *p, int n, int lo, int checker, int phase);
 
 static void dither_fill(const gl12_key *k, const sv *p, int n, int mode, int even, int cap)
 {
     float lo = 1e30f, hi = -1e30f;
     int i, j0, j1, j;
+    gl12_key pk = *k;
+    pk.tex = G.tex[1]; pk.var = GV_DOSPAIR; pk.stipple = 0;
     for (i = 0; i < n; i++) { if (p[i].s < lo) lo = p[i].s; if (p[i].s > hi) hi = p[i].s; }
     j0 = (int)floorf(lo * 2.0f); j1 = (int)floorf(hi * 2.0f);
     if (j1 - j0 > 600) j0 = j1 - 600;
     for (j = j0; j <= j1; j++) {
         sv a[24], b[24];
-        int m = n, nn = j >> 1, odd = j & 1, chk, i0, i1;
+        int m = n, nn = j >> 1, odd = j & 1, chk, i0, i1, paired;
         float c0[4], c1[4];
         memcpy(a, p, (size_t)n * sizeof *p);
         if (j > j0) { m = clip_s(a, m, b, (float)j * 0.5f, 1); memcpy(a, b, (size_t)m * sizeof *a); }
@@ -450,9 +455,15 @@ static void dither_fill(const gl12_key *k, const sv *p, int n, int mode, int eve
         if (mode == 1 && odd) i0 = nn + 1;
         if (i0 > cap) i0 = cap;
         if (i1 > cap) i1 = cap;
-        dos_colour((float)(i0 & 255), c0);
-        if (!chk || i0 == i1) { emit_poly(k, a, m, c0, 0); continue; }
-        dos_colour((float)(i1 & 255), c1);
+        /* Flat bands and both checkerboard phases can share one batch state. */
+        paired = g_pal_ok && (!chk || i0 == i1 || i1 == i0 + 1);
+        if (!paired) dos_colour((float)(i0 & 255), c0);
+        if (!chk || i0 == i1) {
+            if (paired) pal_poly(&pk, a, m, i0, 0, 0);
+            else emit_poly(k, a, m, c0, 0);
+            continue;
+        }
+        if (!paired) dos_colour((float)(i1 & 255), c1);
         if (g_nstrip > 0) {   /* the phase per row band (DOS Gouraud: the span's left end) */
             float ylo = 1e30f, yhi = -1e30f;
             int q, t;
@@ -466,13 +477,19 @@ static void dither_fill(const gl12_key *k, const sv *p, int n, int mode, int eve
                 if (t > 0) { me = clip_s(e, me, f, g_strip[t].y0, 1); memcpy(e, f, (size_t)me * sizeof *e); }
                 if (t + 1 < g_nstrip && me >= 3) { me = clip_s(e, me, f, g_strip[t].y1, 0); memcpy(e, f, (size_t)me * sizeof *e); }
                 if (me < 3) continue;
-                emit_poly(k, e, me, c1, g_strip[t].even ? 1 : 2);
-                emit_poly(k, e, me, c0, g_strip[t].even ? 2 : 1);
+                if (paired) pal_poly(&pk, e, me, i0, 1, g_strip[t].even);
+                else {
+                    emit_poly(k, e, me, c1, g_strip[t].even ? 1 : 2);
+                    emit_poly(k, e, me, c0, g_strip[t].even ? 2 : 1);
+                }
             }
             continue;
         }
-        emit_poly(k, a, m, c1, even ? 1 : 2);   /* n + 1 on the pixels of that parity, */
-        emit_poly(k, a, m, c0, even ? 2 : 1);   /* n on the others (each pixel drawn once) */
+        if (paired) pal_poly(&pk, a, m, i0, 1, even);
+        else {
+            emit_poly(k, a, m, c1, even ? 1 : 2);   /* n + 1 on the pixels of that parity, */
+            emit_poly(k, a, m, c0, even ? 2 : 1);   /* n on the others (each pixel drawn once) */
+        }
     }
 }
 /* the smooth fill (dos_shading / dos_sky = smooth): the palette blended, cut at whole indices */
@@ -568,9 +585,7 @@ static int g_vfirst, g_vcount, g_lastpoly = -1;
  * a convex polygon (NDC, w 1) in colour lo, or - phase 0 / 1 - the checkerboard of lo and hi = lo + 1 with hi on the
  * pixels where x + y + phase is odd (column 1); s = window x + y + phase - 0.5 counts columns, t the pair's row. One
  * batch for the flat colours, the Gouraud runs and their checkerboards (no stipple, no texture switch) */
-static gl12_key g_pkey;
-static int g_pal_ok;
-static void pal_poly(const sv *p, int n, int lo, int checker, int phase)
+static void pal_poly(const gl12_key *key, const sv *p, int n, int lo, int checker, int phase)
 {
     int i, c;
     const float tt = ((float)(lo & 255) + 0.5f) / 256.0f;
@@ -587,7 +602,7 @@ static void pal_poly(const sv *p, int n, int lo, int checker, int phase)
             } else t[c].t0[0] = 0.25f;   /* (column 0's centre) */
             t[c].t0[1] = tt; t[c].t0[3] = 1.0f; t[c].t1[3] = 1.0f;
         }
-        gl12_batch(&g_pkey, t, 3);
+        gl12_batch(key, t, 3);
     }
 }
 
@@ -686,7 +701,7 @@ static int dos_gouraud_spans(const wv *v0, int lev)
                     sv q[4];
                     q[0].x = xa; q[0].y = y0n; q[1].x = xb; q[1].y = y0n; q[2].x = xb; q[2].y = y1n; q[3].x = xa; q[3].y = y1n;
                     for (i = 0; i < 4; i++) { q[i].z = pa * q[i].x + pb * q[i].y + pc; q[i].s = 0; }
-                    pal_poly(q, 4, lo, hi != lo, phase);
+                    pal_poly(&g_pkey, q, 4, lo, hi != lo, phase);
                 }
                 j = j1;
             }
@@ -1014,6 +1029,11 @@ void gl12_world_draw(int first, int count)
     b = G.sb && G.sb != RB_STREAM ? gl12_buf_ptr(G.sb, &bytes) : NULL;
     g_sb = b ? (const float *)b : NULL;
     g_nsb = b ? bytes / 4 : 0;
+    {   /* the DOS palette-pair texture (the DOS table on unit 1) */
+        int tw = 0, th = 0;
+        g_pal_ok = G.prog == RB_PROG_WORLD_DOS && (G.F.u_dos != 0 || G.D.u_horizon)
+            && gl12_tex_texels(G.tex[1], &tw, &th) && tw == 256 && th >= 17;
+    }
     if (G.D.u_horizon) { horizon(); return; }
     key_init(&g_k);
     t0 = gl12_T(G.tex[0]);
@@ -1025,12 +1045,8 @@ void gl12_world_draw(int first, int count)
         if (!white || !gl12_T(white)) { white = rb_tex_new(); rb_tex_image(white, 1, 1, &W, 0); rb_tex_filter(white, RB_NEAREST, RB_NEAREST); }
         g_k.tex = white; g_tex_ok = 1;
     }
-    {   /* the DOS palette-pair texture (the DOS table on unit 1) */
-        int tw = 0, th = 0;
-        key_init(&g_pkey);
-        g_pkey.tex = G.tex[1]; g_pkey.var = GV_DOSPAIR;
-        g_pal_ok = G.prog == RB_PROG_WORLD_DOS && G.F.u_dos != 0 && gl12_tex_texels(G.tex[1], &tw, &th) && tw == 256 && th >= 17;
-    }
+    key_init(&g_pkey);
+    g_pkey.tex = G.tex[1]; g_pkey.var = GV_DOSPAIR;
     for (i = 0; i < count; i++) vertex_stage(G.D.u_first + i, i, &vs[i]);
     g_vs = vs; g_vfirst = G.D.u_first; g_vcount = count; g_lastpoly = -1;
     g_nlines = g_nedges = 0;

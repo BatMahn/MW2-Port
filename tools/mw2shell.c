@@ -344,30 +344,88 @@ static float frame_scale(SDL_Renderer *rd, int whole)
     if (whole && mode == SDL_LOGICAL_PRESENTATION_INTEGER_SCALE && ps >= 1.0f) ps = floorf(ps);
     return ps;
 }
+/* The shell keeps one renderer alive, including while a mission is running. Reuse
+ * its text textures across frames and clip regions, evicting the least recently used. */
+typedef struct {
+    char text[sizeof g_tt[0].t];
+    float px;
+    uint8_t rgb[3];
+    SDL_Texture *tex;
+    int w, h, by;
+    uint64_t used;
+} tt_cached;
+static tt_cached g_tt_cache[96];
+static uint64_t g_tt_clock;
+
+static void tt_cache_clear(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof g_tt_cache / sizeof g_tt_cache[0]; i++) {
+        if (g_tt_cache[i].tex) SDL_DestroyTexture(g_tt_cache[i].tex);
+        g_tt_cache[i].tex = NULL;
+    }
+}
+
+static tt_cached *tt_texture(SDL_Renderer *rd, const tt_item *it, float px)
+{
+    tt_cached *oldest = &g_tt_cache[0];
+    size_t k;
+    int w, h, by, i;
+    uint8_t *img, *rgba;
+    SDL_Texture *tex;
+    for (k = 0; k < sizeof g_tt_cache / sizeof g_tt_cache[0]; k++) {
+        tt_cached *entry = &g_tt_cache[k];
+        if (entry->tex && entry->px == px && memcmp(entry->rgb, it->rgb, sizeof entry->rgb) == 0
+            && strcmp(entry->text, it->t) == 0) {
+            entry->used = ++g_tt_clock;
+            return entry;
+        }
+        if (oldest->tex && (!entry->tex || entry->used < oldest->used)) oldest = entry;
+    }
+
+    img = ttext_render(it->t, px, 0.85f, &w, &h, &by);
+    if (!img) return NULL;
+    rgba = malloc((size_t)w * (size_t)h * 4);
+    if (!rgba) { free(img); return NULL; }
+    for (i = 0; i < w * h; i++) {
+        memcpy(rgba + i * 4, it->rgb, sizeof it->rgb);
+        rgba[i * 4 + 3] = img[i];
+    }
+    free(img);
+#ifdef MW2_CLASSIC_MAC
+    /* The Carbon shim takes RGBA bytes regardless of the host byte order. */
+    tex = SDL_CreateTexture(rd, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h);
+#else
+    tex = SDL_CreateTexture(rd, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+#endif
+    if (!tex || !SDL_UpdateTexture(tex, NULL, rgba, w * 4)) {
+        if (tex) SDL_DestroyTexture(tex);
+        free(rgba);
+        return NULL;
+    }
+    free(rgba);
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+    if (oldest->tex) SDL_DestroyTexture(oldest->tex);
+    snprintf(oldest->text, sizeof oldest->text, "%s", it->t);
+    memcpy(oldest->rgb, it->rgb, sizeof oldest->rgb);
+    oldest->px = px;
+    oldest->tex = tex;
+    oldest->w = w; oldest->h = h; oldest->by = by;
+    oldest->used = ++g_tt_clock;
+    return oldest;
+}
+
 static void tt_draw(SDL_Renderer *rd, const tt_item *it)
 {
     float ps = frame_scale(rd, 0);
-    int w, h, by, i;
-    uint8_t *img;
-    uint32_t *rgba;
-    SDL_Texture *tex;
-    if (!(img = ttext_render(it->t, it->cap * ps, 0.85f, &w, &h, &by))) return;
-    if ((rgba = malloc((size_t)w * (size_t)h * 4))) {
-        for (i = 0; i < w * h; i++) rgba[i] = (uint32_t)img[i] << 24 | (uint32_t)it->rgb[2] << 16 | (uint32_t)it->rgb[1] << 8 | it->rgb[0];
-        if ((tex = SDL_CreateTexture(rd, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, w, h))) {
-            SDL_FRect dr;
-            SDL_UpdateTexture(tex, NULL, rgba, w * 4);
-            SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-            SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
-            dr.w = (float)w / ps; dr.h = (float)h / ps;
-            dr.x = it->align ? (float)it->x - dr.w : (float)it->x;
-            dr.y = (float)it->y - ((float)by / ps - it->cap);
-            SDL_RenderTexture(rd, tex, NULL, &dr);
-            SDL_DestroyTexture(tex);
-        }
-        free(rgba);
-    }
-    free(img);
+    SDL_FRect dr;
+    tt_cached *entry = tt_texture(rd, it, it->cap * ps);
+    if (!entry) return;
+    dr.w = (float)entry->w / ps; dr.h = (float)entry->h / ps;
+    dr.x = it->align ? (float)it->x - dr.w : (float)it->x;
+    dr.y = (float)it->y - ((float)entry->by / ps - it->cap);
+    SDL_RenderTexture(rd, entry->tex, NULL, &dr);
 }
 
 /* Scale3x of an RGBA image (pixels compared exactly) */
@@ -6613,6 +6671,7 @@ int main(int argc, char **argv)
     shell_image_free(&g_bg);
     shelldb_close(&g_db);
     if (tx) SDL_DestroyTexture(tx);
+    tt_cache_clear();
     if (rd) SDL_DestroyRenderer(rd);
     if (win) SDL_DestroyWindow(win);
     SDL_Quit();

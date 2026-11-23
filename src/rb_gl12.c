@@ -510,7 +510,7 @@ static GLint tex_format(const uint8_t *px, size_t n, int *bytes)
     size_t k;
     int opaque = 1, binary = 1;
     *bytes = 4;
-    if (!tex16_on() || !px) return GL_RGBA8;
+    if (!tex16_on() || !px || n <= 4096) return GL_RGBA8;   /* keep small textures such as DOS palette pairs exact */
     for (k = 0; k < n && (opaque || binary); k++) {
         uint8_t a = px[k * 4 + 3];
         if (a != 255) opaque = 0;

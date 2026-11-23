@@ -532,22 +532,27 @@ const char *plat_base_path(void)
  * 1 a folder ('/' path, no trailing '/'), 0 cancelled, -1 not available */
 int mw2_pick_folder(const char *title, char *out, size_t n)
 {
-    NavDialogOptions opt;
-    NavReplyRecord reply;
+    /* Navigation Services on OS X writes fields beyond the Multiversal declarations. */
+    union { NavDialogOptions value; char bytes[2048]; } options_storage;
+    union { NavReplyRecord value; char bytes[1024]; } reply_storage;
+    NavDialogOptions *opt = &options_storage.value;
+    NavReplyRecord *reply = &reply_storage.value;
     AEKeyword kw;
     DescType type;
     SInt32 size;
     FSSpec fs;
     char dir[1024];
     OSErr e;
-    if (NavGetDefaultDialogOptions(&opt) != noErr) return -1;
-    pstr(opt.message, title);
-    memset(&reply, 0, sizeof reply);
-    e = NavChooseFolder(NULL, &reply, &opt, NULL, NULL, NULL);
-    if (e == userCanceledErr || (e == noErr && !reply.validRecord)) { if (e == noErr) NavDisposeReply(&reply); return 0; }
+    memset(&options_storage, 0, sizeof options_storage);
+    if (NavGetDefaultDialogOptions(opt) != noErr) return -1;
+    pstr(opt->message, title);
+    memset(&reply_storage, 0, sizeof reply_storage);
+    e = NavChooseFolder(NULL, reply, opt, NULL, NULL, NULL);
+    if (e == userCanceledErr) return 0;
     if (e != noErr) return -1;
-    e = AEGetNthPtr(&reply.selection, 1, typeFSS, &kw, &type, &fs, sizeof fs, &size);
-    NavDisposeReply(&reply);
+    if (!reply->validRecord) { NavDisposeReply(reply); return 0; }
+    e = AEGetNthPtr(&reply->selection, 1, typeFSS, &kw, &type, &fs, sizeof fs, &size);
+    NavDisposeReply(reply);
     if (e != noErr) return -1;
     dir_path(fs.vRefNum, fs.parID, dir, sizeof dir);   /* the chosen folder's parent, then its name */
     snprintf(out, n, "%s%.*s", dir, (int)fs.name[0], (const char *)fs.name + 1);
