@@ -273,6 +273,7 @@ typedef struct {
     int coll;
     int objtype;
     int colour_task;
+    int effect_pool;
     int32_t scale[3];
 } wnode;
 
@@ -312,6 +313,10 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
     for (k = 0; k < n; k++) {
         bwd_obj o;
         bwd_tsk task;
+        if (strcmp(chunks[k].tag, "XPLO") == 0 && chunks[k].size >= 6) {
+            int index = chunks[k].data[0] | chunks[k].data[1] << 8;
+            if (index < max) nodes[index].effect_pool = 1;
+        }
         if (bwd_tsk_decode(&chunks[k], &task) == 0 && task.type == 1 && task.node >= 0 && task.node < max)
             nodes[task.node].colour_task = 1;
         if (bwd_obj_decode(&chunks[k], &o) != 0 || o.index < 0 || o.index >= max) continue;
@@ -354,9 +359,9 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         p->obj_index = i;
         p->parent_obj = nodes[i].parent;
         p->hidden = with_damaged && strncasecmp(mr.name, "SA", 2) == 0;   /* destroyed variants wait (GT B) */
-        /* the projectile / effect pool (MW2_SHT1: lasers, bullets, explosion and PPC cards at 0,0,0) is never linked into
-         * the world until used (the front end draws shots and effects itself): its cards were drawn at the map origin */
-        if (strncasecmp(record, "MW2_SHT", 7) == 0) p->hidden = 1;
+        /* Pool objects enter the world only as live shots and effects. XPLO also registers objects in mission-specific
+         * pools such as TEALSHT1, whose inactive explosion cards otherwise appear at the crossroads at (0, 0, 0). */
+        if (nodes[i].effect_pool || strncasecmp(record, "MW2_SHT", 7) == 0) p->hidden = 1;
         /* OBJECT DENSITY: the type 0xc0 objects come and go (engine 0x1000de50 unlinks / relinks them; Combat Variables
          * and the in-game menu) - loaded always, hidden while it is LOW */
         p->facing = (nodes[i].objtype & 0xf0) == 0x10 || (nodes[i].objtype & 0xf0) == 0x60;   /* (see mech3d.h) */

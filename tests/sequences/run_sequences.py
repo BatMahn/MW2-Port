@@ -870,6 +870,22 @@ def override_death_mission_failed(c):
 
 
 @sequence
+def aquiline_wreck_wolf_decals(c):
+    """Both of the intact Hermione's insignia appear on the slanted hull."""
+    import numpy as np
+    from PIL import Image
+    for side, z, heading, box in (('north', -45100, 180, (445, 460, 551, 524)),
+                                  ('south', -64100, 0, (520, 529, 594, 579))):
+        r = c.run('_' + side, secs=1.5, mission='AQUASCN1', nostart=True, dos_look=True,
+                  mech='maddog/mdg00std', size='1024x768', shots=[(.7, 'wreck')],
+                  env={'MW2_START': '-72376,%d,3650' % z, 'MW2_START_HEADING': str(heading)})
+        with Image.open(r.shots['wreck']) as frame:
+            rgb = np.asarray(frame.crop(box))
+        emblem = ((rgb == (93, 48, 48)).all(2)).sum()
+        c(emblem > 500, side + ' side displays the Wolf insignia', '%d insignia pixels' % emblem)
+
+
+@sequence
 def aquiline_wreck_light_and_debris(c):
     """The Hermione's colour-task light loads and its five WTB fragments fly separately."""
     r = c.run(secs=3, mission='AQUASCN1', nostart=True, dos_look=True,
@@ -4217,6 +4233,15 @@ def ai_reverse_momentum(c):
 
 
 @sequence
+def dos_jenner_lod_at_450m(c):
+    """The original DOS selector used representation 2 for this Blade Splint Jenner at 449.96 m."""
+    r = c.run(secs=1.5, mission='TEALSCN1', nostart=True, dos_look=True, size='1024x768', mech='maddog/mdg00std',
+              env={'MW2_START': '-47561,0,110', 'MW2_START_HEADING': '90', 'MW2_LOD_TRACE': '1'})
+    reprs = set(re.findall(r'^lod actor 3 JENNER 450 m -> repr (\d)', r.out, re.M))
+    c(reprs == {'2'}, 'the Jenner uses representation 2 at 450 m', str(reprs))
+
+
+@sequence
 def shot_hits_piece_spheres(c):
     """a shot against a unit is tested against its pieces' bounding spheres only (0x10044f60 -> 0x100103e0): each piece is
     a type 6 object (0x10026430 -> 0x1000ffd0(6)) with no test of its own in 0x1024b3a8, so 0x10010650 -> 0x100107b0 takes
@@ -4825,6 +4850,18 @@ def target_nearest_enemy_no_cycle(c):
         cand = [(d, q) for q, d in enumerate(rg) if d >= 0]
         near.append(min(cand)[1] if cand else -1)
     c([g[0] for g in got] == near and 2 in near, 'e from beside the Firemoth: the unarmed trainee, as the nearest', str([(g[0], n) for g, n in zip(got, near)]))
+
+
+@sequence
+def blade_splint_crossroads_effect_pool(c):
+    """TEALSHT1 registers effect slots. Its idle models stay off the road at the second crossroads."""
+    r = c.run(secs=1.5, mission='TEALSCN1', nostart=True, dos_look=True,
+              env={'MW2_START': '-20000,0,110', 'MW2_START_HEADING': '90',
+                   'MW2_DEBUG_PARTPOS': 'XPL0_0 XPL0_1 XPL0_2 XPL0_3 XPL0_4 XPL0_5 XPL0_6 XPL0_7 FIR1_1 FIR1_2 FIR1_3'})
+    pool = re.findall(r'^partpos TEALSHT1 XPL0_(\d) 0 0 0 hidden (\d)', r.out, re.M)
+    c(sorted(pool) == [(str(i), '1') for i in range(8)], 'all eight dormant explosion slots are hidden', str(pool))
+    fires = re.findall(r'^partpos TEALARE1 FIR1_[123] .* hidden (\d)', r.out, re.M)
+    c(fires == ['0'] * 4, 'the four placed fire cards stay visible', str(fires))
 
 
 @sequence

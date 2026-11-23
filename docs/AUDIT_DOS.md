@@ -280,11 +280,21 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - Titanium texture lighting takes the damage nibble of the rendered location. The chase-view test confirmed that
   the damaged arm darkens while the opposite arm retains its colour.
 
-The Blade Splint crossroads flame and the Aquiline Fire decals still need matched original captures. The intact
-Hermione's DOS model carries two pairs of insignia polygons (0x5814), and the Wolf texture exists in slot 0x14.
-The original DOS LOD selector at 0x37580 scales its tests by the camera field at +0xb8 (0x3f1c1). It also ranks
-nearby units before assigning their representations. The reported 450 m observation still needs a matched capture
-at the same resolution, zoom and detail setting.
+### Crossroads flame, wreck decals and LOD follow-up
+
+- Blade Splint's second crossroads is at the map origin. TEALSHT1 registers eight explosion models there with
+  XPLO chunks. The loader now hides such inactive effects. The same view in DOSBox had no flame in the
+  crossroads. The four mission fire cards from TEALARE1 still draw at their authored positions.
+- The intact Hermione's DOS model uses two pairs of Wolf insignia triangles (0x5814, texture slot 0x14).
+  The DOSBox capture shows the emblem, but the port's depth test clipped it where the triangles sat behind
+  the hull. The renderer offsets these triangles by 325 cm along their outward normals on V_BDROPX only.
+  Both sides were checked in the port. The asset data and collision mesh are unchanged.
+- At native 1024 × 768 and 1× zoom, MW2.EXE's LOD scale was 209715 in 16.16 units. Blade Splint's Jenner used
+  representation 2 at 449.96 m, and the port selected the same model at 450 m. It has 94 polygons across 15 parts,
+  compared with 264 polygons across 15 parts at full detail. The selector at 0x37580 uses 3600, 8500 and 22500 cm times
+  the scale, rounded, and ranks nearby units before assigning representations. The port now rounds those
+  thresholds and measures from the camera to each unit's centre as DOS does. The page 7 pose, mech and
+  settings remain to be matched.
 
 ## Not checked
 

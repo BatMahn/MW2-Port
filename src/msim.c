@@ -2588,31 +2588,38 @@ const mech3d *msim_unit_hull(const msim *s, int k)
 static void collision_lods(msim *s)
 {
     float cam[3], a0 = s->cam_ok && s->cam_a0 > 0 ? s->cam_a0 : 2.0f;
+    const int32_t scale = (int32_t)(a0 * 65536.0f);
+    const int32_t t0 = (int32_t)(((int64_t)scale * 3600 + 32768) >> 16);
+    const int32_t t1 = (int32_t)(((int64_t)scale * 8500 + 32768) >> 16);
+    const int32_t t2 = (int32_t)(((int64_t)scale * 22500 + 32768) >> 16);
     int k, n = s->actor_count, n1 = -1, n2 = -1, n3 = -1, cnt = 0;
-    float hmin = a0 * 3600.0f;
+    float hmin = (float)t0;
     if (!s->col_repr || n <= 0) return;
     if (s->cam_ok) memcpy(cam, s->cam_eye, sizeof cam);
     else if (s->player_eye_ok) memcpy(cam, s->player_eye, sizeof cam);
     else { cam[0] = s->player[0]; cam[1] = s->player_unit.y + s->player_centre_h; cam[2] = s->player[2]; }
     for (k = 0; k < n; k++) {
         const world_actor *ac = &s->actors[k];
-        float dx = (float)ac->mech.origin[0] - cam[0], dy = s->units[k].y - cam[1], dz = (float)ac->mech.origin[2] - cam[2];
-        float d = sqrtf(dx * dx + dy * dy + dz * dz), h = sqrtf(dx * dx + dz * dz);
+        float dx = (float)ac->mech.origin[0] - cam[0], dz = (float)ac->mech.origin[2] - cam[2];
         int r;
         if (s->armed[k] && s->units[k].destroyed && !s->units[k].intact_out) { s->col_repr[k] = 1; continue; }   /* +0x14 bit 2 */
         if (s->no_col_lod) { s->col_repr[k] = 0; continue; }
-        if (!msim_dos_int) r = d < a0 * 3600.0f ? 0 : d < a0 * 8500.0f ? 1 : d < a0 * 22500.0f ? 2 : 3;
-        else {
+        if (!msim_dos_int) {
+            float dy = s->units[k].y - cam[1], d = sqrtf(dx * dx + dy * dy + dz * dz);
+            r = d < a0 * 3600.0f ? 0 : d < a0 * 8500.0f ? 1 : d < a0 * 22500.0f ? 2 : 3;
+        } else {
+            float h = sqrtf(dx * dx + dz * dz);
             r = -2;
             if (h < hmin) { hmin = h; n3 = n2; n2 = n1; n1 = k; }
         }
         s->col_repr[k] = (unsigned char)(r < 0 ? 0xfe : r);
     }
     if (msim_dos_int && !s->no_col_lod) {
-        int32_t t0 = (int32_t)(a0 * 3600.0f), t1 = (int32_t)(a0 * 8500.0f), t2 = (int32_t)(a0 * 22500.0f);
         for (k = 0; k < n; k++) {
             const world_actor *ac = &s->actors[k];
-            float dx = (float)ac->mech.origin[0] - cam[0], dy = s->units[k].y - cam[1], dz = (float)ac->mech.origin[2] - cam[2];
+            /* DOS 0x3769f subtracts the camera from the unit object's centre. */
+            float centre = s->centre_h ? s->centre_h[k] : (float)ac->mech.centre_h;
+            float dx = (float)ac->mech.origin[0] - cam[0], dy = s->units[k].y + centre - cam[1], dz = (float)ac->mech.origin[2] - cam[2];
             int32_t d = (int32_t)sqrtf(dx * dx + dy * dy + dz * dz);
             int r;
             if (s->col_repr[k] != 0xfe) continue;

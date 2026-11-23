@@ -643,12 +643,12 @@ static int g_lodq = 1;
 static float g_lod_focal = 320.0f;
 static float lod_a0(void) { return g_lod_focal / 160.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq; }
 static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_alod[64];
-static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist)
+static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist, int repr)
 {
     float a0 = lod_a0();
-    int r = dist < 0 ? (int)-dist : dist < a0 * 3600.0f ? 0 : dist < a0 * 8500.0f ? 1 : dist < a0 * 22500.0f ? 2 : 3;   /* dist -r: representation r */
+    int r = repr >= 0 ? repr : dist < a0 * 3600.0f ? 0 : dist < a0 * 8500.0f ? 1 : dist < a0 * 22500.0f ? 2 : 3;
     mech3d *m;
-    if (getenv("MW2_NO_LOD") && dist >= 0) r = 0;
+    if (getenv("MW2_NO_LOD") && repr < 0) r = 0;
     if (r == 0 || k < 0 || k >= 64 || !g_ma) return NULL;
     if (!g_alod[k].tried || strcmp(g_alod[k].skel, skel) != 0) {
         int q;
@@ -8256,7 +8256,9 @@ int main(int argc, char **argv)
                          * a centre torso carries the hips - all of it); the old "wreck" set was the cockpit representation */
                         const int dead = g_sim.armed[k] && g_sim.units[k].destroyed && !g_sim.units[k].intact_out;
                         const unsigned fly = g_sim.armed[k] ? mech3d_fly_mask(g_sim.units[k].loc_gone) : 0;
-                        mech3d *lm = actor_lod(k, src, g_actors[k].skel, g_sim.col_repr ? -(float)msim_unit_repr(&g_sim, k) : dead ? -1.0f : sqrtf(ddx * ddx + ddy * ddy + ddz * ddz));
+                        if (msim_dos_int && g_sim.centre_h) ddy += g_sim.centre_h[k];
+                        mech3d *lm = actor_lod(k, src, g_actors[k].skel, sqrtf(ddx * ddx + ddy * ddy + ddz * ddz),
+                                              g_sim.col_repr ? msim_unit_repr(&g_sim, k) : dead ? 1 : -1);
                         if (lm && lm->part_count > src->part_count) {
                             mech3d_part *grown = realloc(all.parts, (size_t)(total + lm->part_count) * sizeof *all.parts);
                             if (grown) { all.parts = grown; total += lm->part_count; } else lm = NULL;

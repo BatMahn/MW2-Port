@@ -487,6 +487,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 const wtb_vertex *v0, *v1, *v2;
                 int slot = q->color & 0xFF, batch = GLR_SLOTS;
                 float ground_lift = 0.0f;
+                float decal_offset[3] = {0, 0, 0};
                 if (q->n < 3) continue;
                 /* Titanium (mercsw 0x10053280, the draw by colour kind in the normal view): kind 2 has no case there - not drawn
                  * (lattices, rotor blades, shields, the hex glass) unless its object's texture switch is off (then the kind 1
@@ -685,6 +686,12 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 face[0] = e1[1] * e2[2] - e1[2] * e2[1];
                 face[1] = e1[2] * e2[0] - e1[0] * e2[2];
                 face[2] = e1[0] * e2[1] - e1[1] * e2[0];
+                if (batch < GLR_SLOTS && (q->color & 0xff) == GLR_SLOT_INSIGNIA && strcmp(part->model_name, "V_BDROPX") == 0) {
+                    /* This wreck's two insignia sit up to 316 cm inside its slanted hull. DOS draws them over the
+                     * hull in polygon order. Move just the rendered decals clear of the hull for depth-buffered draws. */
+                    float len = sqrtf(face[0] * face[0] + face[1] * face[1] + face[2] * face[2]);
+                    if (len > 0.0f) for (int c = 0; c < 3; c++) decal_offset[c] = face[c] * (-325.0f / len);
+                }
                 int wface = 0;   /* face[] already in world (game) coordinates */
                 if (r->dos && !model->extended && part->has_rot) {
                     /* DOS (one-sided, 0x3e1de): the posed polygon's own normal - a scaled object (the laser bolts, 3 x 3 x
@@ -820,6 +827,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         const wtb_vertex *v = &o->verts[q->idx[tri[a]]];
                         float *f = buf + pos[batch] * FLOATS_PER_VERTEX;
                         float nx, ny, nz, rx, rz;
+                        float vx = (float)v->x + decal_offset[0], vy = (float)v->y + decal_offset[1], vz = (float)v->z + decal_offset[2];
                         int c;
                         memcpy(sph + pos[batch] * 4, psph, sizeof psph);
                         /* rotate (full matrix when posed, else yaw), place, then GL z = -game z */
@@ -830,7 +838,6 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         }
                         if (part->has_rot) {
                             const float *R = part->rot;
-                            float vx = (float)v->x, vy = (float)v->y, vz = (float)v->z;
                             f[0] = R[0] * vx + R[1] * vy + R[2] * vz + (float)part->pos[0];
                             f[1] = R[3] * vx + R[4] * vy + R[5] * vz + (float)part->pos[1];
                             f[2] = -(R[6] * vx + R[7] * vy + R[8] * vz + (float)part->pos[2]);
@@ -839,10 +846,10 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                             f[5] = -(R[6] * nx + R[7] * ny + R[8] * nz);
                             if (wface) { f[3] = nx; f[4] = ny; f[5] = -nz; }
                         } else {
-                            rx = cy * (float)v->x + sy * (float)v->z;
-                            rz = -sy * (float)v->x + cy * (float)v->z;
+                            rx = cy * vx + sy * vz;
+                            rz = -sy * vx + cy * vz;
                             f[0] = rx + (float)part->pos[0];
-                            f[1] = (float)(v->y + part->pos[1]) + ground_lift;
+                            f[1] = vy + (float)part->pos[1] + ground_lift;
                             f[2] = -(rz + (float)part->pos[2]);
                             f[3] = cy * nx + sy * nz;
                             f[4] = ny;
