@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.57 (2026-11-23)
+
+- **Mech damage.** Limbs and components darken progressively on the 3D model as damage increases on the
+  corresponding cockpit wireframe location. This restores visible damage in the DOS look and keeps it consistent across planets.
+- **Aquiline Fire.** Destroying the crashed Wolf dropship sends five separate hull fragments and four smaller
+  chunks flying. The 3D editions now use all five fragments, including when Titanium models are active.
+
 ## v1.1.56 (2026-11-23)
 
 - **Dire Wolf and Elemental.** The Dire Wolf's right-arm Clan decal clears the armour, and both stock Elemental
