@@ -81,6 +81,7 @@ typedef struct {
 typedef struct gl12_var {
     int kind, param;
     uint32_t ver, dosver;  /* the texture's / the DOS table's version it was made from */
+    rb_tex dos_palette;   /* GV_DOS variants can use different palettes in the same frame */
     int tiled;             /* 1: tiles with borders, drawn only through gl12_tiled_tris (the HUD, blits) */
     int ntx, nty;
     gl12_tile *t;          /* ntx x nty tiles (1 when not tiled) */

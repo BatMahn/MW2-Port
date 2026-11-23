@@ -1996,7 +1996,7 @@ static int tod_group(int tt, int day)
  * length PLNT +12 (payload 3), the start (seconds into the day), PLNT +52 (payload 13: the 3D editions' damage shading
  * sign, DAT_1024e428) */
 static uint8_t g_pal_slot[20][768];
-static int     g_pal_slot_ok[20], g_tod_day, g_tod_start, g_plnt52;
+static int     g_pal_slot_ok[20], g_tod_day, g_tod_start;
 static int     g_hud_slot = -1;   /* the slot the HUD's colours are from */
 static void hud_slot(int slot)    /* the engine's 0x1002ac40: the HUD table (and g_hp) from the PALG slot's record */
 {
@@ -3906,7 +3906,6 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
     char name[16];
     int k, c, q, slot = 0, t0 = 0, day = 0;
     memset(g_pal_slot_ok, 0, sizeof g_pal_slot_ok);
-    g_plnt52 = 0;
     snprintf(name, sizeof name, "%.4sSCN1", mission);
     if (mission && bwd_mission_load(ma, name, &bm) == 0) {
         for (k = 0; k < bm.record_count; k++)
@@ -3923,10 +3922,8 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
                     }
                 }
                 else if (strcmp(ch->tag, "INIT") == 0 && ch->size >= 12) t0 = (int32_t)(ch->data[8] | ch->data[9] << 8 | ch->data[10] << 16 | (uint32_t)ch->data[11] << 24);
-                else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 16) {
+                else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 16)
                     day = (int32_t)(ch->data[12] | ch->data[13] << 8 | ch->data[14] << 16 | (uint32_t)ch->data[15] << 24);
-                    if (ch->size >= 56) g_plnt52 = (int32_t)(ch->data[52] | ch->data[53] << 8 | ch->data[54] << 16 | (uint32_t)ch->data[55] << 24);
-                }
             }
         bwd_mission_free(&bm);
     }
@@ -3941,7 +3938,7 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
     g_hud_slot = -1;
     if (g_pal_slot_ok[slot]) hud_slot(slot);
     else for (k = 0; k < 256; k++) hud_pal_color(g_hud, k, g_hp[k]);
-    if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud palette: %s slot %d (%s) start %d day %d plnt52 %d\n", name, slot, g_pal_slot_ok[slot] ? "PALG" : "COCKPIT", g_tod_start, day, g_plnt52);
+    if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud palette: %s slot %d (%s) start %d day %d\n", name, slot, g_pal_slot_ok[slot] ? "PALG" : "COCKPIT", g_tod_start, day);
 }
 
 /* the panel (0x10065cb0 -> 0x10065df0), laid out by 0x10065580 from the menu record: rect -> pixels (0x10005b70: fraction
@@ -5047,7 +5044,9 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 char dmg[16];
                 if (!g_hud) g_hud = hud_create(ma);
                 hud_mission_palette(ma, mission);   /* the mission's palette for the HUD (0x10260324, see there) */
-                glr_set_damage_shade(r, getenv("MW2_TEST_DSIGN") ? atoi(getenv("MW2_TEST_DSIGN")) : g_plnt52);  /* PLNT +52 (0x1003ded8 -> DAT_1024e428, 0x1002bf85); TEST ONLY override */
+                /* Damage darkens on every planet. Keep the original PLNT +52 branch available for comparison tests. */
+                const char *damage_sign = getenv("MW2_TEST_DSIGN");
+                glr_set_damage_shade(r, damage_sign ? atoi(damage_sign) : 0);
                 g_hud_s = g_render_w == 320 ? 0.5f : 1.0f;
                 g_hud_sfx = g_render_w == 320 ? "" : g_render_w == 640 ? "6" : g_render_w == 1024 ? "K" :
                             abs(1024 - g_win_cols) + abs(768 - g_win_lines) < abs(640 - g_win_cols) + abs(480 - g_win_lines) ? "K" : "6";
@@ -8247,6 +8246,7 @@ int main(int argc, char **argv)
             g_pit_first = -1;
             if (g_sim_ok) {   /* leave destroyed pieces out; add the player's mech (not in the cockpit) */
                 int k, total = 0, show_pl = g_pl_ok && g_pilot && !VIEW_IN_COCKPIT && (!g_sim.player_unit.destroyed || g_sim.player_unit.intact_out || g_camode == 1);   /* state 5: it stands; state 4 seen from the orbit: standing too (DOSBox) */
+                static wtb_model ti_debris_models[MSIM_MAX_DEBRIS];   /* also read by the inset's re-upload of g_frame_layer */
                 if (show_pl && g_camode == 1 && g_sim.player_eye_ok) {
                     /* the death camera gliding out of the cockpit: inside the mech, the engines draw only front faces (the
                      * DOSBox frames show the open view); the data's winding is not consistent enough to cull, so the mech
@@ -8389,6 +8389,13 @@ int main(int argc, char **argv)
                         if (d->object >= pp.model.object_count) continue;
                         pp.model.objects += d->object;
                         pp.model.object_count = 1;
+                        if (pp.ti_model && d->object < pp.ti_model->object_count) {
+                            wtb_model *fragment = &ti_debris_models[k];
+                            *fragment = *pp.ti_model;
+                            fragment->objects += d->object;
+                            fragment->object_count = 1;
+                            pp.ti_model = fragment;
+                        } else pp.ti_model = NULL;
                         pp.hidden = 0; pp.moving = 0;
                     }
                     else pp = d->kind == 2 ? (d->actor < 0 ? g_pl.parts[d->part] : g_actors[d->actor].mech.parts[d->part]) : projm[7 + d->kind];

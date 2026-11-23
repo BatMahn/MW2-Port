@@ -51,6 +51,8 @@ typedef struct {
     int     batch_first[GLR_BATCHES];   /* + GLR_SLOTS: untextured; + 1: shadows; + 2: unlit plain colours (type 0); GLR_B0 + n bank 0 */
     int     batch_count[GLR_BATCHES];
     int     batch_acount[GLR_SLOTS];    /* of a slot's count: its alpha-flag polygons, last (the ARGB4444 reading, tex_a) */
+    uint8_t dos_damaged[GLR_SLOTS + 1]; /* surface batches that need a damage palette */
+    uint8_t *dos_damage;                /* one damage nibble per triangle */
     int     vertex_count;
     float      *tic;       /* vertex_count x 4: what tic_vbo holds */
     float      *tipn;      /* vertex_count x 6: the GL position and the normal the lights use (lit polygons) */
@@ -96,6 +98,8 @@ struct glr {
     int    dos;
     int    prog;                            /* RB_PROG_WORLD, or RB_PROG_WORLD_DOS for the DOS look (glr_use_variant) */
     rb_tex dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
+    rb_tex dos_damage_tex[16];
+    unsigned dos_damage_valid;
     /* the DOS cockpit set's polygons (glr_view: mech3d_part.dos_pit), in emission order: their world corners (game
      * coordinates) for the draw order (dos_pit_ranks) */
 #define GLR_PIT_MAX 128
@@ -154,6 +158,41 @@ static void glr_draw_arrays(glr *r, int first, int count)
     rb_uniforms(0, &r->F, sizeof r->F);
     rb_uniforms(1, &r->D, sizeof r->D);
     rb_draw(first, count);
+}
+
+/* DOS lighting selects a palette index. Scale that index's RGB so damage also darkens unlit and Gouraud surfaces. */
+static rb_tex dos_damage_palette(glr *r, int damage)
+{
+    if (!damage) return r->dos_tex;
+    rb_tex *tex = &r->dos_damage_tex[damage];
+    if (!(r->dos_damage_valid & (1u << damage))) {
+        uint8_t image[17][256][4];
+        memcpy(image, r->dos_img, sizeof image);
+        for (int x = 0; x < 256; x++)
+            for (int c = 0; c < 3; c++) image[16][x][c] = (uint8_t)(image[16][x][c] * (15 - damage) / 15);
+        if (!*tex) {
+            *tex = rb_tex_new();
+            rb_tex_filter(*tex, RB_NEAREST, RB_NEAREST);
+            rb_tex_wrap(*tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
+        }
+        rb_tex_image(*tex, 256, 17, image, 0);
+        r->dos_damage_valid |= 1u << damage;
+    }
+    return *tex ? *tex : r->dos_tex;
+}
+
+static void draw_dos_damage_batch(glr *r, const glr_layer *layer, int batch)
+{
+    int triangle = layer->batch_first[batch] / 3;
+    const int end = triangle + layer->batch_count[batch] / 3;
+    while (triangle < end) {
+        int first = triangle;
+        const int damage = layer->dos_damage[first];
+        do { triangle++; } while (triangle < end && layer->dos_damage[triangle] == damage);
+        rb_texture(1, dos_damage_palette(r, damage));
+        glr_draw_arrays(r, first * 3, (triangle - first) * 3);
+    }
+    rb_texture(1, r->dos_tex);
 }
 /* glBindTexture on unit 0 with its filters (the OpenGL renderer set them on the bound texture before each draw) */
 static void glr_bind(rb_tex t, int minf, int magf)
@@ -216,6 +255,7 @@ void glr_destroy(glr *r)
     for (k = 0; k < 2; k++) rb_tex_delete(r->env_tex[k]);
     rb_tex_delete(r->ground_flat); rb_tex_delete(r->sky_flat);
     rb_tex_delete(r->dos_tex);
+    for (k = 1; k < 16; k++) rb_tex_delete(r->dos_damage_tex[k]);
     rb_tex_delete(r->ptab_tex);
     for (k = 0; k < 64; k++) rb_tex_delete(r->spr_tex[k]);
     for (k = 0; k < GLR_SLOTS; k++) rb_tex_delete(r->dome_tex[k]);
@@ -226,6 +266,7 @@ void glr_destroy(glr *r)
         rb_buf_delete(r->layer[k].vbo);
         rb_buf_delete(r->layer[k].sph_vbo);
         rb_buf_delete(r->layer[k].tic_vbo);
+        free(r->layer[k].dos_damage);
         free(r->layer[k].tic); free(r->layer[k].tipn); free(r->layer[k].tistat); free(r->layer[k].tip); free(r->layer[k].fp);
     }
     free(r);
@@ -425,6 +466,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     float *buf = NULL, *sph = NULL, *tic = NULL, *tipn = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
     glr_tipoly *tip = NULL;
     glr_fpoly *fp = NULL;
+    uint8_t *dos_damage = NULL;
     int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0, pit_o = -1, apoly, fp_n = 0, fp_cap = 0;
     size_t acount[GLR_SLOTS], apos[GLR_SLOTS];
 
@@ -446,6 +488,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     count = calloc(GLR_BATCHES, sizeof *count);
     pos = calloc(GLR_BATCHES, sizeof *pos);
     if (!buf || !sph || !tic || !tipn || !count || !pos) { free(buf); free(sph); free(tic); free(tipn); free(count); free(pos); return -1; }
+    memset(L->dos_damaged, 0, sizeof L->dos_damaged);
     if (r->ti_slots) memcpy(r->ti_pal[li], palette, sizeof r->ti_pal[li]);
 
     /* two passes: count triangles per texture batch, then write them grouped */
@@ -472,7 +515,8 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             else if (part->wire_hi) wire_code = 1;
             if (part->hidden || part->moving || part->facing || !o) continue;   /* moving: a path-carried world part, facing: a fire /
                                                                                  * smoke card - both drawn on the actor layer */
-            const int dnib = !r->dos && !ti && part->dmg_nib > 0 && part->dmg_nib < 16 ? part->dmg_nib : 0;
+            const int damage = part->dmg_nib > 0 && part->dmg_nib < 16 ? part->dmg_nib : 0;
+            const int dnib = !r->dos && !ti ? damage : 0;
             /* the texture switches by the object's type word (0x1002a768: DAT_1024e228 & type, and with the OBJECT bit 0x100
              * also class 5): OBJECT TEXTURES (0x100652f0: bits 0x100 mechs, 0x200) -> class 1, TERRAIN TEXTURES (0x10065340:
              * bit 0x800) -> class 2; other objects (type 0 rocks, buildings) keep their textures */
@@ -767,6 +811,13 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     if ((ty >= 5 || ty == 3) && batch < GLR_SLOTS) { poly_col[0] = 2; poly_col[1] = 0; poly_col[2] = 255; }
                     else if (ty == 0 || ty == 2 || ty == 3) { poly_col[0] = 0; poly_col[1] = (float)((q->color >> 4) & 0xff); poly_col[2] = 0; }
                     else { poly_col[0] = ty == 4 ? 3.0f : 1.0f; poly_col[1] = (float)(((q->color >> 8) & 0xf) * 16); poly_col[2] = ty >= 5 ? 255.0f : (float)(q->color & 0xff); }
+                    if (damage && batch <= GLR_SLOTS) {
+                        if (!dos_damage) dos_damage = calloc(cap / 3, sizeof *dos_damage);
+                        if (dos_damage) {
+                            L->dos_damaged[batch] = 1;
+                            memset(dos_damage + pos[batch] / 3, damage, (size_t)(q->n - 2));
+                        }
+                    }
                 }
                 {   /* a polygon lying in the ground plane (a building's shadow or footing at y 0) flickered against the
                      * ground: raised 3 cm */
@@ -975,6 +1026,8 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     rb_buf_data(L->vbo, buf, n * FLOATS_PER_VERTEX * sizeof *buf);
     rb_buf_data(L->sph_vbo, sph, n * 4 * sizeof *sph);
     rb_buf_data(L->tic_vbo, tic, n * 4 * sizeof *tic);
+    free(L->dos_damage);
+    L->dos_damage = dos_damage;
     free(L->tic); free(L->tipn); free(L->tistat); free(L->tip); free(L->fp);
     L->tic = tic; L->tipn = tipn; L->tistat = NULL; L->tip = tip; L->tip_n = tip_n;
     L->fp = fp; L->fp_n = fp_n; fp = NULL;
@@ -1446,6 +1499,7 @@ void glr_set_dos_palette(glr *r, const uint8_t pal[256][3])
     int x;
     for (x = 0; x < 256; x++) { r->dos_img[16][x][0] = pal[x][0]; r->dos_img[16][x][1] = pal[x][1]; r->dos_img[16][x][2] = pal[x][2]; }
     rb_tex_image(r->dos_tex, 256, 17, r->dos_img, 0);   /* (the whole table: a backend upload replaces it all) */
+    r->dos_damage_valid = 0;
 }
 
 void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
@@ -1457,8 +1511,8 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
     if (!pal) return;
     for (y = 0; y < 16; y++)
         for (x = 0; x < 256; x++) { uint8_t v = luma ? luma[y * 256 + x] : (uint8_t)x; img[y][x][0] = img[y][x][1] = img[y][x][2] = v; img[y][x][3] = 255; }
-    for (x = 0; x < 256; x++) { img[16][x][0] = pal[x][0]; img[16][x][1] = pal[x][1]; img[16][x][2] = pal[x][2]; img[16][x][3] = 255; }
-    rb_tex_image(r->dos_tex, 256, 17, img, 0);
+    for (x = 0; x < 256; x++) img[16][x][3] = 255;
+    glr_set_dos_palette(r, pal);
     rb_tex_filter(r->dos_tex, RB_NEAREST, RB_NEAREST);
     rb_tex_wrap(r->dos_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
 }
@@ -2314,6 +2368,10 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
             r->D.u_textured = 1;   /* Combat Variables textures: per object class (u_notex) */
         } else {
             r->D.u_textured = 0;
+        }
+        if (r->F.u_dos && L->dos_damaged[s]) {
+            draw_dos_damage_batch(r, L, s);
+            continue;
         }
         {   /* 3Dfx / S3 (texture.alt): the polygons without the alpha flag in tex[] (ARGB1555), the alpha-flag ones (acount,
              * last) in tex_a (ARGB4444) - or, with the texture cache (tex_cache_decide), both in the reading the cache holds

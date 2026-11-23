@@ -568,6 +568,7 @@ static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
     int w, h;
     if (!v) return NULL;
     v->kind = kind; v->param = param; v->ver = t->ver; v->dosver = kind == GV_DOS ? dos_key() : 0; v->tiled = tiled;
+    if (kind == GV_DOS) v->dos_palette = G.tex[1];
     px = variant_texels(t, kind, param, &w, &h);
     if (!px) { free(v); return NULL; }
     if (!tiled) {
@@ -660,6 +661,7 @@ static gl12_var *var_get(rb_tex h, int kind, int param, int tiled)
     if (!t || !t->rgba) return NULL;
     for (pp = &t->vars; (v = *pp) != NULL; pp = &v->next) {
         if (v->kind != kind || v->tiled != tiled || v->param != (param | rp)) continue;
+        if (kind == GV_DOS && v->dos_palette != G.tex[1]) continue;
         if (v->ver == t->ver && (kind != GV_DOS || v->dosver == dos_key())) return v;
         *pp = v->next; v->next = NULL; var_free(v);   /* stale */
         break;
@@ -902,7 +904,13 @@ void rb_depth_write(int on) { gl12_flush(); G.dwrite = on; }
 void rb_depth_func(int func) { gl12_flush(); G.dfunc = func; }
 void rb_depth_bias(int on, float slope, float units) { gl12_flush(); G.bias = on; G.slope = slope; G.units = units; }
 void rb_program(int prog) { G.prog = prog; }
-void rb_texture(int unit, rb_tex t) { if (unit >= 0 && unit < 3) G.tex[unit] = t; }
+void rb_texture(int unit, rb_tex t)
+{
+    if (unit < 0 || unit >= 3) return;
+    /* Resolve queued DOS texture variants against the palette they were drawn with. */
+    if (unit == 1 && G.tex[1] != t) gl12_flush();
+    G.tex[unit] = t;
+}
 void rb_vertex(int binding, rb_buf b, size_t offset) { if (binding >= 0 && binding < 3) { G.vb[binding] = b; G.voff[binding] = offset; } }
 void rb_storage(rb_buf b) { G.sb = b; }
 void rb_uniforms(int slot, const void *data, size_t bytes)

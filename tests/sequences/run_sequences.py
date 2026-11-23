@@ -888,13 +888,23 @@ def aquiline_wreck_wolf_decals(c):
 @sequence
 def aquiline_wreck_light_and_debris(c):
     """The Hermione's colour-task light loads and its five WTB fragments fly separately."""
-    r = c.run(secs=3, mission='AQUASCN1', nostart=True, dos_look=True,
-              env={'MW2_START': '-71830,-62590,0', 'MW2_START_HEADING': '0', 'MW2_DEBRIS_TRACE': '1',
-                   'MW2_TEST_BLD_KILL': '1:48', 'MW2_DEBUG_PARTPOS': 'S_1DUMMY'})
-    c('partpos AQUAARE2 S_1DUMMY' in r.out and re.search(r'S_1DUMMY .* hidden 1 moving 1', r.out),
-      'the animated light loads and is hidden when the wreck is destroyed')
-    c(re.search(r'debris [\d.]+s: 9 pieces \(5 world\), \d+ hidden world parts, 1 destroyed', r.out),
-      'the wreck throws five named fragments and four small chunks')
+    looks = [('dos', {'dos_look': True}), ('enhanced', {}),
+             ('3dfx', {'look3dfx': True}), ('ati', {'lookati': True})]
+    tdir = titanium_dir()
+    if tdir:
+        looks.append(('titanium', {}))
+    for look, options in looks:
+        env = {'MW2_START': '-71830,-62590,0', 'MW2_START_HEADING': '0', 'MW2_DEBRIS_TRACE': '1',
+               'MW2_TEST_BLD_KILL': '1:48', 'MW2_DEBUG_PARTPOS': 'S_1DUMMY'}
+        if look == 'titanium':
+            env.update(MW2_CONFIG=titanium_cfg(c.name + '_titanium', tdir),
+                       MW2_TEXTURES='titanium', MW2_SKYGND=os.path.join(tdir, 'SKYGND.PAR'))
+        r = c.run('_' + look, secs=3, mission='AQUASCN1', nostart=True, env=env, **options)
+        if look == 'dos':
+            c('partpos AQUAARE2 S_1DUMMY' in r.out and re.search(r'S_1DUMMY .* hidden 1 moving 1', r.out),
+              'the animated light loads and is hidden when the wreck is destroyed')
+        c(re.search(r'debris [\d.]+s: 9 pieces \(5 world\), \d+ hidden world parts, 1 destroyed', r.out),
+          look + ': the wreck throws five named fragments and four small chunks')
 
 
 @sequence
@@ -2570,7 +2580,7 @@ def titanium_mech_damage_shading(c):
         return
     def capture(suffix, hits):
         env = titanium_chase_env(c.name + suffix, tdir, 4)
-        env.update(MW2_TEST_PHIT=hits, MW2_TEST_DSIGN='0')
+        env.update(MW2_TEST_PHIT=hits)
         return c.run(suffix, secs=4, mission='YELLSCN1', nostart=True, size='640x480', shots=[(2.8, 'view')], env=env)
     healthy = capture('_healthy', '')
     damaged = capture('_damaged', '2.2:5:23:16')
@@ -3844,6 +3854,31 @@ def death_card_world_fixed(c):
         r = c.run('_%d' % (tw + 100), secs=2.65, twist=tw, nostart=True, env={'MW2_FX_TEST': '0d:2.5'}, shots=[(2.6, 's')])
         n[tw] = count_px(r.shots['s'], fire, (0.38, 0.1, 0.62, 0.45))
     c(n[85] > 200 and n[-85] < 20, 'seen from one side only', 'fire px %d / %d' % (n[85], n[-85]))
+
+
+@sequence
+def mech_arm_damage_shading(c):
+    """An arm darkens with successive damage levels in the DOS and Enhanced chase views."""
+    import numpy as np
+    from PIL import Image
+    for look in ('dos', 'enhanced'):
+        frames = []
+        armour = []
+        for state, hits in (('healthy', ''), ('damaged', '2.2:5:23:10'), ('heavy', '2.2:5:23:16')):
+            r = c.run('_' + look + '_' + state, secs=4, mission='YELLSCN1', nostart=True, size='640x480',
+                      dos_look=look == 'dos', keys=[(1, 'c')], shots=[(2.8, 'view')], env={'MW2_TEST_PHIT': hits})
+            armour.append(float(r.at(2.8)['parmor'].split(',')[4]))
+            with Image.open(r.shots['view']) as frame:
+                frames.append(np.asarray(frame, dtype=np.int16))
+        c(0 < armour[2] < armour[1] < armour[0], look + ': the damaged arm stays attached')
+        first_drop = (frames[0] - frames[1]).mean(2)
+        second_drop = (frames[1] - frames[2]).mean(2)
+        damaged_arm = np.s_[272:364, 372:432]
+        c((first_drop[damaged_arm] > 5).sum() > 500, look + ': the damaged arm darkens')
+        c((second_drop[damaged_arm] > 5).sum() > 500, look + ': further damage darkens the arm again')
+        healthy_arm = np.s_[272:364, 200:260]
+        c((abs(first_drop[healthy_arm] + second_drop[healthy_arm]) > 10).sum() < 30,
+          look + ': the healthy arm keeps its colour')
 
 
 @sequence

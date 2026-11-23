@@ -2881,8 +2881,10 @@ static void building_swap(msim *s, int b)
                 if (!parent_shown || j == bd->intact) continue;
                 if (c->gt_debris) {
                     c->gt_debris = 2;   /* spent: launched (or dropped) once */
+                    /* The five VCDDROPX wreck fragments use different flags in the two WTB layouts. */
+                    unsigned split_flag = c->model.extended ? 0x1000u : 0x2000u;
                     int pieces = c->model.object_count;
-                    if (pieces > 0 && !(c->model.objects[0].flags & 0x2000)) pieces = 1;
+                    if (pieces > 0 && !(c->model.objects[0].flags & split_flag)) pieces = 1;
                     for (int piece = 0; s->chunky && piece < pieces && s->debris_count < MSIM_MAX_DEBRIS; piece++) {
                         msim_debris *dd = &s->debris[s->debris_count++];
                         int k;
