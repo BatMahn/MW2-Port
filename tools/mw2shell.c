@@ -750,6 +750,7 @@ static void text_layer_draw(SDL_Renderer *rd)
 
 /* ---- images ---- */
 static shell_image g_bg; static int g_bg_entry = -999;
+static uint8_t g_bg_rgb[W * H * 3];
 static void load_bg(int entry)
 {
     uint8_t *e;
@@ -757,17 +758,22 @@ static void load_bg(int entry)
     if (entry == g_bg_entry) return;
     shell_image_free(&g_bg);
     g_bg_entry = entry;
-    if (entry < 0) return;
-    n = shelldb_entry(&g_db, entry, &e);
-    if (n > 0) shell_pcx(e, (size_t)n, &g_bg, NULL);
-    free(e);
+    if (entry >= 0) {
+        n = shelldb_entry(&g_db, entry, &e);
+        if (n > 0) shell_pcx(e, (size_t)n, &g_bg, NULL);
+        free(e);
+    }
+    if (g_bg.pix) {
+        int i, count = g_bg.w * g_bg.h;
+        if (count > W * H) count = W * H;
+        for (i = 0; i < count; i++) memcpy(g_bg_rgb + (size_t)i * 3, g_bg.pal[g_bg.pix[i]], 3);
+        memset(g_bg_rgb + (size_t)count * 3, 0, sizeof g_bg_rgb - (size_t)count * 3);
+    } else memset(g_bg_rgb, 0, sizeof g_bg_rgb);
 }
 static void draw_bg(void)
 {
-    int i;
     text_layer_clear();
-    if (!g_bg.pix) { memset(g_fb, 0, sizeof g_fb); return; }
-    for (i = 0; i < W * H && i < g_bg.w * g_bg.h; i++) memcpy(g_fb + (size_t)i * 3, g_bg.pal[g_bg.pix[i]], 3);
+    memcpy(g_fb, g_bg_rgb, sizeof g_fb);
 }
 static smk *open_smk(const char *name)
 {

@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 #include <Carbon.h>
 #include "carbon_extra.h"   /* (what Multiversal lacks) */
@@ -27,7 +28,15 @@
 #include "sdl_plat.h"
 
 /* ------------------------------------------------------------------------------------------------ the system */
-static int g_osx;                       /* running on Mac OS X (CarbonLib's Carbon: Mac OS 9) */
+static int is_osx(void)
+{
+    static int osx = -1;
+    if (osx < 0) {
+        SInt32 version = 0;
+        osx = Gestalt(gestaltSystemVersion, &version) == noErr && version >= 0x1000;
+    }
+    return osx;
+}
 
 /* ---------------------------------------------------------------------------------------------- settings file */
 /* Mac OS 9 has no environment variables, so the game's switches (MW2_VRAM_MB, MW2_MUSIC, the MW2_GL12_* and test
@@ -59,14 +68,12 @@ __attribute__((constructor)) static void load_settings(void)
 
 int plat_init(char *err, int errn)
 {
-    SInt32 v = 0;
     (void)err; (void)errn;
     InitCursor();
-    if (Gestalt(gestaltSystemVersion, &v) == noErr && v >= 0x1000) g_osx = 1;
     return 0;
 }
 void plat_quit(void) { ShowMenuBar(); InitCursor(); }
-const char *plat_name(void) { return g_osx ? "carbon (mac os x)" : "carbon (mac os 9)"; }
+const char *plat_name(void) { return is_osx() ? "carbon (mac os x)" : "carbon (mac os 9)"; }
 
 uint64_t plat_ticks_us(void)
 {
@@ -134,7 +141,7 @@ static void *gl_fn(const char *name)
     static const char *const libs[] = {"OpenGLLibrary", "AGL", "OpenGLUtility", NULL};
     int k;
     void *f;
-    if (g_osx) {
+    if (is_osx()) {
         if (!gl) gl = bundle("/System/Library/Frameworks/OpenGL.framework");
         if (!agl) agl = bundle("/System/Library/Frameworks/AGL.framework");
         f = bundle_fn(name[0] == 'a' ? agl : gl, name);
@@ -157,6 +164,7 @@ static AGLRendererInfo (*p_aglNextRendererInfo)(AGLRendererInfo rend);
 static unsigned char (*p_aglDescribeRenderer)(AGLRendererInfo rend, long prop, long *value);
 static void (*p_aglDestroyRendererInfo)(AGLRendererInfo rend);
 static AGLContext (*p_aglCreateContext)(AGLPixelFormat pix, AGLContext share);
+static AGLContext g_current_ctx;
 static unsigned char (*p_aglSetDrawable)(AGLContext ctx, CGrafPtr draw);
 static unsigned char (*p_aglSetCurrentContext)(AGLContext ctx);
 static void (*p_aglSwapBuffers)(AGLContext ctx);
@@ -227,7 +235,6 @@ plat_window *plat_window_create(const char *title, int w, int h, int fullscreen,
 void plat_window_destroy(plat_window *w)
 {
     if (!w) return;
-    if (w->ctx && w->fs_active && p_aglSetDrawable) p_aglSetDrawable(w->ctx, NULL);   /* (the display's mode back) */
     DisposeWindow(w->w);
     if (g_win == w) g_win = NULL;
     free(w);
@@ -253,8 +260,17 @@ int plat_window_fullscreen(plat_window *w, int on, int fw, int fh)
     if (on) { w->width = fw; w->height = fh; }
     return 0;
 }
-void plat_window_show(plat_window *w, int show) { if (show) { ShowWindow(w->w); SelectWindow(w->w); } else HideWindow(w->w); }
-int plat_window_focused(plat_window *w) { return FrontWindow() == w->w; }
+void plat_window_show(plat_window *w, int show)
+{
+    if (show) {
+        g_win = w;
+        if (!w->fs_active) { ShowWindow(w->w); SelectWindow(w->w); }
+    } else {
+        HideWindow(w->w);
+        if (g_win == w) g_win = NULL;
+    }
+}
+int plat_window_focused(plat_window *w) { return w->fs_active ? g_win == w : FrontWindow() == w->w; }
 
 /* ----------------------------------------------------------------------------------------------------- OpenGL */
 void *plat_gl_create(plat_window *w)
@@ -285,7 +301,7 @@ void *plat_gl_create(plat_window *w)
         if (pf) {
             c = p_aglCreateContext(pf, NULL);
             if (p_aglDestroyPixelFormat) p_aglDestroyPixelFormat(pf);
-            if (c && p_aglSetFullScreen(c, w->width, w->height, 0, 0) && p_aglSetCurrentContext(c)) { w->ctx = c; w->fs_active = 1; return c; }
+            if (c && p_aglSetFullScreen(c, w->width, w->height, 0, 0) && plat_gl_make_current(w, c) == 0) { w->ctx = c; w->fs_active = 1; return c; }
             if (c && p_aglDestroyContext) p_aglDestroyContext(c);
         }
         /* no such mode: a window at that size instead */
@@ -300,19 +316,28 @@ void *plat_gl_create(plat_window *w)
     c = p_aglCreateContext(pf, NULL);
     if (p_aglDestroyPixelFormat) p_aglDestroyPixelFormat(pf);
     if (!c) return NULL;
-    if (!p_aglSetDrawable(c, GetWindowPort(w->w)) || !p_aglSetCurrentContext(c)) { if (p_aglDestroyContext) p_aglDestroyContext(c); return NULL; }
+    if (!p_aglSetDrawable(c, GetWindowPort(w->w)) || plat_gl_make_current(w, c) != 0) { if (p_aglDestroyContext) p_aglDestroyContext(c); return NULL; }
     w->ctx = c;
     return c;
 }
 int plat_gl_make_current(plat_window *w, void *ctx)
 {
-    static AGLContext cur;
-    if (cur == (AGLContext)ctx) return 0;
     (void)w;
-    cur = (AGLContext)ctx;
-    return p_aglSetCurrentContext(cur) ? 0 : -1;
+    if (g_current_ctx == ctx) return 0;
+    if (!p_aglSetCurrentContext(ctx)) return -1;
+    g_current_ctx = ctx;
+    return 0;
 }
-void plat_gl_destroy(void *ctx) { if (ctx && p_aglDestroyContext) { p_aglSetCurrentContext(NULL); p_aglDestroyContext((AGLContext)ctx); } }
+void plat_gl_destroy(void *ctx)
+{
+    if (!ctx || !p_aglDestroyContext) return;
+    if (g_current_ctx == ctx) {
+        p_aglSetCurrentContext(NULL);
+        g_current_ctx = NULL;
+    }
+    p_aglSetDrawable(ctx, NULL);   /* Release fullscreen before destroying the context. */
+    p_aglDestroyContext(ctx);
+}
 void plat_gl_swap(plat_window *w) { if (w->ctx) p_aglSwapBuffers(w->ctx); }
 void *plat_gl_proc(const char *name) { return gl_fn(name); }
 void plat_gl_swap_interval(int n) { long v = n; if (g_win && g_win->ctx && p_aglSetInteger) p_aglSetInteger(g_win->ctx, AGL_SWAP_INTERVAL, &v); }
@@ -358,13 +383,16 @@ void plat_pump(void)
         short part;
         switch (ev.what) {
         case mouseDown:
-            part = FindWindow(ev.where, &hit);
+            /* AGL fullscreen draws straight to the display. The hidden Toolbox
+             * window does not participate in FindWindow hit testing. */
+            if (g_win && g_win->fs_active) { part = inContent; hit = g_win->w; }
+            else part = FindWindow(ev.where, &hit);
             if (part == inDrag && g_win && !g_win->fullscreen) { Rect s = screen_rect(); DragWindow(hit, ev.where, &s); }
             else if (part == inGoAway) { if (TrackGoAway(hit, ev.where)) core_quit_request(); }
             else if (part == inContent) {
                 lp = ev.where; local(&lp);
                 g_btn = (ev.modifiers & controlKey) ? 3 : 1;   /* control-click: the right button (one-button mice) */
-                if (hit != FrontWindow()) SelectWindow(hit);
+                if (hit != FrontWindow() && !(g_win && g_win->fs_active)) SelectWindow(hit);
                 core_mouse_button(g_btn, 1, (float)lp.h, (float)lp.v);
             }
             break;
@@ -391,7 +419,7 @@ void plat_pump(void)
     }
     key_diff();
     GetGlobalMouse(&gp);
-    if (g_rel && g_osx && p_CGGetLastMouseDelta) {
+    if (g_rel && is_osx() && p_CGGetLastMouseDelta) {
         int32_t dx = 0, dy = 0;
         p_CGGetLastMouseDelta(&dx, &dy);
         lp = gp; local(&lp);
@@ -413,7 +441,7 @@ void plat_relative_mouse(plat_window *w, int on)
     (void)w;
     g_rel = on;
     if (on) HideCursor(); else ShowCursor();
-    if (g_osx) {
+    if (is_osx()) {
         static CFBundleRef as;
         if (!as) as = bundle("/System/Library/Frameworks/ApplicationServices.framework");
         if (!p_CGGetLastMouseDelta) {
@@ -528,21 +556,129 @@ const char *plat_base_path(void)
     return path;
 }
 
-/* the game folder when none is found (mw2shell.c's pick_folder): Navigation Services' Choose a Folder dialog.
- * 1 a folder ('/' path, no trailing '/'), 0 cancelled, -1 not available */
-int mw2_pick_folder(const char *title, char *out, size_t n)
+/* Panther's Navigation.h lays out these records with mac68k (two-byte)
+ * alignment. The Multiversal headers describe the older modal API. */
+#pragma pack(push, 2)
+typedef struct {
+    uint16_t version;
+    uint32_t flags;
+    Point location;
+    CFStringRef client_name, window_title, action_label, cancel_label, save_name, message;
+    uint32_t preference_key;
+    const void *popup_extension;
+    uint32_t modality;
+    WindowRef parent_window;
+    char reserved[16];
+} mw2_nav_options;
+
+typedef struct {
+    uint16_t version;
+    Boolean valid, replacing, stationery, needs_translation;
+    AEDescList selection;
+    int16_t key_script;
+    Handle file_translation;
+    uint32_t reserved1;
+    CFStringRef save_name;
+    Boolean extension_hidden;
+    uint8_t reserved2;
+    char reserved[225];
+} mw2_nav_reply;
+#pragma pack(pop)
+
+typedef char nav_options_layout[(sizeof(mw2_nav_options) == 66 && offsetof(mw2_nav_options, message) == 30) ? 1 : -1];
+typedef char nav_reply_layout[(sizeof(mw2_nav_reply) == 256 && offsetof(mw2_nav_reply, save_name) == 24) ? 1 : -1];
+
+static int nav_folder_spec(AEDescList *selection, FSSpec *fs)
 {
-    /* Navigation Services on OS X writes fields beyond the Multiversal declarations. */
+    AEKeyword kw;
+    DescType type;
+    SInt32 size;
+    return AEGetNthPtr(selection, 1, typeFSS, &kw, &type, fs, sizeof *fs, &size) == noErr;
+}
+
+static int nav_folder_osx_spec(AEDescList *selection, FSSpec *fs)
+{
+    static CFBundleRef core;
+    static OSStatus (*catalog_info)(const void *, uint32_t, void *, void *, FSSpec *, void *);
+    uint32_t ref[20];   /* File Manager's 80-byte FSRef */
+    AEKeyword kw;
+    DescType type;
+    SInt32 size;
+    if (nav_folder_spec(selection, fs)) return 1;
+    if (AEGetNthPtr(selection, 1, 'fsrf', &kw, &type, ref, sizeof ref, &size) != noErr
+        || size != (SInt32)sizeof ref) return 0;
+    if (!core) {
+        core = bundle("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework");
+        if (!core) return 0;
+        *(void **)&catalog_info = bundle_fn(core, "FSGetCatalogInfo");
+    }
+    return catalog_info && catalog_info(ref, 0, NULL, NULL, fs, NULL) == noErr;
+}
+
+/* Use the OS X implementation of the Carbon dialog and its matching reply
+ * cleanup. The deprecated CFM NavChooseFolder path mixed the legacy reply
+ * with Panther's newer cleanup and could reach CFRelease with a bad pointer. */
+static int nav_folder_osx(const char *title, FSSpec *fs)
+{
+    static CFBundleRef nav;
+    static OSStatus (*options_init)(mw2_nav_options *);
+    static OSStatus (*create)(const mw2_nav_options *, NavEventUPP, NavObjectFilterUPP, void *, void **);
+    static OSStatus (*run)(void *);
+    static uint32_t (*action)(void *);
+    static OSStatus (*get_reply)(void *, mw2_nav_reply *);
+    static OSErr (*dispose_reply)(mw2_nav_reply *);
+    static void (*dispose)(void *);
+    mw2_nav_options options = {0};
+    mw2_nav_reply reply = {0};
+    CFStringRef prompt;
+    void *dialog = NULL;
+    OSStatus status;
+    int result = -1;
+
+    if (!nav) {
+        nav = bundle("/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/NavigationServices.framework");
+        if (!nav) return -1;
+        *(void **)&options_init = bundle_fn(nav, "NavGetDefaultDialogCreationOptions");
+        *(void **)&create = bundle_fn(nav, "NavCreateChooseFolderDialog");
+        *(void **)&run = bundle_fn(nav, "NavDialogRun");
+        *(void **)&action = bundle_fn(nav, "NavDialogGetUserAction");
+        *(void **)&get_reply = bundle_fn(nav, "NavDialogGetReply");
+        *(void **)&dispose_reply = bundle_fn(nav, "NavDisposeReply");
+        *(void **)&dispose = bundle_fn(nav, "NavDialogDispose");
+    }
+    if (!options_init || !create || !run || !action || !get_reply || !dispose_reply || !dispose) return -1;
+    if (options_init(&options) != noErr) return -1;
+    prompt = CFStringCreateWithCString(NULL, title, kCFStringEncodingMacRoman);
+    options.message = prompt;
+    status = create(&options, NULL, NULL, NULL, &dialog);
+    if (status == noErr) {
+        status = run(dialog);
+        if (status == userCanceledErr) result = 0;
+        else if (status == noErr) {
+            uint32_t choice = action(dialog);
+            if (choice == 1 /* kNavUserActionCancel */) result = 0;
+            else if (choice == 4 /* kNavUserActionChoose */ && get_reply(dialog, &reply) == noErr) {
+                if (reply.valid) {
+                    if (nav_folder_osx_spec(&reply.selection, fs)) result = 1;
+                    dispose_reply(&reply);
+                } else result = 0;
+            }
+        }
+        dispose(dialog);
+    }
+    if (prompt) CFRelease(prompt);
+    return result;
+}
+
+static int nav_folder_classic(const char *title, FSSpec *fs)
+{
+    /* CarbonLib can fill reserved fields omitted by the Multiversal headers. */
     union { NavDialogOptions value; char bytes[2048]; } options_storage;
     union { NavReplyRecord value; char bytes[1024]; } reply_storage;
     NavDialogOptions *opt = &options_storage.value;
     NavReplyRecord *reply = &reply_storage.value;
-    AEKeyword kw;
-    DescType type;
-    SInt32 size;
-    FSSpec fs;
-    char dir[1024];
     OSErr e;
+    int result;
     memset(&options_storage, 0, sizeof options_storage);
     if (NavGetDefaultDialogOptions(opt) != noErr) return -1;
     pstr(opt->message, title);
@@ -550,10 +686,19 @@ int mw2_pick_folder(const char *title, char *out, size_t n)
     e = NavChooseFolder(NULL, reply, opt, NULL, NULL, NULL);
     if (e == userCanceledErr) return 0;
     if (e != noErr) return -1;
-    if (!reply->validRecord) { NavDisposeReply(reply); return 0; }
-    e = AEGetNthPtr(&reply->selection, 1, typeFSS, &kw, &type, &fs, sizeof fs, &size);
+    if (!reply->validRecord) return 0;
+    result = nav_folder_spec(&reply->selection, fs) ? 1 : -1;
     NavDisposeReply(reply);
-    if (e != noErr) return -1;
+    return result;
+}
+
+/* 1 a folder ('/' path, no trailing '/'), 0 cancelled, -1 not available */
+int mw2_pick_folder(const char *title, char *out, size_t n)
+{
+    FSSpec fs;
+    char dir[1024];
+    int result = is_osx() ? nav_folder_osx(title, &fs) : nav_folder_classic(title, &fs);
+    if (result != 1) return result;
     dir_path(fs.vRefNum, fs.parID, dir, sizeof dir);   /* the chosen folder's parent, then its name */
     snprintf(out, n, "%s%.*s", dir, (int)fs.name[0], (const char *)fs.name + 1);
     return 1;

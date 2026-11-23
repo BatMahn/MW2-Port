@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.55 (2026-11-22)
+
+- **Classic Mac on OS X.** Use the native Navigation Services folder picker at startup with matching reply
+  records and cleanup. This addresses the folder-picker crash reported on Mac OS X 10.3.9.
+- **Classic Mac on OS 9.** Route fullscreen clicks to the game so Combat Variables can open from the menu.
+  Automatic fullscreen mission resolution uses 640 × 480. Higher resolutions remain available in Combat Variables.
+- **Classic Mac rendering.** Reuse the menu background and texture upload buffer to reduce the work each frame.
+
 ## v1.1.54 (2026-11-22)
 
 - **Classic Mac.** Fix the Mac OS X game-folder picker when Navigation Services uses extended dialog and reply

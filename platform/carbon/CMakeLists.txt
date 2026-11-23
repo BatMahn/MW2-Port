@@ -36,7 +36,7 @@ target_link_libraries(MechWarrior2 m)
 
 target_include_directories(MechWarrior2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ROOT}/src ${ROOT}/third_party)
-target_compile_definitions(MechWarrior2 PRIVATE _DEFAULT_SOURCE MW2_CLASSIC_MAC MW2_NO_SC55 MW2_ONE_BINARY SDL_MAIN_HANDLED
+target_compile_definitions(MechWarrior2 PRIVATE _DEFAULT_SOURCE MW2_CLASSIC_MAC MW2_RB_GL12 MW2_NO_SC55 MW2_ONE_BINARY SDL_MAIN_HANDLED
     MA_NO_DEVICE_IO MA_NO_THREADING MA_NO_ENGINE MA_NO_RESOURCE_MANAGER MA_NO_NODE_GRAPH)
 target_compile_options(MechWarrior2 PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu99> -O2 -mcpu=750 -mtune=750 -ffp-contract=off -w)   # (G3 scheduling, runs on G4s; no fused multiply-add: the simulation's floats must round as on the other builds)
 # the game's sources see the POSIX file layer; the platform files are its implementation

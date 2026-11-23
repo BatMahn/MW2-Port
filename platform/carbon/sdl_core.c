@@ -456,7 +456,7 @@ void core_audio_pump(void)
 /* The shell's use: textures (ABGR8888 - bytes R, G, B, A as the game writes them -, RGB24) drawn as rectangles in the
  * logical resolution (letterboxed / integer-scaled into the window), clear, present, read back. */
 struct SDL_Texture { SDL_Renderer *rd; GLuint id; int w, h, W, H, fmt, linear, blend; void *lockbuf; };
-struct SDL_Renderer { SDL_Window *win; void *ctx; int lw, lh, mode; int vp[4]; float sx, sy; int clip_on; SDL_Rect clip; };
+struct SDL_Renderer { SDL_Window *win; void *ctx; int lw, lh, mode; int vp[4]; float sx, sy; int clip_on; SDL_Rect clip; uint8_t *upload; size_t upload_cap; };
 
 static int p2(int v) { int p = 1; while (p < v) p <<= 1; return p; }
 
@@ -476,7 +476,7 @@ SDL_Renderer *SDL_CreateRenderer(SDL_Window *win, const char *name)
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_PACK_ALIGNMENT, 1);
     return r;
 }
-void SDL_DestroyRenderer(SDL_Renderer *r) { if (!r) return; plat_gl_destroy(r->ctx); free(r); }
+void SDL_DestroyRenderer(SDL_Renderer *r) { if (!r) return; plat_gl_destroy(r->ctx); free(r->upload); free(r); }
 const char *SDL_GetRendererName(SDL_Renderer *r) { (void)r; return "opengl"; }
 bool SDL_SetRenderVSync(SDL_Renderer *r, int v) { (void)r; plat_gl_swap_interval(v); return true; }
 bool SDL_GetRenderOutputSize(SDL_Renderer *r, int *w, int *h) { return r && SDL_GetWindowSizeInPixels(r->win, w, h); }
@@ -548,13 +548,19 @@ void SDL_DestroyTexture(SDL_Texture *t) { if (!t) return; glDeleteTextures(1, &t
 /* a streaming texture's pixels: a CPU copy, given to GL on unlock (the whole texture; rect is not used by the game) */
 bool SDL_LockTexture(SDL_Texture *t, const SDL_Rect *rect, void **pixels, int *pitch)
 {
+    int bpp;
     (void)rect;
     if (!t || !pixels || !pitch) return false;
-    if (!t->lockbuf && !(t->lockbuf = calloc((size_t)t->w * (size_t)t->h, 4))) return false;
-    *pixels = t->lockbuf; *pitch = t->w * 4;
+    bpp = t->fmt == SDL_PIXELFORMAT_RGB24 ? 3 : 4;
+    if (!t->lockbuf && !(t->lockbuf = calloc((size_t)t->w * (size_t)t->h, (size_t)bpp))) return false;
+    *pixels = t->lockbuf; *pitch = t->w * bpp;
     return true;
 }
-void SDL_UnlockTexture(SDL_Texture *t) { if (t && t->lockbuf) SDL_UpdateTexture(t, NULL, t->lockbuf, t->w * 4); }
+void SDL_UnlockTexture(SDL_Texture *t)
+{
+    if (t && t->lockbuf)
+        SDL_UpdateTexture(t, NULL, t->lockbuf, t->w * (t->fmt == SDL_PIXELFORMAT_RGB24 ? 3 : 4));
+}
 bool SDL_GetTextureSize(SDL_Texture *t, float *w, float *h) { if (!t) return false; if (w) *w = (float)t->w; if (h) *h = (float)t->h; return true; }
 
 /* the clip rectangle (logical coordinates), as GL's scissor box in the window's pixels when drawing */
@@ -583,34 +589,46 @@ bool SDL_HideCursor(void) { plat_hide_cursor(); return true; }
 bool SDL_SetTextureScaleMode(SDL_Texture *t, SDL_ScaleMode m) { if (t) t->linear = m == SDL_SCALEMODE_LINEAR; return t != NULL; }
 bool SDL_UpdateTexture(SDL_Texture *t, const SDL_Rect *rect, const void *pixels, int pitch)
 {
-    int x = 0, y = 0, w, h, k, bpp;
+    int x = 0, y = 0, w, h, bpp, ew, eh, k;
+    size_t row, size;
     const uint8_t *src = pixels;
-    uint8_t *buf;
+    SDL_Renderer *r;
     if (!t || !pixels) return false;
     w = rect ? rect->w : t->w; h = rect ? rect->h : t->h;
     if (rect) { x = rect->x; y = rect->y; }
     bpp = t->fmt == SDL_PIXELFORMAT_RGB24 ? 3 : 4;
-    /* rows with the last texel repeated one past the right and bottom edges (a padded texture's bilinear edge) */
-    buf = malloc((size_t)(w + 1) * (size_t)(h + 1) * 4);
-    if (!buf) return false;
-    for (k = 0; k < h + 1; k++) {
-        const uint8_t *s = src + (size_t)(k < h ? k : h - 1) * (size_t)pitch;
-        uint8_t *d = buf + (size_t)k * (size_t)(w + 1) * 4;
-        int i;
-        for (i = 0; i < w + 1; i++) {
-            const uint8_t *p = s + (size_t)(i < w ? i : w - 1) * (size_t)bpp;
-            d[i * 4] = p[0]; d[i * 4 + 1] = p[1]; d[i * 4 + 2] = p[2]; d[i * 4 + 3] = bpp == 4 ? p[3] : 255;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || w > t->w - x || h > t->h - y || pitch < w * bpp) return false;
+    r = t->rd;
+    if (plat_gl_make_current(r->win->pw, r->ctx) != 0) return false;
+
+    /* Extend only the outside edges into the power-of-two padding. Keep
+     * one RGBA upload buffer per renderer so the canvas can reuse it. */
+    ew = w + (x + w == t->w && t->w < t->W);
+    eh = h + (y + h == t->h && t->h < t->H);
+    row = (size_t)ew * 4;
+    size = row * (size_t)eh;
+    if (size > r->upload_cap) {
+        uint8_t *storage = realloc(r->upload, size);
+        if (!storage) return false;
+        r->upload = storage;
+        r->upload_cap = size;
+    }
+    for (k = 0; k < h; k++) {
+        const uint8_t *s = src + (size_t)k * (size_t)pitch;
+        uint8_t *dst = r->upload + (size_t)k * row;
+        if (bpp == 4) memcpy(dst, s, (size_t)w * 4);
+        else {
+            int i;
+            for (i = 0; i < w; i++) {
+                memcpy(dst + i * 4, s + i * 3, 3);
+                dst[i * 4 + 3] = 255;
+            }
         }
+        if (ew > w) memcpy(dst + w * 4, dst + (w - 1) * 4, 4);
     }
-    plat_gl_make_current(t->rd->win->pw, t->rd->ctx);
+    if (eh > h) memcpy(r->upload + (size_t)h * row, r->upload + (size_t)(h - 1) * row, row);
     glBindTexture(GL_TEXTURE_2D, t->id);
-    {
-        int ew = x + w + 1 <= t->W ? w + 1 : w, eh = y + h + 1 <= t->H ? h + 1 : h;
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, w + 1);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, ew, eh, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    }
-    free(buf);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, ew, eh, GL_RGBA, GL_UNSIGNED_BYTE, r->upload);
     return true;
 }
 static void begin2d(SDL_Renderer *r)

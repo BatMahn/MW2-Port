@@ -75,7 +75,8 @@ for 160 MB (128 MB minimum). Measured at a mission's peak, the game's own heap i
   SimpleText document; throw it away to get the first-run settings back. First run: fullscreen 640 x 480, the DOS
   look, no anti-aliasing. The Mac build is always fullscreen (a saved `resolution=window` is played fullscreen); the
   shell's menus are 640 x 480 fullscreen too, and the display is only ever switched to a mode the card's video memory
-  allows (640 x 480, 800 x 600, 1024 x 768 with 16 MB).
+  allows (640 x 480, 800 x 600, 1024 x 768 with 16 MB). On Mac OS 9 the automatic desktop setting also selects
+  640 x 480 for missions. Select a specific display mode in Combat Variables to use a higher resolution.
 - **The game folder** is found next to the application (or one level up), else asked for with the Choose a Folder
   dialog, and remembered. **Hold Option while launching** to choose it again.
 - **Text files** the port opens or writes (.cfg, .txt, .env, .ini, .log, .md) are made SimpleText documents (type

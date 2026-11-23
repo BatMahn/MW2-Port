@@ -6541,6 +6541,11 @@ int main(int argc, char **argv)
             else if (pc.mode == 2) { ww = pc.w; wh = pc.h; }   /* exclusive: the mode is set on the window below */
         }
 #ifdef MW2_CLASSIC_MAC
+        if (!test && pc.mode == 0 && drv && strcmp(drv, "carbon (mac os 9)") == 0) {
+            /* Start at a G3-friendly fullscreen mode. Explicit display modes
+             * in Combat Variables still use the card's VRAM limit below. */
+            ww = 640; wh = 480;
+        }
         {   /* the floor is an ATI Rage 128 (8 MB, two texture units - rb_init checks the units): every look up to
              * 800 x 600 with 8 MB of video memory, 1024 x 768 with 16 MB or more (16-bit frame buffers + textures;
              * docs/CARBON.md). Unknown memory is taken as the floor's 8 MB. */
