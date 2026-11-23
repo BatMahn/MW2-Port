@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.54 (2026-11-22)
+
+- **Classic Mac.** Fix the Mac OS X game-folder picker when Navigation Services uses extended dialog and reply
+  records. Cache rendered menu text to reduce texture uploads.
+- **OpenGL 1.2.** Batch DOS dithered sky and polygon fills and keep small textures such as the DOS palette
+  lookup at full colour precision.
+- **Blade Splint.** Hide the inactive effect pool so its flame sprite no longer appears in the crossroads.
+- **Aquiline Fire.** Draw Wolf Clan decals clear of the crashed dropship's hull so they remain visible.
+
 ## v1.1.53 (2026-11-22)
 
 - **Cockpit.** Ctrl+Z resets zoom to 1× and holds it there until the reset key is released. Looking down in
