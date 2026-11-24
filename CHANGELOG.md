@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.58 (2026-11-24)
+
+- **Golden Spade.** Satellite View hides the Shield-Generator, its converters and their wreckage. The Force Shield
+  draws as a blue mesh in the cockpit and on the map, so nearby terrain, structures and mechs remain visible through it.
+- **Starmate aiming.** Starmates account for the target's height and the movement of their own cockpit as they walk.
+  Weapon shots converge at the target's distance, which helps starmates hit low turrets on Golden Spade.
+- **Pilot promotions.** Winning the first phase of Wolf Trial 1 earns Star Commander, shown in Aftermath and the Pilot
+  Register. A second-phase win earns an additional rank. Older saves that kept the starting title recover one rank
+  per completed trial.
+- **Ready Room.** Star Config enforces the selected mission's limit and trims oversized formations saved by older builds.
+  Add Starmate still clicks when the formation is full.
+- **Enemy camouflage.** DOS hull textures use the colors assigned to each star, restoring Garstedt's gray-and-green
+  enemy camouflage in Trial of Grievance.
+- **Navigation lights.** Distant beacon markers are half their previous apparent width. The wrecked dropship and
+  monorail lights stay visible without filling the view with large squares.
+- **Damage shading.** DOS shading adjusts the light level before the palette lookup, following the original executable.
+  Enhanced and Titanium shading is about half as strong. The GPU DOS renderer approximates shading on some surfaces.
+
 ## v1.1.57 (2026-11-23)
 
 - **Mech damage.** Limbs and components darken progressively on the 3D model as damage increases on the
