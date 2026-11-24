@@ -160,7 +160,7 @@ static void glr_draw_arrays(glr *r, int first, int count)
     rb_draw(first, count);
 }
 
-/* DOS lighting selects a palette index. Scale that index's RGB so damage also darkens unlit and Gouraud surfaces. */
+/* DOS MW2.EXE 0x38e38: damage adjusts the 0..15 light level before the LUMA lookup. */
 static rb_tex dos_damage_palette(glr *r, int damage)
 {
     if (!damage) return r->dos_tex;
@@ -168,8 +168,14 @@ static rb_tex dos_damage_palette(glr *r, int damage)
     if (!(r->dos_damage_valid & (1u << damage))) {
         uint8_t image[17][256][4];
         memcpy(image, r->dos_img, sizeof image);
-        for (int x = 0; x < 256; x++)
-            for (int c = 0; c < 3; c++) image[16][x][c] = (uint8_t)(image[16][x][c] * (15 - damage) / 15);
+        for (int level = 0; level < 16; level++) {
+            const int shade = glr_dos_damage_level(level, damage, r->dsign);
+            if (shade == 15) {
+                for (int x = 0; x < 256; x++) image[level][x][0] = (uint8_t)x;
+            } else {
+                memcpy(image[level], r->dos_img[shade], sizeof image[level]);
+            }
+        }
         if (!*tex) {
             *tex = rb_tex_new();
             rb_tex_filter(*tex, RB_NEAREST, RB_NEAREST);
@@ -513,10 +519,12 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             else if (part->objtype & 0x400) wire_code = 2;
             else if (part->objtype & 0x100) { int cn = (part->objtype & 0xf0) >> 4; wire_code = cn < 1 ? 1 : cn < 12 ? 3 : 2; }
             else if (part->wire_hi) wire_code = 1;
+            const int shield = mech3d_is_force_shield(part);
             if (part->hidden || part->moving || part->facing || !o) continue;   /* moving: a path-carried world part, facing: a fire /
                                                                                  * smoke card - both drawn on the actor layer */
             const int damage = part->dmg_nib > 0 && part->dmg_nib < 16 ? part->dmg_nib : 0;
-            const int dnib = !r->dos && !ti ? damage : 0;
+            /* Keep the legacy 3D renderers' response, at half strength. DOS uses the full original nibble. */
+            const int dnib = ti ? 0 : r->dos ? damage : (damage + 1) / 2;
             /* the texture switches by the object's type word (0x1002a768: DAT_1024e228 & type, and with the OBJECT bit 0x100
              * also class 5): OBJECT TEXTURES (0x100652f0: bits 0x100 mechs, 0x200) -> class 1, TERRAIN TEXTURES (0x10065340:
              * bit 0x800) -> class 2; other objects (type 0 rocks, buildings) keep their textures */
@@ -539,7 +547,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * with low nibble 0 or 3 (0x1004eef0) */
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
-                if (!ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
+                if (shield || (!ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2)) {   /* an outline (r->kl) */
                     if (pass == 1) {
                         /* the colour bits 4-11 in both kinds of model: Sable Flame's dome 0x2c50 is index 0xc5, grey (SABL_NI
                          * 10,10,10) - the DOS models had taken bits 8-15, 0x2c (15,0,0): a red mesh (user report, 1.1.37) */
@@ -695,11 +703,10 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                 if (r->dos && !model->extended) {   /* DOS bitmaps: types 5-7 bitmap = low byte; type 3 (scrub / effect cards,
                                                      * 0x3250 ...) bitmap = (word >> 4) & 0xff, transparent texels */
                     int ty = (q->color >> 12) & 7, bs = ty == 3 ? (q->color >> 4) & 0xff : q->color & 0xff;
-                    /* the insignia slot 0x14 (the decals, 0x7814) + the unit's star value, as the 3D editions (0x10042000):
-                     * the DOS map holds the clans' crests in the same order (0x14 Wolf, 0x15 Jade Falcon ...). The DOS look
-                     * drew every unit with 0x14, the Wolf. INFERRED for MW2.EXE (not available); the Mercenaries DOS sim,
-                     * the same engine, adds the star value (its 0x62bf6 / 0x62e74) */
-                    if (ty >= 5 && bs == GLR_SLOT_INSIGNIA) { int b2 = bs + clan + part->tex_offset + part->world_clan; if (b2 >= 0 && b2 < GLR_SLOTS && slots && slots[b2]) bs = b2; }
+                    /* DOS hulls use 0x7800 for star camouflage and 0x7814 for star insignia.
+                     * INSTMAP1, for example, puts the Instant Action enemy camouflage in slot 1. */
+                    if (ty >= 5 && (bs == GLR_SLOT_CAMO || bs == GLR_SLOT_INSIGNIA) &&
+                        slot >= 0 && slot < GLR_SLOTS && slots && slots[slot]) bs = slot;
                     batch = GLR_SLOTS;
                     if ((ty >= 5 || ty == 3) && !part->flat && slots && slots[bs]) batch = bs;
                 }
@@ -811,13 +818,20 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     if ((ty >= 5 || ty == 3) && batch < GLR_SLOTS) { poly_col[0] = 2; poly_col[1] = 0; poly_col[2] = 255; }
                     else if (ty == 0 || ty == 2 || ty == 3) { poly_col[0] = 0; poly_col[1] = (float)((q->color >> 4) & 0xff); poly_col[2] = 0; }
                     else { poly_col[0] = ty == 4 ? 3.0f : 1.0f; poly_col[1] = (float)(((q->color >> 8) & 0xf) * 16); poly_col[2] = ty >= 5 ? 255.0f : (float)(q->color & 0xff); }
-                    if (damage && batch <= GLR_SLOTS) {
+#ifndef MW2_RB_GL12
+                    if (damage && batch < GLR_SLOTS) {
                         if (!dos_damage) dos_damage = calloc(cap / 3, sizeof *dos_damage);
                         if (dos_damage) {
                             L->dos_damaged[batch] = 1;
                             memset(dos_damage + pos[batch] / 3, damage, (size_t)(q->n - 2));
                         }
                     }
+                    /* The GPU's DOS shader takes baked intensity for flat/Gouraud surfaces. */
+                    if (damage && batch == GLR_SLOTS && (poly_col[0] == 1 || poly_col[0] == 3)) {
+                        const float fraction = (float)damage / 16.0f;
+                        poly_col[2] += (r->dsign ? 255.0f - poly_col[2] : -poly_col[2]) * fraction;
+                    }
+#endif
                 }
                 {   /* a polygon lying in the ground plane (a building's shadow or footing at y 0) flickered against the
                      * ground: raised 3 cm */
@@ -842,7 +856,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                     tp->c = (uint8_t)(tik == 3 || tik == 1 ? k2c : (int)(q->color & 0xff) >> 1);
                     tp->ramp = (uint8_t)(((q->color >> 8) & 0xf) << 4);
                     tp->cls = (uint8_t)(tik == 1 && batch >= GLR_TI && batch < GLR_TB ? k2cls : 0);
-                    tp->damage = (uint8_t)part->dmg_nib;
+                    tp->damage = (uint8_t)((damage + 1) / 2);
                     memcpy(tp->nrm, q->normal, sizeof tp->nrm);
                     tp->v0[0] = (float)v0->x; tp->v0[1] = (float)v0->y; tp->v0[2] = (float)v0->z;
                 }
@@ -1492,7 +1506,12 @@ void glr_set_world_fade(glr *r, const uint8_t pal[256][3], float k, const float 
     }
 }
 
-void glr_set_damage_shade(glr *r, int sign) { if (r) r->dsign = sign != 0; }
+void glr_set_damage_shade(glr *r, int sign)
+{
+    if (!r) return;
+    r->dsign = sign != 0;
+    r->dos_damage_valid = 0;
+}
 
 void glr_set_dos_palette(glr *r, const uint8_t pal[256][3])
 {

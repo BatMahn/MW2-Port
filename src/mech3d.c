@@ -2148,6 +2148,11 @@ void world3d_ti_free(wtb_model *store, int count)
     free(store);
 }
 
+int mech3d_is_force_shield(const mech3d_part *part)
+{
+    return strcmp(part->rec, "GOLDARE8") == 0 && strcmp(part->model_name, "TL1SHIEL") == 0;
+}
+
 int mech3d_part_in_tree(const mech3d *m, int part, int root)
 {
     if (root < 0 || root >= m->part_count || part < 0 || part >= m->part_count) return 0;

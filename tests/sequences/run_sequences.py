@@ -918,7 +918,7 @@ def distant_navigation_beacons(c):
         r = c.run('_' + scene, secs=1, mission=scene, nostart=True, dos_look=True, mech='maddog/mdg00std',
                   size='1920x1080', shots=[(0.75, 'beacon')], env={'MW2_START': start, 'MW2_START_HEADING': heading})
         pixels = count_px(r.shots['beacon'], lambda red, green, blue: (red > 200) & (green < 50) & (blue < 50), crop)
-        c(pixels >= 20, scene + ' beacon is visible at range', '%d bright red pixels' % pixels)
+        c(6 <= pixels <= 28, scene + ' beacon stays small and visible at range', '%d bright red pixels' % pixels)
 
 
 @sequence
@@ -2588,7 +2588,7 @@ def titanium_mech_damage_shading(c):
     c(0 < armour(damaged) < armour(healthy), 'the arm was damaged and remains attached')
     with Image.open(healthy.shots['view']) as before, Image.open(damaged.shots['view']) as after:
         drop = (np.asarray(before, dtype=int) - np.asarray(after, dtype=int)).mean(2)
-    c((drop[272:364, 372:432] > 10).sum() > 500, 'the damaged arm darkens')
+    c((drop[272:364, 372:432] > 3).sum() > 500, 'the damaged arm darkens')
     c((abs(drop[272:364, 200:260]) > 10).sum() < 30, 'the healthy arm keeps its colour')
 
 
@@ -3187,11 +3187,17 @@ def golden_spade_palace_guards_stay_inside(c):
 def golden_spade_satellite_shield_stays_blue(c):
     r = c.run(secs=2, mission='GOLDSCN1', dos_look=True, nostart=True, size='1024x768',
               keys=[(0.3, 'f3')], shots=[(1.5, 'shield')], env={'MW2_START': '0,15000,5000'})
-    dome = (0.43, 0.67, 0.57, 0.78)
+    dome = (0.30, 0.80, 0.70, 0.99)
+    palace = (0.43, 0.67, 0.57, 0.78)
     blue = count_px(r.shots['shield'], lambda r, g, b: (r < 60) & (g < 100) & (b > 110), dome)
-    red = count_px(r.shots['shield'], lambda r, g, b: (r > 170) & (g < 60) & (b < 60), dome)
-    c(blue > 2000 and red == 0, 'the shield marker stays blue across its footprint',
-      '%d blue, %d red pixels' % (blue, red))
+    red = count_px(r.shots['shield'], lambda r, g, b: (r > 170) & (g < 60) & (b < 60), palace)
+    c(500 < blue < 12000 and red > 300, 'the blue shield outline leaves the red palace visible',
+      '%d blue outline pixels, %d red palace pixels' % (blue, red))
+    r = c.run('_generator', secs=2, mission='GOLDSCN1', dos_look=True, nostart=True, size='1024x768',
+              keys=[(0.3, 'f3')], shots=[(1.5, 'generator')], env={'MW2_START': '-95000,62000,5000'})
+    red = count_px(r.shots['generator'], lambda r, g, b: (r > 170) & (g < 60) & (b < 60),
+                   (0.42, 0.40, 0.58, 0.57))
+    c(red == 0, 'the generator and its converters are absent from the map', '%d red pixels' % red)
 
 
 @sequence
@@ -3898,7 +3904,7 @@ def damage_shading(c):
             row = px[(y * w + int(0.375 * w)) * 3:(y * w + int(0.625 * w)) * 3]
             tot += sum(row)
         m[sign] = tot
-    c(m[0] < m[1] * 0.93, 'damaged pieces darker with sign 0', 'sum %d vs %d' % (m[0], m[1]))
+    c(m[0] < m[1] * 0.96, 'damaged pieces darker with sign 0', 'sum %d vs %d' % (m[0], m[1]))
 
 
 @sequence
@@ -6011,6 +6017,113 @@ def _prm_names(gd):
     d = open(os.path.join(gd, 'MW2PRM.CFG'), 'rb').read()
     return [[d[base + 0x14 + 0x24 * k + 0x14:base + 0x14 + 0x24 * k + 0x24].split(b'\0')[0].decode('latin-1') for k in range(3)]
             for base in (0x10, 0x90)]
+
+
+@sequence
+def shell_campaign_star_limit(c):
+    """Pyre Light allows a single mech, including when a prior port saved a larger star."""
+    gd, cfg = _shell_game(c)
+    archive = os.path.join(gd, 'MW2.PRJ')
+    if not os.path.exists(archive):
+        os.symlink(os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2', 'MW2.PRJ'), archive)
+    registry = bytearray(20 * 60)
+    struct.pack_into('<6I', registry, 0, 1, 1, 0, 0, 0, 1500)
+    registry[40:45] = b'Test\0'
+    with open(os.path.join(gd, 'MW2REG.CFG'), 'wb') as f:
+        f.write(registry)
+    path = os.path.join(gd, 'MW2PRM.CFG')
+    with open(path, 'rb') as f:
+        prm = bytearray(f.read())
+    struct.pack_into('<I', prm, 0x1c, 3)
+    with open(path, 'wb') as f:
+        f.write(prm)
+    e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+    e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': '0',
+              'MW2_SHELL_FRAMES': '3', 'MW2_SC_EVENTS': 'l 312,445;l 312,445',
+              'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'star.ppm')})
+    for _ in range(2):
+        run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True, timeout=60 * TSCALE)
+        with open(path, 'rb') as f:
+            size = struct.unpack_from('<I', f.read(), 0x1c)[0]
+        c(run.returncode == 0 and size == 1, 'the saved star stays at the mission limit on each visit',
+          'size %d' % size)
+
+
+@sequence
+def dos_garstedt_enemy_camouflage(c):
+    """The DOS renderer uses the Instant Action enemy's camouflage for textured hull polygons."""
+    gd, cfg = _shell_game(c)
+    archive = os.path.join(gd, 'MW2.PRJ')
+    if not os.path.exists(archive):
+        os.symlink(os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2', 'MW2.PRJ'), archive)
+    with open(cfg, 'a') as f:
+        f.write('renderer=dos\n')
+    e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+    e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_SCREEN': '7', 'MW2_SHELL_CLAN': '2',
+              'MW2_SHELL_FRAMES': '2', 'MW2_SHELL_CLICKS': '2,2,2,0', 'MW2_SIM': 'echo %s',
+              'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'shell.ppm')})
+    run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
+                         text=True, timeout=60 * TSCALE)
+    c('launch: PROVSCN1' in run.stdout, 'the shell launches Garstedt', run.stdout[-300:])
+    names = ['USERSTAR.BWD', 'INSTMAP1.BWD'] + ['EN%02dSTAR.BWD' % k for k in range(1, 6)]
+    files = {}
+    for name in names:
+        with open(os.path.join(gd, name), 'rb') as f:
+            files[name] = f.read()
+    frames = {}
+    striped = files['INSTMAP1.BWD']
+    for label, name in (('striped', b'jscamoia'), ('plain', b'jscamo_f')):
+        files['INSTMAP1.BWD'] = striped.replace(b'jscamoia', name)
+        r = c.run('_' + label, secs=0.5, shots=[(0.4, 'enemy')], size='640x480',
+                  mission='PROVSCN1', dos_look=True, nostart=True, files=files, mech=None,
+                  env={'MW2_START': '55858,-180000', 'MW2_START_HEADING': 0, 'MW2_TEST_TOD_START': 3000})
+        frames[label] = r.shots['enemy']
+    d = mean_diff(frames['plain'], frames['striped'], (0.445, 0.48, 0.563, 0.644))
+    c(d > 0.8, "changing the enemy star's texture changes its hull", 'mean RGB difference %.2f' % d)
+
+
+@sequence
+def shell_trial_promotion(c):
+    """A one-phase Wolf Trial 1 win promotes in Aftermath and persists in the registry."""
+    gd, cfg = _shell_game(c)
+    archive = os.path.join(gd, 'MW2.PRJ')
+    if not os.path.exists(archive):
+        os.symlink(os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2', 'MW2.PRJ'), archive)
+    path = os.path.join(gd, 'MW2REG.CFG')
+    registry = bytearray(20 * 60)
+    struct.pack_into('<6I', registry, 0, 1, 1, 0, 4, 0, 1500)
+    registry[40:45] = b'Test\0'
+    with open(path, 'wb') as f:
+        f.write(registry)
+    result = bytearray(0x9d4)
+    struct.pack_into('<10I', result, 0, 0x4d32574d, 1, 0, 18, 2, 1, 1, 0, 8, 1)
+    result[40:63] = b'Destroy First Mech Star'
+    for name, data in (('MW2MSN.CFG', result), ('MW2CAR.CFG', bytes(80)),
+                       ('MW2DIF.CFG', bytes((0, 0, 1, 1, 1, 1, 0, 0)))):
+        with open(os.path.join(gd, name), 'wb') as f:
+            f.write(data)
+    e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+    e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_SCREEN': '3', 'MW2_SHELL_CLAN': '0',
+              'MW2_SHELL_FRAMES': '2', 'MW2_SHELL_AFTERMATH': '1',
+              'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'aftermath.ppm')})
+    run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
+                         text=True, timeout=60 * TSCALE)
+    c('title 1 (Star Commander)' in run.stdout, 'Aftermath reports Star Commander', run.stdout[-300:])
+    with open(path, 'rb') as f:
+        progress, title, honor = struct.unpack_from('<3I', f.read(), 12)
+    c((progress, title, honor) == (5, 1, 6500), 'the registry records progress, promotion and honor',
+      str((progress, title, honor)))
+
+    # Older saves can contain campaign progress past Trial 1 with the base rank still recorded.
+    struct.pack_into('<3I', registry, 12, 5, 0, 6500)
+    with open(path, 'wb') as f:
+        f.write(registry)
+    with open(os.path.join(gd, 'MW2MSN.CFG'), 'wb') as f:
+        f.write(bytes(len(result)))
+    run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
+                         text=True, timeout=60 * TSCALE)
+    c('title 1 (Star Commander) honor 6500' in run.stdout, 'a legacy pilot recovers the earned title',
+      run.stdout[-300:])
 
 
 @sequence

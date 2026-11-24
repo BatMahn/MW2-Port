@@ -18,6 +18,7 @@
  * Gouraud checker's phase per span not reproduced (one phase per polygon); wireframe edges as GL_LINES.
  */
 #include "rb_gl12.h"
+#include "glr.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -918,6 +919,8 @@ static void world_tri(const wv *v0, const wv *v1, const wv *v2)
         if (F->u_dos_fogdist > 0.0f)
             lev -= fl->dkey >= 0.0f ? (float)(((int)fl->dkey * 16 / (int)F->u_dos_fogdist) >> 4) : floorf((-ctr[2] > 0 ? -ctr[2] : 0.0f) / F->u_dos_fogdist);
         lev = lev < 0 ? 0 : lev > 15 ? 15 : lev;
+        /* DOS 0x38e38-0x38e87: apply the damage nibble after light and fog have selected a level. */
+        if (fl->dnib) lev = (float)glr_dos_damage_level((int)lev, fl->dnib, F->u_dsign);
         if (kind == 1) { dos_flat(v, (int)(base + lev)); return; }
         if (kind == 3) { if (G.F.u_dos_smooth || !dos_gouraud_spans(v0, (int)lev)) dos_gouraud_tri(v, (int)lev); return; }
         {

@@ -1953,8 +1953,12 @@ void msim_step(msim *s, int32_t dt_ms)
                     eye_up = ac->mech.eye_pos[1] - ac->mech.mount_from[1];
                 } else eye_up = s->height[i] * 0.7f;
                 if (enemy_who == -1) aim_up = s->player_centre_h;
-                else if (enemy_who >= 0) aim_up = starmate ? s->height[enemy_who] * 0.55f : s->centre_h[enemy_who];
+                else if (enemy_who >= 0) {
+                    aim_up = starmate ? msim_draw_y(s, enemy_who) - s->units[enemy_who].y + s->height[enemy_who] * 0.55f
+                                      : s->centre_h[enemy_who];
+                }
                 hd = hypotf(dx_eye, dz_eye);
+                if (starmate && v.has_enemy) v.enemy_bearing = atan2f(dx_eye, dz_eye) * 180.0f / 3.14159265f;
             }
             v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - s->units[i].y - eye_up,
                                   fmaxf(hd, 1.0f)) * 180.0f / 3.14159265f;
@@ -2532,7 +2536,7 @@ int msim_roof_overhead(const msim *s, float x, float y, float z, int sky_root)
         if (x < box[0] || x > box[1] || z < box[2] || z > box[3]) continue;
         const int index = s->obstacle_part[i];
         const mech3d_part *part = &s->world->parts[index];
-        if (part->hidden || part->facing || part->shadow || part->coll == 5 ||
+        if (part->hidden || part->facing || part->shadow || part->coll == 5 || mech3d_is_force_shield(part) ||
             mech3d_part_in_tree(s->world, index, sky_root)) continue;
         mech3d roof = {0};
         float t;
@@ -3297,10 +3301,18 @@ static void combat_step(msim *s, float dt, int dos_ticks)
         if (m && !m->rule_fired) s->units[i].ai_trigger = 0;
         if (!s->armed[i] || s->units[i].destroyed || !pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who)) continue;
         (void)ef;
+        const int starmate = s->actors[i].friendly && s->actors[i].table == 0;
         aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
         dx = ex - (float)s->actors[i].mech.origin[0];
         dz = ez - (float)s->actors[i].mech.origin[2];
         from[0] = (float)s->actors[i].mech.origin[0]; from[1] = s->units[i].y + s->height[i] * 0.7f; from[2] = (float)s->actors[i].mech.origin[2];
+        if (starmate && who >= 0) {
+            const mech3d *mech = &s->actors[i].mech;
+            aim_h = msim_draw_y(s, who) + eh * 0.55f;
+            if (mech->eye_ok)
+                for (int axis = 0; axis < 3; axis++)
+                    from[axis] = mech->eye_pos[axis];
+        }
         if (m) {   /* AI missile lock (0x10044560, every live mech, for the AI's selected weapon +0xac = combat_unit.ai_sel):
                     * guided, origin distance (3D) in the weapon's window (+0x3c < d <= +0x40), within 16 degrees of the aim
                     * (bearing off heading + lagged twist; pitch + elevation): 0x8000 on target; 0x40 + a 0x16a-tick timer
@@ -3417,14 +3429,25 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                         memcpy(eye, from, sizeof eye);
                         ey2 = (am->heading + m->twist) * 3.14159265f / 180.0f;
                     }
+                    float target_range = 0.0f;
+                    if (starmate && who >= 0) {
+                        /* Account for the latest eye pose while retaining the twist and pitch servo lag. */
+                        float tx = ex - eye[0], ty = aim_h - eye[1], tz = ez - eye[2];
+                        target_range = sqrtf(tx * tx + ty * ty + tz * tz);
+                        ey2 = atan2f(tx, tz) + wrap180(m->twist - m->twist_demand) * 3.14159265f / 180.0f;
+                        pr = atan2f(ty, hypotf(tx, tz)) + (m->pitch - m->pitch_demand) * 3.14159265f / 180.0f;
+                    }
                     dir[0] = sinf(ey2) * cosf(pr); dir[1] = sinf(pr); dir[2] = cosf(ey2) * cosf(pr);
                     hit = aim_ray(s, i, eye, dir, &dist);
                     r = aim_range_step(s, &s->aim[i], hit, dist);
+                    /* Converge at the selected target so a miss from the eye cannot send shots from
+                     * high mounts over a low turret by converging well behind it. */
+                    if (target_range > 0.0f) r = target_range;
                     to[0] = eye[0] + dir[0] * r; to[1] = eye[1] + dir[1] * r; to[2] = eye[2] + dir[2] * r;
                     if (getenv("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
                         fprintf(stderr, "aiaim %.2f actor %d w %d hit %d dist %.0f range %d conv %.0f eye %.0f %.0f %.0f yaw %.2f body %.2f pitch %.2f\n",
                                 s->now / 1000.0, i, w, hit, dist, s->aim[i].range.value, r, eye[0], eye[1], eye[2], ey2 * 180.0f / 3.14159265f,
-                                wrap180(am->heading + m->twist), m->pitch);
+                                wrap180(am->heading + m->twist), pr * 180.0f / 3.14159265f);
                 }
                 {
                     int before = s->shot_count;
@@ -4509,7 +4532,7 @@ static int sphere_push(const msim *s, const float start[3], const float c[3], fl
         if (!(dl < rr)) continue;
         const mech3d_part *part = &s->world->parts[o->part];
         if ((part->objtype & 0xf0) == 0x50) return 0;
-        if (strcmp(part->rec, "GOLDARE8") == 0 && strcmp(part->model_name, "TL1SHIEL") == 0) {
+        if (mech3d_is_force_shield(part)) {
             /* Golden Spade starts three defenders inside the shield. A move originating inside
              * must not eject them from their mission-defined positions as soon as physics runs. */
             float dx = start[0] - sph[0], dy = start[1] - sph[1], dz = start[2] - sph[2];

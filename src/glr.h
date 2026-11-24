@@ -242,6 +242,13 @@ void glr_set_dos_palette(glr *r, const uint8_t pal[256][3]);
 /* The 3D editions' damage shading (0x1002b9b0): a part whose mech3d_part.dmg_nib n is 1-15 (a mech location's damage,
  * the type-0x100 objects' nibble) is lit x (1 - n / 15), or x (1 + n / 15) (at most full) when sign (PLNT +52,
  * DAT_1024e428) is set. Not the DOS look, not Titanium models. */
+/* DOS MW2.EXE 0x38e38-0x38e87, with the engine's fixed-point rounding. */
+static inline int glr_dos_damage_level(int level, int damage, int brighten)
+{
+    if (!brighten) return (level * (16 - damage) + 8) >> 4;
+    const int headroom = ((15 - level) << 16) / 15;
+    return level + ((headroom * damage + 0x8000) >> 16);
+}
 void glr_set_damage_shade(glr *r, int sign);
 
 #endif

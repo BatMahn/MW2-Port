@@ -1852,6 +1852,8 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
 typedef struct { int32_t used, selected, clan, rank, title, honor, stats[4]; char name[16]; int32_t rt; } pilot_rec;   /* 60 bytes */
 typedef char pilot_rec_is_60_bytes[sizeof(pilot_rec) == 60 ? 1 : -1];
 static pilot_rec g_reg[20];
+static int campaign_is_trial(int clan, int m);
+
 static void reg_load(void)
 {
     char p[700];
@@ -1859,6 +1861,14 @@ static void reg_load(void)
     snprintf(p, sizeof p, "%s/MW2REG.CFG", g_dir);
     memset(g_reg, 0, sizeof g_reg);
     if ((f = fopen(p, "rb"))) { if (fread(g_reg, 1, sizeof g_reg, f) != sizeof g_reg) { /* short: keep what was read */ } fclose(f); }
+    /* Earlier ports advanced the campaign without recording promotions. The save records which
+     * trials were passed, but cannot tell whether the pilot won the optional second phases. */
+    for (int i = 0; i < 20; i++) {
+        pilot_rec *pilot = &g_reg[i];
+        if (!pilot->used || pilot->title != 0 || pilot->clan < 0 || pilot->clan > 1) continue;
+        for (int m = 0; m < pilot->rank && m < 16; m++)
+            if (campaign_is_trial(pilot->clan, m)) pilot->title++;
+    }
 }
 static void reg_save(void)
 {
@@ -2217,7 +2227,7 @@ static const char *CAMPAIGN_TITLE[2][16] = {
     {"Silent Thunder", "Arkham Bridge", "Mirror Cage", "Bone Machine", "Trial 1", "Bouk Obelisk", "Umber Wall", "Rogue Chariot",
      "Trial 2", "Plum Wine", "Rust Heart", "Trial 3", "Armor Veil", "Iron Piston", "Bronze Anvil", "Trial 4"}};
 static const int CAMPAIGN_TRIAL[2][16] = {{0,0,0,0,1,0,0,0,1,0,0,1,0,0,0,1}, {0,0,0,0,1,0,0,0,1,0,0,1,0,0,0,1}};
-int campaign_is_trial(int clan, int m) { return m >= 0 && m < 16 && CAMPAIGN_TRIAL[clan][m]; }   /* the mech is assigned */
+static int campaign_is_trial(int clan, int m) { return m >= 0 && m < 16 && CAMPAIGN_TRIAL[clan][m]; }   /* the mech is assigned */
 
 static void shell_message(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg);
 static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const char *msg, int def);
@@ -3632,6 +3642,14 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
     const char *script = headless ? getenv("MW2_SC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
     star_cfg *st = &g_star[clan];
     star_load(clan);
+    const int reg = clan < 2 ? reg_selected(clan) : -1;
+    const int mission = reg >= 0 && g_reg[reg].rank >= 0 && g_reg[reg].rank < 16 ? g_reg[reg].rank : 0;
+    const mission_star ms = clan < 2 ? mission_sdsc(CAMPAIGN_SCEN[clan][mission]) : (mission_star){0};
+    const int max_size = clan >= 2 ? g_ia.size[clan - 2] : ms.ok ? ms.size : 3;
+    if (st->size > max_size) {
+        st->size = max_size;
+        star_save(clan);
+    }
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);   /* background slots 15 / 22 / 10 (0x7f11c) */
     /* the button clips (0x3b8f6..): every pass hides 6-9 (0x395d0(k, 0x20)) and pauses 5 (clans: bit 0) or hides it (context
      * 2: 0x20); the pointer on MECH LAB (hotspot 1) runs 5 (clans) / shows it (context 2, 0x39610); the left button held
@@ -3679,11 +3697,12 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                         const int *h = SC_HS[cx][i];
                         if (x < h[0] || x > h[2] || y < h[1] || y > h[3]) continue;
                         if (i >= 2) shell_sound(0x65, 0x32);   /* FUN_0003b420: formation, size and bay buttons click (0x91694) */
+                        if (i == 4 && st->size >= max_size) break;
                         if (i == 0) next = back;
                         else if (i == 1) { shell_sound(0x66, 0x32); g_lab_slot = 0; next = 9; }   /* MECH LAB (0x91698) */
                         else if (i == 2) st->formation = (st->formation + 1) % 6;
                         else if (i == 3) st->formation = (st->formation + 5) % 6;
-                        else if (i == 4 && st->size < 3) { if (st->slot[st->size].mech < 0) st->slot[st->size].mech = st->slot[0].mech; st->size++; }
+                        else if (i == 4) { if (st->slot[st->size].mech < 0) st->slot[st->size].mech = st->slot[0].mech; st->size++; }
                         else if (i == 5 && st->size > 1) st->size--;
                         else if (i >= 6 && i - 6 < st->size) { g_lab_slot = i - 6; next = 9; }
                         if (i >= 2 && i <= 5) {   /* FUN_0003aeb0 for each member: a shown name cut to 92 px, stored */
@@ -3795,21 +3814,9 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                 draw_text(&SC_HEAD_FONT, 320 - text_width(&SC_HEAD_FONT, up) / 2, 4, up, pal, -1);
             }
             if (clan >= 2) snprintf(line, sizeof line, "Mission: Trial of Grievance");
-            else {
-                int rg = reg_selected(clan), mm = rg >= 0 ? g_reg[rg].rank : 0;
-                snprintf(line, sizeof line, "Mission: %s", CAMPAIGN_TITLE[clan][mm >= 0 && mm < 16 ? mm : 0]);
-            }
+            else snprintf(line, sizeof line, "Mission: %s", CAMPAIGN_TITLE[clan][mission]);
             draw_text(&g_fthin, 320 - text_width(&g_fthin, line) / 2, 35, line, pal, -1);
-            {   /* the mission's star size (SDSC; Pyre Light 1 in the DOS capture) */
-                int mx2 = 3;
-                if (clan >= 2) mx2 = g_ia.size[clan - 2];
-                else {
-                    int rg = reg_selected(clan), mm = rg >= 0 ? g_reg[rg].rank : 0;
-                    mission_star ms = mission_sdsc(CAMPAIGN_SCEN[clan][mm >= 0 && mm < 16 ? mm : 0]);
-                    if (ms.ok) mx2 = ms.size;
-                }
-                snprintf(line, sizeof line, "Maximum 'Mechs in current Star: %d", mx2);
-            }
+            snprintf(line, sizeof line, "Maximum 'Mechs in current Star: %d", max_size);
             draw_text(&g_fthin, 320 - text_width(&g_fthin, line) / 2, 50, line, pal, -1);
             snprintf(line, sizeof line, "Keshik Defined Maximum Tonnage (KDMT) per 'Mech: %d.00 T", limit);
             draw_text(&g_fthin, 320 - text_width(&g_fthin, line) / 2, 65, line, pal, -1);
@@ -3867,7 +3874,7 @@ static int launch_campaign_m(int clan, int reg, int m)
         if (ms.ok && sz > ms.size) sz = ms.size;                    /* capped at the maximum */
         for (k = 0; k < 3; k++) { fr[k] = g_star[clan].slot[k]; if (k >= sz) fr[k].mech = -1; en[k].mech = -1; }
         if (ms.ok && (CAMPAIGN_TRIAL[clan][m] || fr[0].mech < 0))
-            for (k = 0; k < ms.size && k < 3; k++)
+            for (k = 0; k < sz; k++)
                 if (ms.loadout[k][0]) { fr[k].mech = mech_index_of(ms.loadout[k]); snprintf(fr[k].loadout, sizeof fr[k].loadout, "%s", ms.loadout[k]); }
         if (fr[0].mech < 0) fr[0].mech = clan == 1 ? 5 : 9;
         g_last_limit = ms.ok ? ms.tons : -1;
@@ -4080,7 +4087,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     memset(snd, 0, sizeof snd); memset(dif, 0, sizeof dif);
     wr32(snd + 0x0c, 65536); wr32(snd + 0x04, 65536); wr32(snd + 0x08, 65536);
     for (i = 0x14; i <= 0x24; i += 4) wr32(snd + i, 1);
-    dif[4] = 1; dif[5] = 1;
+    dif[3] = 1; dif[4] = 1; dif[5] = 1;
     snprintf(p, sizeof p, "%s", gpath("MW2SND.CFG")); if ((f = fopen(p, "rb"))) { if (fread(snd, 1, sizeof snd, f)) {} fclose(f); }
     snprintf(p, sizeof p, "%s", gpath("MW2DIF.CFG")); if ((f = fopen(p, "rb"))) { if (fread(dif, 1, sizeof dif, f)) {} fclose(f); }
     portcfg_load(g_dir, &pc);
@@ -5652,7 +5659,7 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
 }
 static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
-    int mission_done;
+    int mission_done, honorable;
     static deb_line L[64];
     int n = 0, i, next = -1, f = 0, reg, success, total = 0, final = 0, top = 0, primary_won = 0;
     unsigned char msn[0x9d4], car[80], dif[8];
@@ -5673,17 +5680,19 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     if (reg < 0) return 12;
     before = g_reg[reg];
     mission_done = before.rank;   /* the mission just flown (before any advance) */
-    success = (msn[16] | msn[17] << 8) == 2;
+    success = rd32le(msn + 16) == 2;
+    honorable = dif[4] == 1 && dif[0] != 1 && dif[1] != 1 && dif[3] != 0;
 #define LINE(lbl, ...) do { if (n < 64) { snprintf(L[n].label, sizeof L[n].label, "%s", lbl); snprintf(L[n].value, sizeof L[n].value, __VA_ARGS__); L[n].centre = 0; n++; } } while (0)
 #define TEXT(lbl) do { if (n < 64) { snprintf(L[n].label, sizeof L[n].label, "%s", lbl); L[n].value[0] = 0; L[n].centre = 1; n++; } } while (0)
     {   /* the objectives */
-        int no = msn[4] | msn[5] << 8, k, primary_failed = 0, sec = 0, ter = 0;
+        uint32_t no = rd32le(msn + 4);
+        int primary_failed = 0, sec = 0, ter = 0;
         g_sub_q[0] = 0;
         static const char *TY[9] = {"Default", "Primary", "Secondary", "", "Tertiary", "", "", "", "Return"};
         TEXT("OBJECTIVES");
-        for (k = 0; k < no && k < 40; k++) {
+        for (uint32_t k = 0; k < no && k < (sizeof msn - 20) / 52; k++) {
             const unsigned char *e = msn + 20 + k * 52;
-            int st = e[0], ty = e[4];
+            uint32_t st = rd32le(e), ty = rd32le(e + 4);
             char txt[40];
             snprintf(txt, sizeof txt, "%.31s", (const char *)e + 20);
             { int q = (int)strlen(txt); while (q > 0 && txt[q - 1] == ' ') txt[--q] = 0; }
@@ -5737,14 +5746,11 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         LINE("Mission Honor:", "%d", total);
         LINE("Difficulty Multiplier:", "(%s = %.1f) %d", DN[d], DM[d], final);
         g_reg[reg].honor += final;
-        g_reg[reg].rank++;   /* the campaign advances */
+        if (honorable) g_reg[reg].rank++;   /* DOS MW2SHELL.EXE 0x24a66 */
         LINE("Career Honor:", "%d", g_reg[reg].honor);
     }
-    /* promotion (Win95 MW2SHELL.DLL 0x1000f0d5, added to pilot +0x10 at 0x1000f3a2, capped at 8 = Khan): a won trial
-     * raises the rank title by one per primary objective completed - only a campaign pilot, a mission the campaign table
-     * flags a trial, the mission won, heat tracking on, and none of the Combat Variables that dishonor (0x1000dd00:
-     * unlimited ammo, invulnerability, no collision damage). The port never promoted: every pilot stayed Mechwarrior. */
-    if (success && campaign_is_trial(clan, mission_done) && dif[4] == 1 && dif[0] != 1 && dif[1] != 1 && dif[3] != 0 && primary_won > 0) {
+    /* DOS MW2SHELL.EXE 0x249ae-0x24a66: one rank per successful primary trial objective. */
+    if (success && honorable && campaign_is_trial(clan, mission_done)) {
         g_reg[reg].title += primary_won;
         if (g_reg[reg].title > 8) g_reg[reg].title = 8;
         if (g_reg[reg].title < 0) g_reg[reg].title = 0;
@@ -5911,7 +5917,6 @@ static const rr_hs RR_HS[2][4] = {
 static const char *RR_CODENAME[2][16] = {
     {"YELLOW", "ORANGE", "TEAL", "TAUPE", "JENNY", "SABLE", "GREY", "BROWN", "AMY", "SILVER", "AQUA", "KIM", "CYAN", "MAROON", "GOLD", "IRENE"},
     {"PINK", "GREEN", "RED", "FUCHSIA", "CINDY", "RUST", "UMBER", "TAN", "HEIDI", "PLUM", "WHITE", "JILL", "PUCE", "BLONDE", "BRONZE", "MARY"}};
-int campaign_is_trial(int clan, int m);
 static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
     int next = -1, f = 0, i, reg, cheat;

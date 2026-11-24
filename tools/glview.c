@@ -1996,7 +1996,7 @@ static int tod_group(int tt, int day)
  * length PLNT +12 (payload 3), the start (seconds into the day), PLNT +52 (payload 13: the 3D editions' damage shading
  * sign, DAT_1024e428) */
 static uint8_t g_pal_slot[20][768];
-static int     g_pal_slot_ok[20], g_tod_day, g_tod_start;
+static int     g_pal_slot_ok[20], g_tod_day, g_tod_start, g_plnt52;
 static int     g_hud_slot = -1;   /* the slot the HUD's colours are from */
 static void hud_slot(int slot)    /* the engine's 0x1002ac40: the HUD table (and g_hp) from the PALG slot's record */
 {
@@ -2197,7 +2197,7 @@ static void scene_anim(glr *r)
  *    per vertex in the 3D editions (Gouraud), flat here per polygon at its mean height.
  * Types 0x30 / 0x70 are skipped (0x100040b0), as are destroyed units. Drawn by the HUD's 2D primitives, lowest first. */
 static const int SAT_COL[13] = {0xe, 0xa, 0x6, 0xf, 0xb, 0xf5, 0x2, 0x3, 0xf9, 0xff, 0xf0, 0x1, 0x2};
-enum { SAT_SHADED = -1, SAT_BITMAP = -2, SAT_SILHOUETTE = -3, SAT_FLAT = -4 };
+enum { SAT_SHADED = -1, SAT_BITMAP = -2, SAT_SILHOUETTE = -3, SAT_OUTLINE = -4 };
 typedef struct { float y; int part_src, part; int side_col; int poly; } sat_item;   /* poly -1 for a card; side_col is a mode or palette index */
 /* a part's vertex in the world (as msim's part_vertex) */
 static void sat_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3])
@@ -2235,12 +2235,17 @@ static int sat_unit_visible(int src, int sky_root)
     if (src >= 0 && g_sim.powered_down && g_sim.powered_down[src]) return 0;
     return !msim_roof_overhead(&g_sim, (float)m->origin[0], unit->y, (float)m->origin[2], sky_root);
 }
+static int sat_is_shield_generator(int thing)
+{
+    return strcasecmp(g_sim.scene, "GOLDSCN1") == 0 &&
+           strcasecmp(g_sim.bld[thing].name, "Shield-Generator") == 0;
+}
+
 static int sat_thing_visible(int thing)
 {
-    const char *name = g_sim.bld[thing].name;
-    return strcasecmp(name, "none") != 0 &&
-           !(strcasecmp(g_sim.scene, "GOLDSCN1") == 0 && strcasecmp(name, "Shield-Generator") == 0);
+    return strcasecmp(g_sim.bld[thing].name, "none") != 0 && !sat_is_shield_generator(thing);
 }
+
 static int sat_rubble_part(const mech3d *world, int part)
 {
     if (world->parts[part].parent_obj < 0) return 0;
@@ -2311,6 +2316,9 @@ static void sat_draw(int w, int h)
     const float hx = (float)w / ((float)h * 4.0f / 3.0f) * range * 0.5f + 2000.0f, hz = range * 0.375f + 2000.0f;
     int n = 0, src, i, k;
     const int sky_root = sat_sky_root();
+    const struct msim_building *generator = NULL;
+    for (i = 0; i < g_sim.bld_count; i++)
+        if (sat_is_shield_generator(i)) { generator = &g_sim.bld[i]; break; }
     static const float black[4] = {0, 0, 0, 1};
     for (src = -2; src < g_actor_count; src++) {
         const mech3d *m = sat_src(src);
@@ -2323,8 +2331,13 @@ static void sat_draw(int w, int h)
             const wtb_object *o = pp->model.object_count > 0 ? &pp->model.objects[0] : NULL;
             float c[3] = {0, 0, 0}, top = -1e30f;
             int col, ty = pp->objtype & 0xf0, kd = pp->objtype & 0xf00, v;
+            const int shield = src == -2 && mech3d_is_force_shield(pp);
             if (!o || o->vert_count <= 0 || pp->hidden) continue;
             if (src == -2 && (ty == 0x30 || ty == 0x70 || mech3d_part_in_tree(m, k, sky_root))) continue;
+            /* GOLDARE8 also holds the pit terrain (OBJ 0) and the separate dome over the palace.
+             * Everything else in the record is the generator, its converters or their wreckage. */
+            if (src == -2 && generator && !shield && pp->obj_index != 0 &&
+                strcmp(pp->rec, m->parts[generator->intact].rec) == 0) continue;
             /* (a quick reject on the part's origin: the world's parts are small next to the view) */
             if (fabsf((float)pp->pos[0] - ex) > hx + 20000.0f || fabsf((float)pp->pos[2] - ez) > hz + 20000.0f) continue;
             for (v = 0; v < o->vert_count; v++) { float q[3]; sat_vertex(pp, &o->verts[v], q); c[0] += q[0]; c[2] += q[2]; if (q[1] > top) top = q[1]; }
@@ -2339,8 +2352,7 @@ static void sat_draw(int w, int h)
                 if (thing >= 0 && g_sim.bld[thing].hp <= 0) col = SAT_SILHOUETTE;
                 else if (thing >= 0) col = SAT_COL[3 + (g_sim.bld[thing].side >= 0 && g_sim.bld[thing].side <= 2 ? g_sim.bld[thing].side : 2)];
                 else if (sat_rubble_part(m, k)) col = SAT_SILHOUETTE;
-                else if (strcmp(pp->rec, "GOLDARE8") == 0 && strcmp(pp->model_name, "TL1SHIEL") == 0)
-                    col = SAT_FLAT;   /* The force shield uses its blue palette colours on the map. */
+                else if (shield) col = SAT_OUTLINE;
                 else if (kd & 0x200) col = SAT_COL[5];
                 else if (kd & 0x100) col = SAT_COL[1];
                 else if (kd & 0x400) col = SAT_COL[6];
@@ -2385,7 +2397,7 @@ static void sat_draw(int w, int h)
     for (i = 0; i < n; i++) {
         const mech3d_part *pp = &sat_src(it[i].part_src)->parts[it[i].part];
         const wtb_object *o = &pp->model.objects[0];
-        int nt = 0, ns = 0, col = it[i].side_col, j;
+        int nt = 0, ns = 0, col = it[i].side_col, edge_col = col, j;
         if (col == SAT_BITMAP) {   /* a card: its bitmap, upright on the map at its centre (the engine draws its polygon as it is) */
             float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f}, wd, hg;
             const hud_sprite *spr = NULL;
@@ -2407,15 +2419,13 @@ static void sat_draw(int w, int h)
             for (c3 = 0; c3 < 3; c3++) { e1[c3] = pv[1][c3] - pv[0][c3]; e2[c3] = pv[2][c3] - pv[0][c3]; }
             ny = e1[2] * e2[0] - e1[0] * e2[2];
             if (ny >= 0) continue;   /* faces turned away from the sky (the port's winding: as the cockpit frame's cull) */
-            if (col == SAT_SHADED || col == SAT_FLAT) {
+            if (col == SAT_SHADED) {
                 int colour = (q->color >> 4) & 0xff;
                 float xy[6];
-                if (col == SAT_SHADED) {
-                    int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : colour;
-                    int shade = (int)floorf(16.0f * my / ((float)q->n * 6400.0f));
-                    if (shade < 0) shade = 0; else if (shade > 15) shade = 15;
-                    colour = (grp & 0xf0) | shade;
-                }
+                int grp = ((q->color >> 12) & 7) == 3 ? SAT_COL[10] : colour;
+                int shade = (int)floorf(16.0f * my / ((float)q->n * 6400.0f));
+                if (shade < 0) shade = 0; else if (shade > 15) shade = 15;
+                colour = (grp & 0xf0) | shade;
                 for (t = 1; t + 1 < q->n; t++) {
                     const int id[3] = {0, t, t + 1};
                     for (c3 = 0; c3 < 3; c3++) { xy[c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; xy[c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
@@ -2423,11 +2433,15 @@ static void sat_draw(int w, int h)
                 }
                 continue;
             }
-            if (nt + q->n > tcap) { float *g = realloc(tri, (size_t)(tcap + q->n + 1024) * 6 * sizeof *g); if (!g) break; tri = g; tcap += q->n + 1024; }
-            for (t = 1; t + 1 < q->n; t++) {
-                const int id[3] = {0, t, t + 1};
-                for (c3 = 0; c3 < 3; c3++) { tri[nt * 6 + c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; tri[nt * 6 + c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
-                nt++;
+            if (col == SAT_OUTLINE) {
+                edge_col = (q->color >> 4) & 0xff;
+            } else {
+                if (nt + q->n > tcap) { float *g = realloc(tri, (size_t)(tcap + q->n + 1024) * 6 * sizeof *g); if (!g) break; tri = g; tcap += q->n + 1024; }
+                for (t = 1; t + 1 < q->n; t++) {
+                    const int id[3] = {0, t, t + 1};
+                    for (c3 = 0; c3 < 3; c3++) { tri[nt * 6 + c3 * 2] = 320.0f + (pv[id[c3]][0] - ex) * sc; tri[nt * 6 + c3 * 2 + 1] = 240.0f - (pv[id[c3]][2] - ez) * sc; }
+                    nt++;
+                }
             }
             if (col == SAT_SILHOUETTE) continue;
             if (ns + q->n > scap) { float *g = realloc(seg, (size_t)(scap + q->n + 1024) * 4 * sizeof *g); if (!g) break; seg = g; scap += q->n + 1024; }
@@ -2439,7 +2453,7 @@ static void sat_draw(int w, int h)
             }
         }
         if (nt) hud_tris(g_hud, tri, nt, black);
-        if (col >= 0 && ns) hud_lines(g_hud, seg, ns, 1.0f, HP(col));
+        if (edge_col >= 0 && ns) hud_lines(g_hud, seg, ns, 1.0f, HP(edge_col));
     }
     /* the projectile pool (type word 0x400: [6]) - each shot a short line along its flight, in colour 2 */
     if (g_sim_ok) {
@@ -3905,6 +3919,7 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
     bwd_mission bm;
     char name[16];
     int k, c, q, slot = 0, t0 = 0, day = 0;
+    g_plnt52 = 0;
     memset(g_pal_slot_ok, 0, sizeof g_pal_slot_ok);
     snprintf(name, sizeof name, "%.4sSCN1", mission);
     if (mission && bwd_mission_load(ma, name, &bm) == 0) {
@@ -3922,8 +3937,11 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
                     }
                 }
                 else if (strcmp(ch->tag, "INIT") == 0 && ch->size >= 12) t0 = (int32_t)(ch->data[8] | ch->data[9] << 8 | ch->data[10] << 16 | (uint32_t)ch->data[11] << 24);
-                else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 16)
-                    day = (int32_t)(ch->data[12] | ch->data[13] << 8 | ch->data[14] << 16 | (uint32_t)ch->data[15] << 24);
+                else if (strcmp(ch->tag, "PLNT") == 0 && ch->size >= 16) {
+                    const uint8_t *d = ch->data;
+                    day = (int32_t)(d[12] | d[13] << 8 | d[14] << 16 | (uint32_t)d[15] << 24);
+                    if (ch->size >= 56) g_plnt52 = (d[52] | d[53] | d[54] | d[55]) != 0;
+                }
             }
         bwd_mission_free(&bm);
     }
@@ -5044,9 +5062,8 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 char dmg[16];
                 if (!g_hud) g_hud = hud_create(ma);
                 hud_mission_palette(ma, mission);   /* the mission's palette for the HUD (0x10260324, see there) */
-                /* Damage darkens on every planet. Keep the original PLNT +52 branch available for comparison tests. */
-                const char *damage_sign = getenv("MW2_TEST_DSIGN");
-                glr_set_damage_shade(r, damage_sign ? atoi(damage_sign) : 0);
+                const char *damage_sign = getenv("MW2_TEST_DSIGN");   /* TEST ONLY */
+                glr_set_damage_shade(r, damage_sign ? atoi(damage_sign) : ati == 3 && g_plnt52);
                 g_hud_s = g_render_w == 320 ? 0.5f : 1.0f;
                 g_hud_sfx = g_render_w == 320 ? "" : g_render_w == 640 ? "6" : g_render_w == 1024 ? "K" :
                             abs(1024 - g_win_cols) + abs(768 - g_win_lines) < abs(640 - g_win_cols) + abs(480 - g_win_lines) ? "K" : "6";
@@ -8870,9 +8887,9 @@ int main(int argc, char **argv)
                         if (g_view_far > 0 && range > g_view_far + pr) continue;
                     }
                     /* Use the animated beacon's palette colour on a small, depth-tested card once the
-                     * mesh is below three pixels at the 640x480 reference size. */
+                     * mesh is below a radius of 1.5 pixels at the 640x480 reference size. */
                     const float dot_scale = (0.75f / 480.0f) / fmaxf(g_zoom, 1.0f);
-                    const float beacon_radius = 3.0f * range * dot_scale;
+                    const float beacon_radius = 1.5f * range * dot_scale;
                     if (beacon && beacon_radius <= pr) continue;
                     int polygons = beacon ? 1 : o->poly_count;
                     for (pk = 0; pk < polygons && n < GLR_MAX_SPRITES; pk++) {
