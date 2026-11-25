@@ -36,13 +36,13 @@ typedef struct {
     float   nrm[3], v0[3];   /* kinds 1 / 2: the polygon's normal and corner 0 in the model's frame (game coordinates) */
 } glr_tipoly;
 
-/* A bank-1 polygon of a texture with two readings (texture.alt), for the 3Dfx / S3 texture cache (glr_view.tex_cache,
- * tex_cache_decide): its corners in GL coordinates, the engine's normal (the stored one negated, 0x10042140), its
- * object's bounding sphere */
+/* The 3Dfx/S3 depth queue uses the corners, facing normal and object sphere.
+ * An untextured polygon can affect the sort without selecting a texture format. */
 typedef struct {
     float   c[WTB_MAX_POLY_VERTS][3], nrm[3], sph[4];
     int     first;     /* its first fan vertex in the layer's vbo (3 (n - 2) vertices: glr_view.alpha_blend's pass) */
-    uint8_t n, slot, apoly, cls, has_nrm;
+    int16_t slot;      /* -1 for a polygon without an alternate texture reading */
+    uint8_t n, apoly, cls, has_nrm;
 } glr_fpoly;
 
 typedef struct {
@@ -478,15 +478,19 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
     uint8_t *dos_damage = NULL;
     int pi, k, j, a, pass, b, tip_n = 0, tip_cap = 0, pit_o = -1, apoly, fp_n = 0, fp_cap = 0;
     size_t acount[GLR_SLOTS], apos[GLR_SLOTS];
+    int cache_geometry = 0;
+    for (b = 0; b < GLR_SLOTS && slots && !cache_geometry; b++)
+        cache_geometry = slots[b] && slots[b]->alt;
 
     memset(acount, 0, sizeof acount);
     memset(apos, 0, sizeof apos);
     if (li < 2) r->kl_n[li] = 0;
     for (pi = 0; pi < m->part_count; pi++) {
-        const wtb_model *pm = r->ti_slots && m->parts[pi].ti_model ? m->parts[pi].ti_model : &m->parts[pi].model;
+        const mech3d_part *part = &m->parts[pi];
+        const wtb_model *pm = r->ti_slots && part->ti_model ? part->ti_model : &part->model;
         const wtb_object *o;
         if (pm->object_count <= 0) continue;   /* (a Titanium object with no model) */
-        o = &pm->objects[0];
+        o = &pm->objects[r->dos && li == 0 && pm == &part->model ? part->dos_draw_object : 0];
         for (k = 0; k < o->poly_count; k++)
             if (o->polys[k].n >= 3) cap += (size_t)(o->polys[k].n - 2) * 3 + (((o->polys[k].color >> 12) & 7) == 3 ? 6 : 0);
     }
@@ -512,7 +516,8 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
             /* TEXTURES TITANIUM: a world object's Titanium model in place of its own; a Titanium mech's parts (ti) */
             const wtb_model *model = r->ti_slots && part->ti_model ? part->ti_model : &part->model;
             const int ti = r->ti_slots && (part->ti || part->ti_model);
-            const wtb_object *o = model->object_count > 0 ? &model->objects[0] : NULL;
+            const int draw_object = r->dos && li == 0 && model == &part->model ? part->dos_draw_object : 0;
+            const wtb_object *o = model->object_count > 0 ? &model->objects[draw_object] : NULL;
             /* image enhancement, mode 0 (engine 0x1002a4b0, enhancement branch): by the object's type word (OBJ +44 ->
              * object +2) - 0x200 colour 7 (blue), 0x400 0xb (red), 0x100 by its class nibble (0 blue, 1-11 3 yellow, 12+
              * red), others the layer's (world 8, dark red); an active building blue (DOS capture) */
@@ -992,12 +997,13 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         n++;
                     }
                 }
-                if (batch < GLR_SLOTS && model->extended && !ti && slots[batch]->alt && q->n <= WTB_MAX_POLY_VERTS) {
+                if (cache_geometry && model->extended && !ti && q->n <= WTB_MAX_POLY_VERTS) {
                     /* (the texture cache's polygons: tex_cache_decide) */
                     glr_fpoly *g;
                     if (fp_n == fp_cap) { g = realloc(fp, (size_t)(fp_cap = fp_cap ? 2 * fp_cap : 256) * sizeof *fp); if (!g) goto no_fp; fp = g; }
                     g = &fp[fp_n++];
-                    g->n = (uint8_t)q->n; g->slot = (uint8_t)batch; g->apoly = (uint8_t)apoly; g->cls = (uint8_t)notex_cls;
+                    g->slot = batch < GLR_SLOTS && slots[batch]->alt ? (int16_t)batch : -1;
+                    g->n = (uint8_t)q->n; g->apoly = (uint8_t)(g->slot >= 0 && apoly); g->cls = (uint8_t)notex_cls;
                     g->first = (int)pfirst;
                     for (j = 0; j < q->n; j++) {   /* (the fan's corners, as ti_corner_vertex) */
                         size_t vi = j == 0 ? pfirst : j <= q->n - 2 ? pfirst + 3 * (size_t)(j - 1) + 1 : pfirst + 3 * (size_t)(q->n - 3) + 2;
@@ -1320,6 +1326,57 @@ static float *env_vertex(float *f, float x, float y, float z, float nx, float ny
     f[0] = x; f[1] = y; f[2] = z; f[3] = nx; f[4] = ny; f[5] = nz; f[6] = u; f[7] = v;
     f[8] = f[9] = f[10] = 1; f[11] = 0; f[12] = 0;
     return f + FLOATS_PER_VERTEX;
+}
+
+typedef struct {
+    float x, z, depth;
+} ground_vertex;
+
+static int ground_clip(const ground_vertex *in, int n, ground_vertex *out, float depth, int keep_far)
+{
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        const ground_vertex a = in[i], b = in[(i + 1) % n];
+        const int a_in = keep_far ? a.depth >= depth : a.depth <= depth;
+        const int b_in = keep_far ? b.depth >= depth : b.depth <= depth;
+        if (a_in) out[count++] = a;
+        if (a_in != b_in && a.depth != depth && b.depth != depth) {
+            float t = (depth - a.depth) / (b.depth - a.depth);
+            out[count++] = (ground_vertex){a.x + t * (b.x - a.x), a.z + t * (b.z - a.z), depth};
+        }
+    }
+    return count;
+}
+
+static int rendition_ground(float *out, const float eye[3], const float view[16], float near_depth, float extent, float tile)
+{
+    /* MERCSW 0x1005545b clips the ground in view space before assigning
+     * fog to the clipped vertices and passing them to the renderer. */
+    const float bounds[4] = {near_depth, 2500.0f, 8000.0f, 1.0e7f};
+    const float x[4] = {-extent, extent, extent, -extent};
+    const float z[4] = {-extent, -extent, extent, extent};
+    ground_vertex quad[4];
+    float *f = out;
+    for (int i = 0; i < 4; i++) {
+        float px = eye[0] + x[i], pz = eye[2] + z[i];
+        quad[i] = (ground_vertex){px, pz, -(view[2] * px + view[10] * pz + view[14])};
+    }
+    for (int band = 0; band < 3; band++) {
+        ground_vertex tmp[6], clipped[6];
+        float lo = fmaxf(near_depth, bounds[band]), hi = bounds[band + 1];
+        if (lo >= hi) continue;
+        int n = ground_clip(quad, 4, tmp, lo, 1);
+        n = ground_clip(tmp, n, clipped, hi, 0);
+        for (int i = 1; i + 1 < n; i++) {
+            const int tri[3] = {0, i, i + 1};
+            for (int j = 0; j < 3; j++) {
+                const ground_vertex v = clipped[tri[j]];
+                f = env_vertex(f, v.x, 0, v.z, 0, 1, 0, v.x * tile, -v.z * tile);
+                f[-2] = -8.0f;
+            }
+        }
+    }
+    return (int)((f - out) / FLOATS_PER_VERTEX);
 }
 
 void glr_set_bank0(glr *r, texture *const bank0[GLR_SLOTS]) { if (r) r->bank0 = bank0; }
@@ -1670,8 +1727,13 @@ static void dos_qsort(int *id, int *key, int lo, int hi)   /* 0x3cea0, element b
         }
         t = id[lo]; id[lo] = id[j]; id[j] = t;
         t = key[lo]; key[lo] = key[j]; key[j] = t;
-        if (lo < j - 1) dos_qsort(id, key, lo, j - 1);
-        lo = j + 1;
+        if (j - lo < hi - j) {
+            if (lo < j - 1) dos_qsort(id, key, lo, j - 1);
+            lo = j + 1;
+        } else {
+            if (j + 1 < hi) dos_qsort(id, key, j + 1, hi);
+            hi = j - 1;
+        }
     }
 }
 static void dos_pit_ranks(const glr *r, const int64_t R[3][3], const float eye_gl[3], int w, int h, const int ps[2], int *ranks)
@@ -1735,81 +1797,111 @@ static int tex_mip(const glr_view *v, const texture *t)
     return v->tex_cache == 1 && t && t->w == 128 && t->h == 128 && t->cel >= 1 && t->cel < 0x51c;
 }
 
-/* The 3Dfx / S3 texture cache (glr_view.tex_cache): a texture not yet in it (upfmt 0) takes the reading of the first
- * polygon drawn with it. The engines draw a frame's polygons farthest first - each one that is front-facing ((corner 0 -
- * eye) . normal < 0, 0x1002b9b0), not wholly outside a screen edge or the near / far planes, its object not culled by
- * the view distance (0x1002fba0) - keyed by its deepest corner (0x1002b9b0: the node flag word is always 0x8000, so
- * never the mean / nearest keys) and sorted by 0x10029ff0. So among the texture's visible polygons in this frame the one
- * with the deepest corner decides: flag 2 (types 8-11) ARGB4444, else ARGB1555 (0x10066e70 -> 0x10066a30; S3
- * 0x10010170 -> 0x1000fb20). A 3Dfx alpha polygon on a mw2.mip texture is not in this entry (tex_mip). Textures switched
- * off (Combat Variables) are not drawn by 0x1002c880: no upload */
+/* Visible polygons enter the depth queue in layer and polygon order. */
+static float cache_depth(const glr_fpoly *g, const glr_view *v, const float view[16], const float mvp[16], const float eye[3])
+{
+    if (g->has_nrm && (g->c[0][0] - eye[0]) * g->nrm[0] + (g->c[0][1] - eye[1]) * g->nrm[1] + (g->c[0][2] - eye[2]) * g->nrm[2] >= 0) return 0;
+    if (v->far_cull > 0 && g->sph[3] > 0) {
+        float sc[3];
+        for (int i = 0; i < 3; i++) sc[i] = view[i] * g->sph[0] + view[4 + i] * g->sph[1] + view[8 + i] * g->sph[2] + view[12 + i];
+        const float limit = v->far_cull + g->sph[3];
+        if (sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2] > limit * limit || -sc[2] > limit) return 0;
+    }
+    int out = 0x3f;
+    float depth = 0;
+    for (int k = 0; k < g->n; k++) {
+        const float *p = g->c[k];
+        float z = -(view[2] * p[0] + view[6] * p[1] + view[10] * p[2] + view[14]);
+        float q[4];
+        for (int i = 0; i < 4; i++) q[i] = mvp[i] * p[0] + mvp[4 + i] * p[1] + mvp[8 + i] * p[2] + mvp[12 + i];
+        out &= (q[0] < -q[3] ? 1 : 0) | (q[0] > q[3] ? 2 : 0) | (q[1] < -q[3] ? 4 : 0) | (q[1] > q[3] ? 8 : 0)
+             | (q[2] < -q[3] ? 16 : 0) | (v->far_cull > 0 && z > v->far_cull ? 32 : 0);
+        if (z > depth) depth = z;
+    }
+    return out ? 0 : depth;
+}
+
+/* Cache candidates use one format per CEL. For a tie, use the first
+ * candidate in the original first-pivot depth sort (3Dfx 0x10029ff0).
+ * The whole visible queue matters even when two faces share every corner. */
 static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], const float mvp[16], const float eye[3])
 {
-    float key[GLR_SLOTS];
-    int8_t ap[GLR_SLOTS];
-    int li, i, s, k, c, any = 0;
-    const int notex = (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0);
-    for (s = 0; s < GLR_SLOTS; s++) {
+    int slot[GLR_SLOTS], any = 0, notex = (v->notex_actors ? 1 : 0) | (v->notex_world ? 2 : 0);
+    float depth[GLR_SLOTS] = {0};
+    int8_t alpha[GLR_SLOTS];
+    uint8_t tied[GLR_SLOTS] = {0};
+    for (int s = 0; s < GLR_SLOTS; s++) {
         texture *t = (texture *)r->tex_src[s];
-        ap[s] = -1;
-        key[s] = -1e30f;
+        slot[s] = s;
+        alpha[s] = -1;
         if (!t || !t->alt || t->upfmt) continue;
-        /* one cache entry per CEL (the key is its data, 0x10066e70): slots with the same CEL (0x100 / 0x104 ...) share it */
-        for (k = 0; k < GLR_SLOTS && t->cel > 0; k++)
-            if (r->tex_src[k] && r->tex_src[k]->cel == t->cel && r->tex_src[k]->alt && r->tex_src[k]->upfmt) { t->upfmt = r->tex_src[k]->upfmt; break; }
-        if (!t->upfmt) any = 1;
+        for (int k = 0; k < GLR_SLOTS && t->cel > 0; k++) {
+            const texture *other = r->tex_src[k];
+            if (!other || !other->alt || other->cel != t->cel) continue;
+            if (other->upfmt) { t->upfmt = other->upfmt; break; }
+            if (k < slot[s]) slot[s] = k;
+        }
+        any |= !t->upfmt;
     }
     if (!any) return;
-    for (li = 0; li < GLR_LAYERS; li++) {
+    for (int li = 0; li < GLR_LAYERS; li++) {
         const glr_layer *L = &r->layer[li];
         if (v->solo && li == 0) continue;
-        for (i = 0; i < L->fp_n; i++) {
+        for (int i = 0; i < L->fp_n; i++) {
             const glr_fpoly *g = &L->fp[i];
+            if (g->slot < 0 || (g->cls & notex)) continue;
             const texture *t = r->tex_src[g->slot];
-            float d = -1e30f, cz[WTB_MAX_POLY_VERTS], clip[WTB_MAX_POLY_VERTS][4];
-            int out;
-            if (!t || !t->alt || t->upfmt || (g->cls & notex) || L->batch_count[g->slot] <= 0) continue;
-            if (g->apoly && tex_mip(v, t)) continue;
-            if (g->has_nrm && (g->c[0][0] - eye[0]) * g->nrm[0] + (g->c[0][1] - eye[1]) * g->nrm[1] + (g->c[0][2] - eye[2]) * g->nrm[2] >= 0) continue;
-            if (v->far_cull > 0 && g->sph[3] > 0) {   /* (the shader's view-distance cull) */
-                float sc[3];
-                for (c = 0; c < 3; c++) sc[c] = view[c] * g->sph[0] + view[4 + c] * g->sph[1] + view[8 + c] * g->sph[2] + view[12 + c];
-                if (sc[0] * sc[0] + sc[1] * sc[1] + sc[2] * sc[2] > (v->far_cull + g->sph[3]) * (v->far_cull + g->sph[3]) || -sc[2] - g->sph[3] > v->far_cull) continue;
-            }
-            for (k = 0; k < g->n; k++) {
-                cz[k] = -(view[2] * g->c[k][0] + view[6] * g->c[k][1] + view[10] * g->c[k][2] + view[14]);
-                for (c = 0; c < 4; c++) clip[k][c] = mvp[c] * g->c[k][0] + mvp[4 + c] * g->c[k][1] + mvp[8 + c] * g->c[k][2] + mvp[12 + c];
-                if (cz[k] > d) d = cz[k];
-            }
-            out = 0x7f;   /* the sides every corner is outside of */
-            for (k = 0; k < g->n; k++) {
-                const float *q = clip[k];
-                out &= (q[0] < -q[3] ? 1 : 0) | (q[0] > q[3] ? 2 : 0) | (q[1] < -q[3] ? 4 : 0) | (q[1] > q[3] ? 8 : 0) | (q[2] < -q[3] ? 16 : 0)
-                     | (v->far_cull > 0 && cz[k] > v->far_cull ? 32 : 0);
-            }
-            if (out) continue;
-            /* (equal keys - an object drawn twice in place, S_BFLAGQ type 7 / S_BFLAGB type 9 at TRNJAREA / TRNWAREA, OBJs
-             * 2 / 1 at the same offset with the same corners (Q's texels rows 61-63, B's the whole CEL): 0x1002a080 puts
-             * both in one list (a polygon each, or with node flag 0x100 the object by its centre depth from 0x1002fba0,
-             * expanded in place by 0x1002a170), sorted by 0x10029ff0 - a first-element-pivot quicksort that leaves equal
-             * keys in either order, about half the time each whatever their rank in the list; the flags are not in view
-             * at the start, so the frame that first shows them, and the pick, depend on the route played - ASSUMED the
-             * copy without the flag) */
-            if (d > key[g->slot] || (d == key[g->slot] && !g->apoly)) { key[g->slot] = d; ap[g->slot] = (int8_t)g->apoly; }
+            if (!t || !t->alt || t->upfmt || (g->apoly && tex_mip(v, t))) continue;
+            float z = cache_depth(g, v, view, mvp, eye);
+            if (z <= 0) continue;
+            int s = slot[g->slot];
+            if (z > depth[s]) { depth[s] = z; alpha[s] = (int8_t)g->apoly; tied[s] = 0; }
+            else if (z == depth[s] && alpha[s] != g->apoly) tied[s] = 1;
         }
     }
-    for (s = 0; s < GLR_SLOTS; s++)   /* (the slots of one CEL: its deepest polygon) */
-        for (k = s + 1; k < GLR_SLOTS && r->tex_src[s] && r->tex_src[s]->cel > 0; k++)
-            if (r->tex_src[k] && r->tex_src[k]->cel == r->tex_src[s]->cel && ap[k] >= 0
-                && (ap[s] < 0 || key[k] > key[s] || (key[k] == key[s] && !ap[k]))) { key[s] = key[k]; ap[s] = ap[k]; }
-    for (s = 0; s < GLR_SLOTS; s++)   /* (the shared result: the first slot of each CEL carries it, the scan above) */
-        for (k = 0; k < s && r->tex_src[s] && r->tex_src[s]->cel > 0; k++)
-            if (r->tex_src[k] && r->tex_src[k]->cel == r->tex_src[s]->cel && ap[k] >= 0) { key[s] = key[k]; ap[s] = ap[k]; break; }
-    for (s = 0; s < GLR_SLOTS; s++)
-        if (ap[s] >= 0 && r->tex_src[s] && !r->tex_src[s]->upfmt) {
-            ((texture *)r->tex_src[s])->upfmt = ap[s] ? 2 : 1;
-            if (mw2_development_env("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, r->tex_src[s]->cel, ap[s] ? "4444" : "1555", key[s]);   /* TEST hook */
+    any = 0;
+    for (int s = 0; s < GLR_SLOTS; s++) any |= tied[s];
+    if (any) {
+        int total = 0, n = 0;
+        for (int li = 0; li < GLR_LAYERS; li++) total += r->layer[li].fp_n;
+        int *queue = malloc((size_t)total * 3 * sizeof *queue);
+        if (queue) {
+            int *key = queue + total, *candidate = key + total;
+            for (int li = 0; li < GLR_LAYERS; li++) {
+                const glr_layer *L = &r->layer[li];
+                if (v->solo && li == 0) continue;
+                for (int i = 0; i < L->fp_n; i++) {
+                    const glr_fpoly *g = &L->fp[i];
+                    float z = cache_depth(g, v, view, mvp, eye);
+                    if (z <= 0) continue;
+                    queue[n] = n;
+                    /* Positive IEEE floats have the same order as their bit patterns. */
+                    memcpy(&key[n], &z, sizeof z);
+                    candidate[n] = -1;
+                    if (g->slot >= 0 && !(g->cls & notex)) {
+                        const texture *t = r->tex_src[g->slot];
+                        int s = slot[g->slot];
+                        if (tied[s] && z == depth[s] && t && !t->upfmt && !(g->apoly && tex_mip(v, t)))
+                            candidate[n] = 2 * s + g->apoly;
+                    }
+                    n++;
+                }
+            }
+            dos_qsort(queue, key, 0, n - 1);
+            for (int i = 0; i < n; i++) {
+                int pick = candidate[queue[i]];
+                if (pick >= 0 && tied[pick / 2]) { alpha[pick / 2] = (int8_t)(pick % 2); tied[pick / 2] = 0; }
+            }
+            free(queue);
         }
+    }
+    for (int s = 0; s < GLR_SLOTS; s++) {
+        texture *t = (texture *)r->tex_src[s];
+        int k = slot[s];
+        if (!t || !t->alt || t->upfmt || alpha[k] < 0) continue;
+        t->upfmt = alpha[k] ? 2 : 1;
+        if (mw2_development_env("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, t->cel, alpha[k] ? "4444" : "1555", depth[k]);
+    }
 }
 
 /* glr_view.alpha_blend (3Dfx 0x10067240): binds the texture slot s's alpha-flag polygons draw with - the reading the
@@ -2188,7 +2280,17 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
              * Jade Falcon mission 3). The Titanium engine itself has no working depth test (above) and draws in its
              * depth sort's order, the ground before the objects on it */
             if (r->ti_slots) rb_depth_write(0);
-            if (!mw2_development_env("MW2_TEST_NO_GROUND")) glr_draw_arrays(r, 30, 6);   /* (TEST ONLY: MW2_TEST_NO_GROUND) */
+            if (!mw2_development_env("MW2_TEST_NO_GROUND")) {
+                if (v->ti_fog_vtx && v->ti_fog[0] > 0.5f && v->ortho_w <= 0) {
+                    float bands[36 * FLOATS_PER_VERTEX];
+                    const int count = rendition_ground(bands, eye, view, proj[14] / (proj[10] - 1.0f), half, gs);
+                    if (count > 0) {
+                        glr_bind_stream(glr_stream(bands, (size_t)count * FLOATS_PER_VERTEX));
+                        U4(r->F.u_tifog, v->ti_fog[0], v->ti_fog[1], 1.0f, v->ti_fog[2]);
+                        glr_draw_arrays(r, 0, count);
+                    }
+                } else glr_draw_arrays(r, 30, 6);
+            }
             if (r->ti_slots) rb_depth_write(1);
             r->D.u_tilit = 0;
             r->D.u_mga_lod = 0;
@@ -2197,6 +2299,8 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
     UV(r->F.u_mvp, mvp, 16);
     UV(r->F.u_view, view, 16);
     UV(r->F.u_light, L, 3);
+    U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1],
+       v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
     r->F.u_point = v->point_light;
     r->F.u_ambient = v->ambient;
     r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
@@ -2438,7 +2542,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
             UV(r->F.u_mvp, mvp, 16);
             UV(r->F.u_view, view, 16);
             r->F.u_fog_density = v->ortho_w > 0 ? 0.0f : fog_k(v->fog_density);
-            /* (RENDITION: the world, objects and effects fogged per vertex; the ground and dome above per pixel / unfogged) */
+            /* Rendition uses vertex fog for the ground, scenery and effects. */
             U4(r->F.u_tifog, v->ortho_w > 0 ? 0.0f : v->ti_fog[0], v->ti_fog[1], v->ti_fog_vtx ? 1.0f : 0.0f, v->ti_fog[2]);
             r->F.u_far = v->ortho_w > 0 ? 0.0f : v->far_cull;
         }

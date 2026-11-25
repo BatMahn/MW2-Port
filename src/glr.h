@@ -76,7 +76,7 @@ typedef struct {
      * alpha-blended (Render type 8) instead of alpha-tested */
     float ti_fog[3];
     int   ti_fog_vtx;        /* RENDITION (zredline.dll): that fog per vertex, interpolated across each polygon of the world,
-                              * the objects and the effects (the ground stays per pixel) */
+                              * the objects, effects and the ground's three depth bands */
     float ti_scroll[2];
     int   fx_blend;
     /* the Titanium lights (mercsw 0x1002ecaa, per vertex, one-sided; its SKYGND.PAR amb / wa / wb): ti_light on, the

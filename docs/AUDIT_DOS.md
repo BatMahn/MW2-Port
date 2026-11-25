@@ -467,7 +467,8 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   parser. The follow-up below covers the last three failures in that sweep.
 - The normal Titanium and Rendition looks use the base mission and equipment data alongside the Titanium
   graphics resources. The objective sweep exercises load compatibility separately from that normal path.
-  Native Windows AI, weapon tables and combat timing still need a live comparison. Proton's Wineserver
+  All 35 extra weapon records (IDs 31–65) match the stock Titanium DLL table. Native Windows AI
+  and combat timing still need a live comparison. Proton's Wineserver
   could not bind its socket in the sandbox, so the original Windows simulation did not start.
 
 ### Verification
@@ -656,12 +657,20 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 
 ## Remaining comparisons
 
-- **Live manoeuvre execution.** Full DOS route comparisons across other missions remain open.
+- **Live manoeuvre execution.** The first Umber Wall capture matched 520 horizontal positions
+  from eight aircraft through tick 1122. In the longer capture, the player's 194-tick first
+  movement hits the floor loudly enough for the positional landing cue `0xe6`. Its pitch draw
+  precedes the player's startup timer in the original (0x40d5d before 0x2818c). The port now
+  applies gravity on the first player movement and rolls the timer afterward. The two departing
+  aircraft match all 112 earlier horizontal positions through tick 1994. The extended replay
+  compares 182 positions per aircraft through tick 5679 (31 seconds). The greatest horizontal
+  differences were 5 cm and 1 cm. Routes triggered by later objectives still need comparison.
 - **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
   Paired mission captures of detachment and world-fragment spawn timing still need broader coverage.
 - **Scenery detail changes in live play.** The Silver Staff replay covers scenery before its first
   camera-range update. The selector has isolated executable comparisons. More live replays are
-  needed for switches between nearer scenery models.
+  needed for switches between nearer scenery models. The renderer now uses the same selection
+  as the original executable comparison for visible scenery.
 - **Mission-wide random ordering.** Startup, AI, damage, missile offsets and positional sounds
   use the DOS table. The complete live order, especially for simultaneous effects, remains open.
 - **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
@@ -708,5 +717,18 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   `sweep_objectives MW2.PRJ -offline-net -no-fallback APACSCN1 CALISCN1` checks one local
   player against one AI opponent in Apache and seven in Cali. Both complete with zero fallbacks.
 - World construction, scripted object tasks and building metadata all read the loaded scene
-  tree. This includes externally supplied BWDs. The ten Mercenaries templates remain blocked
-  on original generator output. A local fixture exercised the hand-off path.
+  tree. This includes externally supplied BWDs. The ten Mercenaries templates in the raw-archive
+  sweep expect generator output. A local fixture exercised the hand-off path.
+
+
+### Titanium single-player mission coverage
+
+- The 8-bit and 16-bit `Install/*/MW2SHELL.DLL` files from the original Titanium disc name
+  the same 54 distinct scenes for campaign, training, and Instant Action. The two campaign
+  tables contribute 32 scenes, training contributes 12, and Instant Action contributes 11,
+  with PINKSCN1 shared by the campaign and Instant Action.
+- All 54 scene names appear as successful with zero fallbacks in the Titanium objective
+  sweep. The ten `MIS0SCN1` through `MIS9SCN1` records appear in the shared PRJ archive but
+  are absent from both Titanium single-player shell tables. The 151-of-161 count above
+  describes the raw archive sweep. The shipped Titanium single-player campaign, training
+  and Instant Action objective coverage is 54 of 54.

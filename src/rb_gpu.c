@@ -99,6 +99,7 @@ static int g_win_samples = 1, g_win_made, g_win_w, g_win_h;
 /* the window's picture's format: on Vulkan the swapchain's (shown with a copy - a blit is a draw, 7 ms a frame at 1920 x
  * 1080 in Mesa's software Vulkan), else RGBA8 (shown with a blit, the documented way on Direct3D 12 and Metal) */
 static SDL_GPUTextureFormat g_win_fmt = COLOR_FMT;
+static int g_rgb565_available;
 static rpipe *g_pipes;
 static int g_npipes, g_cappipes;
 static rsamp *g_samps;
@@ -360,6 +361,8 @@ retry:
         g_win_fmt = COLOR_FMT;
         goto retry;
     }
+    g_rgb565_available = SDL_GPUTextureSupportsFormat(g_dev, SDL_GPU_TEXTUREFORMAT_B5G6R5_UNORM,
+        SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
     if (MW2_DEVELOPMENT_LOGS) {
         printf("gpu: %s (%s)\n", rb_backend_name(), g_devname);
         fflush(stdout);
@@ -714,7 +717,7 @@ void *rb_stream(size_t bytes, size_t *off)
 }
 
 /* ---- targets */
-static void target_make(rtex *t, int w, int h, int depth, int samples, SDL_GPUTextureFormat fmt)
+static int target_make(rtex *t, int w, int h, int depth, int samples, SDL_GPUTextureFormat fmt, int optional)
 {
     SDL_GPUTextureCreateInfo ti;
     memset(&ti, 0, sizeof ti);
@@ -735,16 +738,36 @@ static void target_make(rtex *t, int w, int h, int depth, int samples, SDL_GPUTe
         ti.sample_count = t->msaa ? ti.sample_count : SDL_GPU_SAMPLECOUNT_1;
         t->depth = SDL_CreateGPUTexture(g_dev, &ti);
     }
-    if (!t->t || (samples > 1 && !t->msaa) || (depth && !t->depth)) { fprintf(stderr, "rb: target %d x %d: %s\n", w, h, SDL_GetError()); exit(1); }
+    if (!t->t || (samples > 1 && !t->msaa) || (depth && !t->depth)) {
+        if (optional) return -1;
+        fprintf(stderr, "rb: target %d x %d: %s\n", w, h, SDL_GetError());
+        exit(1);
+    }
     t->w = w; t->h = h; t->levels = 1; t->samples = t->msaa ? samples : 1; t->target = 1; t->fmt = fmt;
     t->min = t->mag = RB_NEAREST; t->ws = t->wt = RB_CLAMP_TO_EDGE;
+    return 0;
 }
 
 rb_tex rb_target_new(int w, int h, int depth)
 {
     rb_tex k = rb_tex_new();
-    target_make(&g_tex[k], w, h, depth, 1, COLOR_FMT);
+    target_make(&g_tex[k], w, h, depth, 1, COLOR_FMT, 0);
     return k;
+}
+
+int rb_rgb565_available(void)
+{
+    return g_rgb565_available;
+}
+
+rb_tex rb_target_new_rgb565(int w, int h, int depth)
+{
+    if (!g_rgb565_available) return 0;
+    rb_tex k = rb_tex_new();
+    if (target_make(&g_tex[k], w, h, depth, 1, SDL_GPU_TEXTUREFORMAT_B5G6R5_UNORM, 1) == 0) return k;
+    rb_tex_delete(k);
+    g_rgb565_available = 0;
+    return 0;
 }
 
 void rb_frame(int w, int h)
@@ -756,7 +779,7 @@ void rb_frame(int w, int h)
     t = &g_tex[g_win_tex];
     if (!t->t || g_win_w != w || g_win_h != h || g_win_made != g_win_samples) {
         tex_release(t);
-        target_make(t, w, h, 1, g_win_samples, g_win_fmt);
+        target_make(t, w, h, 1, g_win_samples, g_win_fmt, 0);
         g_win_w = w; g_win_h = h; g_win_made = g_win_samples;
         if (g_rec_target == g_win_tex) g_rec_target = 0;   /* (record the new one's target) */
     }
@@ -1192,11 +1215,13 @@ void rb_read_rgb(int x, int y, int w, int h, unsigned char *rgb)
     SDL_GPUTextureRegion src;
     SDL_GPUTextureTransferInfo dst;
     SDL_GPUFence *f;
-    uint32_t need = (uint32_t)w * (uint32_t)h * 4;
+    uint32_t need;
     const uint8_t *m;
-    int r, k, bgra;
+    int r, k, bgra, bpp;
     if (!g_dev || w <= 0 || h <= 0) return;
     t = cur_target();
+    bpp = t->fmt == SDL_GPU_TEXTUREFORMAT_B5G6R5_UNORM ? 2 : 4;
+    need = (uint32_t)w * (uint32_t)h * (uint32_t)bpp;
     memset(rgb, 0, (size_t)w * (size_t)h * 3);
     if (x < 0 || y < 0 || x + w > t->w || y + h > t->h) return;
     if (!g_down || g_down_cap < need) {
@@ -1227,9 +1252,11 @@ void rb_read_rgb(int x, int y, int w, int h, unsigned char *rgb)
     if (!m) return;
     bgra = t->fmt == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     for (r = 0; r < h; r++) {   /* GL's order: the bottom row first */
-        const uint8_t *s = m + (size_t)(h - 1 - r) * (size_t)w * 4;
+        const uint8_t *s = m + (size_t)(h - 1 - r) * (size_t)w * (size_t)bpp;
         unsigned char *d = rgb + (size_t)r * (size_t)w * 3;
-        if (bgra) for (k = 0; k < w; k++) { d[k * 3] = s[k * 4 + 2]; d[k * 3 + 1] = s[k * 4 + 1]; d[k * 3 + 2] = s[k * 4]; }
+        if (bpp == 2) {
+            SDL_ConvertPixels(w, 1, SDL_PIXELFORMAT_RGB565, s, w * 2, SDL_PIXELFORMAT_RGB24, d, w * 3);
+        } else if (bgra) for (k = 0; k < w; k++) { d[k * 3] = s[k * 4 + 2]; d[k * 3 + 1] = s[k * 4 + 1]; d[k * 3 + 2] = s[k * 4]; }
         else for (k = 0; k < w; k++) { d[k * 3] = s[k * 4]; d[k * 3 + 1] = s[k * 4 + 1]; d[k * 3 + 2] = s[k * 4 + 2]; }
     }
     SDL_UnmapGPUTransferBuffer(g_dev, g_down);

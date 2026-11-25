@@ -402,7 +402,9 @@ static int load_mission(int idx)
         snprintf(t, sizeof t, "%s - %s (%s)", MV_TITLE, g_ms[idx].title, scene);
         if (SDL_GetKeyboardFocus()) SDL_SetWindowTitle(SDL_GetKeyboardFocus(), t);
     }
-    printf("mapview: %s (%s): %d world objects, %d units, %d nav points, %d textures\n", scene, g_ms[idx].title, g_world.part_count, g_na, g_nn, g_sc.textures_loaded);
+    if (MW2_DEVELOPMENT_LOGS)
+        printf("mapview: %s (%s): %d world objects, %d units, %d nav points, %d textures\n",
+               scene, g_ms[idx].title, g_world.part_count, g_na, g_nn, g_sc.textures_loaded);
     return 0;
 }
 
@@ -1056,7 +1058,9 @@ int main(int argc, char **argv)
     if (!(g_ma = prj_open(models, err, sizeof err)) || !(g_ta = prj_open(textures, err, sizeof err))) { fprintf(stderr, "mapview: %s\n", err); return 1; }
     snprintf(g_export_root, sizeof g_export_root, "%s", cfg.game[0] ? cfg.game : cfg.install);
     if (getenv("MW2_MAPVIEW_EXPORTS")) snprintf(g_export_root, sizeof g_export_root, "%s", getenv("MW2_MAPVIEW_EXPORTS"));   /* tests */
-    printf("mapview: game folder %s\nmapview: models %s, textures %s (%s)\n", cfg.game[0] ? cfg.game : cfg.install, models, textures, kind);
+    if (MW2_DEVELOPMENT_LOGS)
+        printf("mapview: game folder %s\nmapview: models %s, textures %s (%s)\n",
+               cfg.game[0] ? cfg.game : cfg.install, models, textures, kind);
     ttext_init(base);
     missions_list(g_ma);
     if (!g_mn) { fprintf(stderr, "mapview: no missions in %s\n", models); return 1; }
@@ -1116,8 +1120,14 @@ int main(int argc, char **argv)
     if (shot) {
         draw_frame();
         write_shot(shot);
-        if (g_sel_kind) { char lines[24][96]; int n = info_lines(lines, 24); for (i = 0; i < n; i++) printf("info: %s\n", lines[i]); }
-        printf("mapview: %dx%d -> %s\n", g_w, g_h, shot);
+        if (MW2_DEVELOPMENT_LOGS) {
+            if (g_sel_kind) {
+                char lines[24][96];
+                int n = info_lines(lines, 24);
+                for (i = 0; i < n; i++) printf("info: %s\n", lines[i]);
+            }
+            printf("mapview: %dx%d -> %s\n", g_w, g_h, shot);
+        }
         rb_finish();
         running = 0;
     }

@@ -41,7 +41,8 @@ recorded.
   `(K, 0, 0, z)` at each corner (K = density / 2048), which GL's perspective interpolation turns into exactly `K / z` per
   pixel - also for triangles clipped at the near plane. A 2048-entry 1D texture (RGB the fog colour, A the factor) on
   unit 1 with `GL_DECAL`. The Titanium fog's per-pixel kind (linear in the view depth up to Z) uses a ramp texture the
-  same way, the triangle split at Z; its per-vertex kind (Rendition) is sent screen-linear.
+  same way, with triangles split at Z. Rendition interpolates fog screen-linearly across vertices, including those
+  created by the ground depth bands.
 - **Screen-linear (affine) texels** (the ATi look's types): coordinates `(s w, t w, 0, w)`.
 - **Matrox mip bands**: the ground's triangles split at view depths 2500 / 5000 / 15000, each piece at its level
   (`GL_TEXTURE_BASE_LEVEL` = `GL_TEXTURE_MAX_LEVEL`).
@@ -116,7 +117,9 @@ hand-run `glview` doesn't) - without it fog comparisons compare nothing.
 
 ## Limits
 
-- No multisampling (the RESOLUTION row's AA steps do nothing); `GPU OPENGL` in Combat Variables.
+- No multisampling (the RESOLUTION row's AA steps do nothing). Combat Variables shows `GPU OPENGL`.
+- The fixed-resolution frame shrinks to fit when the drawable is smaller than the configured resolution. A drawable
+  smaller than 320×200 gets the HUD directly in the fitted frame.
 - CPU cost: the vertex stage runs per vertex per frame on the CPU; on a period CPU the per-vertex transforms dominate
   (a first place to optimise: static geometry cached between frames).
 - Not yet run on a real OpenGL 1.x driver or Windows XP (KNOWN_ISSUES.md).

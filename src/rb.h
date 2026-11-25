@@ -63,6 +63,8 @@ void rb_frame(int w, int h);
 void rb_samples(int samples);
 /* an off-screen target (colour, with a depth buffer if depth), usable as a texture */
 rb_tex rb_target_new(int w, int h, int depth);
+int rb_rgb565_available(void);
+rb_tex rb_target_new_rgb565(int w, int h, int depth);
 void rb_target(rb_tex t);                /* draw into t (0: the window's picture) */
 int  rb_target_height(void);
 /* glBlitFramebuffer: colour from src's rectangle to dst's (0: the window's picture), bottom-left coordinates */

@@ -32,6 +32,7 @@ typedef struct {
                                 0x1000dca0, DOS 0x37060 -> 0x1f9b0) unlinks them, and the first frame swaps every unit (its
                                 +0x1c starts at -1, 0x100235e0) - mech3d_hull_hit and the probes skip them */
     wtb_model model;
+    int       dos_draw_object; /* selected scenery detail within model, for DOS drawing */
     int       flat;          /* draw untextured, in each polygon's palette colour (cockpit frame) */
     int       objtype;       /* world objects: OBJ type word (bwd_obj.objtype); 0 for mech parts */
     int       parent_obj;    /* world objects: the OBJ parent's index in the same record (-1 none) */

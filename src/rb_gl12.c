@@ -872,6 +872,14 @@ rb_tex rb_target_new(int w, int h, int depth)
     return k;
 }
 
+/* Compatibility targets share the drawable's colour precision. */
+int rb_rgb565_available(void) { return 0; }
+rb_tex rb_target_new_rgb565(int w, int h, int depth)
+{
+    (void)w; (void)h; (void)depth;
+    return 0;
+}
+
 void rb_frame(int w, int h)
 {
     gl12_tex *t;

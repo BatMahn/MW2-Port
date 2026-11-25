@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.3 (2026-11-25)
+
+- **Titanium coverage.** Both original Titanium single-player shells list the same 54 scenes, and all 54 pass the objective sweep. The raw archive inventory also counts ten Mercenaries templates outside those launch tables.
+- **DOS startup and aircraft.** The first touchdown can play before the startup timer draws from the shared random table. Both departing aircraft in Umber Wall stay within 5 cm of their recorded paths over 31 seconds.
+- **DOS scenery detail.** The renderer draws the selected detail model for buildings and other face-tested scenery. The world mesh updates when a visible object changes detail.
+- **Legacy fixed resolutions.** OpenGL fits the whole cockpit and mission frame inside smaller windows. At sizes below 320×200 it draws the HUD directly into the fitted frame.
+- **Rendition rendering.** Fog is interpolated from world and ground vertices. The ground uses the original three depth bands. GPU backends that support RGB565 blend directly into a 16-bit frame.
+- **3Dfx and S3 texture caching.** When the two training flag polygons have equal depth, the frame's polygon order chooses how their shared texture is read.
+- **Release builds.** Map viewer startup and screenshot diagnostics appear only in development builds.
+
+Linux validation passed 319 OpenGL sequences, 11 focused Vulkan sequences, 66 DOS audit groups, and all 59 DOS mission objective sweeps under sanitizers. Both release viewers ran with development diagnostics disabled.
+
 ## v2.2 (2026-11-25)
 
 - **Scripted vehicle routes.** The Titanium limousine in Maroon Flower steers clear of the lamp on its final approach to Nav Omicron and completes its escort route.

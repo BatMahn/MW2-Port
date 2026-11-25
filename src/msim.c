@@ -17,6 +17,7 @@
 
 /* The native DOS controller first runs about 168 ticks into the mission clock. */
 #define DOS_FIRST_CONTROL_TICK 168
+#define DOS_STARTUP_BASE_TICKS 0x445
 
 static unsigned rnd_ms(unsigned *x);
 static unsigned ms_roll(void *ctx, unsigned n);
@@ -45,7 +46,7 @@ static void dos_random_init(msim *s)
 static unsigned startup_ticks(msim *s)
 {
     if (!msim_dos_int) return 0x43e + ms_roll(s, 0x16a);
-    return 0x444 + ms_roll(s, 0x16c) + 1;   /* 0x2823f waits through the deadline. */
+    return DOS_STARTUP_BASE_TICKS + ms_roll(s, 0x16c);   /* 0x2823f waits through the deadline. */
 }
 
 static float startup_deadline(const msim *s, unsigned delay, int initial)
@@ -621,7 +622,9 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     for (i = 0; s->online_at && i < count; i++)
         s->online_at[i] = msim_dos_int ? -1.0f : (float)startup_ticks(s) * 1000.0f / 182.0f;
     if (msim_dos_int) s->dos_boot_ticks = DOS_FIRST_CONTROL_TICK;
-    s->player_online_at = startup_deadline(s, startup_ticks(s), 1);
+    /* DOS chooses the delay in the first controller pass. Until then the
+     * base delay keeps the player's controls in the startup state. */
+    s->player_online_at = startup_deadline(s, msim_dos_int ? DOS_STARTUP_BASE_TICKS : startup_ticks(s), 1);
     combat_damage_live = getenv("MW2_NO_STARTUP") != NULL;   /* DAT_1024c570 = 0 at the mission start (0x1002388d) */
     s->armed = calloc((size_t)(count > 0 ? count : 1), sizeof *s->armed);
     if (!s->units || !s->armed) return -1;
@@ -2142,7 +2145,7 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
         if (!firing || m->turn != 0.0f) jdir = 0;
         s->units[i].jet_forward = firing && (m->turn != 0.0f || jdir);
         combat_motion lift = {0};
-        if (msim_dos_int && !fixed_unit(ac)) lift = msim_dos_lift(&s->units[i], &s->planet, firing, dos_ticks);
+        if (msim_dos_int && !fixed_unit(ac)) lift = msim_dos_lift(&s->units[i], &s->planet, firing, dos_ticks, 0);
         float dy_frame = msim_dos_int ? lift.dy : fixed_unit(ac) ? 0.0f : combat_jets_dy(&s->units[i], m->jet, dt);
         float dy_done = 0.0f, vy3 = 0.0f;
         int imp3 = 0, land3 = 0;
@@ -2502,8 +2505,8 @@ void msim_step(msim *s, int32_t dt_ms)
         /* A replay may supply the time already spent loading. The estimated
          * boot interval fills only the part that isn't on the mission clock. */
         s->dos_boot_ticks = dos_ticks < DOS_FIRST_CONTROL_TICK ? DOS_FIRST_CONTROL_TICK - dos_ticks : 0;
-        int elapsed = dos_ticks + s->dos_boot_ticks - DOS_FIRST_CONTROL_TICK;
-        s->player_online_at += (float)elapsed * 1000.0f / 182.0f;
+        /* The player's first movement can land before the startup roll. */
+        s->player_online_at = startup_deadline(s, startup_ticks(s), 1);
         dos_player_startup_sound(s);
     }
     if (msim_dos_int && !first_frame) {
@@ -5407,6 +5410,25 @@ static void dos_prepare_scenery(msim *s, const msim_camera *camera)
     }
 }
 
+/* The renderer keeps a static world mesh, so only rebuild it when a
+ * visible object's depth crosses a detail threshold. */
+int msim_scenery_draw_lods(const msim *s, mech3d *world)
+{
+    const terrain_t *t = (const terrain_t *)s->terrain;
+    int changed = 0;
+    if (s->world != world || !t || !t->dos_scenery) return 0;
+    for (int i = 0; i < t->nco; i++) {
+        const cobj_t *c = &t->co[i];
+        const int model = t->dos_scenery[c->part].model;
+        if (!c->lod_count || !model) continue;
+        mech3d_part *p = &world->parts[c->part];
+        if (model > p->model.object_count || p->dos_draw_object == model - 1) continue;
+        p->dos_draw_object = model - 1;
+        changed = 1;
+    }
+    return changed;
+}
+
 static scenery_faces clist_faces(const msim *s, const terrain_t *t, const cobj_t *c, int movement)
 {
     if (s->cam_ok && c->lod_count) {
@@ -6203,13 +6225,15 @@ static int32_t dos_motion_lift(int32_t *velocity, int32_t gravity, int32_t thrus
     return dos_motion_axis(velocity, accel, ticks);
 }
 
-combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks)
+combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks, int first_move)
 {
     int32_t speed = (int32_t)lrintf(u->vy * 65536.0f);
     int mode = jet ? (u->jet_forward ? 2 : 1) : 0;
+    /* A freshly placed player has yet to register a terrain contact. */
+    int grounded = !first_move && u->y <= u->ground;
     int32_t move = dos_motion_lift(&speed, dos_gravity(planet->gravity_g),
                                   (int32_t)lrintf(u->jet_ddy * 65536.0f),
-                                  (int32_t)lrintf(planet->jet_damping), u->y <= u->ground, mode, ticks);
+                                  (int32_t)lrintf(planet->jet_damping), grounded, mode, ticks);
     return (combat_motion){(float)move, speed / 65536.0f, ticks};
 }
 
@@ -6273,7 +6297,7 @@ void msim_wreck_step(msim *s, int actor, int32_t origin[3], float vx, float vz, 
         dos_motion_plane(u->dos_vel, 0, 0, 0, 0, 0, 1, 0, dos_ticks, delta);
         x = (float)(origin[0] + delta[0]);
         z = (float)(origin[2] + delta[1]);
-        lift = msim_dos_lift(u, &s->planet, 0, dos_ticks);
+        lift = msim_dos_lift(u, &s->planet, 0, dos_ticks, 0);
     } else lift = (combat_motion){.dy = combat_jets_dy(u, 0, dt)};
     float before[3] = {(float)origin[0], u->y + h, (float)origin[2]};
     float after[3] = {x, u->y + h + lift.dy, z}, normal[3], centre[3], velocity[3], radius;

@@ -76,7 +76,7 @@ static int        g_win_lines = 480;     /* the window's drawable height (the na
 static int        g_win_cols = 640;      /* and its width */
 static float      g_hp[256][4];          /* the HUD palette's colours (hud_mission_palette) */
 #define HP(i) ((const float *)g_hp[(i) & 0xff])
-#define HUD_BEGIN(hd, w, h) (g_render_w == 320 && g_lr_fbo[0] ? hud_begin_stretched(hd, w, h) : hud_begin(hd, w, h))
+#define HUD_BEGIN(hd, w, h) (g_frame_320 ? hud_begin_stretched(hd, w, h) : hud_begin(hd, w, h))
 /* the port's HUD layout (mw2port.cfg hud_layout=, the GRAPHICS page's HUD layout; not the original's - it drew the 4:3
  * layout only): wide (1, the default) puts the left-hand instruments at the window's left edge and the right-hand ones
  * at its right edge when the window is wider than 4:3 (hud_side); original (0) keeps the whole HUD in the 4:3 middle */
@@ -1497,25 +1497,32 @@ static rb_tex g_lr_fbo[2];
 static rb_tex g_frame_tgt;   /* the frame's render target: 0 the window, or g_lr_fbo[0] at the original resolutions */
 static int g_aa;   /* the anti-aliasing samples chosen (mw2port.cfg aa=; the viewer's M key toggles them) */
 static int g_lr_w, g_lr_h, g_out_w, g_out_h;
-static int lowres_target(int w, int h)
+static int g_frame_320, g_lr_565, g_lr320_565;
+static int lowres_target(int w, int h, int rgb565)
 {
-    if (g_lr_fbo[0] && g_lr_w == w && g_lr_h == h) return 0;
-    if (g_lr_fbo[0]) { rb_tex_delete(g_lr_fbo[0]); rb_tex_delete(g_lr_fbo[1]); }
-    g_lr_fbo[0] = rb_target_new(w, h, 1);
-    g_lr_fbo[1] = rb_target_new(320, 200, 0);
-    g_lr_w = w; g_lr_h = h;
-    return 0;
+    if (g_lr_fbo[0] && g_lr_w == w && g_lr_h == h && g_lr_565 == rgb565) return 0;
+    if (g_lr_fbo[0]) rb_tex_delete(g_lr_fbo[0]);
+    g_lr_fbo[0] = rgb565 ? rb_target_new_rgb565(w, h, 1) : rb_target_new(w, h, 1);
+    if (!g_lr_fbo[0] && rgb565 && g_render_w) {
+        rgb565 = 0;
+        g_lr_fbo[0] = rb_target_new(w, h, 1);
+    }
+    g_lr_w = w; g_lr_h = h; g_lr_565 = rgb565;
+    return g_lr_fbo[0] ? 0 : -1;
 }
 static void lowres_present(int ow, int oh)
 {
-    int sw = g_render_w == 320 ? 320 : g_lr_w, sh = g_render_w == 320 ? 200 : g_lr_h;
-    rb_tex src = g_render_w == 320 ? g_lr_fbo[1] : g_lr_fbo[0];   /* 320 x 200: the frame the HUD was drawn into */
+    int sw = g_frame_320 ? 320 : g_lr_w, sh = g_frame_320 ? 200 : g_lr_h;
+    rb_tex src = g_frame_320 ? g_lr_fbo[1] : g_lr_fbo[0];   /* 320 x 200: the frame the HUD was drawn into */
     int vw, vh, x0, y0, k;
     /* the 4:3 picture, as large as fits; whole multiples of the low-res pixel where they fit (crisp, even blocks) */
     vh = oh; vw = oh * 4 / 3;
     if (vw > ow) { vw = ow; vh = ow * 3 / 4; }
+    if (vw < 1) vw = 1;
+    if (vh < 1) vh = 1;
     k = vh / sh;
-    if (g_render_w == 320) { if (vh / 240 >= 2) { vh = vh / 240 * 240; vw = vh * 4 / 3; } }   /* 200 lines at 4:3: multiples of 240 */
+    if (vw / sw < k) k = vw / sw;
+    if (g_frame_320) { if (vh / 240 >= 2) { vh = vh / 240 * 240; vw = vh * 4 / 3; } }   /* 200 lines at 4:3: multiples of 240 */
     else if (k >= 2) { vh = sh * k; vw = sw * k; }   /* whole multiples when at least 2 fit, else the largest 4:3 that fits */
     x0 = (ow - vw) / 2; y0 = (oh - vh) / 2;
     {
@@ -7903,7 +7910,7 @@ int main(int argc, char **argv)
                     int thrust = g_sim_ok && jet && g_sim.player_unit.jets > 0 &&
                                  !g_sim.player_unit.no_jump && g_sim.player_unit.jet_fuel > 0;
                     if (g_sim_ok && msim_dos_int)
-                        g_pl_lift = msim_dos_lift(&g_sim.player_unit, &g_sim.planet, thrust, dos_ticks);
+                        g_pl_lift = msim_dos_lift(&g_sim.player_unit, &g_sim.planet, thrust, dos_ticks, g_sim.now == 0);
                     g_pl_dy_frame = msim_dos_int ? g_pl_lift.dy : g_sim_ok ? combat_jets_dy(&g_sim.player_unit, jet, dt) : 0.0f;
                     /* engine 0x10019310 (DOS 0x26990): the velocity approaches heading x c[0xb] only on the ground with the
                      * jets not firing (input +0x1d and fuel c[0x30] > 0); airborne or jetting it is left alone - momentum,
@@ -8141,7 +8148,7 @@ int main(int argc, char **argv)
                          * volume in the cockpit view; at the feet (+0xcc below the origin) ~10 m from the eye -> 0x10032f60
                          * 100. DOSBox WHITSCN1 / PLUMSCN1 drops: MECMTNHD 0.49 / 0.50x the start's MECTURX2 (which passes
                          * the flag inverted: full in the cockpit) */
-                        if (g_sfx) { float p3[3]; snd_player_pos(p3); snd_at(g_sim.player_unit.landed_vy >= -16.154f ? 0xe6 : 0xe5, p3, 0, snd_cockpit()); }   /* 0x1001c115: the mech minus the camera */
+                        if (g_sfx || msim_dos_int) { float p3[3]; snd_player_pos(p3); snd_at(g_sim.player_unit.landed_vy >= -16.154f ? 0xe6 : 0xe5, p3, 0, snd_cockpit()); }   /* 0x1001c115: the mech minus the camera */
                         jolt_start(0.0f, -g_sim.player_unit.landed_vy, 0.0f, g_sim.now);
                     }
                     {   /* the nav's visited flag 0x20 (RRNP on the radar, the autopilot skips it, the objectives' "visited"
@@ -8474,6 +8481,7 @@ int main(int argc, char **argv)
                     .near_clip = 1 + (int32_t)(((int64_t)zoom * (w > 1 ? w / 2 : 1)) >> 17)
                 };
                 msim_camera_lods(&g_sim, &camera);
+                if (msim_dos_int && msim_scenery_draw_lods(&g_sim, &g_mech)) g_mm_world_dirty = 1;
                 for (k = 0; k < g_actor_count; k++) total += g_actors[k].mech.part_count;
                 if (show_pl || (g_cockpit && g_pl_ok)) total += g_pl.part_count + (g_plpit_ok ? g_plpit.part_count : 0);
                 total += g_sim.shot_count + g_sim.debris_count;   /* projectiles in flight, debris */
@@ -8820,15 +8828,9 @@ int main(int argc, char **argv)
         rb_frame(w, h);
         rb_target(0);
         g_frame_tgt = 0;
+        g_frame_320 = 0;
         g_out_w = w; g_out_h = h;
         g_win_lines = h; g_win_cols = w;
-        if (g_render_w && g_world) {
-            /* the original resolutions: the frame is drawn at 640 x 480 (1024 x 768 for that choice) - the scale the HUD
-             * art and layout are made for - then, for 320 x 200, point-sampled down to 320 x 200; the result is shown
-             * scaled up in whole blocks to fill 4:3 (non-square pixels at 320 x 200, as a VGA monitor showed them) */
-            int dw = g_render_w == 320 ? 640 : g_render_w, dh = g_render_w == 320 ? 480 : g_render_h;
-            if (lowres_target(dw, dh) == 0) { w = dw; h = dh; rb_target(g_lr_fbo[0]); g_frame_tgt = g_lr_fbo[0]; }
-        }
         music_poll();
         {   /* TEST ONLY: MW2_TEST_VIDEO=t:look[,t:look] - the GRAPHICS menu's choice at t autopilot seconds; look = a
              * renderer (enhanced, 3dfx, ...), a texture set (original, titanium) or renderer+textures */
@@ -8858,7 +8860,43 @@ int main(int argc, char **argv)
             switch_look(r, &v, ma, &ta, &ati, mission, g_mm_ed_req >= 0 ? g_mm_ed_req : g_edition, g_mm_tx_req >= 0 ? g_mm_tx_req : g_texset);
             g_mm_ed_req = g_mm_tx_req = -1;
         }
-        if (g_mm_world_dirty) {   /* OBJECT DENSITY changed: the world layer again */
+        const int rgb565 = g_world && g_edition == PORTCFG_ED_RENDITION && w > 0 && h > 0 && rb_rgb565_available();
+        if (g_world && (g_render_w || rgb565)) {
+            /* the original resolutions: the frame is drawn at 640 x 480 (1024 x 768 for that choice) - the scale the HUD
+             * art and layout are made for - then, for 320 x 200, point-sampled down to 320 x 200; the result is shown
+             * scaled up in whole blocks to fill 4:3 (non-square pixels at 320 x 200, as a VGA monitor showed them) */
+            int dw = g_render_w == 320 ? 640 : g_render_w ? g_render_w : w;
+            int dh = g_render_w == 320 ? 480 : g_render_w ? g_render_h : h;
+            g_frame_320 = g_render_w == 320;
+#if defined(MW2_RB_GL12)
+            /* The legacy backend stores off-screen targets in the drawable.
+             * Fit the whole frame before rendering so readback never crops it. */
+            if (dw > w || dh > h) {
+                if ((int64_t)dw * h > (int64_t)dh * w) {
+                    dh = (int)((int64_t)dh * w / dw);
+                    dw = w;
+                } else {
+                    dw = (int)((int64_t)dw * h / dh);
+                    dh = h;
+                }
+                if (dw < 1) dw = 1;
+                if (dh < 1) dh = 1;
+            }
+            g_frame_320 = g_frame_320 && w >= 320 && h >= 200;
+#endif
+            if (lowres_target(dw, dh, rgb565) == 0) {
+                w = dw; h = dh;
+                rb_target(g_lr_fbo[0]);
+                g_frame_tgt = g_lr_fbo[0];
+                if (g_frame_320 && (!g_lr_fbo[1] || g_lr320_565 != g_lr_565)) {
+                    if (g_lr_fbo[1]) rb_tex_delete(g_lr_fbo[1]);
+                    g_lr_fbo[1] = g_lr_565 ? rb_target_new_rgb565(320, 200, 0) : rb_target_new(320, 200, 0);
+                    g_lr320_565 = g_lr_565;
+                }
+            }
+            g_frame_320 = g_frame_320 && g_frame_tgt && g_lr_fbo[1];
+        }
+        if (g_mm_world_dirty) {   /* Object density or the visible DOS scenery detail changed. */
             glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);
             g_mm_world_dirty = 0;
         }
@@ -9364,7 +9402,7 @@ int main(int argc, char **argv)
             ((g_vport >= 1 && g_vport <= 2) || wcam >= 0) && vp_on && !g_snow_show[0] && vp_wf * vp_hf > 0) {
             glr_view vv = v;
             int rect[4];
-            mfd_camera_rect(2, 1, w, h, g_render_w == 320 && g_lr_fbo[0], rect);
+            mfd_camera_rect(2, 1, w, h, g_frame_320, rect);
             int px = rect[0], py = rect[1], pw = rect[2], ph = rect[3];
             if (vp_wf < 1.0f || vp_hf < 1.0f) {
                 /* powering up / down (0x10011aa0 / 0x10011b70): the view is drawn into the window as it stands - the camera's
@@ -9511,14 +9549,14 @@ int main(int argc, char **argv)
                     vv.mono[0] = vv.mono[1] = vv.mono[2] = 0.0f; vv.mono[3] = 2.0f;
                     vv.ambient = 0.35f; vv.point_light = 0;
                 }
-                mfd_camera_rect(13, -1, w, h, g_render_w == 320 && g_lr_fbo[0], rect);
+                mfd_camera_rect(13, -1, w, h, g_frame_320, rect);
                 vv.vfov = 2.0f * atanf((float)rect[3] / (2.0f * (float)rect[2])) * 180.0f / 3.14159265f;
                 glr_draw_rect(r, &vv, rect[0], rect[1], rect[2], rect[3]);
                 rb_viewport(0, 0, w, h);
                 target_camera_drawn = 1;
             }
         }
-        if (g_render_w == 320 && g_world && g_lr_fbo[0]) {
+        if (g_frame_320 && g_lr_fbo[0]) {
             /* 320 x 200: the 3D picture (and the inset views) point-sampled down to the 320 x 200 frame; the HUD is then
              * drawn into that frame with the original's 320x200 sprite set and font, 1:1, its layout stretched to the
              * frame (320 across, 200 down: the VGA picture the 320x200 art was made for) */
@@ -10693,7 +10731,10 @@ int main(int argc, char **argv)
             hud_end(g_hud);
         }
         if (g_hud) hud_set_flash(g_hud, 0, 0, 0, 0);
-        if (g_render_w && g_world && g_lr_fbo[0]) { lowres_present(g_out_w, g_out_h); w = g_out_w; h = g_out_h; }
+        if (g_frame_tgt && !g_lr_565) {
+            lowres_present(g_out_w, g_out_h);
+            w = g_out_w; h = g_out_h;
+        }
         if (g_sim_ok && g_world && g_hud && !getenv("MW2_NO_STARTUP") && (g_tex_kind == 3 || c3d_ti)) {
             /* the palette fade from black at the mission start (engine 0x10007900 -> 0x100079d0 -> 0x1002b090 ->
              * 0x1002ad50; DOS 0x15070 -> 0x3eae0 -> 0x3e7d0): the palette starts all black (slot 0x10, 0x1002b0c0); the
@@ -10723,6 +10764,13 @@ int main(int argc, char **argv)
                 hud_begin(g_hud, w, h);
                 hud_rect(g_hud, hud_left_x(g_hud) - 10.0f, -10.0f, 660.0f - 2.0f * hud_left_x(g_hud), 500.0f, blk);
                 hud_end(g_hud);
+            }
+        }
+        if (g_frame_tgt && g_lr_565) {
+            if (g_render_w) { lowres_present(g_out_w, g_out_h); w = g_out_w; h = g_out_h; }
+            else {
+                rb_blit(g_frame_tgt, 0, 0, w, h, 0, 0, 0, w, h, 0);
+                rb_target(0);
             }
         }
         test_frame(w, h);   /* TEST hook (tests/sequences) */

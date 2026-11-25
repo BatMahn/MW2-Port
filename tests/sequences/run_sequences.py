@@ -6822,6 +6822,33 @@ def rendition_look(c):
 
 
 @sequence
+def rendition_rgb565_frame(c):
+    """Rendition's Vulkan mission is blended into an RGB565 framebuffer before presentation."""
+    import numpy as np
+    tdir = titanium_dir()
+    if not tdir:
+        c.note('no Titanium folder')
+        return
+    cfg = titanium_cfg(c.name, tdir)
+    env = {'MW2_CONFIG': cfg, 'MW2_SKYGND': os.path.join(tdir, 'SKYGND.PAR'), 'MW2_TEST_SKY_STILL': '1'}
+    for mode in ('native', '320x200'):
+        r = c.run('_' + mode, secs=0.4, throttle=0, nostart=True, mission='SILVSCN1', size='640x480',
+                  edition='rendition', env={**env, 'MW2_RENDER': mode})
+        if 'gpu: Vulkan (llvmpipe' not in r.out:
+            c.note('RGB565 colour attachment check requires software Vulkan')
+            return
+        path = r.shots['final']
+        if not c(os.path.isfile(path), mode + ' frame captured'):
+            continue
+        w, h, pixels = ppm(path)
+        colors = np.frombuffer(pixels, dtype=np.uint8).reshape(h, w, 3).astype(np.float32)
+        scale = np.array([31, 63, 31], dtype=np.float32) / 255
+        expanded = np.round(colors * scale) / scale
+        c(np.count_nonzero(colors) > w * h and np.max(abs(expanded - colors)) <= 1.01,
+          mode + ' frame uses the RGB565 colour steps', 'maximum error %.3f' % np.max(abs(expanded - colors)))
+
+
+@sequence
 def rendition_look_switch(c):
     """the in-mission Renderer to RENDITION from ENHANCED / ORIGINAL (switch_look): the Titanium textures come with it
     (TEXTURES follows, locked), and back to ENHANCED the Titanium textures stay; saved as renderer= / textures=; the
@@ -7373,24 +7400,24 @@ def look3d_texcache_first_poly(c):
 
 @sequence
 def look3d_texcache_tie_s3_reload(c):
-    """the texture cache (look3d_texcache_first_poly): S_BFLAGQ (type 7) and S_BFLAGB (type 9) are one flag drawn twice in
-    place (TRNJAREA objects 2 / 1, slot 0x122): equal keys, whose order after the quicksort depends on the whole frame's
-    list (a transcription of 0x10029ff0 on random frames: 50 / 50) - ASSUMED the copy without the flag first: ARGB1555, the
-    flag as before (picture identical, compared with the 0.5 alpha test: MW2_TEST_NO_ALPHA_BLEND - look3dfx_alpha_blend
-    draws the type 9 copy over the other). S3: a PALG slot reload (light amplification on: 0xb5 ticks later 0x1003ec50 ->
-    0x1003ec90 -> 0x1000f870, which snapshots the use counter) makes 0x10010170 upload every texture again in its next
-    polygon's format - V1_PLAIN decided anew; the 3Dfx list is reset only at the mission's start (0x10066570)"""
+    """The overlapping training flags share a CEL and a depth key.
+    Their draw order decides how the texture is read. A palette reload resets
+    S3's choice, while 3Dfx retains it until the next mission."""
     from PIL import Image, ImageChops
-    pics = {}
-    for sub, env in (('', {}), ('_own', {'MW2_TEST_NO_TEXCACHE': '1'})):
-        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0', 'MW2_TEST_NO_ALPHA_BLEND': '1'})
-        r = c.run('_flag' + sub, secs=1, nostart=True, mission='TNJ1SCN1', look3dfx=True, env=env, shots=[(0.8, 'v')])
-        pics[sub] = r.shots.get('v')
-        if not sub:
-            c('TEXCACHE slot=0x122 cel=1354 fmt=1555' in r.out, 'the flag (equal keys): ARGB1555')
-    if c(all(p and os.path.exists(p) for p in pics.values()), 'flag pictures'):
-        bb = ImageChops.difference(Image.open(pics['']).convert('RGB'), Image.open(pics['_own']).convert('RGB')).getbbox()
-        c(bb is None, 'the flag as before', 'differs in %s' % (bb,))
+    for name, x, fmt in (('opaque', -2991, '1555'), ('alpha', -2791, '4444')):
+        pics = []
+        for sub, env in (('', {}), ('_own', {'MW2_TEST_NO_TEXCACHE': '1'})):
+            env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': f'{x},-28000',
+                        'MW2_START_HEADING': '0', 'MW2_TEST_NO_ALPHA_BLEND': '1'})
+            r = c.run('_flag_' + name + sub, secs=1, nostart=True, mission='TNJ1SCN1',
+                      look3dfx=True, env=env, shots=[(0.8, 'v')])
+            pics.append(r.shots.get('v'))
+            if not sub:
+                c(f'TEXCACHE slot=0x122 cel=1354 fmt={fmt}' in r.out, f'{name} first: ARGB{fmt}')
+        if c(all(p and os.path.exists(p) for p in pics), f'{name} flag pictures'):
+            bb = ImageChops.difference(*(Image.open(p).convert('RGB') for p in pics)).getbbox()
+            c((bb is None) == (name == 'opaque'), f'{name}: shared texture changes the flag only for ARGB4444',
+              f'changed bounds {bb}')
     for tag, kw, want in (('s3', {'look': 's3'}, 2), ('3dfx', {'look3dfx': True}, 1)):
         r = c.run('_amp_' + tag, secs=4, nostart=True, mission='TNW1SCN1', keys=[(1.0, 'l')], **kw)
         k = sum(1 for l in r.out.splitlines() if l.startswith('TEXCACHE slot=0x138'))
@@ -7654,7 +7681,7 @@ def look3dfx_alpha_blend(c):
     fbox = (310 / 640.0, 115 / 400.0, 345 / 640.0, 145 / 400.0)
     pic = {}
     for sub, env in (('', {}), ('_test', {'MW2_TEST_NO_ALPHA_BLEND': '1'})):
-        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2791,-28000', 'MW2_START_HEADING': '0'})
+        env.update({'MW2_TEST_SKY_STILL': '1', 'MW2_START': '-2991,-28000', 'MW2_START_HEADING': '0'})
         r = c.run('_flag' + sub, secs=1, nostart=True, mission='TNJ1SCN1', look3dfx=True, env=env, shots=[(0.8, 'v')])
         pic[sub] = r.shots.get('v')
         if not sub:
@@ -8085,6 +8112,37 @@ def dos_native_gouraud(c):
                    'the fixed DOS mode keeps its exact letterboxed frame')
     compare_frames(picture('enhanced', dos=False, **policy), picture('enhanced_reference', dos=False),
                    'enhanced rendering is identical with the DOS policy enabled')
+
+
+@sequence
+def dos_scenery_draws_selected_detail(c):
+    """Silver Staff's Chemical Plant draws its second model beyond the 170 m detail boundary."""
+    r = c.run(secs=0.37, nostart=True, size='640x480', dos_look=True, mission='SILVSCN1',
+              throttle=0, twist=0, env={'MW2_START': '-1315,-19500', 'MW2_START_HEADING': 0,
+                                        'MW2_TEST_SKY_STILL': '1', 'MW2_NO_FAR_CULL': '1'})
+    path = r.shots['final']
+    box = (265 / 640, 297 / 480, 577 / 640, 338 / 480)
+    ground = count_px(path, lambda red, green, blue: (red == 28) & (green == 28) & (blue == 4), box)
+    detail = count_px(path, lambda red, green, blue: (red == 40) & (green == 28) & (blue == 20), box)
+    c(ground > 8000 and 0 <= detail < 150, 'camera sees the plant with its reduced silhouette',
+      '%d ground pixels and %d pixels with the near-model shade' % (ground, detail))
+
+
+@sequence
+def fixed_resolution_fits_small_window(c):
+    """Fixed-resolution views must retain both sides of the scene in a smaller drawable."""
+    for mode, size, dimensions in (('1024x768', '480x360', (480, 360)),
+                                   ('320x200', '240x180', (240, 180))):
+        r = c.run('_' + mode, secs=0.5, nostart=True, size=size, dos_look=True,
+                  env={'MW2_RENDER': mode, 'MW2_TEST_SKY_STILL': '1'})
+        path = r.shots['final']
+        if not c(os.path.isfile(path), mode + ' frame captured'):
+            continue
+        w, h, _ = ppm(path)
+        c((w, h) == dimensions, mode + ' keeps the drawable size', '%dx%d' % (w, h))
+        for label, box in (('left', (0.03, 0.16, 0.20, 0.30)), ('right', (0.80, 0.16, 0.97, 0.30))):
+            sky = count_px(path, lambda red, green, blue: (blue > red + 20) & (blue > green + 10), box)
+            c(sky > 100, mode + ' shows sky on the ' + label, '%d pixels' % sky)
 
 
 @sequence
@@ -8589,25 +8647,35 @@ def bronze_anvil_aircraft_tracks_convoy(c):
       'the gunship plays CHPRANIM, whose keys set the DOS drive servo rate')
 
 
-@sequence
-def bronze_anvil_native_flight(c):
-    """Both gunships follow the original DOS opening route on the recorded frame schedule."""
-    with open(os.path.join(HERE, 'bron_dos_flight.txt')) as capture:
+def check_dos_aircraft_replay(c, capture_name, mission, aircraft):
+    with open(os.path.join(HERE, capture_name)) as capture:
         rows = [line.split() for line in capture if not line.startswith('#')]
     ticks = [int(row[0]) for row in rows]
-    for actor, col, tolerance in ((4, 1, 2), (5, 3, 6)):
+    for actor, col, tolerance in aircraft:
         expected = {int(row[0]): tuple(map(int, row[col:col+2])) for row in rows if row[col] != '-'}
-        run = c.run(secs=ticks[-1]/182 + 0.01, throttle=0, twist=0, mission='BRONSCN1',
+        run = c.run('_%d' % actor, secs=ticks[-1]/182 + 0.01, throttle=0, twist=0, mission=mission,
                     dos_look=True, mech='maddog/mdg00std', dump='/0.001',
                     env={'MW2_TEST_FRAME_TICKS': ' '.join(map(str, ticks)), 'MW2_WATCH_ACTOR': str(actor)})
         seen = {state['now']*182//1000: (state['w_x'], state['w_z'])
                 for state in run.states if 'w_x' in state}
-        c(expected.keys() <= seen.keys(), 'all original flight samples for actor %d' % actor,
-          str(sorted(expected.keys() - seen.keys())[:10]))
-        error = max((seen[t][0] - x)**2 + (seen[t][1] - z)**2
-                    for t, (x, z) in expected.items() if t in seen)
+        missing = expected.keys() - seen.keys()
+        if not c(not missing, 'all original flight samples for actor %d' % actor, str(sorted(missing)[:10])):
+            continue
+        error = max((seen[t][0] - x)**2 + (seen[t][1] - z)**2 for t, (x, z) in expected.items())
         c(error <= tolerance**2, 'actor %d stays within %d cm of DOS' % (actor, tolerance),
           'maximum %.2f cm' % math.sqrt(error))
+
+
+@sequence
+def bronze_anvil_native_flight(c):
+    """Both gunships follow the original DOS opening route on the recorded frame schedule."""
+    check_dos_aircraft_replay(c, 'bron_dos_flight.txt', 'BRONSCN1', ((4, 1, 2), (5, 3, 6)))
+
+
+@sequence
+def umber_wall_native_takeoff(c):
+    """A landing before the player's startup roll shifts both aircraft's timers in stock DOS."""
+    check_dos_aircraft_replay(c, 'umber_dos_flight.txt', 'UMBESCN1', ((5, 1, 5), (6, 3, 1)))
 
 
 def main():

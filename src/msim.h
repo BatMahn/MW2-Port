@@ -456,6 +456,7 @@ typedef struct {
 } msim_camera;
 
 void msim_camera_lods(msim *s, const msim_camera *camera);
+int  msim_scenery_draw_lods(const msim *s, mech3d *world);
 int  msim_unit_repr(const msim *s, int k);
 const mech3d *msim_unit_hull(const msim *s, int k);
 /* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second
@@ -497,7 +498,7 @@ float msim_leg_demand(float input, float spd, int player, float gain, int airbor
 /* Update an airborne wreck with no drive or thrust. Horizontal velocities are cm/s. */
 void msim_wreck_step(msim *s, int actor, int32_t origin[3], float vx, float vz, float dt, int dos_ticks);
 /* DOS ground approach, directional thrust, and whole-centimetre movement. */
-combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks);
+combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks, int first_move);
 void msim_dos_walk(combat_unit *u, float heading, float drive, float top, int freev, int jet_dir,
                    int ticks, int32_t move[2]);
 void msim_dos_project_velocity(const combat_unit *u, float heading, float *along, float *across);
