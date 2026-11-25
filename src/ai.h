@@ -136,6 +136,8 @@ typedef struct {
     float weave, weave_ticks;/* attack manoeuvre 3 */
     int   man, prev_man, forced_man;   /* attack manoeuvre (engine +0x170 / +0x172 / +0x174), -1 none */
     int   dos_avoid_unit;    /* first blocking unit, -1 player, -2 scenery or none */
+    int   terrain_block_ticks, terrain_escape_ticks;
+    float terrain_normal[2], terrain_escape_bearing;
     float man_ticks, man_limit;
     float man_phase_ticks;   /* DOS manoeuvre 9 has a separate jet phase deadline. */
     int   flank_slot;        /* manoeuvre 1: slot taken (-1 none) */

@@ -48,11 +48,12 @@ VARIANT (DOSBox: each starts at its x). Every screen's loop also calls the globa
 The sample IDs below are the original shell's one-based DATABASE IDs. The shell's WAVs use
 the effects level. Combat Variables previews each of its three sliders with sound 0x66 at the
 changed slider's gain when the level moves at least ten pixels (0x25551). Music and effects
-changes apply immediately, and the levels are saved to MW2SND.CFG.
+changes apply immediately, and the levels are saved to MW2SND.CFG. Spoken menu cues use the
+Voice level.
 
 | Screen | Playback checked against the executable and assets |
 |---|---|
-| Title | DOS loops 0x4a with a fade from volume 5 to 0x1e (0x2a4ad). The Windows 95 title waits for playback of its 0x68 introduction to finish before starting the loop. |
+| Title | DOS loops 0x4a with a fade from volume 5 to 0x1e (0x2a4ad). The Windows 95 title waits for its 0x68 introduction to finish before starting the loop. With Voice muted, the loop starts immediately. |
 | Clan halls | Wolf loops 0x4f at 0x32. Jade Falcon plays the AJFBALL Smacker track. Its left door plays for Cadet Training, its right door plays for the Ready Room, and both open on return from the Register (DOS 0x1ddba, 0x1de6a, 0x1df82). The two opening clips carry identical audio, played once. Opening the Archive plays 0x67 and the projector clip. Windows 95 adds the 0x69 training announcement for a new pilot. Wolf starts it on entry and Jade Falcon starts it after the doors. |
 | Trials of Grievance and Register | 0x52 and 0x51 respectively at 0x1e. The trial announcement only starts from the title, and both samples stop on leaving. |
 | Cadet Training and Ready Room | Training loops 0x4c at 0x32 from entry, with the panel's separate Smacker track. Ready Room uses 0x64 at 0x32 with the holotable before entering the lab. |

@@ -891,6 +891,13 @@ static void shell_sound_play(int index, int vol, int loop)
     sfx_play_pcm(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f, loop);
 }
 static void shell_sound(int index, int vol) { shell_sound_play(index, vol, 0); }
+static int shell_speech(int index, int vol)
+{
+    const shell_snd *z = g_sfx ? shell_sound_load(index) : NULL;
+    if (!z) return -1;
+    sfx_stop_pcm(g_sfx, z->pcm);
+    return sfx_play_pcm_voice(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f);
+}
 static void shell_sound_stop(int index) { if (index > 0 && index <= 160 && g_sfx && g_snd[index - 1].pcm) sfx_stop_pcm(g_sfx, g_snd[index - 1].pcm); }
 static shell_snd *g_amb;
 static float g_amb_level;
@@ -1749,7 +1756,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
     if (g_from_screen == 8) { g_ia.scen = 0; ia_load_scenario(); }   /* FUN_00029680 from the main menu (EBX 8): the first
                                                                          * scenario, both stars reloaded from it (FUN_000291b0) */
     else if (!g_ia.loaded) ia_load_scenario();
-    if (!headless && g_from_screen == 8) shell_sound(0x52, 0x1e);   /* FUN_00029680 0x29763 / 0x29a2f: from the main menu (EBX 8)
+    if (!headless && g_from_screen == 8) shell_speech(0x52, 0x1e);   /* FUN_00029680 0x29763 / 0x29a2f: from the main menu (EBX 8)
                                          * DATABASE sound 0x52 - "A call to trial... justice by combat" - once, at volume 0x1e */
     ov_set(&ov[0], IA_CLAN[g_ia.clan[0]], 13, 205);
     ov_set(&ov[1], IA_CLAN[g_ia.clan[1]], 483, 329);
@@ -2005,7 +2012,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
     char edit[16] = "";
     reg_load();
     load_bg(clan == 1 ? 23 : 16);
-    if (!headless) shell_sound(0x51, 0x1e);   /* 0x384f8: DATABASE sound 0x51 at volume 0x1e on entering */
+    if (!headless) shell_speech(0x51, 0x1e);   /* 0x384f8: DATABASE sound 0x51 at volume 0x1e on entering */
     g_new_pilot = 0;   /* (Windows 95 0x10018440) */
     while (next == -1) {
         SDL_Event e;
@@ -2085,7 +2092,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                     reg_load();
                     load_bg(clan == 1 ? 23 : 16);
                     old_list = 0;   /* the roster again, as on entering (the record panel) */
-                    if (!headless) shell_sound(0x51, 0x1e);
+                    if (!headless) shell_speech(0x51, 0x1e);
                     continue;
                 }
             }
@@ -3434,7 +3441,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
      * left button is held on hotspot 4, 5, 2, 3 (NEXT / PREV VARIANT, NEXT / PREV CHASSIS: cases 0x34ca0, 0x34dd2,
      * 0x34668, 0x34982) */
     for (i = 0; i < 9; i++) cl[i] = clip_open(CL[cx][i]);
-    if (!headless) shell_sound(LAB_VOICE[m], 0x28);   /* the chassis' name on entering (0x34441) */
+    if (!headless) shell_speech(LAB_VOICE[m], 0x28);   /* the chassis' name on entering (0x34441) */
     if (mw2_development_env("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the chassis by lance index, as NEXT CHASSIS would reach it */
         m = atoi(mw2_development_env("MW2_SHELL_LAB_CHASSIS")) % lance_mech_count();
         nv = mek_variants(lance_mech_code(m), var, 24); vi = 0;
@@ -3497,7 +3504,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                             m = (m + (h == 2 ? 1 : nch - 1)) % nch;
                         }
                         nv = mek_variants(lance_mech_code(m), var, 24); vi = 0;
-                        shell_sound(LAB_VOICE[m], 0x28);
+                        shell_speech(LAB_VOICE[m], 0x28);
                     } else if ((h == 4 || h == 5) && nv) { shell_sound(0x65, 0x32); vi = (vi + (h == 4 ? 1 : nv - 1)) % nv; }   /* variant */
                     else if (h == 6 && have) {                                                                         /* CUSTOMIZE */
                         char saved[16] = "";
@@ -6657,9 +6664,8 @@ int main(int argc, char **argv)
              * that edition's DATABASE.MW2) at volume 0x78, and the 0x4a loop only once it has ended (the 0x404 handler
              * 0x10005342: 0x1002561e not playing); without 0x68 the loop starts at once, as the DOS shell's (0x2a410) */
             const shell_snd *intro = sd && sd->id == 8 ? shell_sound_load(0x68) : NULL;
-            if (intro && !headless) {
+            if (intro && !headless && shell_speech(0x68, 0x78) == 0) {
                 play_ambient(-1);
-                shell_sound(0x68, 0x78);
                 title_intro = intro;
                 amb_entry = sd->ambient;
             } else if (sd && sd->id == 8 && !intro) {
@@ -6684,7 +6690,7 @@ int main(int argc, char **argv)
             }
             /* Windows 95 0x10004b61 waits for the Falcon doors before the training line. */
             if (g_new_pilot && door_until) pilot_announcement = 1;
-            else if (g_new_pilot) shell_sound(0x69, 0x7f);
+            else if (g_new_pilot) shell_speech(0x69, 0x7f);
         }
         if (sd && sd->id == 1) g_new_pilot = 0;
         while (next == -1 && running) {
@@ -6699,7 +6705,7 @@ int main(int argc, char **argv)
             if (door_until && audio_now >= door_until) {
                 for (int q = 0; q < 2; q++) { smk_close(doors[q]); doors[q] = NULL; }
                 door_until = 0;
-                if (pilot_announcement) { pilot_announcement = 0; shell_sound(0x69, 0x7f); }
+                if (pilot_announcement) { pilot_announcement = 0; shell_speech(0x69, 0x7f); }
             }
             if (!headless) {
                 while (shell_poll(&e)) {

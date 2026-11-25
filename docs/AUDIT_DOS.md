@@ -613,6 +613,23 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   UndefinedBehaviorSanitizer. All 62 executable comparison groups and four focused software
   Vulkan sequences passed.
 
+## Gameplay compatibility after v2.0
+
+- The DOS cockpit shares the heat bar warning labels with the other looks. A rendered sequence
+  checks the label while shutdown is pending, after an override, and after cooling.
+- The player's projectiles and convergence ray use a signed sphere projection for turret and
+  dropship hulls. This lets shots reach off-centre pieces that the original carry rejection
+  would skip. A live Sable Flame replay checks hits and destruction with the stock armour.
+- AI steering retains its avoidance inputs between probes. A DOS ’Mech that keeps colliding
+  with a steep terrain face steers along the face and slightly downhill to break the stall.
+- The scenery selector matched the executable in 657 checks, including side culling, distance
+  thresholds, and retention when culled. The player movement test retains the port's nearby
+  wall collision so falling wrecks stop at walls behind the camera. Player projectile and
+  aim rays test placed wall faces independently of the active camera.
+- The 144 Hz control replay releases and presses a weapon-group trigger between adjacent
+  simulation updates. The controller records the press separately from the held state,
+  so the second PPC volley reaches the simulation and a short tap cannot leave repeat fire held.
+
 ## Not checked
 
 - **Live manoeuvre execution.** Bronze Anvil has a paired flight replay. The cause of its
@@ -620,9 +637,9 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
   Full playback comparisons across every mission, the live flight of detached mech parts and world
   fragments, and their spawn timing remain open. Debris landing was compared on flat ground.
-- **Scenery detail changes.** The Silver Staff replay covers scenery before its first camera-range
-  update. Side-of-view culling and switches between the nearer scenery models still need paired
-  comparisons.
+- **Scenery detail changes in live play.** The Silver Staff replay covers scenery before its first
+  camera-range update. The selector has isolated executable comparisons. More live replays are
+  needed for switches between nearer scenery models.
 - **Simultaneous contacts.** Contact cases outside the recorded training replays still need
   comparison.
 - **Mission-wide random ordering.** Startup, AI, damage, missile offsets and positional sounds

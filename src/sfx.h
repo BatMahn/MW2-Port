@@ -73,8 +73,8 @@ int  sfx_voice_busy(sfx *s);
 void sfx_stop_voice(sfx *s, int index);
 /* decode an SFLX sound (a SNDS record or a disc .SFL file) to unsigned 8-bit at 11025 Hz; free(*out). Bytes, or -1 */
 int  sfx_decode_sflx(const unsigned char *rec, size_t len, unsigned char **out);
-/* play decoded 8-bit PCM on the voice channel (counts for sfx_voice_busy); the buffer must stay valid */
-void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume);
+/* Play caller-owned 8-bit PCM on the voice channel at rate Hz. Returns 0 if queued, -1 if silent or unavailable. */
+int sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, int rate, float volume);
 /* stop every voice playing this buffer (sfx_play_pcm) */
 void sfx_stop_pcm(sfx *s, const unsigned char *pcm);
 int sfx_pcm_playing(sfx *s, const unsigned char *pcm);

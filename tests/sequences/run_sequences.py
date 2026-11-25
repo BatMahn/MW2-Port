@@ -2165,6 +2165,17 @@ def tnj1_slide_frame_rates(c):
 
 
 @sequence
+def dos_quick_trigger_repress(c):
+    """A release and second press between simulation updates still fires a ready non-repeating weapon."""
+    r = c.run(secs=5, throttle=0, nostart=True, dos_look=True, mech='warhawk/whk00std',
+              dump='1,3.9,4.3,5', hold=[(0.2, 4.009, 'numlock'), (4.018, 4.4, 'numlock')],
+              env={'MW2_TEST_FPS': 144, 'MW2_GROUPS': '2:1,2,3,4,5,6,7,8,9', 'MW2_TEST_PASSIVE': 1})
+    ready = str(r.at(3.9).get('weapons', '')).split(';')[0]
+    c(ready.startswith('21:1:') and r.at(3.9).get('fired') == 1, 'the PPC has cycled while the first press is held', ready)
+    c(r.last.get('fired') == 2, 'the quick second press starts another PPC volley', str(r.last.get('fired')))
+
+
+@sequence
 def tnj4_wall_slide(c):
     """walking into a wall at an angle (TNJ4's S_1BQDAS, a type 0 box, its south face z 166195; the Firemoth at FULL,
     heading -18.5, 18.5 degrees off head-on - DOSBox's run). The engine's world hit (0x1000b5e0): the move's segment
@@ -5165,6 +5176,22 @@ def ai_probe_dos_broad_phase(c):
 
 
 @sequence
+def sable_flame_mechs_clear_hill(c):
+    """Two Mad Dogs on Sable Flame keep moving after they hit the slopes by the sensor dome."""
+    for actor in (2, 3):
+        r = c.run('_%d' % actor, secs=50, throttle=0, mission='SABLSCN1', nostart=True, dos_look=True, dump='/0.5',
+                  env={'MW2_START': '-20000,40000', 'MW2_WATCH_ACTOR': actor,
+                       'MW2_BLOCK_TRACE': actor, 'MW2_TEST_PASSIVE': '1'})
+        c(re.search(r'^block [\d.]+s actor %d .* n \S+ 0\.[1-6]\d ' % actor, r.out, re.M) is not None,
+          'Mad Dog %d hits a steep face' % actor)
+        for t in (30, 40):
+            start, end = r.at(t), r.at(t + 10)
+            progress = math.hypot(end.get('w_x', 0) - start.get('w_x', 0), end.get('w_z', 0) - start.get('w_z', 0))
+            c(progress > 1000, 'Mad Dog %d keeps moving from %d to %d s' % (actor, t, t + 10),
+              '%.1f m' % (progress / 100))
+
+
+@sequence
 def hud_layout_wide(c):
     """port (user request 2026-10-21): hud_layout=wide (the default) on a window wider than 4:3 moves the left-hand
     instruments (radar, altitude tape, target display, AUTOPILOT) to the window's left edge and the right-hand ones
@@ -5461,6 +5488,17 @@ def tab_in_mission_no_reload(c):
     c(a and b and b['t'] > a['t'] + 4.5, 'the mission runs on after Tab (no reload)', '%s -> %s' % (a and a.get('t'), b and b.get('t')))
     c(a and b and abs(b.get('x', 0) - a.get('x', 0)) + abs(b.get('z', 0) - a.get('z', 0)) > 500, 'the player keeps walking (not reset to the start)',
       '%s,%s -> %s,%s' % (a and a.get('x'), a and a.get('z'), b and b.get('x'), b and b.get('z')))
+
+@sequence
+def sable_flame_dropship_damage(c):
+    """Normal weapons can destroy Sable Flame's dropship, including shots into offset hull sections."""
+    r = c.run(secs=27, throttle=0, fire=1, mission='SABLSCN1', nostart=True, dos_look=True, dump='/0.25',
+              env={'MW2_TEST_AIM': '8,13000,0', 'MW2_TEST_WATCH': '0:8',
+                   'MW2_TEST_TARGET': '8', 'MW2_TEST_PASSIVE': '1'})
+    c(r.at(1).get('tgt_health', 0) > 7000 and r.at(15).get('tgt_health', 9999) < 6450,
+      'player fire damages the stock Falcon dropship hull', str(r.at(15).get('tgt_health')))
+    c(r.last.get('a_dead') == 1, 'the dropship is destroyed by sustained player fire', str(r.last.get('a_armor')))
+
 
 @sequence
 def dropship_flies_at_centre(c):
@@ -5788,6 +5826,21 @@ def overheat_alarm_dos_rules(c):
         else:
             c(not warn, '3D: no warning above 80', str(warn))
             c(len(al) == 1 and al[0] < 10.2, '3D: MECOVHW1 with the sequence only', str(al))
+
+
+@sequence
+def dos_heat_shutdown_label(c):
+    """The DOS cockpit shows the warning below the heat bar throughout the shutdown sequence."""
+    r = c.run(secs=5, throttle=0, nostart=True, dos_look=True, size='640x480', dump='/0.1',
+              keys=[(3, 'o')], env={'MW2_TEST_HEAT': '2:90,4:30'},
+              shots=[(1, 'cold'), (2.5, 'pending'), (3.3, 'override'), (4.5, 'cooled')])
+    label = (215 / 640, 442 / 480, 335 / 640, 454 / 480)
+    red = lambda R, G, B: (R > 100) & (R > 2 * G) & (R > 2 * B)
+    pixels = {name: count_px(r.shots[name], red, label) for name in ('cold', 'pending', 'override', 'cooled')}
+    c(r.at(2.5).get('pend') and r.at(3.3).get('ovr') and not r.at(4.5).get('pend'),
+      'heat starts the shutdown sequence, the pilot overrides it, and cooling clears it')
+    c(pixels['cold'] == pixels['cooled'] == 0 and pixels['pending'] > 50 and pixels['override'] > 50,
+      'the heat label is red during shutdown and override only', str(pixels))
 
 
 @sequence
@@ -8352,6 +8405,42 @@ def shell_volume_previews(c):
     with open(config, 'rb') as f:
         gains = struct.unpack_from('<III', f.read(), 4)
     c(gains == (16384, 8192, 40960), 'the new levels survive closing the menu', str(gains))
+
+
+@sequence
+def shell_voice_volume(c):
+    """Windows 95 title narration uses Voice volume and a muted cue does not delay the ambience."""
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    with open(os.path.join(GTEST, 'DATABASE.MW2'), 'rb') as f:
+        if struct.unpack('<I', f.read(4))[0] < 0x68:
+            c.note('Windows 95 title narration absent from this install: skipped')
+            return
+    for name, effects, voice in (('effects_muted', 0, 16384), ('voice_muted', 65536, 0)):
+        sub = c.name + '_' + name
+        game = install_dir(sub, None)
+        work = os.path.join(OUT, sub)
+        audio = bytearray(60)
+        struct.pack_into('<III', audio, 4, effects, voice, 65536)
+        with open(os.path.join(game, 'MW2SND.CFG'), 'wb') as f:
+            f.write(audio)
+        env = _shell_env(work, MW2_NO_INTRO=1, MW2_SHELL_NOREG=1, MW2_SHELL_SCREEN=8, MW2_SFX_LOG=1)
+        with subprocess.Popen([shell, game], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as p:
+            try:
+                out = p.communicate(timeout=2 * TSCALE)[0]
+            except subprocess.TimeoutExpired:
+                p.terminate()
+                out = p.communicate(timeout=5)[0]
+        log = out.decode('latin-1')
+        with open(os.path.join(work, 'audio.log'), 'w') as f:
+            f.write(log)
+        if voice:
+            c('pcm 28356 vol 0.24 voice' in log, 'narration plays at quarter Voice gain with Effects muted', log[-750:])
+        else:
+            c('pcm 28356' not in log and 'pcm 38861 vol 0.24' in log,
+              'muting Voice skips the narration and starts the ambience immediately', log[-750:])
 
 
 @sequence

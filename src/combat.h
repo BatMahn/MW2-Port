@@ -104,6 +104,7 @@ typedef struct {
     int           restarted;      /* one tick: the heat restart (state 3 -> 0): the start-up lock runs again (msim.c) */
     int           human;          /* a human pilot: edge-triggered fire, no range check (0x100437a0) */
     uint32_t      fire_held, fire_prev, fire_edge;   /* human: weapons whose trigger is held now / last tick / newly pressed */
+    uint32_t      fire_pending;    /* presses sampled between simulation updates */
     int           shutdown_pending;  /* engine flag 4: sequence started above 80, shuts down 1086 ticks later */
     int           alarm_latch;       /* engine flag 0x1000: the sequence's alarm was given; cleared at or below 65 with no
                                       * sequence pending (0x10016268; DOS 0x10d bit 0x10, 0x2530a) */

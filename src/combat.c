@@ -232,7 +232,8 @@ void combat_tick(combat_unit *u, float dt, int dos_ticks)
     int i;
     if (u->destroyed) return;
     u->last_ticks = ticks;
-    u->fire_edge = u->fire_held & ~u->fire_prev;
+    u->fire_edge = (u->fire_held & ~u->fire_prev) | u->fire_pending;
+    u->fire_pending = 0;
     u->fire_prev = u->fire_held;
     u->heat_warning = 0;
     u->seq_alarm = 0;

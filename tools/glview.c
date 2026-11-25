@@ -1212,7 +1212,7 @@ static void on_radio(void *user, const char *name)
                     if (fread(raw, 1, (size_t)n, f) == (size_t)n) {
                         unsigned char *dec = NULL;
                         int len = sfx_decode_sflx(raw, (size_t)n, &dec);
-                        if (len > 0) { sfx_stop_pcm(g_sfx, pcm); free(pcm); pcm = dec; sfx_play_pcm_voice(g_sfx, pcm, len, 1.0f); }
+                        if (len > 0) { sfx_stop_pcm(g_sfx, pcm); free(pcm); pcm = dec; sfx_play_pcm_voice(g_sfx, pcm, len, 11025, 1.0f); }
                         else free(dec);
                     }
                     free(raw);
@@ -8296,12 +8296,17 @@ int main(int argc, char **argv)
                         for (fg = 0; fg < 3; fg++) if (H(FG[fg]) && group_select(fg)) mask |= g_groups[fg];
                     }
                     g_cur_group = sel_group() < 0 ? 0 : sel_group();   /* (the state dump's "curgrp") */
+                    uint32_t held = mask;
                     if (msim_dos_int) {
-                        static uint32_t pending_trigger;
-                        /* Keep a trigger tap that landed between two simulated frames. */
-                        if (!targeting_online() || g_mm_depth || g_paused) pending_trigger = 0;
-                        else pending_trigger |= mask;
-                        if (frame_ms > 0) { mask |= pending_trigger; pending_trigger = 0; }
+                        static uint32_t sampled;
+                        combat_unit *u = &g_sim.player_unit;
+                        if (reload) sampled = 0;
+                        if (!targeting_online() || g_mm_depth || g_paused) {
+                            u->fire_pending = 0;
+                            held = 0;
+                        } else u->fire_pending |= held & ~sampled;
+                        sampled = held;
+                        mask = held | u->fire_pending;
                     }
                     g_sim.player_fire_mask = all ? 0 : mask;
                     g_sim.player_attacks = (all || mask) != 0;   /* the trigger fires with or without a target (along the aim line) */
@@ -8309,7 +8314,7 @@ int main(int argc, char **argv)
                     {   /* the triggers held now (combat.c fires on their press); autopilot fire tests press every other frame */
                         static int auto_tog;
                         if (!msim_dos_int || frame_ms > 0)
-                            g_sim.player_unit.fire_held = !g_sim.player_attacks ? 0 : all ? ((auto_tog ^= 1) ? 0xFFFFFFFFu : 0) : mask;
+                            g_sim.player_unit.fire_held = !g_sim.player_attacks ? 0 : all ? ((auto_tog ^= 1) ? 0xFFFFFFFFu : 0) : held;
                     }
                 }
                 g_sim.player_sel_w = g_sel_weapon;
@@ -8459,7 +8464,16 @@ int main(int argc, char **argv)
                  * port had gone on scaling - 1440 lines 216 / 510 / 1350 m - so far mechs kept detail the original
                  * never shows (user report: DOS at 442 m on its third model, the port at 445 m on its second) */
                 if (g_lod_focal > 512.0f) g_lod_focal = 512.0f;
-                msim_camera_lods(&g_sim, v.eye, lod_a0(msim_dos_int && g_camode != 0 ? g_cam_zoom : g_zoom), g_view_far);
+                const float aspect = (float)(w > 0 ? w : 640) / (float)(h > 0 ? h : 480);
+                const float focal_x = 1.0f / (aspect * tanf(v.vfov * 3.14159265f / 360.0f));
+                const int32_t zoom = (int32_t)lroundf(fminf(16.0f, fmaxf(0.5f, focal_x)) * 65536.0f);
+                msim_camera camera = {
+                    .eye = {v.eye[0], v.eye[1], v.eye[2]}, .yaw = v.look_yaw, .pitch = v.look_pitch,
+                    .lod_scale = lod_a0(msim_dos_int && g_camode != 0 ? g_cam_zoom : g_zoom),
+                    .far_clip = g_view_far, .focal_x = zoom, .focal_y = (int32_t)lroundf(zoom * aspect),
+                    .near_clip = 1 + (int32_t)(((int64_t)zoom * (w > 1 ? w / 2 : 1)) >> 17)
+                };
+                msim_camera_lods(&g_sim, &camera);
                 for (k = 0; k < g_actor_count; k++) total += g_actors[k].mech.part_count;
                 if (show_pl || (g_cockpit && g_pl_ok)) total += g_pl.part_count + (g_plpit_ok ? g_plpit.part_count : 0);
                 total += g_sim.shot_count + g_sim.debris_count;   /* projectiles in flight, debris */
@@ -10529,8 +10543,8 @@ int main(int argc, char **argv)
                 }
                 /* engine 0x100185e0: the heat bar's label - flag 4 (shutdown sequence) "Shutdown..." in red (0xb), with flag 8
                  * (overridden) "Overridden" in red, else "Heat" in green (0xe) */
-                /* (the DOS edition always draws "Heat": MW2.EXE has no "Shutdown..." or "Overridden" label) */
-                if ((pu->shutdown_pending || pu->shutdown) && !msim_dos_int) hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, pu->override ? "Overridden" : "Shutdown...", red);
+                /* Keep the cockpit warning visible in the DOS look as well. */
+                if (pu->shutdown_pending || pu->shutdown) hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, pu->override ? "Overridden" : "Shutdown...", red);
                 else hud_text(g_hud, (float)hw.x0 * hw.ux, (float)(hw.y0 + ly) * hw.uy, "Heat", green);
                 hud_text(g_hud, (float)dw.x0 * dw.ux, (float)(dw.y0 + ly) * dw.uy, "dH/dT", green);
                 if (pu->jets > 0) {
@@ -10550,7 +10564,7 @@ int main(int argc, char **argv)
                 }
             }
             }
-            if (getenv("MW2_HUD_RECTS")) {   /* TEST hook: the HUD elements' rectangles in window pixels (x0 y0 x1 y1), once a
+            if (mw2_development_env("MW2_HUD_RECTS")) {   /* TEST hook: the HUD elements' rectangles in window pixels (x0 y0 x1 y1), once a
                                               * second: side -1 left-hand, 1 right-hand, 0 centred (hud_side) */
                 static double last = -1;
                 if (g_sim.now / 1000.0 >= last + 1.0 || g_sim.now / 1000.0 < last) {

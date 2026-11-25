@@ -1345,6 +1345,61 @@ def dos_shared_rotations(rep, rnd, n):
 
 
 @test
+def player_scenery_shots(rep, rnd, n):
+    """Solid scenery stops a player shot and its aim ray with the camera looking either way."""
+    out = (ctypes.c_int * 4)()
+    lib('msim').shim_player_scenery_shots(out)
+    rep.check(list(out) == [4000, 2000, 4000, 2000], 'wall shot and aim distances: %s' % list(out))
+
+
+@test
+def dos_scenery_collision_lods(rep, rnd, n):
+    """Compare the camera cull and the persistent model selection at their boundaries."""
+    e = emu()
+    obj, camera = e.alloc(76), e.alloc(196)
+    models = [e.alloc(24) for _ in range(3)]
+    e.w32(obj + 28, models[0])
+    for i in range(2):
+        e.w32(models[i] + 12, models[i + 1])
+    e.w32(618524, camera)
+    for address in (1375872, 1375860, 1375952):
+        e.w32(address, 1 << 29)
+    I = ctypes.c_int32
+    port = lib('msim').shim_dos_scenery
+    port.argtypes = [ctypes.POINTER(I), I, I, I, ctypes.POINTER(I), ctypes.POINTER(I), I, ctypes.POINTER(I), I]
+    focal = (I * 2)(65536, 87380)
+    normal = (I * 2)(92681, 109222)
+    near, far = 161, 75000
+    for off, value in ((24, focal[0]), (168, normal[0]), (172, normal[1]), (176, focal[1]), (180, far)):
+        e.w32(camera + off, value)
+    e.w32(1375924, near)
+    e.w32(1375908, far)
+
+    for scale in (65536, 131072, 163840):
+        e.w32(camera + 184, scale)
+        for distances in ((1, 8500, 25000), (0, 8500, 25000), (200, 200, 1800)):
+            for model, distance in zip(models, distances):
+                e.w32(model, distance)
+            cases = [(x, y, z, r) for x, y, z, r in ((0, 0, near - 1, 0), (0, 0, near, 0),
+                     (0, 0, far, 0), (0, 0, far + 1, 0), (20000, 0, 3000, 100),
+                     (0, -20000, 3000, 100), (3000, 2200, 3000, 100))]
+            for threshold in distances[1:]:
+                depth = (threshold * scale + 32768) >> 16
+                cases.extend((0, 0, depth + offset, 1) for offset in (-1, 0, 1))
+            cases.extend(tuple(rnd.randint(-55000, 55000) for _ in range(3)) + (rnd.randint(0, 1500),)
+                         for _ in range(n))
+            e.w32(obj + 32, models[-1])
+            actual = len(models) - 1
+            for x, y, z, radius in cases:
+                e.write(obj + 52, struct.pack('<4i', x, y, z, radius))
+                if e.call(0x3f500, eax=obj) == 0:
+                    e.call(0x3cda0, eax=obj, edx=e.rs32(1375404))
+                expected = models.index(e.r32(obj + 32))
+                actual = port((I * 3)(x, y, z), radius, near, far, focal, normal, scale, (I * 3)(*distances), actual)
+                rep.check(actual == expected, f'{(x, y, z, radius)} scale {scale} thresholds {distances}: DOS {expected}, port {actual}')
+
+
+@test
 def dos_volley_warning_order(rep, rnd, n):
     """Track each volley-start draw when the shooter's aim reference changes or has no recipient."""
     e = mw2emu.Emu()

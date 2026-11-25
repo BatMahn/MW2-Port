@@ -15,6 +15,20 @@ void shim_dos_drive_frame(int32_t current, int32_t target, int32_t speed, int32_
 }
 float shim_oct_len(float x, float y, float z) { return oct_len(x, y, z); }
 
+int shim_dos_scenery(const int32_t point[3], int radius, int near, int far,
+                     const int32_t focal[2], const int32_t normal[2],
+                     int scale, const int32_t distances[3], int previous)
+{
+    int64_t limit = (int64_t)far + radius;
+    int64_t distance2 = 0;
+    for (int axis = 0; axis < 3; axis++) distance2 += (int64_t)point[axis] * point[axis];
+    if (distance2 > limit * limit || !dos_scenery_visible(point, radius, near, far, focal, normal))
+        return previous;
+    scenery_faces models[3] = {{0}};
+    for (int i = 0; i < 3; i++) models[i].distance = distances[i];
+    return dos_scenery_level(models, 3, point[2], scale);
+}
+
 unsigned shim_dos_startup(int distance, unsigned *index)
 {
     msim s = {0};
@@ -325,11 +339,46 @@ void shim_dos_contact_math(const int32_t start[3], const int32_t delta[3], const
     const dos_shot_segment ray = dos_shot_segment_make(o, d, 1);
     out[0] = ray.length;
     for (int i = 0; i < 3; i++) out[i + 1] = ray.dir[i];
-    out[4] = dos_shot_sphere(&ray, sph);
+    out[4] = dos_shot_sphere(&ray, sph, 1);
     out[5] = dos_shot_box(&ray, box);
     float effect_at[3];
     dos_impact_effect(d, o, effect_at);
     for (int i = 0; i < 3; i++) out[i + 6] = (int32_t)effect_at[i];
+}
+
+void shim_player_scenery_shots(int out[4])
+{
+    wtb_vertex vertices[4] = {
+        {.x = -1000, .y = -1000}, {.x = 1000, .y = -1000},
+        {.x = 1000, .y = 1000}, {.x = -1000, .y = 1000}
+    };
+    wtb_poly polygon = {.n = 4, .idx = {0, 1, 2, 3}};
+    wtb_object models[2] = {
+        {.name = "WALL_1", .flags = 0x1000, .verts = vertices, .vert_count = 4, .polys = &polygon, .poly_count = 1},
+        {.name = "WALL_8500", .flags = 0x1000, .verts = vertices, .vert_count = 4, .polys = &polygon, .poly_count = 1}
+    };
+    mech3d_part wall = {.pos = {0, 0, 4000}, .coll = 7, .model = {models, 2, 0}};
+    mech3d world = {.parts = &wall, .part_count = 1};
+    msim *s = calloc(1, sizeof *s);
+    if (!s) return;
+    msim_dos_int = 1;
+    s->world = &world;
+    s->terrain = terrain_build(&world, NULL, 0);
+    const float origin[3] = {0, 0, 2000}, delta[3] = {0, 0, 4000}, direction[3] = {0, 0, 1};
+    msim_camera view = {.eye = {0, 0, 2000}, .yaw = 180, .lod_scale = 1,
+                        .near_clip = 160, .far_clip = 40000, .focal_x = 65536, .focal_y = 87380};
+    for (int i = 0; i < 2; i++) {
+        msim_camera_lods(s, &view);
+        int unit = -2, group = 0, part = -1;
+        float contact[3], distance;
+        out[i * 2] = dos_shot_contact(s, -1, origin, delta, &unit, &group, &part, contact) && part == 0
+                     ? (int)contact[2] : -1;
+        out[i * 2 + 1] = dos_aim_contact(s, -1, origin, direction, &unit, &part, &distance) && part == 0
+                         ? (int)distance : -1;
+        view.yaw = 0;
+    }
+    terrain_free(s->terrain);
+    free(s);
 }
 
 void *shim_projectile_pool_new(const uint8_t *kinds, int count)

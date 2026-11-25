@@ -397,7 +397,7 @@ double sfx_log_time = -1;   /* TEST ONLY (MW2_SFX_LOG): the caller's clock (s) p
 /* TEST ONLY (MW2_SFX_SIMCLOCK=1): the voice channel counts as busy for each line's length on that clock (sfx_log_time),
  * not while the audio device plays it - headless runs go faster than real time, so voice order is checkable */
 static double s_sim_voice_end = -1;
-static void sim_voice(int samples) { if (getenv("MW2_SFX_SIMCLOCK")) s_sim_voice_end = sfx_log_time + samples / 11025.0; }
+static void sim_voice(int samples, int rate) { if (mw2_development_env("MW2_SFX_SIMCLOCK")) s_sim_voice_end = sfx_log_time + (double)samples / rate; }
 static void sfx_log(const char *what, int index, float volume, int voice, float pan)
 {
     char pn[32] = "";
@@ -436,7 +436,7 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     s->v[best].loop = 0;
     if (s->next_is_voice) {   /* TEST ONLY: talk time is extended while the earlier line is held */
         double old_end = s_sim_voice_end;
-        sim_voice(c->len);
+        sim_voice(c->len, 11025);
         if (getenv("MW2_SFX_SIMCLOCK") && s->next_is_voice == SFX_PRIORITY_SPEECH && old_end > sfx_log_time)
             s_sim_voice_end += old_end - sfx_log_time;
     }
@@ -512,15 +512,17 @@ int sfx_play_pcm(sfx *s, const unsigned char *pcm, int len, int rate, float volu
     return 0;
 }
 
-void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume)
+int sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, int rate, float volume)
 {
-    if (!s) return;
+    if (!s || !pcm || len <= 0 || rate <= 0) return -1;
     volume *= gain_of(s->gain_voice);   /* the VOICE slider, not EFFECTS (dividing the EFFECTS gain back out gave
                                          * inf x 0 = NaN with EFFECTS at 0 - a silent line and a NaN in the mix) */
+    if (volume <= 0.0f) return -1;
     s->next_is_voice = SFX_SPEECH;
-    sim_voice(len);   /* TEST ONLY */
-    sfx_play_pcm(s, pcm, len, 11025, volume, 0);
+    sim_voice(len, rate);   /* TEST ONLY */
+    int result = sfx_play_pcm(s, pcm, len, rate, volume, 0);
     s->next_is_voice = 0;
+    return result;
 }
 
 int sfx_voice_busy(sfx *s)
@@ -530,7 +532,7 @@ int sfx_voice_busy(sfx *s)
     SDL_LockAudioStream(s->stream);
     for (k = 0; k < SFX_VOICES; k++) if (s->v[k].c && s->v[k].is_voice) on = 1;
     SDL_UnlockAudioStream(s->stream);
-    if (getenv("MW2_SFX_SIMCLOCK")) return sfx_log_time >= 0 && sfx_log_time < s_sim_voice_end;   /* TEST ONLY */
+    if (mw2_development_env("MW2_SFX_SIMCLOCK")) return sfx_log_time >= 0 && sfx_log_time < s_sim_voice_end;   /* TEST ONLY */
     return on;
 }
 

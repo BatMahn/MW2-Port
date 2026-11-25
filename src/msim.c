@@ -1949,7 +1949,7 @@ static void unit_messages(msim *s)
 
 static void collision_lods(msim *s);
 static void dos_sync_hull_order(msim *s);
-static void dos_prepare_scenery(msim *s, const float eye[3], float view_far);
+static void dos_prepare_scenery(msim *s, const msim_camera *camera);
 static int test_floor(const msim *s, float x, float z, float *lo, float *hi);
 static void mission_status_step(msim *s, const mtbl_world *w)
 {
@@ -2077,6 +2077,7 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
          * (0x1000ba20, 0x1000b5e0), the port takes the 30 fps reference (as the player's, glview pl_locomote); out of
          * contact the frame is one move */
         float rest = dt, sdt;
+        int steep_contact = 0;
         if (msim_dos_int) m->dos_gait_throttle = m->thr_servo;
         /* the frame's vertical move goes into the move test with the horizontal one (engine 0x10019310 -> 0x1000b5e0:
          * one 3D segment; walking it is 0): combat_jets makes it below unless a move was refused - then the 3D
@@ -2341,6 +2342,11 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
                      * clears it */
                     s->units[i].blocked = !(imp & 2);
                     if (!(imp & 2)) {
+                        if (msim_dos_int && ac->unit_class == 1 && wn[1] > 0.0f && wn[1] < 0.70710677f) {
+                            steep_contact = 1;
+                            m->terrain_normal[0] = wn[0];
+                            m->terrain_normal[1] = wn[2];
+                        }
                         if (s->collision_damage)   /* Combat Variables: a global switch in the engine */
                             combat_collision(&s->units[i], sp3, wn[1], atan2f(-wn[0], -wn[2]) * 57.29578f - (ac->mech.heading + m->twist), &s->rng);   /* off heading + twist (DOS 0x209ab..0x209b9: object +0x60 + +0x6c), as the player's */
                         msim_impact_damage(s, i, sp3);
@@ -2357,6 +2363,11 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
                 cm = 0; rest = s->contact_acc[i]; s->contact_acc[i] = 0;
                 if (rest <= 1e-5f) break;
             }
+        }
+        if (msim_dos_int && ac->unit_class == 1) {
+            /* A sliding or bouncing contact can have clear frames between impacts. */
+            int ticks = m->terrain_block_ticks + (steep_contact && fabsf(m->speed) < 200.0f ? dos_ticks : -dos_ticks);
+            m->terrain_block_ticks = ticks < 0 ? 0 : ticks > 182 ? 182 : ticks;
         }
         if (fixed_unit(ac)) s->units[i].ground = s->units[i].y;   /* 0x100219e0: no translation, no gravity */
         else {
@@ -2393,6 +2404,25 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
     if (mw2_development_env("MW2_TEST_LEG") && s->now >= atoi(mw2_development_env("MW2_TEST_LEG")) && s->armed[i] && !s->units[i].loc_gone[7]) {   /* tests: the left leg shot off */
         int q; for (q = 0; q < 80 && !s->units[i].loc_gone[7]; q++) combat_hit(&s->units[i], 11, 8, 180.0f, &s->rng);
     }
+}
+
+/* A prolonged stall can alternate between a forward and reverse attack on
+ * the same slope. Steer along the face with enough downhill bias to clear it. */
+static void dos_ai_escape_terrain(ai_mind *m, float heading, int ticks)
+{
+    if (m->terrain_escape_ticks <= 0) {
+        if (m->terrain_block_ticks < 182 || m->throttle <= 0.0f) return;
+        const float downhill = atan2f(m->terrain_normal[0], m->terrain_normal[1]) * 57.29578f;
+        const float side = wrap180(heading - downhill);
+        m->terrain_escape_bearing = downhill + (side < 0.0f ? -60.0f : 60.0f);
+        m->terrain_escape_ticks = 3 * 182;
+        m->terrain_block_ticks = 0;
+    }
+    const float err = wrap180(m->terrain_escape_bearing - heading);
+    m->reverse = 0;
+    m->turn = fminf(819.2f, fmaxf(-819.2f, 24.0f * err));
+    m->throttle = fabsf(err) > 30.0f ? 0.25f : 0.75f;
+    m->terrain_escape_ticks -= ticks;
 }
 
 void msim_step(msim *s, int32_t dt_ms)
@@ -2926,6 +2956,9 @@ void msim_step(msim *s, int32_t dt_ms)
             float gb = m->state == AI_ATTACK || m->state == AI_TARGET ? v.enemy_bearing : (v.has_goal ? v.goal_bearing : ac->mech.heading);
             avoid_obstacles(s, i, m, gb, msim_dos_int ? (float)dos_ticks : dt * 182.0f);
         }
+        if (msim_dos_int && ac->unit_class == 1 && !starting && !s->units[i].offline && !s->units[i].shutdown &&
+            !s->units[i].immobile && !m->jet && m->state >= AI_TARGET && m->state <= AI_GODIRECT)
+            dos_ai_escape_terrain(m, ac->mech.heading, dos_ticks);
         if (!msim_dos_int) actor_move(s, i, dt, dos_ticks, starting, v.jets_installed);
         if (mw2_development_env("MW2_AI_TRACE") && i == atoi(mw2_development_env("MW2_AI_TRACE")) && (s->now / dt_ms) % 10 == 0) {   /* tests: one AI every 10 steps */
             fprintf(stderr, "ai %.2fs actor %d at %d,%d y %.0f immobile %d heading %.1f turn %.0f avoid %.0f/%d goal %.1f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2], s->units[i].y, s->units[i].immobile,
@@ -3329,16 +3362,16 @@ static void collision_lods(msim *s)
     if (s->player_col_repr)
         s->player_col_repr = pose_collision_lod(s, s->actor_count, s->player_col_repr, s->player_skel, &s->pl_mech);
 }
-void msim_camera_lods(msim *s, const float eye[3], float scale, float view_far)
+void msim_camera_lods(msim *s, const msim_camera *camera)
 {
-    memcpy(s->cam_eye, eye, sizeof s->cam_eye);
-    s->cam_a0 = scale;
+    memcpy(s->cam_eye, camera->eye, sizeof s->cam_eye);
+    s->cam_a0 = camera->lod_scale;
     s->cam_ok = 1;
     /* DOS 0x15da7 -> 0x35870 picks the draw representations after projectile upkeep. */
     if (msim_dos_int) {
         collision_lods(s);
         dos_sync_hull_order(s);
-        dos_prepare_scenery(s, eye, view_far);
+        dos_prepare_scenery(s, camera);
     }
 }
 /* the engine's tick clock (DAT_1024ab44) */
@@ -4770,7 +4803,9 @@ typedef struct {
      * quadtrees, the fixed entries per 50 m cell */
     struct cobj *co; int nco;
     struct cpoly *cp; int ncp, capcp;
-    unsigned char *dos_scenery_ready;
+    struct scenery_state *dos_scenery;
+    struct scenery_faces *scenery_faces;
+    int scenery_count, scenery_capacity;
     struct qnode *qn; int nqn, capqn;
     int *qidx; int nqidx, capqidx;
     cell_t *ccell;
@@ -4791,7 +4826,7 @@ static void terrain_free(terrain_t *t)
     free(t->obj); free(t->obj_box); free(t->obj_sph); free(t->ocell); free(t->thing_of); free(t->stamp);
     for (i = 0; t->ccell && i < t->gw * t->gh; i++) free(t->ccell[i].idx);
     free(t->ccell); free(t->co); free(t->cp); free(t->qn); free(t->qidx);
-    free(t->dos_scenery_ready);
+    free(t->dos_scenery); free(t->scenery_faces);
     free(t->mov); free(t->mov_box); free(t);
 }
 
@@ -4916,8 +4951,11 @@ typedef struct cobj {
     int part, type, moving;
     float box[6], sph[4], lsph[4];
     int p0, np, root;
-    int unposed_first, unposed_count;
+    int unposed_first, unposed_count, lod_first, lod_count;
 } cobj_t;
+
+typedef struct scenery_faces { int first, count, distance; } scenery_faces;
+typedef struct scenery_state { int model; int in_range; } scenery_state;
 
 /* the engine's face normal through three model vertices (0x10030410): -((P2 - P1) x (P3 - P2)), normalised; returns the
  * cross product's length as an int (ftol: the x87's 0x80000000 from 2^31 up), *ok 0 when it is 0 (left unchanged) */
@@ -5127,6 +5165,44 @@ static int clist_append_faces(terrain_t *t, const mech3d_part *part)
     return t->ncp - first;
 }
 
+static void clist_scenery_faces(terrain_t *t, const mech3d *w, cobj_t *c, const mech3d_part *part)
+{
+    const int count = part->model.object_count;
+    for (int i = 0; i < count; i++)
+        if (!(part->model.objects[i].flags & 0x1000)) return;
+
+    if (!t->dos_scenery)
+        t->dos_scenery = calloc((size_t)w->part_count, sizeof *t->dos_scenery);
+    if (!t->dos_scenery) return;
+    if (t->scenery_count + count > t->scenery_capacity) {
+        int capacity = t->scenery_count + count + 64;
+        scenery_faces *faces = realloc(t->scenery_faces, (size_t)capacity * sizeof *faces);
+        if (!faces) return;
+        t->scenery_faces = faces;
+        t->scenery_capacity = capacity;
+    }
+
+    c->lod_first = t->scenery_count;
+    c->lod_count = count;
+    mech3d_part pose = *part;
+    for (int i = 0; i < count; i++) {
+        pose.model.objects = &part->model.objects[i];
+        const char *suffix = strchr(pose.model.objects->name, '_');
+        const long distance = suffix && isdigit((unsigned char)suffix[1]) ? strtol(suffix + 1, NULL, 10) : 0;
+        scenery_faces *faces = &t->scenery_faces[t->scenery_count++];
+        faces->distance = distance <= INT_MAX ? (int)distance : INT_MAX;
+        faces->first = i == 0 ? c->p0 : t->ncp;
+        faces->count = i == 0 ? c->np : clist_append_faces(t, &pose);
+    }
+
+    /* 0x383bb leaves the last loaded model selected until 0x3cda0 poses it. */
+    memset(pose.pos, 0, sizeof pose.pos);
+    pose.has_rot = pose.has_dos_rot = 0;
+    pose.yaw = 0;
+    c->unposed_first = t->ncp;
+    c->unposed_count = clist_append_faces(t, &pose);
+}
+
 static void clist_build(terrain_t *t, const mech3d *w, const int *seq, int nseq)
 {
     int i, k, j;
@@ -5164,19 +5240,8 @@ static void clist_build(terrain_t *t, const mech3d *w, const int *seq, int nseq)
         if (!c->moving && (c->type == 2 || c->type == 5 || c->type == 7)) {
             c->p0 = t->ncp;
             c->np = clist_append_faces(t, p);
-            /* DOS 0x383bb leaves the last scenery model selected at load.
-             * Its local faces stay unposed until the view prepares the object. */
-            if (msim_dos_int && c->type == 7 && !p->model.extended && p->model.object_count > 1) {
-                mech3d_part unposed = *p;
-                unposed.model.objects = &p->model.objects[p->model.object_count - 1];
-                memset(unposed.pos, 0, sizeof unposed.pos);
-                unposed.has_rot = unposed.has_dos_rot = 0;
-                unposed.yaw = 0;
-                c->unposed_first = t->ncp;
-                c->unposed_count = clist_append_faces(t, &unposed);
-                if (c->unposed_count && !t->dos_scenery_ready)
-                    t->dos_scenery_ready = calloc((size_t)w->part_count, sizeof *t->dos_scenery_ready);
-            }
+            if (msim_dos_int && c->type == 7 && !p->model.extended && p->model.object_count > 1)
+                clist_scenery_faces(t, w, c, p);
         }
         t->nco++;
     }
@@ -5215,27 +5280,86 @@ static void clist_build(terrain_t *t, const mech3d *w, const int *seq, int nseq)
     }
 }
 
-/* a moving entry where it is now: its world box (terrain_t mov_box) and bounding sphere */
-static void dos_prepare_scenery(msim *s, const float eye[3], float view_far)
+/* 0x3f500 compares the centre against the clip planes, expanded by the sphere radius. */
+static int dos_scenery_visible(const int32_t point[3], int32_t radius, int32_t near, int32_t far,
+                               const int32_t focal[2], const int32_t normal[2])
+{
+    const int32_t depth = point[2];
+    if (depth + radius < near || (far > 0 && depth - radius > far)) return 0;
+    for (int axis = 0; axis < 2; axis++) {
+        int64_t distance = (int64_t)abs(point[axis]) * focal[axis] - (int64_t)depth * 65536;
+        if (distance / normal[axis] > radius) return 0;
+    }
+    return 1;
+}
+
+/* 0x3cda0 walks the thresholds in ascending order. Equality selects the new model. */
+static int dos_scenery_level(const scenery_faces *models, int count, int32_t depth, int32_t scale)
+{
+    int first = 0, selected = -1;
+    for (int i = 0; i < count; i++) {
+        if (models[i].distance < models[first].distance) first = i;
+        if (models[i].distance == 0) continue;
+        int64_t threshold = ((int64_t)models[i].distance * scale + 32768) >> 16;
+        if (depth >= threshold && (selected < 0 || models[i].distance >= models[selected].distance))
+            selected = i;
+    }
+    if (models[first].distance == 0 || selected < 0) return first;
+    return selected;
+}
+
+static void dos_prepare_scenery(msim *s, const msim_camera *camera)
 {
     terrain_t *t = (terrain_t *)s->terrain;
-    if (!t || !t->dos_scenery_ready) return;
+    if (!t || !t->dos_scenery) return;
+    const dos_matrix axes = dos_matrix_rotation(
+        (int32_t)lrint(-(double)camera->pitch * 65536.0),
+        (int32_t)lrint((double)camera->yaw * 65536.0), 0);
+    const int32_t focal[2] = {camera->focal_x, camera->focal_y};
+    const int32_t normal[2] = {
+        (int32_t)llround(hypot(65536.0, focal[0])), (int32_t)llround(hypot(65536.0, focal[1]))
+    };
+    int32_t eye[3];
+    for (int axis = 0; axis < 3; axis++) eye[axis] = (int32_t)lrintf(camera->eye[axis]);
+    const int32_t far = (int32_t)camera->far_clip;
+    const int32_t scale = (int32_t)(camera->lod_scale * 65536.0f);
     for (int i = 0; i < t->nco; i++) {
         const cobj_t *c = &t->co[i];
-        if (!c->unposed_count || t->dos_scenery_ready[c->part]) continue;
-        const float x = c->sph[0] - eye[0], y = c->sph[1] - eye[1], z = c->sph[2] - eye[2];
-        const float limit = view_far + c->sph[3];
-        /* 0x3f500 culls distant scenery before 0x3cda0 can pose its model. */
-        if (view_far <= 0 || x * x + y * y + z * z <= limit * limit)
-            t->dos_scenery_ready[c->part] = 1;
+        if (!c->lod_count) continue;
+        int32_t delta[3], point[3];
+        int32_t radius = (int32_t)lrintf(c->sph[3]);
+        int64_t distance2 = 0;
+        for (int axis = 0; axis < 3; axis++) {
+            delta[axis] = (int32_t)lrintf(c->sph[axis]) - eye[axis];
+            distance2 += (int64_t)delta[axis] * delta[axis];
+        }
+        const int64_t limit = (int64_t)far + radius;
+        if (far > 0 && distance2 > limit * limit) continue;
+        scenery_state *state = &t->dos_scenery[c->part];
+        state->in_range = 1;
+        for (int axis = 0; axis < 3; axis++) {
+            int64_t dot = 0;
+            for (int j = 0; j < 3; j++) dot += (int64_t)axes.r[j * 3 + axis] * delta[j];
+            point[axis] = (int32_t)((dot + (1 << 28)) >> 29);
+        }
+        if (!dos_scenery_visible(point, radius, camera->near_clip, far, focal, normal)) continue;
+        state->model = 1 + dos_scenery_level(&t->scenery_faces[c->lod_first], c->lod_count, point[2], scale);
     }
 }
 
-static int clist_unposed(const msim *s, const terrain_t *t, const cobj_t *c)
+static scenery_faces clist_faces(const msim *s, const terrain_t *t, const cobj_t *c, int movement)
 {
-    return s->cam_ok && c->unposed_count && t->dos_scenery_ready && !t->dos_scenery_ready[c->part];
+    if (s->cam_ok && c->lod_count) {
+        const scenery_state *state = &t->dos_scenery[c->part];
+        /* Nearby walls must keep their movement collision even when behind the camera. */
+        const int lod = movement ? state->in_range : state->model;
+        if (!lod) return (scenery_faces){c->unposed_first, c->unposed_count, 0};
+        if (lod <= c->lod_count) return t->scenery_faces[c->lod_first + lod - 1];
+    }
+    return (scenery_faces){c->p0, c->np, 0};
 }
 
+/* A moving entry uses its current world box and bounding sphere. */
 static int cobj_now(const msim *s, const cobj_t *c, float box[6], float sph[4])
 {
     const terrain_t *t = (const terrain_t *)s->terrain;
@@ -5436,7 +5560,8 @@ static float eseg_sphere(const float sp[4], const eseg_t *g)
 
 /* one entry against the segment (0x10010650 with its type's segment test); the segment ends at the hit, n the hit's
  * normal (DAT_1024b408..410) */
-static int cobj_seg(const msim *s, const cobj_t *c, const float box[6], const float sph[4], float ent, eseg_t *g, float n[3])
+static int cobj_seg(const msim *s, const cobj_t *c, const float box[6], const float sph[4],
+                    float ent, eseg_t *g, float n[3], int movement)
 {
     const terrain_t *t = (const terrain_t *)s->terrain;
     if (!(g->len > 0.0f)) return 1;
@@ -5464,10 +5589,8 @@ static int cobj_seg(const msim *s, const cobj_t *c, const float box[6], const fl
             }
             return 0;
         }
-        const int unposed = clist_unposed(s, t, c);
-        const int first = unposed ? c->unposed_first : c->p0;
-        const int count = unposed ? c->unposed_count : c->np;
-        for (k = 0; k < count; k++) if (eseg_poly(&t->cp[first + k], g, n)) return 1;
+        const scenery_faces faces = clist_faces(s, t, c, movement);
+        for (k = 0; k < faces.count; k++) if (eseg_poly(&t->cp[faces.first + k], g, n)) return 1;
         return 0;
     }
     case 5:   /* 0x1000d680 -> 0x1000ccf0 */
@@ -5511,7 +5634,7 @@ static int clist_seg(const msim *s, const float p0[3], const float p1[3], clist_
         e = eseg_sphere(sph, &g0);
         if (!(e < best)) continue;
         g = g0;
-        if (!cobj_seg(s, c, box, sph, e, &g, nn)) continue;
+        if (!cobj_seg(s, c, box, sph, e, &g, nn, query == CLIST_MOVE)) continue;
         if (query != CLIST_MOVE && !(g.len < best)) continue;
         best = g.len; hit = cand[k];
         n[0] = nn[0]; n[1] = nn[1]; n[2] = nn[2];
@@ -5556,7 +5679,7 @@ static void dos_impact_effect(const float dv[3], const float hit[3], float out[3
 }
 
 /* DOS 0x3a745 tests the integer sphere, including the carry-out rejection on the final dot product add. */
-static int32_t dos_shot_sphere(const dos_shot_segment *g, const float sph[4])
+static int32_t dos_shot_sphere(const dos_shot_segment *g, const float sph[4], int reject_carry)
 {
     int64_t dx = (int32_t)lroundf(sph[0]) - g->start[0];
     int64_t dy = (int32_t)lroundf(sph[1]) - g->start[1];
@@ -5566,8 +5689,10 @@ static int32_t dos_shot_sphere(const dos_shot_segment *g, const float sph[4])
     int64_t offset2 = dx * dx + dy * dy + dz * dz - (int64_t)r * r;
     if (offset2 < 0) return 10;
     int64_t partial = dx * g->delta[0] + dy * g->delta[1], last = dz * g->delta[2];
-    if ((uint64_t)partial + (uint64_t)last < (uint64_t)partial) return INT32_MAX;
-    int64_t projected = (partial + last) / g->length;
+    if (reject_carry && (uint64_t)partial + (uint64_t)last < (uint64_t)partial) return INT32_MAX;
+    const int64_t dot = partial + last;
+    if (!reject_carry && dot <= 0) return INT32_MAX;
+    int64_t projected = dot / g->length;
     if (projected * projected < offset2) return INT32_MAX;
     int64_t entry = projected - r;
     return entry >= g->length ? INT32_MAX : entry > 0 ? (int32_t)entry : 0;
@@ -5600,14 +5725,14 @@ static void dos_shot_point(const dos_shot_segment *g, int32_t entry, float out[3
 }
 
 /* Pieces are inserted in load order, so the last solid piece has first refusal. */
-static int dos_shot_hull(const dos_shot_segment *g, const mech3d *m, unsigned gone,
+static int dos_shot_hull(const dos_shot_segment *g, const mech3d *m, unsigned gone, int reject_carry,
                          int32_t *best, int *group, float contact[3], float *centre)
 {
     int hit = 0;
     for (int j = m->part_count - 1; j >= 0; j--) {
         float sphere[4];
         if (!mech3d_dos_hull_sphere(m, j, gone, sphere)) continue;
-        int32_t broad = dos_shot_sphere(g, sphere);
+        int32_t broad = dos_shot_sphere(g, sphere, reject_carry);
         int32_t entry = broad ? broad : g->length;
         if (broad >= *best || entry >= *best) continue;
         *best = entry;
@@ -5683,7 +5808,7 @@ static int32_t dos_shot_tree(const terrain_t *t, int node, const dos_shot_segmen
 
 typedef struct {
     float centre[3];
-    int climbable;
+    int climbable, recover_terrain;
 } dos_probe_hit;
 
 /* 0x1c3f0 walks scenery and unit pieces together, newest first. A candidate
@@ -5705,7 +5830,11 @@ static int32_t dos_scan_segment(const msim *s, int owner, const dos_shot_segment
             const struct msim_dos_hull *h = &s->dos_hulls[j++];
             if (!h->repr || h->unit == owner) continue;
             unsigned gone = mech3d_fly_mask(h->unit < 0 ? s->player_unit.loc_gone : s->units[h->unit].loc_gone);
-            if (dos_shot_hull(g, h->repr, gone, &best, group, contact, probe ? probe->centre : NULL)) {
+            const int cls = h->unit < 0 ? (int)s->player_class : s->actors[h->unit].unit_class;
+            /* Player fire and its sight ray must reach the offset hull pieces of dropships and turrets. */
+            const int reject_carry = owner != -1 || probe || (cls != 3 && cls != 8);
+            if (dos_shot_hull(g, h->repr, gone, reject_carry, &best, group, contact,
+                              probe ? probe->centre : NULL)) {
                 if (probe) probe->climbable = 0;
                 *unit = h->unit;
                 *part = -1;
@@ -5719,7 +5848,9 @@ static int32_t dos_scan_segment(const msim *s, int owner, const dos_shot_segment
         if (!cobj_now(s, c, box, sph)) continue;
         if (t->thing_of && c->part < t->nparts && t->thing_of[c->part] >= 0 &&
             s->bld[t->thing_of[c->part]].hp <= 0) continue;
-        int32_t entry = dos_shot_sphere(g, sph);
+        /* A mech already blocked by a slope needs to see the same terrain
+         * face its movement hit, even when the DOS sphere test drops a carry. */
+        int32_t entry = dos_shot_sphere(g, sph, !(probe && probe->recover_terrain && c->type == 5));
         if (entry >= best) continue;
         if (c->type == 0 || c->type == 1) {
             entry = dos_shot_box(g, box);
@@ -5740,11 +5871,12 @@ static int32_t dos_scan_segment(const msim *s, int owner, const dos_shot_segment
                     entry = dos_shot_face(g, &face, point, &normal_y);
                 }
             } else {
-                const int unposed = clist_unposed(s, t, c);
-                const int first = unposed ? c->unposed_first : c->p0;
-                const int count = unposed ? c->unposed_count : c->np;
-                for (int j = 0; j < count && entry == INT32_MAX; j++)
-                    entry = dos_shot_face(g, &t->cp[first + j], point, &normal_y);
+                /* A cockpit, orbit or weapon camera must leave player fire and convergence
+                 * testing the same placed wall. Camera poses still feed the native AI scan. */
+                const scenery_faces faces = owner == -1 && !probe
+                    ? (scenery_faces){c->p0, c->np, 0} : clist_faces(s, t, c, 0);
+                for (int j = 0; j < faces.count && entry == INT32_MAX; j++)
+                    entry = dos_shot_face(g, &t->cp[faces.first + j], point, &normal_y);
             }
         } else if (entry == 0) {
             entry = g->length;   /* 0x1c720 leaves the endpoint alone at a zero sphere entry */
@@ -6872,9 +7004,9 @@ void msim_set_world(msim *s, const mech3d *world)
     }
     terrain_t *previous = (terrain_t *)s->terrain;
     terrain_t *terrain = terrain_build(world, s->clist_seq, s->clist_seq_n);
-    if (s->world == world && previous && terrain && previous->dos_scenery_ready && terrain->dos_scenery_ready) {
+    if (s->world == world && previous && terrain && previous->dos_scenery && terrain->dos_scenery) {
         const int count = previous->nparts < terrain->nparts ? previous->nparts : terrain->nparts;
-        memcpy(terrain->dos_scenery_ready, previous->dos_scenery_ready, (size_t)count);
+        memcpy(terrain->dos_scenery, previous->dos_scenery, (size_t)count * sizeof *terrain->dos_scenery);
     }
     terrain_free(previous);
     s->terrain = terrain;
@@ -6983,9 +7115,13 @@ static int dos_probe(const msim *s, int self, const float p0[3], const float p1[
 {
     const float ray[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
     const dos_shot_segment g = dos_shot_segment_make(p0, ray, 0);
-    dos_probe_hit probe;
+    dos_probe_hit probe = {0};
     int unit = -2, group = 0, part = -1;
     float contact[3];
+    if (self >= 0 && self < s->actor_count && s->actors[self].unit_class == 1) {
+        const combat_unit *u = &s->units[self];
+        probe.recover_terrain = u->blocked && u->y <= u->ground + 1.0f;
+    }
     *climb = 0;
     if (g.length <= 0 || dos_scan_segment(s, self, &g, &unit, &group, &part, contact, &probe) == INT32_MAX) return 0;
     *climb = probe.climbable;
@@ -7084,7 +7220,12 @@ static int avoid_obstacles(msim *s, int i, ai_mind *m, float goal_bearing, float
     float now = 0;
     if (msim_dos_int) {
         now = (float)sim_ticks(s);
-        if (now < s->avoid_next[i]) return side != 0;
+        if (now < s->avoid_next[i]) {
+            if (s->avoid_turn[i] == 0) return 0;
+            m->turn = s->avoid_turn[i];
+            m->throttle = s->avoid_thr[i];
+            return 1;
+        }
     } else {
         s->avoid_next[i] -= ticks;
         if (s->avoid_next[i] > 0) {

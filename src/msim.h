@@ -450,7 +450,12 @@ int  msim_dos_unit_impact(msim *s, int self, const float start[3], float height,
                           const float centre[3], const float normal[3], float combined_radius,
                           const float vel[3], const float other[3], float end[3], float bounce[3]);
 /* the representation actor k is drawn and collided at (0-3; see col_repr) and its collision model, posed as the unit */
-void msim_camera_lods(msim *s, const float eye[3], float scale, float view_far);
+typedef struct {
+    float eye[3], yaw, pitch, lod_scale, far_clip;
+    int32_t near_clip, focal_x, focal_y;
+} msim_camera;
+
+void msim_camera_lods(msim *s, const msim_camera *camera);
 int  msim_unit_repr(const msim *s, int k);
 const mech3d *msim_unit_hull(const msim *s, int k);
 /* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second

@@ -1,9 +1,6 @@
 # MechWarrior 2 port - foundation modules (Linux / macOS / Windows via MinGW-w64)
 CC      ?= cc
 CFLAGS  ?= -std=c99 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wconversion
-ifeq ($(MW2_RELEASE),1)
-  CFLAGS += -DMW2_RELEASE
-endif
 LDLIBS  = -lpthread -lm
 UNAME_S := $(shell uname -s)
 # SDL3 (3.2.0 or newer) through pkg-config's sdl3 module. SDL3_DIR=<prefix> uses only <prefix>/lib/pkgconfig (an SDL3
@@ -102,11 +99,23 @@ ifeq ($(RB),gl12)
   endif
 endif
 
+ifeq ($(MW2_RELEASE),1)
+  override CFLAGS += -DMW2_RELEASE
+endif
+
 LIB_SRC = src/prj.c src/datapath.c src/cdaudio.c src/cddrive.c src/mek.c
 BIN     = prjtool cdtool mektool bwdtool mechview mechview3d cdrip test_port shelltool xmiplay test_titanium test_gamefolder
 GLBIN   = glshot glview mw2shell
 
 all: $(BIN)
+
+# Rebuild the programs when switching between development and release flags.
+MW2_BUILD_MODE = $(if $(filter 1,$(MW2_RELEASE)),release,development)
+build/.mw2-build-mode: force-build-mode
+	@mkdir -p build
+	@if test "$$(cat $@ 2>/dev/null)" != "$(MW2_BUILD_MODE)"; then printf '%s\n' "$(MW2_BUILD_MODE)" > $@; fi
+.PHONY: force-build-mode
+mw2 mw2shell glview mapview build/glview_gl12: build/.mw2-build-mode
 
 # Windows: the exe's icon and version information
 build/mw2res.o: packaging/windows/mw2port.rc packaging/windows/mw2port.ico

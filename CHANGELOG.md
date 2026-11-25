@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.1 (2026-11-25)
+
+This release restores DOS gameplay and cockpit behavior affected by the v2.0 parity changes, and fixes menu voice volume and release build switching.
+
+- **Cockpit heat warning.** The DOS HUD shows `Shutdown...` and `Overridden` under the heat bar again.
+- **Dropship damage.** Player fire can connect with offset dropship and turret hull pieces from oblique angles in DOS mode.
+- **DOS AI obstacle avoidance.** ’Mechs retain their avoidance steering between probes and steer clear after repeated collisions with a steep face. Both Mad Dogs in the Sable Flame regression replay get past the hill.
+- **DOS scenery collision.** Player shots and weapon aim use solid scenery regardless of camera direction. Nearby walls still stop moving ’Mechs and falling wrecks when the camera faces away.
+- **High-refresh controls.** Quick release-and-repress inputs for the same weapon group reach the DOS simulation even when both happen between updates.
+- **Menu audio.** Spoken announcements use the Voice slider. Muting Voice starts the Windows 95 title ambience without waiting for silent narration.
+- **Builds.** Switching between release and development builds recompiles the game and viewer with the requested diagnostics setting.
+
+Linux validation passed 311 OpenGL sequences, four software Vulkan sequences, 64 DOS audit groups, and all 59 DOS mission objective sweeps under sanitizers. The release smoke test also confirmed that development traces stay off.
+
 ## v2.0 (2026-11-25)
 
 This release brings the DOS mission simulation closer to the original executable, fixes menu audio transitions, and changes how the DOS renderer handles native resolution on macOS.
