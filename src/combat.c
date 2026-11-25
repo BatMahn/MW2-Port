@@ -209,7 +209,8 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
 
 void combat_tick(combat_unit *u, float dt, int dos_ticks)
 {
-    float ticks = dt * COMBAT_TICKS_PER_S, net;
+    /* DOS 0x52436 uses the whole clock ticks crossed by this frame, including at the volley boundary. */
+    float ticks = combat_dos ? (float)dos_ticks : dt * COMBAT_TICKS_PER_S, net;
     int i;
     if (u->destroyed) return;
     u->last_ticks = ticks;
@@ -631,10 +632,11 @@ float combat_max_range(const combat_unit *u)
 
 void combat_trigger(combat_unit *u, float distance) { combat_trigger_mask(u, distance, 0xFFFFFFFFu); }
 
-void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
+uint32_t combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
 {
     int i;
-    if (u->destroyed || u->shutdown || u->offline) return;
+    uint32_t started = 0;
+    if (u->destroyed || u->shutdown || u->offline) return 0;
     /* a human pilot (0x100437a0 / 0x10044440): a weapon fires on the press of its trigger, not while it is held (a
      * repeating weapon re-fires from the volley's end, see release_due), and with no range check */
     if (u->human) mask &= u->fire_edge;
@@ -646,9 +648,12 @@ void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask)
         if (cw->state == CW_READY && cw->ammo != 0 && !u->loc_gone[cw->location] &&
             (u->human || distance <= range_cm(cw->weapon)) &&
             /* AI (0x100232b0): fire a weapon only if heat + its heat stays under 65 */
-            !(u->hold_fire_above > 0 && u->heat + weapon_spec(cw->weapon).heat >= u->hold_fire_above))
+            !(u->hold_fire_above > 0 && u->heat + weapon_spec(cw->weapon).heat >= u->hold_fire_above)) {
             start_volley(u, cw);
+            if (i < 32) started |= 1u << i;
+        }
     }
+    return started;
 }
 
 /* 0x10043f80: the selection moves to the next weapon that is still there */
@@ -694,14 +699,14 @@ int combat_ai_select(combat_unit *u, float distance, unsigned (*rng)(void *ctx, 
     return ai_choose(u, distance, rng, ctx);
 }
 
-void combat_ai_trigger(combat_unit *u)
+int combat_ai_trigger(combat_unit *u)
 {
     /* engine 0x100437a0 (unit state 2), a unit other than the player: no group triggers (+0x27..+0x2a), so +0x25 alone:
      * pressed with the latch (+0x10c bit 1) clear - latch, and the selected weapon (+0xac) starts its volley if ready
      * (state 1: +0x24 = per volley, state 2, +0x10 = 0; the release loop then counts this frame's ticks, combat_tick);
      * released with the latch set - unlatch and 0x10043f80(0): the next weapon is selected */
-    int n = u->weapon_count;
-    if (u->destroyed || u->shutdown || u->offline || n <= 0) return;
+    int n = u->weapon_count, started = -1;
+    if (u->destroyed || u->shutdown || u->offline || n <= 0) return -1;
     if (u->ai_sel < 0 || u->ai_sel >= n) u->ai_sel = 0;
     if (u->ai_trigger) {
         if (!u->ai_latch) {
@@ -713,6 +718,7 @@ void combat_ai_trigger(combat_unit *u)
                 cw->t = 0;
                 cw->volley_start = 1;
                 cw->homing = u->lock_target;
+                started = cw->weapon;
             }
         }
     } else if (u->ai_latch) {
@@ -722,6 +728,7 @@ void combat_ai_trigger(combat_unit *u)
     /* the volley's end (release_due) and the repeat's end (combat_tick) test the trigger: down -> state 3 / the
      * selected weapon fires again (0x100437a0 states 2 / 3) */
     u->fire_held = u->ai_trigger ? 1u << u->ai_sel : 0;
+    return started;
 }
 
 int combat_next_projectile_ex(combat_unit *u, int *first) { return combat_next_projectile_at(u, first, NULL); }

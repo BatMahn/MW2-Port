@@ -179,6 +179,111 @@ def weapon_parameters(rep, rnd, n):
         rep.check(tuple(result) == expected, 'weapon %d: DOS %s port %s' % (w, expected, tuple(result)))
 
 @test
+def ai_volley_without_target(rep, rnd, n):
+    """An in-progress volley keeps releasing rounds after the AI loses its target."""
+    L = lib('msim')
+    lock = ctypes.c_int()
+    for online in (0, 1):
+        for rounds in (1, 2):
+            for ticks, elapsed, dt in ((1, 0, 1/182), (44, 0, 44/182), (45, 0, 45/182),
+                                       (89, 0, 89/182), (90, 0, 90/182), (91, 0, 91/182),
+                                       (6, 38, .033), (7, 38, .033), (6, 39, .033), (7, 39, .034)):
+                e = emu()
+                unit, obj, inputs = e.alloc(0x170), e.alloc(0x200), e.alloc(0x80)
+                slots = e.alloc(10 * 0x68, fill=255)
+                e.w32(unit, obj)
+                e.w32(unit + 0x54, slots)
+                e.w32(unit + 0xa0, 2 if online else 1)
+                e.w32(obj + 4, 1)
+                e.w32(obj + 0x4c, inputs)
+                e.w32(PLAYER, 0)
+                e.w32(NOW, 500)
+                e.w32(TICKS, ticks)
+                for offset, value in ((4, 5), (8, 2), (0x10, elapsed), (0x24, rounds), (0x28, 0)):
+                    e.w32(slots + offset, value)
+                launched = []
+                e.stub(0x52620, lambda em: launched.append(em.reg('edx')) or 1)
+                e.stub(0x51000)
+                e.call(0x52080, eax=unit)
+                port = L.shim_ai_volley(ctypes.c_float(dt), ticks, online, rounds, elapsed, ctypes.byref(lock))
+                rep.check(len(launched) == port, 'online %d, %d rounds, %d+%d ticks: DOS %d port %d' %
+                          (online, rounds, elapsed, ticks, len(launched), port))
+                if online:
+                    e.w16(unit + 0x10c, 0x80c0)
+                    e.call(0x52ea0, eax=unit)
+                    dos_lock = e.r16(unit + 0x10c)
+                    rep.check(dos_lock == lock.value, 'without a target: DOS lock %#x, port lock %#x' %
+                              (dos_lock, lock.value))
+
+@test
+def reticle_nearest_contact(rep, rnd, n):
+    """DOS 0x53190 remembers the closest collision object, including solid wreck geometry."""
+    L = lib('msim')
+    distance = ctypes.c_float()
+    for first, second, radius in ((7000, 10000, 270), (10000, 7000, 270), (10030, 10050, 270),
+                                  (10050, 10030, 270), (7000, 10000, 250), (10000, 7000, 250)):
+        for wreck in (-1, 0, 1):
+            e = emu()
+            unit, head, parts = e.alloc(0xc0), e.alloc(0x20), (e.alloc(0x60), e.alloc(0x60))
+            contacts = dict(zip(parts, (first, second)))
+            e.w32(PLAYER, 0)
+            e.w32(0x95b44, head)
+            e.w32(head + 0x10, parts[0])
+            e.w32(parts[0] + 0x10, parts[1])
+            for i, part in enumerate(parts):
+                # A solid DOS wreck representation keeps the same unit collision flag (0x37381).
+                e.w16(part + 2, 0x100)
+                e.w16(part + 0x14, i + 1)
+
+            def segment(em):
+                ray = em.reg('edx')
+                em.w32(ray + 0x30, 150000)
+                em.w32(ray + 0x34, 1)
+
+            def clip(em):
+                em.w32(em.reg('edx') + 0x30, contacts[em.reg('eax')])
+                return 1
+
+            e.stub(0x49b80)
+            e.stub(0x532c0, segment)
+            e.stub(0x3a745, lambda em: contacts[em.reg('eax')])
+            e.stub(0x1c600, clip)
+            e.call(0x53190, eax=unit)
+            dos = parts.index(e.r32(0x159440))
+            port = L.shim_reticle_contact(first, second, radius, wreck, ctypes.byref(distance))
+            rep.check(dos == port and abs(e.r32(unit + 0xb0) - distance.value) < 1.0,
+                      'ranges %d/%d, wreck %d: DOS %d at %d, port %d at %g' %
+                      (first, second, wreck, dos, e.r32(unit + 0xb0), port, distance.value))
+
+@test
+def missile_lock_range(rep, rnd, n):
+    """Check the DOS missile lock's elevation, inclusive outer range, and timer."""
+    L = lib('msim')
+    for y, z in ((0, 100100), (0, 100101), (0, 7500), (1300, 7400),
+                 (2920, 10000), (0, 7501), (0, 16000)):
+        for flags, timer in ((0, 0), (0x8040, 7), (0x8040, 0), (0x80c0, 361)):
+            e = emu()
+            unit, obj, weapon = e.alloc(0x170), e.alloc(0x200), e.alloc(0x68)
+            bearing, slant, horizontal, elevation = (e.alloc(4) for _ in range(4))
+            e.call(0x2ab60, eax=0, edx=y, ebx=z, ecx=bearing, stack=(slant, horizontal, elevation))
+            e.w32(unit, obj)
+            e.w32(unit + 0x54, weapon)  # weapon 0, the LRM 20
+            e.w32(unit + 0x8c, timer)
+            e.w16(unit + 0x10c, flags)
+            e.w32(obj + 0xdc, 0x201)
+            e.w32(obj + 0xcc, y)
+            e.w32(obj + 0xd0, z)
+            e.w32(obj + 0xd4, e.r32(bearing))
+            e.w32(obj + 0xd8, e.r32(elevation))
+            e.w32(TICKS, 7)
+            e.call(0x52ea0, eax=unit)
+            port_timer = ctypes.c_int(timer)
+            port = L.shim_player_lock(y, z, flags, ctypes.byref(port_timer), 7)
+            expected = (e.r16(unit + 0x10c), e.rs32(unit + 0x8c))
+            rep.check((port, port_timer.value) == expected, 'y %d z %d initial lock %#x/%d: DOS %s port %s' %
+                      (y, z, flags, timer, expected, (port, port_timer.value)))
+
+@test
 def ai_weapon_pick(rep, rnd, n):
     """DOS 0x2e980..0x2ea63 through the real range, heat, slot and step checks, for stock AI weapon groups."""
     L = lib('combat')

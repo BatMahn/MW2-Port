@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <strings.h>
 #include <ctype.h>
@@ -1441,22 +1442,28 @@ static int shell_dialog(SDL_Renderer *rd, SDL_Texture *tx, int headless, const c
 static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, int py);
 static int menu_opens(const SDL_Event *e);
 static char g_result[64];   /* the last mission's result, from MW2MSN.CFG */
-static void read_results(const char *dir)
+enum { MISSION_RESULT_SIZE = 0x9d4 };
+static int read_mission_result(const char *dir, unsigned char result[MISSION_RESULT_SIZE])
 {
     char path[1100];
-    unsigned char b[20];
     FILE *f;
-    int st, n;
-    g_result[0] = 0;
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", dir);
     f = fopen(path, "rb");
-    if (!f) return;
-    if (fread(b, 1, sizeof b, f) == sizeof b) {
-        st = b[16] | b[17] << 8; n = b[4] | b[5] << 8;
-        snprintf(g_result, sizeof g_result, "%s (%d OBJECTIVES)", st == 2 ? "MISSION SUCCESSFUL" : st == 3 ? "MISSION FAILED" :
-                 st == 4 ? "MISSION TIME EXCEEDED" : "MISSION OVER", n);
-    }
+    if (!f) return 0;
+    int valid = fread(result, 1, MISSION_RESULT_SIZE, f) == MISSION_RESULT_SIZE && memcmp(result, "MW2M", 4) == 0;
     fclose(f);
+    return valid;
+}
+
+static int read_results(const char *dir)
+{
+    unsigned char b[MISSION_RESULT_SIZE];
+    g_result[0] = 0;
+    if (!read_mission_result(dir, b)) return 0;
+    int st = b[16] | b[17] << 8, n = b[4] | b[5] << 8;
+    snprintf(g_result, sizeof g_result, "%s (%d OBJECTIVES)", st == 2 ? "MISSION SUCCESSFUL" : st == 3 ? "MISSION FAILED" :
+             st == 4 ? "MISSION TIME EXCEEDED" : "MISSION OVER", n);
+    return 1;
 }
 
 /* the simulation's command line: MW2_SIM if set (tests), else the glview beside this executable with the configured
@@ -1853,19 +1860,29 @@ typedef struct { int32_t used, selected, clan, rank, title, honor, stats[4]; cha
 typedef char pilot_rec_is_60_bytes[sizeof(pilot_rec) == 60 ? 1 : -1];
 static pilot_rec g_reg[20];
 static int campaign_is_trial(int clan, int m);
+static const char REG_RANKS_CHECKED[] = "MW2RANK1";
+static const char MISSION_SELECT_PILOT[] = "FREEBIRTHTOAD";
 
 static void reg_load(void)
 {
     char p[700];
+    char trailer[sizeof REG_RANKS_CHECKED - 1];
+    int ranks_checked = 0;
     FILE *f;
     snprintf(p, sizeof p, "%s/MW2REG.CFG", g_dir);
     memset(g_reg, 0, sizeof g_reg);
-    if ((f = fopen(p, "rb"))) { if (fread(g_reg, 1, sizeof g_reg, f) != sizeof g_reg) { /* short: keep what was read */ } fclose(f); }
-    /* Earlier ports advanced the campaign without recording promotions. The save records which
-     * trials were passed, but cannot tell whether the pilot won the optional second phases. */
+    if ((f = fopen(p, "rb"))) {
+        if (fread(g_reg, 1, sizeof g_reg, f) == sizeof g_reg && fread(trailer, 1, sizeof trailer, f) == sizeof trailer)
+            ranks_checked = memcmp(trailer, REG_RANKS_CHECKED, sizeof trailer) == 0;
+        fclose(f);
+    }
+    if (ranks_checked) return;
+    /* Repair old port saves once. The original DOS shell reads exactly 20 records at 0x1db02,
+     * so the port can keep the migration marker after the registry without changing the records. */
     for (int i = 0; i < 20; i++) {
         pilot_rec *pilot = &g_reg[i];
         if (!pilot->used || pilot->title != 0 || pilot->clan < 0 || pilot->clan > 1) continue;
+        if (strncmp(pilot->name, MISSION_SELECT_PILOT, sizeof pilot->name) == 0) continue;
         for (int m = 0; m < pilot->rank && m < 16; m++)
             if (campaign_is_trial(pilot->clan, m)) pilot->title++;
     }
@@ -1877,7 +1894,11 @@ static void reg_save(void)
     int i;
     snprintf(p, sizeof p, "%s/MW2REG.CFG", g_dir);
     for (i = 0; i < 20; i++) g_reg[i].rt = 0;   /* the runtime field (the name's text object) is not kept */
-    if ((f = fopen(p, "wb"))) { fwrite(g_reg, 1, sizeof g_reg, f); fclose(f); }
+    if ((f = fopen(p, "wb"))) {
+        if (fwrite(g_reg, 1, sizeof g_reg, f) == sizeof g_reg)
+            fwrite(REG_RANKS_CHECKED, 1, sizeof REG_RANKS_CHECKED - 1, f);
+        fclose(f);
+    }
 }
 #define PRM_STAR0 0x10   /* MW2PRM.CFG: record 0x840dc (0x8415c follows at 0x90) */
 static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -3858,8 +3879,6 @@ static int launch_campaign_m(int clan, int reg, int m)
     prj_archive *a;
     lance_slot fr[3], en[3];
     int k, rc;
-    unsigned char b[20];
-    FILE *f;
     if (m < 0 || m > 15) return -1;
     if (!save) save = g_dir;
     if (!simprj) simprj = sim_archive();
@@ -3877,7 +3896,8 @@ static int launch_campaign_m(int clan, int reg, int m)
             for (k = 0; k < sz; k++)
                 if (ms.loadout[k][0]) { fr[k].mech = mech_index_of(ms.loadout[k]); snprintf(fr[k].loadout, sizeof fr[k].loadout, "%s", ms.loadout[k]); }
         if (fr[0].mech < 0) fr[0].mech = clan == 1 ? 5 : 9;
-        g_last_limit = ms.ok ? ms.tons : -1;
+        /* DOS MW2SHELL.EXE 0x22359: the underweight bonus uses the maximum star size times the per-mech limit. */
+        g_last_limit = ms.ok ? ms.tons * ms.size : -1;
         g_last_tons = 0;
         for (k = 0; k < 3; k++)
             if (fr[k].mech >= 0) {
@@ -3891,6 +3911,12 @@ static int launch_campaign_m(int clan, int reg, int m)
     rc = lance_write_all(a, save, fr, en, 1);
     prj_close(a);
     if (rc) { fprintf(stderr, "launch: cannot write the lance files into %s\n", save); return -1; }
+    /* Each flight supplies its own results and career counters. A failed launch must never score the last flight. */
+    const char *const result_files[] = {"MW2MSN.CFG", "MW2CAR.CFG"};
+    for (k = 0; k < 2; k++) {
+        snprintf(path, sizeof path, "%s/%s", save, result_files[k]);
+        if (remove(path) != 0 && errno != ENOENT) { perror(path); return -1; }
+    }
     snprintf(scen, sizeof scen, "%s", CAMPAIGN_SCEN[clan][m]);
     snprintf(g_load_scene, sizeof g_load_scene, "%s", scen);
     for (k = 0; scen[k]; k++) if (scen[k] >= 'a' && scen[k] <= 'z') scen[k] = (char)(scen[k] - 32);
@@ -3904,15 +3930,13 @@ static int launch_campaign_m(int clan, int reg, int m)
     if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     shell_hide_for_sim();
-    snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
-    remove(path);
     loading_screen(g_load_clan);
     rc = system(line);
-    read_results(save);
     sim_returned(rc);
     shell_show_after_sim();
-    (void)b; (void)f;   /* the debriefing (screen 3) scores the mission and updates the pilot */
-    return 0;
+    if (read_results(save)) return 0;
+    fprintf(stderr, "launch: the simulation returned without a complete mission result\n");
+    return -1;
 }
 
 
@@ -5515,7 +5539,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         }
     }
     load_bg(clan == 1 ? 22 : 15);
-    if (getenv("MW2_SHELL_AUTOLAUNCH")) { launch_campaign(clan, reg); return 3; }   /* tests: press LAUNCH once */
+    if (getenv("MW2_SHELL_AUTOLAUNCH")) return launch_campaign(clan, reg) == 0 ? 3 : -2;   /* tests: press LAUNCH once */
     while (next == -1) {
         SDL_Event e;
         int hover = -1;
@@ -5556,8 +5580,11 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
                         if (x < BRF_HS[i][0] || x > BRF_HS[i][2] || y < BRF_HS[i][1] || y > BRF_HS[i][3]) continue;
                         if (i == 0) next = 11;                             /* ABORT: the Ready Room */
                         else if (i == 1) { if (ns > 0) { sit = 1; spage = 0; } }   /* SITUATION: its own page */ else if (i == 2) {                                /* LAUNCH, then the debriefing */
-                            launch_campaign(clan, reg);
-                            next = 3;
+                            if (launch_campaign(clan, reg) == 0) next = 3;
+                            else {
+                                shell_message(rd, tx, headless, "The simulation did not return a mission result.#Ok");
+                                next = 0;
+                            }
                         } else if (i == 3 && brf_skip(reg)) next = 3;       /* SKIP: straight to the debriefing */
                     }
                 }
@@ -5659,10 +5686,10 @@ static void text_page(SDL_Renderer *rd, SDL_Texture *tx, int headless, int clan,
 }
 static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int *mx, int *my)
 {
-    int mission_done, honorable;
+    int mission_done, mission_status, altered_reality;
     static deb_line L[64];
     int n = 0, i, next = -1, f = 0, reg, success, total = 0, final = 0, top = 0, primary_won = 0;
-    unsigned char msn[0x9d4], car[80], dif[8];
+    unsigned char msn[MISSION_RESULT_SIZE], car[80], dif[8];
     char path[800];
     FILE *fp;
     pilot_rec before;
@@ -5671,8 +5698,13 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     dif[3] = 1; dif[4] = 1; dif[5] = 1;   /* (no file: the install's defaults - collision damage, heat tracking on) */
     {
         const char *dir = getenv("MW2_SAVE_DIR") ? getenv("MW2_SAVE_DIR") : g_dir;
-        snprintf(path, sizeof path, "%s/MW2MSN.CFG", dir); if ((fp = fopen(path, "rb"))) { if (fread(msn, 1, sizeof msn, fp)) {} fclose(fp); }
-        snprintf(path, sizeof path, "%s/MW2CAR.CFG", dir); if ((fp = fopen(path, "rb"))) { if (fread(car, 1, sizeof car, fp)) {} fclose(fp); }
+        if (read_mission_result(dir, msn)) {
+            snprintf(path, sizeof path, "%s/MW2CAR.CFG", dir);
+            if ((fp = fopen(path, "rb"))) {
+                if (fread(car, 1, sizeof car, fp) != sizeof car) memset(car, 0, sizeof car);
+                fclose(fp);
+            }
+        } else memset(msn, 0, sizeof msn);
         snprintf(path, sizeof path, "%s", gpath("MW2DIF.CFG")); if ((fp = fopen(path, "rb"))) { if (fread(dif, 1, sizeof dif, fp)) {} fclose(fp); }
     }
     reg_load();
@@ -5680,8 +5712,9 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     if (reg < 0) return 12;
     before = g_reg[reg];
     mission_done = before.rank;   /* the mission just flown (before any advance) */
-    success = rd32le(msn + 16) == 2;
-    honorable = dif[4] == 1 && dif[0] != 1 && dif[1] != 1 && dif[3] != 0;
+    mission_status = (int)rd32le(msn + 16);
+    success = mission_status == 2;
+    altered_reality = dif[0] == 1 || dif[1] == 1 || dif[3] == 0;
 #define LINE(lbl, ...) do { if (n < 64) { snprintf(L[n].label, sizeof L[n].label, "%s", lbl); snprintf(L[n].value, sizeof L[n].value, __VA_ARGS__); L[n].centre = 0; n++; } } while (0)
 #define TEXT(lbl) do { if (n < 64) { snprintf(L[n].label, sizeof L[n].label, "%s", lbl); L[n].value[0] = 0; L[n].centre = 1; n++; } } while (0)
     {   /* the objectives */
@@ -5716,7 +5749,10 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     {
         int wing = u16at(car, 0x34), md = u16at(car, 0x07), mt = u16at(car, 0x1e), vd = u16at(car, 0x44), vt = u16at(car, 0x4a);
         int shots = u16at(car, 0x13), hits = u16at(car, 0x15);
-        if (wing) { total -= wing * 4000; LINE("Wingman Deaths:", "%d x-4000 = %d", wing, -wing * 4000); }
+        if (success && wing) {   /* DOS MW2SHELL.EXE 0x24162: only a win scores starmate losses */
+            total -= wing * 4000;
+            LINE("Wingman Deaths:", "%d x-4000 = %d", wing, -wing * 4000);
+        }
         if (mt) { total += mt * 250; LINE("Enemy Mechs Destroyed (direct / total):", "%d / %d = %d", md, mt, mt * 250); }
         if (vt) { total += vt * 125; LINE("Enemy Vehicles Destroyed (direct / total):", "%d / %d = %d", vd, vt, vt * 125); }
         if (g_last_limit > 0 && g_last_tons >= 0 && g_last_tons < g_last_limit) {   /* 25 per ton under the limit */
@@ -5724,8 +5760,8 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             total += under * 25;
             LINE("Star Underweight Bonus:", "%d (x%d tons) = %d", 25, under, under * 25);
         }
-        if (shots > 0) {
-            double pct = (double)hits / shots;
+        if (shots == 0 || hits <= shots) {   /* DOS 0x22469: accuracy over 100% is omitted and scores no bonus */
+            double pct = shots > 0 ? (double)hits / shots : 0.0;
             int bonus = pct >= 0.7 ? 750 : 0;
             total += bonus;
             LINE("Hit Percentage:", "%.1f = %d", pct * 100.0, bonus);
@@ -5736,21 +5772,26 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         g_reg[reg].stats[2] += shots;
     }
     TEXT("");
-    if (!dif[4]) { TEXT("The Keshik deems it Dishonorable to Alter Heat Tracking"); final = 0; }
-    else if (!success) { TEXT("Mission Failed:  NO HONOR ACQUIRED"); final = 0; }
-    else {
+    if (!dif[4]) TEXT("The Keshik deems it Dishonorable to Alter Heat Tracking");
+    else if (success) {
         static const char *DN[3] = {"EASY", "MEDIUM", "HARD"};
         static const double DM[3] = {0.8, 1.0, 1.3};
         int d = dif[5] <= 2 ? dif[5] : 1;
-        final = (int)lround(total * DM[d]);
+        /* DOS 0x22691 adds the difficulty adjustment after truncating it toward zero. */
+        final = total + (int)(total * DM[d] - total);
         LINE("Mission Honor:", "%d", total);
         LINE("Difficulty Multiplier:", "(%s = %.1f) %d", DN[d], DM[d], final);
-        g_reg[reg].honor += final;
-        if (honorable) g_reg[reg].rank++;   /* DOS MW2SHELL.EXE 0x24a66 */
-        LINE("Career Honor:", "%d", g_reg[reg].honor);
     }
+    if (altered_reality) {
+        TEXT("No Career Advancement with Altered Reality Enabled");
+        final = 0;   /* DOS MW2SHELL.EXE 0x2272a-0x227b1 */
+    }
+    if (mission_status == 3) TEXT("Mission Failed:  NO HONOR ACQUIRED");
+    g_reg[reg].honor += final;
+    if (success && !altered_reality) g_reg[reg].rank++;   /* DOS MW2SHELL.EXE 0x24a66 */
+    LINE("Career Honor:", "%d", g_reg[reg].honor);   /* DOS 0x2492b: display the career total after any outcome */
     /* DOS MW2SHELL.EXE 0x249ae-0x24a66: one rank per successful primary trial objective. */
-    if (success && honorable && campaign_is_trial(clan, mission_done)) {
+    if (success && !altered_reality && dif[4] == 1 && campaign_is_trial(clan, mission_done)) {
         g_reg[reg].title += primary_won;
         if (g_reg[reg].title > 8) g_reg[reg].title = 8;
         if (g_reg[reg].title < 0) g_reg[reg].title = 0;
@@ -5930,7 +5971,7 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
     reg_load();
     reg = reg_selected(clan);
     if (reg < 0) return 12;
-    cheat = strcmp(g_reg[reg].name, "FREEBIRTHTOAD") == 0;
+    cheat = strncmp(g_reg[reg].name, MISSION_SELECT_PILOT, sizeof g_reg[reg].name) == 0;
     load_bg(clan == 1 ? 20 : 13);
     grid = open_smk(clan == 1 ? "AJFGRID1" : "AWOGRID1");
     while (next == -1) {

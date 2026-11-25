@@ -218,7 +218,7 @@ void combat_tick(combat_unit *u, float dt, int dos_ticks);
  * released over time by combat_tick; collect them with combat_next_projectile. */
 void combat_trigger(combat_unit *u, float distance);
 /* As combat_trigger, for the weapons whose bit is set in mask (bit i = weapons[i]). */
-void combat_trigger_mask(combat_unit *u, float distance, uint32_t mask);
+uint32_t combat_trigger_mask(combat_unit *u, float distance, uint32_t mask);   /* slots starting a volley */
 /* AI fire (engine 0x100232b0): one weapon per decision - starting at the unit's selected weapon, each in turn is
  * tried: in its range window (+0x3c .. +0x40), heat + its heat under 65, ready, ammunition, and a roll of
  * rand(refire / (DOS ? 91 : 90) + 1) == 0; the first that passes fires (and stays selected), else the selection moves on.
@@ -232,7 +232,7 @@ int  combat_ai_select(combat_unit *u, float distance, unsigned (*rng)(void *ctx,
  * set, ai_latch clear) starts the selected weapon's volley if it is ready; released (ai_trigger clear, ai_latch set)
  * moves the selection to the next weapon still there (0x10043f80 with 0) - so an AI fires its weapons in turn, one per
  * press. A repeating weapon whose volley ends with the trigger still down fires again after `refire` while selected */
-void combat_ai_trigger(combat_unit *u);
+int combat_ai_trigger(combat_unit *u);   /* weapon ID starting a volley, or -1 */
 /* Next projectile released and not yet launched: returns the weapon (sim_weapons index) or -1. */
 int  combat_next_projectile(combat_unit *u);
 /* As above; *first = 1 for a volley's first projectile (the engine plays the weapon sound then). */

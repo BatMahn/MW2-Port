@@ -904,18 +904,23 @@ static void snd_listener(float L[3], float *yaw)
     *yaw = g_pl.heading + g_pl.twist;
 }
 static int snd_cockpit(void) { return g_snd_ok ? g_snd_pit : view_in_cockpit(); }   /* DAT_1024e678 as the sounds see it */
-/* DOS 0x2ab60 / 0x40bc0 / 0x40d10. Recover the horizontal distance from the larger axis, then divide by
- * cos(elevation). Both divisions truncate. The pan uses the signed high bits of the sine. */
-static int dos_positional_audio(int x, int y, int z, int32_t listener, int half, int *pan, int *delay)
+/* DOS 0x2ab60: recover the horizontal distance from the larger axis, then divide by cos(elevation).
+ * Both divisions truncate. Targeting and positional audio use the same calculation. */
+static int64_t dos_spatial_range(int x, int y, int z, int32_t yaw)
 {
     const int64_t one = INT64_C(1) << 29;
-    int32_t yaw = glr_dos_atan2(x, z);
     int use_x = llabs(x) > llabs(z);
     int32_t axis = use_x ? glr_dos_sin(yaw) : glr_dos_cos(yaw);
     int32_t horizontal = axis ? (int32_t)((use_x ? x : z) * one / axis) : 0;
     int32_t elevation = glr_dos_atan2(y, horizontal);
     int32_t cosine = glr_dos_cos(elevation);
-    int64_t distance = cosine ? horizontal * one / cosine : 0;
+    return cosine ? horizontal * one / cosine : 0;
+}
+
+static int dos_positional_audio(int x, int y, int z, int32_t listener, int half, int *pan, int *delay)
+{
+    int32_t yaw = glr_dos_atan2(x, z);
+    int64_t distance = dos_spatial_range(x, y, z, yaw);
     int metres, volume;
     if (distance >= 50000) return 0;
     metres = (int)(distance / 100);
@@ -1513,6 +1518,35 @@ static const char *inspect_text(int actor, int thing)
  * for the player as it starts, TARGET_AT_RETICLE 0x1001d870 sets it as it ENDS (also with nothing under the reticle);
  * RESET_TARGETTING (0x1001ce80) leaves it. While it is 0 the player may take only things flagged 0x400 / 0x1000 */
 static int g_tgt_any;
+static float target_distance(float dx, float dy, float dz)
+{
+    if (!msim_dos_int) return sqrtf(dx * dx + dy * dy + dz * dz);
+    int x = (int)lrintf(dx), y = (int)lrintf(dy), z = (int)lrintf(dz);
+    return (float)dos_spatial_range(x, y, z, glr_dos_atan2(x, z));
+}
+
+/* DOS 0x3017a: the viewer displays the selected target's full distance, including elevation. */
+static float target_viewer_range(int unit, int thing, int nav)
+{
+    float pos[3];
+    if (unit >= 0 && unit < g_actor_count) {
+        pos[0] = (float)g_actors[unit].mech.origin[0];
+        pos[1] = g_sim.units[unit].y;
+        pos[2] = (float)g_actors[unit].mech.origin[2];
+    } else if (thing >= 0 && thing < g_sim.bld_count) {
+        if (!msim_dos_int || !msim_thing_point(&g_sim, thing, pos)) {
+            const struct msim_building *b = &g_sim.bld[thing];
+            for (int i = 0; i < 3; i++) pos[i] = (b->mn[i] + b->mx[i]) * 0.5f;
+        }
+    } else if (nav >= 0 && nav < g_sim.nav_count) {
+        pos[0] = g_sim.navs[nav].x;
+        pos[1] = g_sim.navs[nav].y;
+        pos[2] = g_sim.navs[nav].z;
+    } else return -1.0f;
+    float dx = pos[0] - (float)g_pl.origin[0], dz = pos[2] - (float)g_pl.origin[2];
+    return msim_dos_int ? target_distance(dx, pos[1] - g_sim.player_unit.y, dz) : sqrtf(dx * dx + dz * dz);
+}
+
 /* may the player target thing b (engine 0x1001d2d0 for the player, DOS 0x2a4xx the same)? not destroyed (record flag 4,
  * the runtime destroyed bit - no GT record carries it), flag 0x400 or 0x1000 unless g_tgt_any, never flag 0x800 (TNJ4's
  * 16 "none" markers), its object there (0x10025760 / 0x10025780), and within 1750 m (0x482ae600 / DOS 0x2ab98) of the
@@ -1529,7 +1563,7 @@ static int thing_targetable(int b, float *dist)
     if (fl & 0x800) return 0;
     if (!msim_thing_point(&g_sim, b, p)) return 0;
     dx = p[0] - g_sim.player[0]; dy = p[1] - g_sim.player_unit.y; dz = p[2] - g_sim.player[2];
-    d = sqrtf(dx * dx + dy * dy + dz * dz);
+    d = target_distance(dx, dy, dz);
     if (!(fl & 0x1000) && d > 175000.0f) return 0;
     if (dist) *dist = d;
     return 1;
@@ -1557,7 +1591,7 @@ static int unit_targetable(int q, int side, float *dist)
     if (g_actors[q].unit_flags & 0x800) return 0;                     /* +0x15 & 8 */
     dx = (float)g_actors[q].mech.origin[0] - (float)g_pl.origin[0]; dz = (float)g_actors[q].mech.origin[2] - (float)g_pl.origin[2];
     dy = g_sim.units[q].y - g_sim.player_unit.y;
-    d = sqrtf(dx * dx + dy * dy + dz * dz);
+    d = target_distance(dx, dy, dz);
     if (d > 175000.0f && !(g_actors[q].unit_flags & 0x1000)) return 0;   /* +0x15 & 0x10 */
     if (dist) *dist = d;
     return 1;
@@ -6071,6 +6105,7 @@ static void test_dump(const char *tag)
     printf(" rcl=%d", g_rcl);   /* the reticle drawn: -1 RETICLE, 0 RCLINOP 1 RCLLOCK 2 RCLNOLK 3 RCLPLOC 4 RCLTGT 5 RCLGLOC */
     printf(" heatbar=%d heats=%d heatx=%d thrbar=%d jetbar=%d", (int)g_heat_p, (int)g_heat_s, (int)g_heat_x, (int)g_thr_p, (int)g_jet_p);
     printf(" jetsm=%d", (int)g_jet_s);
+    printf(" viewer_range=%.0f", (double)target_viewer_range(g_tgt_sel, g_tgt_thing, g_nav_sel >= 0 ? current_nav(NULL) : -1));
     {   /* the navs' visited flags 0x20 (g_nav_seen), bit n = nav n */
         unsigned m = 0;
         for (i = 0; i < g_sim.nav_count && i < 32; i++) if (g_nav_seen[i]) m |= 1u << i;
@@ -9356,7 +9391,6 @@ int main(int argc, char **argv)
             float rx = cosf(yaw), rz = -sinf(yaw);
             g_wire_r[0] = rx; g_wire_r[1] = rz; g_wire_f[0] = sinf(yaw); g_wire_f[1] = cosf(yaw);
             float th = tanf(v.vfov * 0.5f * 3.14159265f / 180.0f), aspect = (float)w / (float)(h > 0 ? h : 1);
-            float tdist = -1.0f;
             /* not up (controller state 1 starting / 3 shut down, engine 0x1001e340): only the start-up (+0x78) / shutdown
              * (+0x80) callbacks draw - the radar, target display and viewport windows growing / shrinking, and in
              * start-up the weapon names (see pow_update); the reticle, compass, altitude tape, bars, ammunition and
@@ -9394,10 +9428,6 @@ int main(int argc, char **argv)
             if (!hud_dead) {   /* the instruments (dark while shut down) */
             /* target: the selected one only (the DOS footage shows the nav point with no selection) */
             if (tgt >= g_actor_count || (tgt >= 0 && g_sim.armed[tgt] && g_sim.units[tgt].destroyed)) tgt = g_tgt_sel = -1;
-            if (tgt >= 0) {
-                float ddx = (float)g_actors[tgt].mech.origin[0] - (float)g_pl.origin[0], ddz = (float)g_actors[tgt].mech.origin[2] - (float)g_pl.origin[2];
-                tdist = sqrtf(ddx * ddx + ddz * ddz);   /* cm */
-            }
             /* compass (engine 0x10022b10 / 0x10022960; window 24 = (115,1)-(205,35) in 320x200 -> 640 units x 230-411,
              * y 2-84; its reference point (0.5, 0.4) of the window = local (91, 33) -> (321, 35); the HUD record's
              * positions are never read). The tape shows the LEGS' heading: COMPASS by its hotspot (the 00 mark) at
@@ -10197,7 +10227,7 @@ int main(int argc, char **argv)
                             hud_text(g_hud, nx, ty, it ? it : g_actors[tgt].name[0] ? g_actors[tgt].name : "Mech",
                                      g_actors[tgt].alliance == 2 ? HP(6) : g_actors[tgt].friendly ? HP(0xe) : HP(0xa));
                         }
-                        range_text(info, sizeof info, tdist);
+                        range_text(info, sizeof info, target_viewer_range(tgt, -1, -1));
                         hud_text(g_hud, rgx, rgy, info, green);
                     } else if (g_tgt_thing >= 0 && g_tgt_thing < g_sim.bld_count && (g_sim.bld[g_tgt_thing].hp <= 0 ||
                                (g_world && g_sim.bld[g_tgt_thing].intact >= 0 && g_sim.bld[g_tgt_thing].intact < g_mech.part_count && g_mech.parts[g_sim.bld[g_tgt_thing].intact].hidden))) {
@@ -10205,7 +10235,6 @@ int main(int argc, char **argv)
                     } else if (g_tgt_thing >= 0 && g_tgt_thing < g_sim.bld_count) {   /* a structure: its name, then (inspected)
                                                                                          * what it holds, and the range */
                         const struct msim_building *gb = &g_sim.bld[g_tgt_thing];
-                        float cx = (gb->mn[0] + gb->mx[0]) * 0.5f - (float)g_pl.origin[0], cz = (gb->mn[2] + gb->mx[2]) * 0.5f - (float)g_pl.origin[2];
                         if (!shaded && !snow && g_world && gb->intact >= 0 && gb->intact < g_mech.part_count) {   /* the structure's wireframe */
                             const mech3d_part *bp = &g_mech.parts[gb->intact];
                             mech3d one;
@@ -10231,12 +10260,12 @@ int main(int argc, char **argv)
                                 g_wire_r[0] = sr0; g_wire_r[1] = sr1; g_wire_f[0] = sf0; g_wire_f[1] = sf1;
                             }
                         }
-                        {   /* one text line (0x10020e40): the inspection result for 0x16a ticks, else the name ("Installation"
-                             * when empty); its colour by the thing's alliance (0x10021167) - not kept by the port: red */
+                        {   /* DOS 0x300b1: use the same alliance colours for units and installations. */
                             const char *it = inspect_text(-1, g_tgt_thing);
-                            hud_text(g_hud, nx, ty, it ? it : gb->name[0] ? gb->name : "Installation", red);
+                            const float *name_colour = msim_dos_int ? HP(gb->side == 0 ? 0xe : gb->side == 2 ? 6 : 0xa) : red;
+                            hud_text(g_hud, nx, ty, it ? it : gb->name[0] ? gb->name : "Installation", name_colour);
                         }
-                        range_text(info, sizeof info, sqrtf(cx * cx + cz * cz));
+                        range_text(info, sizeof info, target_viewer_range(-1, g_tgt_thing, -1));
                         hud_text(g_hud, rgx, rgy, info, green);
                     } else {
                         const char *label = NULL;
@@ -10254,8 +10283,7 @@ int main(int argc, char **argv)
                             /* the range as for any target (the player's +0xc4, formatted by range_text) in the text
                              * routine's colour 0xe (DOS 0x30180 / 3Dfx 0x1002118f reset it after the name): DOSBox YELLSCN1
                              * "1.08k" in green for Nav Epsilon at 1075 m (the port had " 1075m" in the name's yellow) */
-                            range_text(info, sizeof info, sqrtf((g_sim.navs[nv].x - (float)g_pl.origin[0]) * (g_sim.navs[nv].x - (float)g_pl.origin[0]) +
-                                                                (g_sim.navs[nv].z - (float)g_pl.origin[2]) * (g_sim.navs[nv].z - (float)g_pl.origin[2])));
+                            range_text(info, sizeof info, target_viewer_range(-1, -1, nv));
                             hud_text(g_hud, rgx, rgy, info, green);
                         }
                     }

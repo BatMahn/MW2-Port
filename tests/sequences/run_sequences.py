@@ -3050,16 +3050,17 @@ def dos_missile_lock_order(c):
 
 @sequence
 def dos_missile_warning_window(c):
-    """The DOS player warning requires both the convergence point and the selected unit in the main view."""
+    """DOS gives one warning when the volley starts, using the convergence point and target in the main view."""
     env = {'MW2_KILL_ACTOR': '0,9999', 'MW2_TEST_TARGET': '0', 'MW2_TEST_STANDOFF': 16000,
            'MW2_TEST_HOLD_ACTOR': '0', 'MW2_MISSILE_TRACE': '1'}
     select = [(0.15 + 0.25 * i, 0.25 + 0.25 * i, 'enter') for i in range(7)]
-    for view, glance in ((1, []), (0, [(3, 6, 'kp9')])):
+    for view, glance in ((1, [(4.5, 6, 'kp9')]), (0, [(3, 4.5, 'kp9')])):
         r = c.run('_%d' % view, secs=6, nostart=True, dos_look=True, env=env,
                   hold=select + [(4, 4.08, 'space')] + glance)
         windows = [int(v) for v in re.findall(r'^mwarn unit 0 view (\d+)$', r.out, re.M)]
-        c(len(windows) >= 18 and all(v == view for v in windows),
-          'warning window follows the main camera while firing at the selected unit', str(windows))
+        paths, _ = missile_paths(r)
+        c(len(paths) >= 18, 'the LRM volley fires its missiles', '%d missiles' % len(paths))
+        c(windows == [view], 'one warning uses the main camera at the start of the volley', str(windows))
 
 
 @sequence
@@ -4760,6 +4761,31 @@ def target_cycle_unit_rules(c):
 
 
 @sequence
+def dos_target_viewer_elevation(c):
+    """DOS 0x3017a displays the range from 0x2ab60, which includes target elevation."""
+    r = c.run(secs=3, dos_look=True, nostart=True, dump='/0.1',
+              env={'MW2_TEST_TARGET': '0', 'MW2_TEST_DROP': '2:0:3000:4000:0:0'})
+    st = r.at(2.1)
+    expected = math.hypot(st['tgt_range'], st['a_y'] - st['y'])
+    c(st['tgt'] == 0 and expected > st['tgt_range'] + 1000, 'the selected mech is well above the player',
+      'horizontal %d, slant %.0f' % (st['tgt_range'], expected))
+    c(abs(st['viewer_range'] - expected) <= 10, 'the viewer displays slant range',
+      'displayed %d, expected %.0f' % (st['viewer_range'], expected))
+
+    nav_run = c.run('_nav', secs=1.2, dos_look=True, nostart=True, keys=[(0.4, 'n')], dump='/0.1',
+                    env={'MW2_START': '360067,347177,40000', 'MW2_DEBUG_NAVS': '1'})
+    st = nav_run.at(0.6)
+    nav = re.search(r"^nav %d \S+ '[^']*' (-?\d+) (-?\d+) (-?\d+) shown" % st['nav'], nav_run.out, re.M)
+    if c(nav is not None, 'a nav point is selected from above the terrain'):
+        x, y, z = (int(v) for v in nav.groups())
+        horizontal = math.hypot(x - st['x'], z - st['z'])
+        expected = math.hypot(horizontal, y - st['y'])
+        c(expected > horizontal + 1000 and abs(st['viewer_range'] - expected) <= 100,
+          'the viewer includes the elevation of a selected nav point', 'displayed %d, expected %.0f' %
+          (st['viewer_range'], expected))
+
+
+@sequence
 def target_enemy_friendly_sides(c):
     """e (0x1001db60: the nearest of the 0x40008 walk - alliance 1 only; none or beyond 1750 m: the old selector back) and
     f (0x1001db20(1): one step of the 0x20008 walk - the player's side only - not the nearest; none: no target).
@@ -6084,7 +6110,7 @@ def dos_garstedt_enemy_camouflage(c):
 
 @sequence
 def shell_trial_promotion(c):
-    """A one-phase Wolf Trial 1 win promotes in Aftermath and persists in the registry."""
+    """Wolf Trial 1 promotion, honor and campaign progress follow the DOS Combat Variables."""
     gd, cfg = _shell_game(c)
     archive = os.path.join(gd, 'MW2.PRJ')
     if not os.path.exists(archive):
@@ -6093,37 +6119,92 @@ def shell_trial_promotion(c):
     registry = bytearray(20 * 60)
     struct.pack_into('<6I', registry, 0, 1, 1, 0, 4, 0, 1500)
     registry[40:45] = b'Test\0'
-    with open(path, 'wb') as f:
-        f.write(registry)
     result = bytearray(0x9d4)
     struct.pack_into('<10I', result, 0, 0x4d32574d, 1, 0, 18, 2, 1, 1, 0, 8, 1)
     result[40:63] = b'Destroy First Mech Star'
-    for name, data in (('MW2MSN.CFG', result), ('MW2CAR.CFG', bytes(80)),
-                       ('MW2DIF.CFG', bytes((0, 0, 1, 1, 1, 1, 0, 0)))):
-        with open(os.path.join(gd, name), 'wb') as f:
-            f.write(data)
+    normal = bytes((0, 0, 1, 1, 1, 1, 0, 0))
     e = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
     e.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_SCREEN': '3', 'MW2_SHELL_CLAN': '0',
               'MW2_SHELL_FRAMES': '2', 'MW2_SHELL_AFTERMATH': '1',
               'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'aftermath.ppm')})
-    run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
-                         text=True, timeout=60 * TSCALE)
-    c('title 1 (Star Commander)' in run.stdout, 'Aftermath reports Star Commander', run.stdout[-300:])
-    with open(path, 'rb') as f:
-        progress, title, honor = struct.unpack_from('<3I', f.read(), 12)
-    c((progress, title, honor) == (5, 1, 6500), 'the registry records progress, promotion and honor',
-      str((progress, title, honor)))
+    def debrief(combat, mission, pilot_registry=None, career=bytes(80)):
+        files = [('MW2MSN.CFG', mission), ('MW2CAR.CFG', career), ('MW2DIF.CFG', combat)]
+        if pilot_registry is not None:
+            files.append(('MW2REG.CFG', pilot_registry))
+        for name, data in files:
+            with open(os.path.join(gd, name), 'wb') as f:
+                f.write(data)
+        run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
+                             text=True, timeout=60 * TSCALE, check=True)
+        with open(path, 'rb') as f:
+            saved = struct.unpack_from('<3I', f.read(), 12)
+        return run.stdout, saved
+
+    log, saved = debrief(normal, result, registry)
+    c('title 1 (Star Commander)' in log, 'Aftermath reports Star Commander', log[-300:])
+    c(saved == (5, 1, 6500), 'the registry records progress, promotion and honor', str(saved))
+
+    for name, index, value in (('unlimited ammo', 0, 1), ('invulnerability', 1, 1), ('collisions off', 3, 0)):
+        combat = bytearray(normal)
+        combat[index] = value
+        _, saved = debrief(combat, result, registry)
+        c(saved == (4, 0, 1500), name + ' blocks advancement and honor', str(saved))
+
+    combat = bytearray(normal)
+    combat[4] = 0
+    _, saved = debrief(combat, result, registry)
+    c(saved == (5, 0, 1500), 'heat tracking off allows advancement without promotion or honor', str(saved))
+    no_result = bytes(len(result))
+    log, _ = debrief(normal, no_result)
+    c('title 0 (Mechwarrior) honor 1500' in log, 'the unpromoted pilot stays unpromoted on reload', log[-300:])
+
+    career = bytearray(80)
+    struct.pack_into('<H', career, 0x4a, 1)  # a vehicle adds 125 honor before the multiplier
+    hard = bytearray(normal)
+    hard[5] = 2
+    _, saved = debrief(hard, result, registry, career)
+    c(saved == (5, 1, 8162), 'Hard truncates the 1537.5-point difficulty adjustment', str(saved))
+    easy = bytearray(normal)
+    easy[5] = 0
+    _, saved = debrief(easy, result, registry, career)
+    c(saved == (5, 1, 5600), 'Easy deducts 20% of mission honor', str(saved))
+    career = bytearray(80)
+    for hits, expected in ((69, 6500), (70, 7250), (100, 7250), (101, 6500)):
+        struct.pack_into('<HH', career, 0x13, 100, hits)
+        _, saved = debrief(normal, result, registry, career)
+        c(saved == (5, 1, expected), 'accuracy %d%% gives the DOS honor award' % hits, str(saved))
 
     # Older saves can contain campaign progress past Trial 1 with the base rank still recorded.
     struct.pack_into('<3I', registry, 12, 5, 0, 6500)
-    with open(path, 'wb') as f:
-        f.write(registry)
-    with open(os.path.join(gd, 'MW2MSN.CFG'), 'wb') as f:
-        f.write(bytes(len(result)))
-    run = subprocess.run([os.path.join(REPO, 'mw2shell')], env=e, capture_output=True,
-                         text=True, timeout=60 * TSCALE)
-    c('title 1 (Star Commander) honor 6500' in run.stdout, 'a legacy pilot recovers the earned title',
-      run.stdout[-300:])
+    log, _ = debrief(normal, no_result, registry)
+    c('title 1 (Star Commander) honor 6500' in log, 'a legacy pilot recovers the earned title', log[-300:])
+
+    struct.pack_into('<3I', registry, 12, 14, 0, 1500)
+    registry[40:54] = b'FREEBIRTHTOAD\0'
+    log, _ = debrief(normal, no_result, registry)
+    c('title 0 (Mechwarrior) honor 1500' in log, 'mission select progress alone leaves the pilot at the base rank',
+      log[-300:])
+
+    # Launch Golden Spade with only its default 85-ton Warhawk. DOS scores against all three 90-ton slots.
+    os.unlink(os.path.join(gd, 'MW2PRM.CFG'))
+    win = os.path.join(gd, 'trial-win.cfg')
+    with open(win, 'wb') as f:
+        f.write(result)
+    e.update({'MW2_SHELL_SCREEN': '0', 'MW2_SHELL_AUTOLAUNCH': '1', 'MW2_NO_LOADING': '1',
+              'MW2_SIM': 'cp "$MW2_INSTALL_DIR/trial-win.cfg" "$MW2_INSTALL_DIR/MW2MSN.CFG"'})
+    registry[40:54] = b'Test\0'.ljust(14, b'\0')
+    struct.pack_into('<3I', registry, 12, 14, 3, 1500)
+    log, saved = debrief(normal, no_result, registry)
+    c('GOLDSCN1' in log and saved == (15, 3, 11125), 'Golden Spade awards 4625 honor for the unused tonnage',
+      str(saved))
+
+    # A failed or interrupted launch can leave only a stale career file or a success header.
+    for command in ('false', 'head -c 20 "$MW2_INSTALL_DIR/trial-win.cfg" > "$MW2_INSTALL_DIR/MW2MSN.CFG"'):
+        e['MW2_SIM'] = command
+        log, saved = debrief(normal, result, registry, career)
+        c('GOLDSCN1' in log and 'aftermath:' not in log and saved == (14, 3, 1500),
+          'an incomplete launch leaves the campaign record alone', str(saved))
+        c(not os.path.exists(os.path.join(gd, 'MW2CAR.CFG')), 'the launch clears the previous flight’s career counters')
 
 
 @sequence

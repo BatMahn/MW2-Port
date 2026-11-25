@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.59 (2026-11-24)
+
+- **Campaign progression.** Unlimited ammunition, invulnerability, and disabled collision damage block campaign
+  advancement, honor, and promotions. With heat tracking off, a win unlocks the next mission without awarding
+  honor or a promotion.
+  The Pilot Register preserves the rank earned in play, including after mission select with `FREEBIRTHTOAD`.
+- **Debriefing.** The underweight bonus uses the full star allowance. A solo Warhawk on Golden Spade earns 4,625
+  bonus honor. Hard difficulty truncates the fractional honor adjustment, and accuracy earns a bonus from
+  70% through 100%. Career Honor appears after every outcome, and starmate losses are deducted only on a win.
+- **Campaign launches.** A failed launch or incomplete mission result returns to the briefing. The previous
+  flight's statistics cannot carry over.
+- **AI fire.** Mechs finish an active volley after losing their target and clear the missile lock. Shutdown
+  still pauses the volley.
+- **DOS weapons.** Weapon timers, heat updates, and missile lock timers count whole game ticks. Missile locks
+  use the target's elevation relative to the shooter's feet and include the exact maximum range. A missile
+  or PPC volley gives the target one chance to react when the volley starts.
+- **Reticle.** The aim ray uses the closest overlapping hull. Solid wrecks block the ray in DOS mode.
+- **DOS target viewer.** Ranges to mechs, installations, and nav points include elevation. Installation names
+  use their alliance colors.
+
 ## v1.1.58 (2026-11-24)
 
 - **Golden Spade.** Satellite View hides the Shield-Generator, its converters and their wreckage. The Force Shield

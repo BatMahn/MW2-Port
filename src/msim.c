@@ -2693,25 +2693,26 @@ static float aim_range_step(msim *s, msim_aim *a, int hit, float dist)
 }
 static int shot_objects(msim *s, const float o[3], const float dv[3], float *tb, int *part);
 static int shot_thing(const msim *s, int part);
-/* the aim ray (0x10044950 -> 0x100103e0): 150000 cm from the eye along dir, the nearest thing it enters - a mech's
- * pieces (the shots' own test, their type 6 spheres, in 1 m legs within the mech's bounding sphere; the shooter's own skipped), a world
- * object, the ground. Returns 1 with the distance when that is a unit (mechs, or a thing's object: class 0x200), 0 when
- * nothing, the ground or another object is nearer. */
+/* The aim ray (DOS 0x53190 -> 0x1c3f0, 3Dfx 0x10044950 -> 0x100103e0) traces 150000 cm from the eye.
+ * Returns 1 with the distance to the nearest unit or thing, 0 when blocked by scenery or when nothing was hit. */
 static int aim_ray(msim *s, int self, const float from[3], const float dir[3], float *dist)
 {
     float best = 150000.0f, tb = 2.0f;
     int q, hit = 0, part = -1, hitq = -1, hitb = -1;
     for (q = -1; q < s->actor_count; q++) {
-        float c[3], t, px, py, pz, rr, t0, t1, h;
+        float c[3], t, px, py, pz, rr, fraction;
+        int group;
         mech3d *mq;
         if (q == self) continue;
         if (q < 0) {
-            if (!s->pl_mech_ok || s->player_unit.destroyed) continue;
+            if (!s->pl_mech_ok || (!msim_dos_int && s->player_unit.destroyed)) continue;
             mq = player_hull(s);
             c[0] = s->player[0] - from[0]; c[1] = s->player_unit.y + (s->player_centre_h > 0 ? s->player_centre_h : 475.0f) - from[1]; c[2] = s->player[2] - from[2];
             rr = s->player_radius > 1200.0f ? s->player_radius : 1200.0f;
         } else {
-            if (!s->armed[q] || s->units[q].destroyed) continue;
+            /* DOS 0x37381 keeps the unit flag on solid wreck parts. The aim ray stops there,
+             * and target selection rejects the destroyed unit separately (0x2a298). */
+            if (!s->armed[q] || (!msim_dos_int && s->units[q].destroyed)) continue;
             mq = (mech3d *)msim_unit_hull(s, q);
             c[0] = (float)mq->origin[0] - from[0];
             c[1] = s->units[q].y + (s->centre_h ? s->centre_h[q] : s->height[q] * 0.5f) - from[1];
@@ -2722,12 +2723,14 @@ static int aim_ray(msim *s, int self, const float from[3], const float dir[3], f
         t = c[0] * dir[0] + c[1] * dir[1] + c[2] * dir[2];
         px = c[0] - dir[0] * t; py = c[1] - dir[1] * t; pz = c[2] - dir[2] * t;
         if (t <= 0 || px * px + py * py + pz * pz > rr * rr) continue;
-        h = sqrtf(rr * rr - (px * px + py * py + pz * pz));
-        t0 = t - h > 0 ? t - h : 0; t1 = t + h;
-        for (; t0 < t1 && t0 < best; t0 += 100.0f) {   /* 1 m legs (mech3d_hull_hit: the pieces' sphere entries) */
-            float o2[3] = {from[0] + dir[0] * t0, from[1] + dir[1] * t0, from[2] + dir[2] * t0}, d2[3] = {dir[0] * 100.0f, dir[1] * 100.0f, dir[2] * 100.0f}, ft;
-            int lg;
-            if (mech3d_hull_hit(mq, o2, d2, mech3d_fly_mask(q < 0 ? s->player_unit.loc_gone : s->units[q].loc_gone), &ft, &lg)) { best = t0 + ft * 100.0f; hit = 1; hitq = q; break; }
+        /* Trace from the eye to the current closest contact. Splitting the ray into short
+         * segments could move a hit on a segment boundary to the end of the following segment. */
+        const float ray[3] = {dir[0] * best, dir[1] * best, dir[2] * best};
+        if (mech3d_hull_hit(mq, from, ray, mech3d_fly_mask(q < 0 ? s->player_unit.loc_gone : s->units[q].loc_gone),
+                           &fraction, &group) && fraction < 1.0f) {
+            best *= fraction;
+            hit = 1;
+            hitq = q;
         }
     }
     {   /* world objects nearer: a thing's object (0x200) is a unit struck, anything else stops the ray */
@@ -3183,9 +3186,12 @@ static void player_lock_step(msim *s, float pl_h, float ticks)
     if (wid >= 0 && msim_weapon_guided(wid) && (th || (e >= 0 && e < s->actor_count && s->armed[e] && !s->units[e].destroyed && !s->player_unit.destroyed))) {
         float dx = th ? tp[0] - s->player[0] : (float)s->actors[e].mech.origin[0] - s->player[0];
         float dz = th ? tp[2] - s->player[2] : (float)s->actors[e].mech.origin[2] - s->player[2];
-        float dy = th ? tp[1] - s->player_unit.y : (s->units[e].y + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
+        /* DOS 0x52f14 compares the positions stored by target selection, measured from each unit's feet. */
+        float dy = th ? tp[1] - s->player_unit.y : msim_dos_int ? s->units[e].y - s->player_unit.y :
+                   (s->units[e].y + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
         float d = sqrtf(dx * dx + dz * dz + dy * dy), yaw, pit;
-        if (d > (float)LOCK_MIN[wid] && (th ? d <= combat_weapon_range(wid) : d < combat_weapon_range(wid))) {
+        const float max_range = combat_weapon_range(wid);
+        if (d > (float)LOCK_MIN[wid] && (d < max_range || ((th || msim_dos_int) && d == max_range))) {
             yaw = atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw;
             while (yaw > 180.0f) yaw -= 360.0f;
             while (yaw < -180.0f) yaw += 360.0f;
@@ -3211,6 +3217,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
 {
     int i, k, w;
     float ticks = dt * COMBAT_TICKS_PER_S;
+    float lock_ticks = msim_dos_int ? (float)dos_ticks : ticks;
     char line[200];
     const float pl_h = 950.0f;          /* Timber Wolf muzzle / aim height, cm (approx.) */
 
@@ -3238,7 +3245,17 @@ static void combat_step(msim *s, float dt, int dos_ticks)
     for (i = 0; i < s->actor_count; i++) if (s->armed[i]) {
         /* 0x1001a180: the weapon step (0x100437a0) runs before the AI (0x10011c50) - it sees the trigger the AI left
          * last frame */
-        if (s->minds && s->ai_ok) combat_ai_trigger(&s->units[i]);
+        if (s->minds && s->ai_ok) {
+            int started = combat_ai_trigger(&s->units[i]);
+            if (msim_dos_int && (msim_weapon_guided(started) || started == 0x15)) {
+                float ex, ez, ey, ef, eh;
+                int who;
+                if (pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who) && who >= 0) {
+                    int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
+                    missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2], 1);
+                }
+            }
+        }
         combat_tick(&s->units[i], dt, dos_ticks);
     }
     if (s->cheat_kill > 0 && s->cheat_kill <= s->actor_count) {   /* the cheat codes "gankem" / "enolagay" */
@@ -3294,12 +3311,14 @@ static void combat_step(msim *s, float dt, int dos_ticks)
     /* triggers and launches: the AI's fire decisions */
     for (i = 0; i < s->actor_count; i++) {
         float dx, dz, from[3], to[3], ex = 0, ez = 0, ey = 0, ef = 0, eh = 0, aim_h;
-        int who = -1;
+        int who = -2;
         ai_mind *m = s->minds && s->ai_ok ? &s->minds[i] : NULL;
         /* the AI's trigger (+0x25): cleared by the state's movement (0x100130f0 case 2, 0x10013290), which does not
          * run when a rule fired (0x10011c50) - then it holds */
         if (m && !m->rule_fired) s->units[i].ai_trigger = 0;
-        if (!s->armed[i] || s->units[i].destroyed || !pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who)) continue;
+        if (!s->armed[i] || s->units[i].destroyed) continue;
+        /* DOS 0x5235a: an online unit releases the rest of a volley even after losing its target. */
+        const int has_target = pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who);
         (void)ef;
         const int starmate = s->actors[i].friendly && s->actors[i].table == 0;
         aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
@@ -3313,7 +3332,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                 for (int axis = 0; axis < 3; axis++)
                     from[axis] = mech->eye_pos[axis];
         }
-        if (m) {   /* AI missile lock (0x10044560, every live mech, for the AI's selected weapon +0xac = combat_unit.ai_sel):
+        if (m && has_target) {   /* AI missile lock (0x10044560, every live mech, for the AI's selected weapon +0xac = combat_unit.ai_sel):
                     * guided, origin distance (3D) in the weapon's window (+0x3c < d <= +0x40), within 16 degrees of the aim
                     * (bearing off heading + lagged twist; pitch + elevation): 0x8000 on target; 0x40 + a 0x16a-tick timer
                     * when first on, counted down by dt, locked (0x80) at <= 0. Off target: 0x8000 / 0x80 cleared and the
@@ -3338,14 +3357,14 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                     m->lock |= 0x8000;
                     if (!(m->lock & 0x40)) { m->lock |= 0x40; m->lock_ticks = msim_dos_int ? 364.0f : 362.0f; }   /* DOS 0x530d4: 0x16c */
                     else if (m->lock_ticks < 1.0f) { m->lock_ticks = 0; m->lock |= 0x80; }
-                    else m->lock_ticks -= ticks;
+                    else m->lock_ticks -= lock_ticks;
                 } else {
                     m->lock &= ~(0x8000 | 0x80);
-                    if (m->lock & 0x40) { m->lock_ticks += ticks; if (m->lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) m->lock &= ~0x40; }
+                    if (m->lock & 0x40) { m->lock_ticks += lock_ticks; if (m->lock_ticks >= (msim_dos_int ? 364.0f : 362.0f)) m->lock &= ~0x40; }
                 }
             } else m->lock = 0;
-        }
-        if (m) {
+        } else if (m) m->lock = 0;   /* DOS 0x52f03: no target clears the timed lock */
+        if (m && has_target) {
             /* set by the fire decision (0x100231a0) when 0x100232b0 chooses a weapon (it stays selected; ENEMYFIR
              * 0x10023428) and the line to the target is clear (0x10015090). The weapon step fires on the press, one
              * weapon, and moves on at the release (combat_ai_trigger) */
@@ -3374,7 +3393,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                     }
                 }
             }
-        } else if (who == -1 && order_attacks_player(s, i) &&
+        } else if (has_target && who == -1 && order_attacks_player(s, i) &&
             !los_blocked(s, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f, (float)s->actors[i].mech.origin[2],
                          ex, aim_h, ez) &&
             !los_unit_first(s, i, who, (float)s->actors[i].mech.origin[0], s->units[i].y + s->height[i] * 0.7f, (float)s->actors[i].mech.origin[2],
@@ -3388,83 +3407,85 @@ static void combat_step(msim *s, float dt, int dos_ticks)
              * 0x6f, volume 0x32, not positional (pos NULL) */
             if (fw >= 0 && who == -1 && msim_weapon_guided(s->units[i].weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
         }
+        int first = 0, loc = -1, hom = -2;
+        w = combat_next_projectile_h(&s->units[i], &first, &loc, &hom);
+        if (w < 0) continue;
         {   /* engine 0x100448e0: the shot follows the shooter's aim line (no random scatter): the legs' heading + the
              * LAGGED torso twist (clamped to MGEO) and the lagged pitch, from the aim origin; aimed at the ray's point at
              * the target's distance (no AI programs; with them the aim ray below, per projectile) */
-            float lim = s->twist_limit ? s->twist_limit[i] : 90.0f, rel, yaw, pit, d3;
+            float lim = s->twist_limit ? s->twist_limit[i] : 90.0f, rel = 0.0f, yaw, pit = 0.0f, d3;
             float tx = ex - from[0], ty = aim_h - from[1], tz = ez - from[2];
-            if (m) rel = m->twist;
-            else {   /* no AI programs: straight at the target within the twist limit */
+            if (m) {
+                rel = m->twist;
+                pit = m->pitch;
+            } else if (has_target) {   /* no AI programs: straight at the target within the twist limit */
                 rel = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->actors[i].mech.heading);
                 if (lim < 360.0f) { if (rel > lim) rel = lim; if (rel < -lim) rel = -lim; }
+                pit = atan2f(ty, sqrtf(tx * tx + tz * tz)) * 180.0f / 3.14159265f;
             }
             yaw = (s->actors[i].mech.heading + rel) * 3.14159265f / 180.0f;
-            pit = (m ? m->pitch : atan2f(ty, sqrtf(tx * tx + tz * tz)) * 180.0f / 3.14159265f) * 3.14159265f / 180.0f;
-            d3 = sqrtf(tx * tx + ty * ty + tz * tz);
+            pit = pit * 3.14159265f / 180.0f;
+            d3 = has_target ? sqrtf(tx * tx + ty * ty + tz * tz) : 50000.0f;
             to[0] = from[0] + sinf(yaw) * cosf(pit) * d3; to[1] = from[1] + sinf(pit) * d3; to[2] = from[2] + cosf(yaw) * cosf(pit) * d3;
         }
-        {
-            int first = 0;
-            int loc = -1, hom = -2;
-            while ((w = combat_next_projectile_h(&s->units[i], &first, &loc, &hom)) >= 0) {
-                /* from the weapon's mount (POFO slot by its location), else the body point */
-                float o[3] = {(float)s->actors[i].mech.origin[0], s->units[i].y, (float)s->actors[i].mech.origin[2]}, mf[3];
-                const float *src = mech3d_mount_world(&s->actors[i].mech, mech3d_mount_slot(loc), o, s->actors[i].mech.heading, mf) == 0 ? mf : from;
-                if (m && s->aim) {
-                    /* every projectile as it leaves (0x10043cc0 -> 0x10044810, AI units only): the aim ray from the EYE
-                     * (unit +0x44, the EYEO node as posed: walk, lagged twist; no torso sway, mech3d.c) along the eye
-                     * object's world yaw and the controller's lagged pitch (0x100449d0: +0x20 -> +0x1c replaces the
-                     * eye's own pitch) sets the aim range (aim_range_step); the shot heads from its mount for the
-                     * point at that range on the ray (0x100448e0) - so it lands where the eye ray meets the target, not
-                     * on the target's centre */
-                    const mech3d *am = &s->actors[i].mech;
-                    float eye[3], dir[3], ey2, pr = m->pitch * 3.14159265f / 180.0f, dist, r;
-                    int hit;
-                    if (am->eye_ok) {
-                        eye[0] = o[0] + am->eye_pos[0] - am->mount_from[0];
-                        eye[1] = o[1] + am->eye_pos[1] - am->mount_from[1];
-                        eye[2] = o[2] + am->eye_pos[2] - am->mount_from[2];
-                        ey2 = atan2f(am->eye_rot[2], am->eye_rot[8]);
-                    } else {
-                        memcpy(eye, from, sizeof eye);
-                        ey2 = (am->heading + m->twist) * 3.14159265f / 180.0f;
-                    }
-                    float target_range = 0.0f;
-                    if (starmate && who >= 0) {
-                        /* Account for the latest eye pose while retaining the twist and pitch servo lag. */
-                        float tx = ex - eye[0], ty = aim_h - eye[1], tz = ez - eye[2];
-                        target_range = sqrtf(tx * tx + ty * ty + tz * tz);
-                        ey2 = atan2f(tx, tz) + wrap180(m->twist - m->twist_demand) * 3.14159265f / 180.0f;
-                        pr = atan2f(ty, hypotf(tx, tz)) + (m->pitch - m->pitch_demand) * 3.14159265f / 180.0f;
-                    }
-                    dir[0] = sinf(ey2) * cosf(pr); dir[1] = sinf(pr); dir[2] = cosf(ey2) * cosf(pr);
-                    hit = aim_ray(s, i, eye, dir, &dist);
-                    r = aim_range_step(s, &s->aim[i], hit, dist);
-                    /* Converge at the selected target so a miss from the eye cannot send shots from
-                     * high mounts over a low turret by converging well behind it. */
-                    if (target_range > 0.0f) r = target_range;
-                    to[0] = eye[0] + dir[0] * r; to[1] = eye[1] + dir[1] * r; to[2] = eye[2] + dir[2] * r;
-                    if (getenv("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
-                        fprintf(stderr, "aiaim %.2f actor %d w %d hit %d dist %.0f range %d conv %.0f eye %.0f %.0f %.0f yaw %.2f body %.2f pitch %.2f\n",
-                                s->now / 1000.0, i, w, hit, dist, s->aim[i].range.value, r, eye[0], eye[1], eye[2], ey2 * 180.0f / 3.14159265f,
-                                wrap180(am->heading + m->twist), pr * 180.0f / 3.14159265f);
+        do {
+            /* from the weapon's mount (POFO slot by its location), else the body point */
+            float o[3] = {(float)s->actors[i].mech.origin[0], s->units[i].y, (float)s->actors[i].mech.origin[2]}, mf[3];
+            const float *src = mech3d_mount_world(&s->actors[i].mech, mech3d_mount_slot(loc), o, s->actors[i].mech.heading, mf) == 0 ? mf : from;
+            if (m && s->aim) {
+                /* every projectile as it leaves (0x10043cc0 -> 0x10044810, AI units only): the aim ray from the EYE
+                 * (unit +0x44, the EYEO node as posed: walk, lagged twist; no torso sway, mech3d.c) along the eye
+                 * object's world yaw and the controller's lagged pitch (0x100449d0: +0x20 -> +0x1c replaces the
+                 * eye's own pitch) sets the aim range (aim_range_step); the shot heads from its mount for the
+                 * point at that range on the ray (0x100448e0) - so it lands where the eye ray meets the target, not
+                 * on the target's centre */
+                const mech3d *am = &s->actors[i].mech;
+                float eye[3], dir[3], ey2, pr = m->pitch * 3.14159265f / 180.0f, dist, r;
+                int hit;
+                if (am->eye_ok) {
+                    eye[0] = o[0] + am->eye_pos[0] - am->mount_from[0];
+                    eye[1] = o[1] + am->eye_pos[1] - am->mount_from[1];
+                    eye[2] = o[2] + am->eye_pos[2] - am->mount_from[2];
+                    ey2 = atan2f(am->eye_rot[2], am->eye_rot[8]);
+                } else {
+                    memcpy(eye, from, sizeof eye);
+                    ey2 = (am->heading + m->twist) * 3.14159265f / 180.0f;
                 }
-                {
-                    int before = s->shot_count;
-                    spawn_shot_h(s, w, i, src, to, 0.0f, hom);   /* the target latched at the trigger (slot +0x18 / +0x1c) */
-                    if (s->shot_count > before) {
-                        s->shots[s->shot_count - 1].first = first;
-                        s->shots[s->shot_count - 1].life -= combat_last_age;   /* 0x10043cc0: +0x4c - slot +0x10 */
-                    }
+                float target_range = 0.0f;
+                if (starmate && who >= 0) {
+                    /* Account for the latest eye pose while retaining the twist and pitch servo lag. */
+                    float tx = ex - eye[0], ty = aim_h - eye[1], tz = ez - eye[2];
+                    target_range = sqrtf(tx * tx + ty * ty + tz * tz);
+                    ey2 = atan2f(tx, tz) + wrap180(m->twist - m->twist_demand) * 3.14159265f / 180.0f;
+                    pr = atan2f(ty, hypotf(tx, tz)) + (m->pitch - m->pitch_demand) * 3.14159265f / 180.0f;
                 }
-                if (who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* the target dodges (0x10020ac0 from 0x1004397b) */
-                    int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
-                    missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2], 1);
-                }
-                if (s->on_shot) s->on_shot(s->shot_user, w, i, first, src[0], src[2]);
-                if (first) muzzle(s, w, src, src == mf ? &s->actors[i].mech : NULL, mech3d_mount_slot(loc), s->actors[i].mech.heading);
+                dir[0] = sinf(ey2) * cosf(pr); dir[1] = sinf(pr); dir[2] = cosf(ey2) * cosf(pr);
+                hit = aim_ray(s, i, eye, dir, &dist);
+                r = aim_range_step(s, &s->aim[i], hit, dist);
+                /* Converge at the selected target so a miss from the eye cannot send shots from
+                 * high mounts over a low turret by converging well behind it. */
+                if (target_range > 0.0f) r = target_range;
+                to[0] = eye[0] + dir[0] * r; to[1] = eye[1] + dir[1] * r; to[2] = eye[2] + dir[2] * r;
+                if (getenv("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
+                    fprintf(stderr, "aiaim %.2f actor %d w %d hit %d dist %.0f range %d conv %.0f eye %.0f %.0f %.0f yaw %.2f body %.2f pitch %.2f\n",
+                            s->now / 1000.0, i, w, hit, dist, s->aim[i].range.value, r, eye[0], eye[1], eye[2], ey2 * 180.0f / 3.14159265f,
+                            wrap180(am->heading + m->twist), pr * 180.0f / 3.14159265f);
             }
-        }
+            {
+                int before = s->shot_count;
+                spawn_shot_h(s, w, i, src, to, 0.0f, hom);   /* the target latched at the trigger (slot +0x18 / +0x1c) */
+                if (s->shot_count > before) {
+                    s->shots[s->shot_count - 1].first = first;
+                    s->shots[s->shot_count - 1].life -= combat_last_age;   /* 0x10043cc0: +0x4c - slot +0x10 */
+                }
+            }
+            if (!msim_dos_int && who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* 0x10020ac0 from 0x1004397b */
+                int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
+                missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2], 1);
+            }
+            if (s->on_shot) s->on_shot(s->shot_user, w, i, first, src[0], src[2]);
+            if (first) muzzle(s, w, src, src == mf ? &s->actors[i].mech : NULL, mech3d_mount_slot(loc), s->actors[i].mech.heading);
+        } while ((w = combat_next_projectile_h(&s->units[i], &first, &loc, &hom)) >= 0);
     }
     if (!msim_dos_int) player_lock_step(s, pl_h, ticks);
     /* the player fires at the crosshair target, or with none along the aim line (engine 0x100448e0: shots follow the
@@ -3504,7 +3525,17 @@ static void combat_step(msim *s, float dt, int dos_ticks)
             else { to[0] = from[0] + dx; to[1] = from[1] + sinf(ap) * 100000.0f; to[2] = from[2] + dz; }
             /* a volley triggered now latches the target if locked (0x100437a0 / 0x10044440: slot +0x18 / +0x1c from the
              * mech's +0xdc when the controller's 0x80 is set) - its later missiles home even if the lock breaks */
-            if (s->player_attacks) combat_trigger_mask(&s->player_unit, tgt_ok ? sqrtf(dx * dx + dz * dz) : 0.0f, s->player_fire_mask ? s->player_fire_mask : 0xFFFFFFFFu);
+            if (s->player_attacks) {
+                uint32_t started = combat_trigger_mask(&s->player_unit, tgt_ok ? sqrtf(dx * dx + dz * dz) : 0.0f,
+                                                       s->player_fire_mask ? s->player_fire_mask : 0xFFFFFFFFu);
+                /* DOS 0x522c6 / 0x52dc8: a missile/PPC warning is sent as the volley enters state 2. */
+                if (msim_dos_int)
+                    for (int slot = 0; slot < s->player_unit.weapon_count && slot < 32; slot++) {
+                        int weapon = s->player_unit.weapons[slot].weapon;
+                        if ((started & (1u << slot)) && (msim_weapon_guided(weapon) || weapon == 0x15))
+                            dos_player_warning(s, to);
+                    }
+            }
             {
                 int first = 0;
                 int loc = -1, hom = -2;
@@ -3530,12 +3561,10 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                         memcpy(ns->aim_o, s->player_eye_ok ? s->player_eye : from, sizeof ns->aim_o);
                         ns->aim_d[0] = sinf(ay2) * cosf(ap2); ns->aim_d[1] = sinf(ap2); ns->aim_d[2] = cosf(ay2) * cosf(ap2);
                     }
-                    if (msim_weapon_guided(w) || w == 0x15) {
-                        if (msim_dos_int) dos_player_warning(s, to);
-                        else if (tgt_ok) {   /* 0x10020ac0: within 15 degrees of torso aim */
-                            float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
-                            if (fabsf(off) < 15.0f) missile_warning(s, e, 1, s->player[0], s->player[2], 1);
-                        }
+                    if (!msim_dos_int && tgt_ok && (msim_weapon_guided(w) || w == 0x15)) {
+                        /* 0x10020ac0: within 15 degrees of torso aim */
+                        float off = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
+                        if (fabsf(off) < 15.0f) missile_warning(s, e, 1, s->player[0], s->player[2], 1);
                     }
                     s->shot_loc = loc;
                     if (s->on_shot) s->on_shot(s->shot_user, w, -1, first, src[0], src[2]);
@@ -3550,7 +3579,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
 
     /* DOS 0x27780 calls weapon dispatch (0x27836) before target upkeep and lock (0x27a55). */
     if (msim_dos_int) {
-        player_lock_step(s, pl_h, ticks);
+        player_lock_step(s, pl_h, lock_ticks);
         s->dos_warning_target = s->player_lock_target;
     }
 
