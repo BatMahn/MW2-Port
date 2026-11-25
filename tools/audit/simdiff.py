@@ -10,6 +10,7 @@ Modelled on the GBL port's tools/audit/simdiff.py; MW2.EXE's controller offsets 
 import ctypes, os, random, sys, math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mw2emu
+from unicorn.x86_const import UC_X86_REG_FPCW
 s32 = mw2emu.s32
 
 BUILD = os.environ.get('SIMDIFF_BUILD', '/tmp/simdiff_build')
@@ -400,11 +401,463 @@ def leg_turn_demand(rep, rnd, n):
         if k % 50 == 49: e.reset_data()
 
 @test
+def damage_shade(rep, rnd, n):
+    """Original loader packs the shade scales, and 0x26270 updates the part only from the side struck."""
+    e = emu()
+    L = lib('combat')
+    vec = ctypes.c_int * 3
+    L.shim_dos_damage_shade.argtypes = [vec, vec] + [ctypes.c_int] * 5
+    obj, control, tree, part, locations = e.alloc(0x100), e.alloc(0x200), e.alloc(0x30), e.alloc(0x90), e.alloc(8 * 40)
+    e.w32(control, obj)
+    e.w32(control + 0x58, locations)
+    e.w32(obj + 0x40, tree)
+    e.w32(tree + 0x6c, part)
+    e.w32(0xf8a40, obj)
+    dif_block(e)
+    e.stub(RAND)
+    for _ in range(n * 24):
+        player = rnd.randrange(2)
+        loc = rnd.choice([1, 2, 4, 5, 6, 7, 8])
+        rear = rnd.randrange(2)
+        side = int(rear != 0 and loc in (2, 4))
+        divisor = 4 if player else rnd.choice([1, 3, 4])
+        factor = 3 if divisor == 1 and rnd.randrange(2) else divisor
+        base = [rnd.randint(0, 110), rnd.randint(0, 34) if loc in (2, 4) else 0, rnd.randint(1, 47)]
+        remaining = [rnd.randint(0, base[0] * factor * 256) * 256,
+                     rnd.randint(0, base[1] * factor * 256) * 256,
+                     rnd.randint(1, base[2] * 256) * 256]
+        damage = rnd.randint(1, min(2048, (remaining[side] + remaining[2] - 1) >> 7)) * 128
+        prev = rnd.choice([0, 0, 0, 3, 14])
+        rec = locations + (loc - 1) * 40
+        e.w32(PLAYER, 0)
+        e.w32(obj + 4, 0 if player else 1)
+        e.w32(0x961d8, 4)
+        e.w32(0x961d4, divisor)
+        e.w32(0x9ee48, -1)
+        e.w16(part, 0x8100 | prev << 4)
+        e.w16(part + 0x16, loc)
+        for j, value in enumerate(base):
+            e.w32(rec + j * 4, value)
+        e.w16(rec + 0x26, 0)
+        e.run(0x4ca25, 0x4ca8c, ebx=rec)
+        for j, value in enumerate(remaining):
+            e.w32(rec + j * 4, value)
+        e.call(0x26270, eax=control, edx=damage, ebx=loc | (rear << 15))
+        original = (e.r16(part) >> 4) & 15
+        port = L.shim_dos_damage_shade(vec(*base), vec(*remaining), divisor, prev, damage, rear, loc)
+        rep.check(original == port, 'location %d rear %d older shade %d: DOS %d port %d' %
+                  (loc, rear, prev, original, port))
+
+@test
+def projectile_pool(rep, rnd, n):
+    """0x52710 picks the first available slot of the weapon kind, and 0x506f0 visits slots in ascending order."""
+    e = emu()
+    L = lib('msim')
+    L.shim_projectile_pool_new.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int]
+    L.shim_projectile_pool_new.restype = ctypes.c_void_p
+    L.shim_projectile_pool_insert.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    L.shim_projectile_pool_release.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    L.shim_projectile_pool_at.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    L.shim_projectile_pool_free.argtypes = [ctypes.c_void_p]
+    base, stride = 0x153940, 0x50
+    weapon = e.alloc(0x58)
+    ebp = mw2emu.STACK_TOP - 0x800
+    for _ in range(n):
+        kinds = [rnd.randrange(8) for _ in range(rnd.randint(8, 175))]
+        for slot in range(175):
+            entry = base + slot * stride
+            e.w32(entry, kinds[slot] if slot < len(kinds) else -1)
+            e.w32(entry + 0x2c, 1 if slot < len(kinds) else 0)
+            e.w32(entry + 0x38, 0)
+        pool = L.shim_projectile_pool_new((ctypes.c_uint8 * len(kinds))(*kinds), len(kinds))
+        active = set()
+        try:
+            for _ in range(96):
+                if active and rnd.randrange(4) == 0:
+                    slot = rnd.choice(sorted(active))
+                    e.w32(base + slot * stride + 0x38, 0)
+                    L.shim_projectile_pool_release(pool, slot)
+                    active.remove(slot)
+                else:
+                    kind = rnd.randrange(10)
+                    e.w32(weapon, kind)
+                    e.w32(ebp - 4, weapon)
+                    e.run(0x52709, 0x5274f, ebp=ebp, ebx=0)
+                    original = (e.reg('esi') - base) // stride if e.reg('ebx') else -1
+                    port = L.shim_projectile_pool_insert(pool, kind)
+                    rep.check(port == original, 'kind %d: DOS slot %d port %d' % (kind, original, port))
+                    if original >= 0:
+                        e.w32(base + original * stride + 0x38, 1)
+                        active.add(original)
+                state = [L.shim_projectile_pool_at(pool, i) for i in range(len(active) + 1)]
+                rep.check(state == sorted(active) + [-1], 'visit order %s, port %s' % (sorted(active), state))
+        finally:
+            L.shim_projectile_pool_free(pool)
+
+@test
+def dos_collision_lods(rep, rnd, n):
+    """Compare DOS distance arithmetic and the two-pass collision representation selector."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    ptr = ctypes.POINTER(ctypes.c_int32)
+    L.shim_dos_lods.argtypes = [ptr, ctypes.c_int, vec, ctypes.c_int, ctypes.c_int, ptr]
+    cam, yaw, slant, level, pitch = e.alloc(0xbc), *(e.alloc(4) for _ in range(4))
+    units = [e.alloc(0x100) for _ in range(24)]
+    e.w32(0x9701c, cam)
+    def replace_hull(em):
+        changed.append(em.reg('eax'))
+        return 1
+
+    e.stub(0x37060, replace_hull)
+    for _ in range(n * 5):
+        count = rnd.randint(1, len(units))
+        mode = rnd.randrange(3)  # absent, cockpit, external
+        e.w32(PLAYER, 0 if mode else -1)
+        e.w32(0x96ee8, int(mode == 2))
+        e.w32(0x961c8, count)
+        eye = [rnd.randint(-50000, 50000) for _ in range(3)]
+        scale = rnd.choice([49152, 65536, 131072, 209715, rnd.randint(48000, 210000)])
+        for j, v in enumerate(eye):
+            e.w32(cam + j * 4, v)
+        e.w32(cam + 0xb8, scale)
+        values, expected, changed = [], [], []
+        for j, unit in enumerate(units[:count]):
+            distance = (rnd.choice([3600, 8500, 22500]) * scale + 32768) >> 16
+            distance += rnd.randint(-5, 5)
+            x, z = rnd.choice([(0, 0), (0, distance), (-distance, 0), (distance, -distance),
+                               (rnd.randint(-distance, distance), rnd.randint(-distance, distance))])
+            y = rnd.choice([0, 1, rnd.randint(-8000, 8000)])
+            dead = int(rnd.randrange(6) == 0)
+            e.w32(0xf8a40 + 4 * j, unit)
+            e.w32(unit + 4, j)
+            e.w16(unit + 20, 2 * dead)
+            prev = rnd.randrange(5 if j == 0 and mode else 4)
+            e.w32(unit + 28, prev)
+            for axis, v in enumerate([x, y, z]):
+                e.w32(unit + 0x50 + 4 * axis, v + eye[axis])
+                values.append(v + eye[axis])
+            values.extend([dead, prev])
+            e.call(0x2ab60, eax=x, edx=y, ebx=z, ecx=yaw, stack=(slant, level, pitch))
+            expected.append((e.rs32(level), e.rs32(slant)))
+        e.call(0x37580)
+        order = list(reversed(changed)) + [j for j in reversed(range(count)) if j not in changed]
+        out = (ctypes.c_int32 * (count * 4))()
+        L.shim_dos_lods((ctypes.c_int32 * len(values))(*values), count, vec(*eye), scale, mode, out)
+        for j, unit in enumerate(units[:count]):
+            original = (*expected[j], e.rs32(unit + 28), order[j])
+            native = tuple(out[4 * j:4 * j + 4])
+            rep.check(original == native, 'camera %s scale %d mode %d unit %s: DOS %s port %s' %
+                      (eye, scale, mode, values[5 * j:5 * j + 5], original, native))
+
+
+@test
+def dos_obstacle_probe(rep, rnd, n):
+    """DOS 0x2df30 starts a side probe off-centre while aiming at a point relative to the hull."""
+    e = emu()
+    L = lib('msim')
+    v3, v6 = ctypes.c_int32 * 3, ctypes.c_int32 * 6
+    out = v6()
+    L.shim_dos_probe_points.argtypes = [v3, ctypes.c_float] + [ctypes.c_int] * 4 + [v6]
+    unit, control, matrix, segment = e.alloc(0x210), e.alloc(0x200), e.alloc(0x30), e.alloc(0x38)
+    e.w32(unit + 0x20, control)
+    e.stub(0x1e540, ret=matrix)
+    for _ in range(n * 12):
+        origin = [rnd.randint(-200000, 200000) for _ in range(3)]
+        heading = rnd.choice([0, 45, 90, 180, -90, rnd.uniform(-180, 180)])
+        sn, cs = math.sin(math.radians(heading)), math.cos(math.radians(heading))
+        for j, value in enumerate([cs, 0, sn, 0, 1, 0, -sn, 0, cs]):
+            e.w32(matrix + 4 * j, round(value * (1 << 29)))
+        for j, value in enumerate(origin):
+            e.w32(matrix + 0x24 + 4 * j, value)
+            e.w32(unit + 0x50 + 4 * j, value)
+        step, side = rnd.randrange(4), rnd.choice([-1, 1])
+        length, lateral = rnd.randint(1499, 15000), rnd.choice([0, rnd.randint(50, 1000)])
+        e.w32(control + 0xe8, lateral + 1)
+        e.call(0x2df30, eax=unit, edx=segment, ebx=side, ecx=step, stack=(length, int(lateral > 0)))
+        original = [e.rs32(segment + 4 * j) for j in range(6)]
+        L.shim_dos_probe_points(v3(*origin), heading, step, side, length, lateral, out)
+        rep.check(max(abs(a - b) for a, b in zip(out, original)) <= 1,
+                  'probe %d side %d length %d lateral %d: DOS %s port %s' %
+                  (step, side, length, lateral, original, list(out)))
+
+@test
+def dos_hull_bounds(rep, rnd, n):
+    """Execute the original collision-sphere builder on integer hull vertices."""
+    e = emu()
+    e.uc.reg_write(UC_X86_REG_FPCW, e.r16(0xa4520))
+    L = lib('msim')
+    out = (ctypes.c_int32 * 4)()
+    L.shim_dos_hull_bounds.argtypes = [ctypes.POINTER(ctypes.c_int32), ctypes.c_int, type(out)]
+    obj, model = e.alloc(0x80), e.alloc(24 + 44 * 64)
+    e.w32(obj + 28, model)
+    for _ in range(n * 10):
+        count = rnd.choice([1, 2, 3, 16, 24, 64])
+        points = [rnd.randint(-14000, 14000) for _ in range(count * 3)]
+        e.w16(model + 4, count)
+        for j in range(count):
+            for axis in range(3):
+                e.w32(model + 24 + j * 44 + 12 + axis * 4, points[j * 3 + axis])
+        e.call(0x37f60, eax=obj)
+        original = [e.rs32(obj + 52 + axis * 4) for axis in range(4)]
+        L.shim_dos_hull_bounds((ctypes.c_int32 * len(points))(*points), count, out)
+        rep.check(list(out) == original, '%d vertices: DOS %s port %s' % (count, original, list(out)))
+
+@test
+def projectile_contact_math(rep, rnd, n):
+    """DOS 0x1d960/0x1d9f0 prepares the segment, 0x3a745 tests its sphere, 0x1ec60 clips against a box."""
+    e = emu()
+    e.uc.reg_write(UC_X86_REG_FPCW, e.r16(0xa4520))  # Watcom startup at 0x78159
+    L = lib('msim')
+    vec, vec4, vec6 = (ctypes.c_int32 * k for k in (3, 4, 6))
+    out = (ctypes.c_int32 * 9)()
+    L.shim_dos_contact_math.argtypes = [vec, vec, vec4, vec6, type(out)]
+    obj, segment, box, frame = e.alloc(0x60), e.alloc(0x38), e.alloc(24), e.alloc(0x80)
+    e.w16(obj, 0x200)
+    e.w32(obj + 0x44, box)
+    for _ in range(n * 30):
+        p = [rnd.randint(-25000, 25000) for _ in range(3)]
+        delta = [rnd.choice([0, 0, 1, -1, rnd.randint(-8000, 8000)]) for _ in range(3)]
+        if not any(delta):
+            delta[2] = 1
+        end = [p[i] + delta[i] for i in range(3)]
+        scale = rnd.choice([-0.5, 0, 0.1, 0.5, 0.9, 1.4])
+        radius = rnd.randint(50, 3000)
+        center = [p[i] + round(delta[i] * scale) + rnd.randint(-radius, radius) for i in range(3)]
+        bounds = [v for c in center for v in (c - radius // 2, c + radius // 2)]
+        for i, value in enumerate(center + [radius]):
+            e.w32(obj + 0x34 + 4 * i, value)
+        for i, value in enumerate(bounds):
+            e.w32(box + 4 * i, value)
+        e.call(0x1d840, eax=segment, edx=p[0], ebx=p[1], ecx=p[2], stack=end)
+        octlen = (3 * max(map(abs, delta)) + sum(map(abs, delta))) // 4
+        e.call(0x1d9f0 if octlen > 3000 else 0x1d960, eax=segment)
+        length = e.rs32(segment + 0x30)
+        direction = [e.rs32(segment + 0x24 + 4 * i) for i in range(3)]
+        s = e.call(0x3a745, eax=obj, edx=segment)
+        hit = e.call(0x1ec60, eax=obj, edx=segment)
+        d = e.rs32(segment + 0x30) if hit else 0x7fffffff
+        for i, offset in enumerate((0x76, 0x7a, 0x72)):
+            e.w32(frame + offset, p[i])
+            e.w32(frame + 0x1e + 4 * i, direction[i])
+        e.run(0x5093c, 0x50984, ebp=frame, ebx=direction[0])
+        # Only the unit bullet effect uses the backed X and Z (0x510c1).
+        backed = [e.rs32(frame + 0x66), p[1], e.rs32(frame + 0x62)]
+        L.shim_dos_contact_math(vec(*p), vec(*delta), vec4(*center, radius), vec6(*bounds), out)
+        dos = [length] + direction + [s, d] + backed
+        rep.check(list(out) == dos, 'start %s step %s, sphere %s radius %d: DOS %s port %s' %
+                  (p, delta, center, radius, dos, list(out)))
+
+@test
+def projectile_obstruction(rep, rnd, n):
+    """DOS 0x1c3f0 keeps the first list entry at equal hit distances, and the nearest box otherwise."""
+    e = emu()
+    L = lib('msim')
+    L.shim_dos_projectile_obstruction.argtypes = [ctypes.c_int] * 3
+    L.shim_dos_projectile_terrain.argtypes = [ctypes.c_int]
+    head, segment, hit = e.alloc(32), e.alloc(0x38), e.alloc(4)
+    obj = [e.alloc(0x60), e.alloc(0x60)]
+    box = [e.alloc(24), e.alloc(24)]
+    e.w32(0x95b44, head)
+    for i in range(2):
+        e.w16(obj[i], 0x200)  # the box bounds are already cached
+        e.w32(obj[i] + 0x44, box[i])
+    for _ in range(n * 8):
+        first = rnd.randint(100, 2900)
+        second = first if rnd.randrange(2) else rnd.randint(100, 2900)
+        order = rnd.randrange(2)
+        for i, z in enumerate((first, second)):
+            for j, value in enumerate((-100, 100, 100, 300, z, z + 200)):
+                e.w32(box[i] + 4 * j, value)
+            for j, value in enumerate((0, 200, z + 100, 174)):
+                e.w32(obj[i] + 0x34 + 4 * j, value)
+        e.w32(head + 0x10, obj[order])
+        e.w32(obj[order] + 0x10, obj[1 - order])
+        e.w32(obj[1 - order] + 0x10, 0)
+        e.call(0x1d840, eax=segment, edx=0, ebx=200, ecx=0, stack=(0, 200, 2400))
+        e.call(0x1c3f0, eax=segment, edx=hit, ebx=0)
+        target = e.r32(hit)
+        original = obj.index(target) if target else -1
+        port = L.shim_dos_projectile_obstruction(first, second, order)
+        rep.check(original == port, 'boxes at %d and %d, newest %d: DOS %d port %d' %
+                  (first, second, order, original, port))
+    rep.check(L.shim_dos_projectile_terrain(0) == 1 and L.shim_dos_projectile_terrain(1) == 0,
+              'a terrain face above zero blocks the shot even when its endpoint is beyond the face')
+
+@test
+def dos_mixed_contact(rep, rnd, n):
+    """The DOS list resolves scenery and hulls together, with the first eligible member retaining a tie."""
+    e = emu()
+    L = lib('msim')
+    out = (ctypes.c_int32 * 4)()
+    L.shim_dos_mixed_contact.argtypes = [ctypes.c_int] * 4 + [type(out)]
+    head, segment, hit = e.alloc(32), e.alloc(0x38), e.alloc(4)
+    world, leg, arm = [e.alloc(0x60) for _ in range(3)]
+    box = e.alloc(24)
+    e.w32(0x95b44, head)
+    e.w16(world, 0x200)
+    e.w32(world + 0x44, box)
+    for part, group in ((leg, 4), (arm, 6)):
+        e.w16(part + 2, 0x100)
+        e.w16(part + 0x14, 7)
+        e.w16(part + 0x16, group)
+        e.w32(part + 0x24, 6)
+    for _ in range(n * 8):
+        z = rnd.randint(-150, 2800)
+        unit_z = z + 100 + rnd.choice([0, 0, -30, 30, -150, 150, rnd.randint(-1000, 1000)])
+        world_first, skip_unit = rnd.randrange(2), rnd.randrange(2)
+        for j, value in enumerate((-100, 100, 100, 300, z, z + 200)):
+            e.w32(box + 4 * j, value)
+        for obj, centre, radius in ((world, z + 100, 174), (leg, unit_z, 100), (arm, unit_z, 100)):
+            for j, value in enumerate((0, 200, centre, radius)):
+                e.w32(obj + 0x34 + 4 * j, value)
+        order = [world, arm, leg] if world_first else [arm, leg, world]
+        for a, b in zip([head] + order, order + [0]):
+            e.w32(a + 0x10, b)
+        e.call(0x1d840, eax=segment, edx=0, ebx=200, ecx=0, stack=(0, 200, 2400))
+        original_hit = e.call(0x1c3f0, eax=segment, edx=hit, ebx=7 if skip_unit else 0)
+        obj = e.r32(hit) if original_hit else 0
+        original = [1 if obj == world else 2 if obj else 0,
+                    e.r16(obj + 0x16) if obj in (leg, arm) else 0,
+                    e.rs32(segment + 16) if obj else 0,
+                    e.rs32(segment + 20) if obj else 0]
+        L.shim_dos_mixed_contact(z, unit_z, world_first, skip_unit, out)
+        rep.check(list(out) == original, 'box %d sphere %d first %d skip %d: DOS %s port %s' %
+                  (z, unit_z, world_first, skip_unit, original, list(out)))
+
+@test
+def projectile_launch(rep, rnd, n):
+    """DOS 0x527dc launch direction, 0x52806 gravity and 0x53410 missile muzzle offset, including random calls."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    out = (ctypes.c_int32 * 7)()
+    L.shim_dos_projectile_launch.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_int32, vec, vec, type(out)]
+    L.shim_dos_projectile_launch.restype = ctypes.c_uint
+    work = e.alloc(12)
+    controller = e.alloc(0x100)
+    model = e.alloc(0x80)
+    planet, shot = e.alloc(32), e.alloc(0x50)
+    e.w32(model + 0x6c, e.alloc(0x80))
+    calls, muzzle = [], []
+    def mount_position(em):
+        for reg, value in zip(('edx', 'ebx', 'ecx'), start):
+            em.w32(em.reg(reg), value)
+    def move_model(em):
+        muzzle[:] = [s32(em.reg(r)) for r in ('edx', 'ebx', 'ecx')]
+    def roll(em):
+        calls.append(em.reg('eax'))
+        return ((next_seed >> 16) & 0x7fff) % 200
+    e.stub(RAND, roll)
+    e.stub(0x1e100, pops=4)
+    e.stub(0x1df60, mount_position)
+    e.stub(0x1dfa0, move_model)
+    e.stub(0x1dfc0)
+    for _ in range(n * 10):
+        weapon, speed, missile = rnd.choice([(0, 100, 1), (7, 70, 1), (22, 280, 0), (29, 600, 0)])
+        start = [rnd.randint(-100000, 100000) for _ in range(3)]
+        aim = [pos + rnd.randint(-10000, 10000) for pos in start]
+        if aim == start:
+            aim[2] += 1
+        seed = rnd.getrandbits(32)
+        next_seed = (1103515245 * seed + 12345) & 0xffffffff
+        for i in range(3):
+            e.w32(work + 4 * i, aim[i] - start[i])
+        e.call(0x3fa50, eax=work, edx=work + 4, ebx=work + 8)
+        d = [e.rs32(work + 4 * i) for i in range(3)]
+        calls.clear()
+        e.call(0x53410, eax=controller, edx=model, ebx=d[0], ecx=d[1], stack=(d[2], missile))
+        gravity = rnd.randint(20000, 200000)
+        e.w32(planet + 8, gravity)
+        e.run(0x4e62e, 0x4e644, ecx=planet)
+        e.run(0x52806, 0x5282c, ebx=0x9ee58 + weapon * 0x58, esi=shot)
+        port_seed = L.shim_dos_projectile_launch(weapon, seed, gravity, vec(*start), vec(*aim), out)
+        rep.check(list(out[:3]) == muzzle and list(out[3:6]) == [v * speed for v in d] and
+                  out[6] == e.rs32(shot + 0x18) and
+                  calls == ([200] if missile else []) and port_seed == (next_seed if missile else seed),
+                  'weapon %d: DOS muzzle %s gravity %d, port %s gravity %d' %
+                  (weapon, muzzle, e.rs32(shot + 0x18), out[:3], out[6]))
+
+@test
+def projectile_guidance(rep, rnd, n):
+    """DOS 0x50d50 guidance toward a unit and its 100 cm proximity test."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    acc = vec()
+    L.shim_dos_projectile_guide.argtypes = [vec, vec, vec]
+    shot, unit = e.alloc(0x50), e.alloc(0x100)
+    e.w32(shot + 0x34, 0x200)
+    e.w32(0xf8a40, unit)
+    e.stub(0x1e100, pops=4)
+    for _ in range(n * 10):
+        vel = [rnd.randint(-100 * 65536, 100 * 65536) for _ in range(3)]
+        span = rnd.choice([40, 100, 180, 100000])
+        delta = [rnd.randint(-span, span) for _ in range(3)]
+        if not any(delta):
+            delta[2] = 1
+        for i in range(3):
+            e.w32(shot + 8 + i * 4, vel[i])
+            e.w32(unit + 0x50 + i * 4, delta[i])
+        e.w32(shot + 0x38, 0)
+        e.call(0x50d50, eax=shot)
+        dos = [e.rs32(shot + 0x14 + i * 4) for i in range(3)]
+        prox = L.shim_dos_projectile_guide(vec(*vel), vec(*delta), acc)
+        rep.check(list(acc) == dos and bool(e.r32(shot + 0x38) & 0x8000) == bool(prox),
+                  'delta %s: DOS %s port %s' % (delta, dos, list(acc)))
+
+@test
+def projectile_frame(rep, rnd, n):
+    """0x50750 flies one fixed-point segment over all frame ticks, checks collisions, then retires on expiry."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    out = (ctypes.c_int32 * 6)()
+    L.shim_dos_projectile_frame.argtypes = [ctypes.c_int, ctypes.c_int, vec, vec, vec, type(out)]
+    slot = 0x153940
+    model = e.alloc(16)
+    end = []
+    def model_position(em):
+        for reg, i in (('edx', 0), ('ebx', 1), ('ecx', 2)):
+            em.w32(em.reg(reg), pos[i])
+    def move_model(em):
+        end[:] = [s32(em.reg(r)) for r in ('edx', 'ebx', 'ecx')]
+    def expire(em):
+        end[:] = [s32(em.arg(i)) for i in (1, 2, 3)]
+    e.stub(0x1df60, model_position)
+    e.stub(0x1d840, pops=12)
+    e.stub(0x1d960)
+    e.stub(0x1d9f0)
+    e.stub(0x1c3f0)
+    e.stub(0x1dfa0, move_model)
+    e.stub(0x1e480)
+    e.stub(0x50f20, expire, pops=16)
+    for _ in range(n * 16):
+        ticks = rnd.choice([1, 3, 6, 7, 12, 24, 48])
+        life = ticks + rnd.choice([-ticks, -1, 0, 1, 180])
+        pos = [rnd.randint(-250000, 250000), 50000, rnd.randint(-250000, 250000)]
+        vel = [rnd.randint(-600 * 65536, 600 * 65536) for _ in range(3)]
+        acc = [rnd.randint(-16000, 16000) for _ in range(3)]
+        for i in range(3):
+            e.w32(slot + 8 + i * 4, vel[i])
+            e.w32(slot + 20 + i * 4, acc[i])
+        e.w32(slot + 0x24, life - ticks)
+        e.w32(slot + 0x2c, model)
+        e.w32(TICKS, ticks)
+        end.clear()
+        e.call(0x50750)
+        alive = L.shim_dos_projectile_frame(ticks, life, vec(*pos), vec(*vel), vec(*acc), out)
+        rep.check(alive == (life > ticks) and list(out[:3]) == end and
+                  (not alive or list(out[3:]) == [e.rs32(slot + 8 + i * 4) for i in range(3)]),
+                  'ticks %d life %d: DOS end %s, port end %s alive %d' % (ticks, life, end, out[:3], alive))
+
+@test
 def servo_step(rep, rnd, n):
     """MW2.EXE 0x49b80 (the integer servo: value += (target - value) x elapsed / T, the target once reached or passed)
-    vs msim_servo over random frame sequences, T 36 / 54 / 109 / 145"""
+    vs the DOS aim servo over random frame sequences, T 36 / 54 / 109 / 145"""
     L = lib('msim')
-    L.msim_servo.restype = ctypes.c_float; L.msim_servo.argtypes = [ctypes.c_float] * 4
+    L.msim_dos_aim_servo.restype = ctypes.c_float
+    L.msim_dos_aim_servo.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_int, ctypes.c_int]
     for case in range(n * 4):
         e = emu()
         T = rnd.choice([36, 54, 109, 145])
@@ -414,12 +867,12 @@ def servo_step(rep, rnd, n):
         pv = v0 / 65536.0; worst = 0
         for f in range(60):
             if f % 15 == 0: tgt = rnd.randint(-0x5a0000, 0x5a0000); e.w32(sv + 4, tgt)
-            t = rnd.choice([1, 3, 4, 6, 9, 14, 20])
+            t = rnd.choice([0, 1, 3, 4, 6, 7, 9, 14, 20, T])
             now += t; e.w32(NOW, now)
             e.call(0x49b80, eax=sv)
-            pv = L.msim_servo(pv, tgt / 65536.0, float(T), float(t))
+            pv = L.msim_dos_aim_servo(pv, tgt / 65536.0, T, t)
             worst = max(worst, abs(e.rs32(sv + 8) / 65536.0 - pv))
-        rep.check(worst < 0.01, 'T %d: worst |dos - port| %.5f' % (T, worst))
+        rep.check(worst == 0, 'T %d: worst |dos - port| %.8f' % (T, worst))
 
 @test
 def dos_drive_servo(rep, rnd, n):
@@ -463,7 +916,8 @@ def turret_twist(rep, rnd, n):
     """MW2.EXE 0x2edc3..0x2ee2a (a turret's twist demand, limit >= 360: the servo value taken round to within 180 of the
     demand) + the servo step 0x49b80 (T 145) vs msim_twist_round"""
     e = emu(); L = lib('msim')
-    L.msim_twist_round.restype = ctypes.c_float; L.msim_twist_round.argtypes = [ctypes.c_float] * 4
+    L.msim_twist_round.restype = ctypes.c_float
+    L.msim_twist_round.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.c_int, ctypes.c_int]
     for case in range(n * 10):
         obj = e.alloc(0x100); ib = e.alloc(0x50); c = e.alloc(0x200)
         e.w32(c, obj); e.w32(obj + 0x4c, ib); e.w32(c + 0xe0, 0x1680000); e.w32(c + 0x10, 145)
@@ -477,7 +931,7 @@ def turret_twist(rep, rnd, n):
             t = rnd.choice([3, 4, 6, 12]); now += t; e.w32(NOW, now)
             e.call(0x49b80, eax=c + 4)
             dv = s32(e.r32(c + 0xc)) / 65536.0
-            pc = L.msim_twist_round(pc, dem / 65536.0, 145.0, float(t))
+            pc = L.msim_twist_round(pc, dem / 65536.0, 145, t)
             d = (dv - pc + 180.0) % 360.0 - 180.0
             rep.check(abs(d) < 0.02, 'case %d frame %d demand %.2f: dos %.3f port %.3f' % (case, f, dem / 65536.0, dv, pc))
         if case % 20 == 19: e.reset_data()
@@ -527,6 +981,369 @@ def collision_damage(rep, rnd, n):
         ok = all(abs(a - b) < 0.02 + 0.002 * abs(a) for a, b in zip(dos, prt))
         rep.check(ok, '%s S %.3f ny %.3f rel %.1f tons %d/%d: dos %s port %s' % ('unit' if unit else 'wall', S / 65536.0, ny, rel,
                   oth_t, own_t, [round(x, 3) for x in dos], [round(x, 3) for x in prt]))
+
+@test
+def manoeuvre_closing(rep, rnd, n):
+    """DOS compares closing distance through the fixed-point factor and skips range updates on frames with zero ticks."""
+    e = emu()
+    e.uc.reg_write(UC_X86_REG_FPCW, e.r16(0xa4520))
+    L = lib('ai')
+    out = (ctypes.c_int * 3)()
+    L.shim_dos_close.argtypes = [ctypes.c_int] * 3 + [type(out)]
+    unit, frame = e.alloc(0x210), e.alloc(0x40) + 0x20
+    for _ in range(n * 12):
+        ticks = rnd.choice([0, 1, 3, 6, 7, 19])
+        distance = rnd.choice([7999, 8000, 8001, rnd.randint(5500, 50000)])
+        speed = rnd.randint(-50, 50)
+        previous = distance + speed * ticks + rnd.randint(-3, 3)
+        e.w32(unit + 0xc0, distance)
+        e.w32(unit + 0x194, previous)
+        e.w32(TICKS, ticks)
+        e.run(0x2d400, 0x2d482, ecx=unit, ebp=frame, esi=0)
+        done, kept = e.reg('esi'), e.rs32(unit + 0x194)
+        e.w32(unit + 0x194, previous)
+        e.run(0x2d840, 0x2d871, ebx=unit)
+        closing_speed = s32(e.reg('edx'))
+        L.shim_dos_close(previous, distance, ticks, out)
+        dos = [done, kept, closing_speed]
+        rep.check(list(out) == dos, '%d → %d over %d ticks: DOS %s port %s' %
+                  (previous, distance, ticks, dos, list(out)))
+
+@test
+def manoeuvre_step(rep, rnd, n):
+    """DOS 0x2c210 starts or updates a manoeuvre in one pass, with whole ticks through the ending frame."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 7)()
+    L.shim_dos_attack_step.argtypes = [ctypes.c_int] * 9 + [ctypes.c_uint, type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 0x146, 3)
+    # Supply a fixed target geometry and suppress weapon selection in the original step.
+    for addr in (0x2dac0, 0x22850, 0x2e860, 0x2e300, 0x2db80):
+        e.stub(addr)
+    e.stub(0x2c880, lambda _em: chosen)
+    for _ in range(n * 12):
+        chosen = rnd.choice([0, 4, 8, 10, 11])
+        man = rnd.choice([-1, chosen, chosen])
+        ticks = rnd.choice([0, 3, 6, 7, 19])
+        now = 10000
+        left = rnd.choice([ticks, ticks + 1, 90])
+        distance = rnd.choice([4499, 4500, 14999, 15000, 30000, 30001, 40000])
+        bearing = rnd.randint(-90, 90)
+        throttle = rnd.choice([0, 0x333, 0x400])
+        target_height = rnd.randint(-2000, 2000)
+        height = rnd.choice([0, target_height + 1999, target_height + 2000])
+        seed = rnd.getrandbits(32)
+        e.stub(RAND, Lcg(seed))
+        e.w32(NOW, now + ticks)
+        e.w32(TICKS, ticks)
+        e.w8(unit + 0x16c, man & 255)
+        e.w8(unit + 0x16d, 255)
+        e.w32(unit + 0x16e, 0)
+        e.w32(unit + 0x172, now + left)
+        e.w32(unit + 0x190, int(man in (4, 11)))
+        e.w32(unit + 0xc0, distance)
+        e.w32(unit + 0xcc, target_height)
+        e.w32(unit + 0xd4, bearing * 65536)
+        e.w32(unit + 0x54, height)
+        e.w32(inputs + 8, throttle)
+        e.w32(inputs + 0xc, 15 * 65536)
+        e.w8(inputs + 0x1d, int(man in (4, 11)))
+        e.w8(inputs + 0x1e, int(man == 11))
+        e.w8(inputs + 0x2f, int(man in (8, 10)))
+        e.call(0x2c210, eax=unit)
+        active = e.r8(unit + 0x16c)
+        dos = [active if active != 255 else -1, e.rs32(inputs + 8), e.rs32(inputs + 0xc),
+               e.r8(inputs + 0x2f), e.r8(inputs + 0x1d), e.r8(inputs + 0x1e),
+               0 if active == 255 else e.rs32(unit + 0x172) - now - ticks]
+        L.shim_dos_attack_step(man, chosen, ticks, left, distance, bearing, throttle, height, target_height, seed, out)
+        rep.check(dos[:2] == list(out[:2]) and abs(dos[2] - out[2]) <= 4 and dos[3:] == list(out[3:]),
+                  'man %d chosen %d ticks %d left %d bearing %d distance %d: DOS %s port %s' %
+                  (man, chosen, ticks, left, bearing, distance, dos, list(out)))
+
+@test
+def manoeuvre_approach(rep, rnd, n):
+    """Exercise DOS approach, weaving and charges on clear and obstructed paths."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 6)()
+    L.shim_dos_approach.argtypes = [ctypes.c_int] * 8 + [type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 0x146, 3)
+    for addr in (0x22850, 0x2e860, 0x2e300):
+        e.stub(addr)
+
+    def avoid(em):
+        if blocked:
+            em.w32(inputs + 8, 256)
+            em.w32(inputs + 0xc, round(-204.8 * 65536))
+        return int(bool(blocked))
+
+    e.stub(0x2db80, avoid)
+    e.stub(0x2e400, ret=12)
+    for _ in range(n * 12):
+        man = rnd.choice([2, 3, 6])
+        distance = rnd.choice([5499, 5500, 7999, 8000, 8001, 11000, 11001, 40000])
+        if man == 6:
+            distance = rnd.choice([0, 1999, 2000, 2001, 9000])
+        bearing = rnd.choice([-45, -2, 0, 2, 45, rnd.randint(-90, 90)])
+        ticks, until_flip = rnd.choice([0, 3, 7, 19]), rnd.choice([0, 3, 7, 90])
+        previous = distance + rnd.randint(-200, 1800)
+        sign, blocked = rnd.choice([-1, 1]), rnd.randrange(3 if man == 6 else 2)
+        now = 10000
+        e.w32(NOW, now + ticks)
+        e.w32(TICKS, ticks)
+        e.w8(unit + 0x16c, man)
+        e.w8(unit + 0x16d, 255)
+        e.w32(unit + 0x16e, 0)
+        e.w32(unit + 0x172, now + 900)
+        e.w32(unit + 0x176, now + until_flip)
+        e.w32(unit + 0x17a, sign)
+        e.w32(unit + 0xc0, distance)
+        e.w32(unit + 0xc4, distance)
+        e.w32(unit + 0x182, 12 if blocked == 2 else 13)
+        e.w32(unit + 0xd4, bearing * 65536)
+        e.w32(unit + 0x194, previous)
+        e.w32(inputs + 8, 512)
+        e.w32(inputs + 0xc, 15 * 65536)
+        e.w8(inputs + 0x43, 0)
+        e.call(0x2c210, eax=unit)
+        active = e.r8(unit + 0x16c) != 255
+        dos = [man if active else -1, e.rs32(inputs + 0xc), e.rs32(inputs + 8),
+               e.rs32(unit + 0x17a), e.rs32(unit + 0x176) - now - ticks, e.r8(inputs + 0x43)]
+        L.shim_dos_approach(man, previous, distance, bearing, ticks, sign, until_flip, blocked, out)
+        rep.check(dos[0] == out[0] and abs(dos[1] - out[1]) <= 5 and dos[2] == out[2] and
+                  dos[5] == out[5] and (man != 3 or not active or dos[3:5] == list(out[3:5])),
+                  'man %d prev %d dist %d bearing %d ticks %d deadline %d blocked %d: DOS %s port %s' %
+                  (man, previous, distance, bearing, ticks, until_flip, blocked, dos, list(out)))
+
+
+@test
+def manoeuvre_flank(rep, rnd, n):
+    """Compare DOS waypoint approach and target-facing controls on both sides of the transition."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 3)()
+    L.shim_dos_flank.argtypes = [ctypes.c_int] * 6 + [type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 328, 0x101)
+    e.w16(unit + 330, 0x201)
+    e.stub(0x2e860)
+    e.stub(0x2e300)
+
+    def select_ref(em):
+        goal = em.reg('edx') == 0x101
+        em.w32(unit + 0xc0, level if goal else 12000)
+        em.w32(unit + 0xd4, yaw if goal else target * 65536)
+        return 1
+
+    def avoid(em):
+        if blocked:
+            em.w32(inputs + 8, 256)
+            em.w32(inputs + 0xc, round(-204.8 * 65536))
+        return blocked
+
+    e.stub(0x22850, select_ref)
+    e.stub(0x2db80, avoid)
+    yaw_ptr, slant, level_ptr, pitch = (e.alloc(4) for _ in range(4))
+    for _ in range(n * 12):
+        x, z = rnd.choice([(0, 3999), (0, 4000), (3000, 0), (4500, 0), (4501, 0), (4500, 30),
+                           (rnd.randint(-12000, 12000), rnd.randint(-12000, 12000))])
+        e.call(0x2ab60, eax=x, ebx=z, edx=0, ecx=yaw_ptr, stack=(slant, level_ptr, pitch))
+        level, yaw = e.rs32(level_ptr), e.rs32(yaw_ptr)
+        target = rnd.choice([-6, -5, 0, 5, 6, rnd.randint(-120, 120)])
+        face, blocked = rnd.randrange(2), rnd.randrange(2)
+        throttle = rnd.choice([0, 102, 512, 1024])
+        e.w32(unit + 0x17e, face)
+        e.w32(inputs + 8, throttle)
+        e.w32(inputs + 0xc, 15 * 65536)
+        e.call(0x2d290, eax=unit)
+        original = [e.rs32(unit + 0x17e), e.rs32(inputs + 0xc), e.rs32(inputs + 8)]
+        L.shim_dos_flank(face, x, z, target, throttle, blocked, out)
+        rep.check(original[0] == out[0] and abs(original[1] - out[1]) <= 4 and original[2] == out[2],
+                  'phase %d waypoint %d,%d range %d bearing %.2f target %d throttle %d blocked %d: DOS %s port %s' %
+                  (face, x, z, level, yaw / 65536, target, throttle, blocked, original, list(out)))
+
+
+@test
+def manoeuvre_circle(rep, rnd, n):
+    """Check that the aircraft steers for the current waypoint on the update that advances it."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 4)()
+    L.shim_dos_circle.argtypes = [ctypes.c_int] * 5 + [type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 328, 0x101)  # assigned waypoint
+    e.w16(unit + 330, 0x201)  # attack target
+    e.stub(0x2e860)
+    e.stub(0x2e300)
+
+    def select_ref(em):
+        goal = em.reg('edx') == 0x101
+        em.w32(unit + 0xc0, level if goal else 12000)
+        em.w32(unit + 0xd4, yaw if goal else 0)
+        return 1
+
+    def avoid(em):
+        if blocked:
+            em.w32(inputs + 8, 256)
+            em.w32(inputs + 0xc, round(-204.8 * 65536))
+        return blocked
+
+    def next_point(_em):
+        visited.append(1)
+
+    e.stub(0x22850, select_ref)
+    e.stub(0x2db80, avoid)
+    e.stub(0x23590, next_point)
+    yaw_ptr, slant, level_ptr, pitch = (e.alloc(4) for _ in range(4))
+    for _ in range(n * 12):
+        x, z = rnd.choice([(0, 2999), (0, 3000), (0, 3001), (3000, 0), (2100, 2100), (2100, 2200),
+                           (rnd.randint(-9000, 9000), rnd.randint(-9000, 9000))])
+        e.call(0x2ab60, eax=x, ebx=z, edx=0, ecx=yaw_ptr, stack=(slant, level_ptr, pitch))
+        level, yaw = e.rs32(level_ptr), e.rs32(yaw_ptr)
+        visited = []
+        blocked = rnd.randrange(2)
+        ticks = rnd.choice([0, 3, 7, 19])
+        due = rnd.choice([0, 3, 7, 40])
+        now = 10000
+        e.w32(NOW, now + ticks)
+        e.w32(unit + 0x176, now + due)
+        e.w32(inputs + 8, 512)
+        e.w32(inputs + 0xc, 15 * 65536)
+        e.call(0x2d990, eax=unit)
+        dos = [len(visited), e.rs32(unit + 0x176) - now - ticks,
+               e.rs32(inputs + 0xc), e.rs32(inputs + 8)]
+        L.shim_dos_circle(x, z, due, ticks, blocked, out)
+        rep.check(dos[:2] == list(out[:2]) and abs(dos[2] - out[2]) <= 4 and dos[3] == out[3],
+                  'waypoint %d,%d distance %d bearing %.2f blocked %d step %d due %d: DOS %s port %s' %
+                  (x, z, level, yaw / 65536, blocked, ticks, due, dos, list(out)))
+
+
+@test
+def manoeuvre_glide(rep, rnd, n):
+    """Exercise the DOS glide dispatcher, including fuel and closing-rate boundaries."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 8)()
+    L.shim_dos_glide.argtypes = [ctypes.c_int] * 14 + [type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 0x146, 3)
+    for addr in (0x22850, 0x2e860):
+        e.stub(addr)
+    for _ in range(n * 12):
+        phase = rnd.randrange(3)
+        d = rnd.choice([999, 1000, 1001, 5999, 6000, 6001, 10000])
+        lim = rnd.choice([10, 30, 45])
+        bear = rnd.choice([0, lim, -lim - 1, 3 * lim - 1, -3 * lim, 180])
+        fuel = rnd.choice([-1, 0, 1, 5, 6, 100])
+        heat = rnd.choice([0, 39, 40])
+        installed, grounded, contact = (rnd.randrange(2) for _ in range(3))
+        ticks = rnd.choice([0, 3, 7, 19])
+        previous = d + ticks * rnd.choice([-5, 8, 9, 10, 35, 36, 37])
+        held_jet, held_forward, held_back = (rnd.randrange(2) for _ in range(3))
+        now = 10000
+        e.w32(NOW, now + ticks)
+        e.w32(TICKS, ticks)
+        e.w8(unit + 0x16c, 5)
+        e.w8(unit + 0x16d, 255)
+        e.w32(unit + 0x16e, 0)
+        e.w32(unit + 0x172, now + 900)
+        e.w32(unit + 0x17a, phase)
+        e.w32(unit + 0x190, 1)
+        e.w32(unit + 0x194, previous)
+        e.w32(unit + 0xc0, d)
+        e.w32(unit + 0xd4, bear * 65536)
+        e.w32(unit + 0x78, grounded)
+        e.w32(control + 0xe0, lim << 16)
+        e.w32(control + 0xec, installed)
+        e.w32(control + 0x98, heat << 16)
+        e.w32(control + 0xa4, contact)
+        e.w32(control + 0xc0, fuel)
+        e.w32(inputs + 8, 512)
+        e.w32(inputs + 0xc, 15 * 65536)
+        for off, value in [(0x1d, held_jet), (0x20, held_forward), (0x21, held_back)]:
+            e.w8(inputs + off, value)
+        e.call(0x2c210, eax=unit)
+        active = e.r8(unit + 0x16c) != 255
+        original = [5 if active else -1, e.rs32(unit + 0x17a) if active else -1, e.rs32(unit + 0x194),
+                    e.r8(inputs + 0x1d), e.r8(inputs + 0x20), e.r8(inputs + 0x21),
+                    e.rs32(inputs + 0xc), e.rs32(inputs + 8)]
+        L.shim_dos_glide(phase, previous, d, bear, lim, fuel, heat, installed, grounded, contact, ticks,
+                         held_jet, held_forward, held_back, out)
+        rep.check(list(out) == original, 'phase %d previous %d distance %d bearing %d limit %d fuel %d heat %d '
+                  'installed %d ground %d contact %d step %d: DOS %s port %s' %
+                  (phase, previous, d, bear, lim, fuel, heat, installed, grounded, contact, ticks, original, list(out)))
+
+
+@test
+def manoeuvre_jump_climb(rep, rnd, n):
+    """DOS jump attack keeps separate manoeuvre and jet phase deadlines."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int * 6)()
+    L.shim_dos_jump_climb.argtypes = [ctypes.c_int] * 13 + [type(out)]
+    unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.w16(unit + 0x146, 3)
+    e.w32(unit + 0xc0, 20000)
+    for addr in (0x22850, 0x2e860, 0x2e300, 0x5914e, 0x49fa0):
+        e.stub(addr)
+    # Supply LOS. Descent braking and the touchdown flag are read by 0x2dac0.
+    e.stub(0x2da50, lambda _em: blocked)
+    for _ in range(n * 12):
+        phase = rnd.randrange(3)
+        elapsed = rnd.choice([0, 175, 182])
+        ticks = rnd.choice([0, 3, 7, 19])
+        left = rnd.choice([ticks, ticks + 1, 900])
+        fuel = rnd.choice([-1, 0, 5, 6, 300])
+        height = rnd.choice([500, 19999, 20000, 30000])
+        vy = rnd.choice([-1000000, -899860, -899859, -793993, -793992, 0, 1000000])
+        jets, held_jet = rnd.randrange(2), rnd.randrange(2)
+        heat = rnd.choice([20, 39, 40, 80])
+        blocked, grounded = rnd.randrange(2), rnd.randrange(2)
+        bearing = rnd.randint(-90, 90)
+        now = 10000
+        e.w32(NOW, now + ticks)
+        e.w32(TICKS, ticks)
+        e.w8(unit + 0x16c, 9)
+        e.w8(unit + 0x16d, 255)
+        e.w32(unit + 0x16e, 0)
+        e.w32(unit + 0x172, now + left)
+        e.w32(unit + 0x176, now + 182 - elapsed)
+        e.w32(unit + 0x17a, phase)
+        e.w32(unit + 0x190, 1)
+        e.w32(unit + 0xd4, bearing * 65536)
+        e.w32(control + 0xc0, fuel)
+        e.w32(control + 0x98, heat << 16)
+        e.w32(control + 0xec, jets)
+        e.w32(control + 0xf8, vy)
+        e.w32(unit + 0x54, height)
+        e.w32(unit + 0x78, grounded)
+        e.w8(inputs + 0x1d, held_jet)
+        e.w32(inputs + 8, 512)
+        e.w32(inputs + 0xc, 15 * 65536)
+        e.call(0x2c210, eax=unit)
+        active = e.r8(unit + 0x16c) != 255
+        dos = [9 if active else -1, e.rs32(unit + 0x17a) if active else -1,
+               e.rs32(unit + 0x172) - now - ticks if active else 0,
+               e.r8(inputs + 0x1d), e.rs32(inputs + 0xc), e.rs32(inputs + 8)]
+        L.shim_dos_jump_climb(phase, elapsed, left, ticks, bearing, fuel, heat, blocked, grounded, height, vy, jets, held_jet, out)
+        rep.check(dos[:4] == list(out[:4]) and abs(dos[4] - out[4]) <= 4 and dos[5] == out[5],
+                  'phase %d elapsed %d left %d step %d fuel %d heat %d blocked %d grounded %d height %d vy %d jets %d held %d: DOS %s port %s' %
+                  (phase, elapsed, left, ticks, fuel, heat, blocked, grounded, height, vy, jets, held_jet, dos, list(out)))
+
 
 @test
 def manoeuvre_start(rep, rnd, n):
@@ -739,9 +1556,11 @@ def seg_poly(rep, rnd, n):
     rounding can decide it) is counted, not judged."""
     L = lib('msim')
     F3 = ctypes.c_float * 3
+    L.shim_dos_shot_face.argtypes = [ctypes.POINTER(ctypes.c_float), ctypes.c_int, F3, F3, F3, ctypes.c_int, F3]
     edge = 0
     for case in range(n * 40):
         e = emu()
+        e.uc.reg_write(UC_X86_REG_FPCW, e.r16(0xa4520))
         nv = rnd.randint(3, 6)
         # the face's plane: a random unit normal, a centre, two axes in the plane
         while True:
@@ -761,7 +1580,8 @@ def seg_poly(rep, rnd, n):
         verts = [[int(round(cen[k] + R * (math.cos(a) * u[k] + math.sin(a) * w[k]))) for k in range(3)] for a in angs]
         # DOS records: the face (+2 count, +4 offset of the index bytes, +0x14 normal 2.29), the vertices (0x2c each,
         # world x / y / z at +0xc), the segment (0x38: start, end, delta, direction 16.16, length, +0x34 state)
-        N = [int(round(c * (1 << 29))) for c in nrm]
+        normal = F3(*nrm)
+        N = [int(round(c * (1 << 29))) for c in normal]
         poly = e.alloc(0x60); vb = e.alloc(0x2c * nv); seg = e.alloc(0x40)
         e.w16(poly + 2, nv); e.w32(poly + 4, 0x40)
         for k in range(3): e.w32(poly + 0x14 + 4 * k, N[k])
@@ -777,15 +1597,22 @@ def seg_poly(rep, rnd, n):
         p0 = [int(round(q[k] + nrm[k] * d0 + tilt[k])) for k in range(3)]
         p1 = [int(round(q[k] + nrm[k] * d1 - tilt[k] * rnd.uniform(0, 1))) for k in range(3)]
         if p0 == p1: continue
+        deltas = [abs(b - a) for a, b in zip(p0, p1)]
+        long_step = case % 2 and (3 * max(deltas) + sum(deltas)) // 4 > 3000
         for k in range(3):
             e.w32(seg + 4 * k, p0[k]); e.w32(seg + 12 + 4 * k, p1[k]); e.w32(seg + 24 + 4 * k, p1[k] - p0[k])
         e.w32(seg + 0x34, 0)
-        e.call(0x1d960, eax=seg)
+        e.call(0x1d9f0 if long_step else 0x1d960, eax=seg)
         if e.rs32(seg + 0x30) <= 0: continue
         dh = e.call(0x1c7a0, eax=poly, edx=vb, ebx=seg) != 0
         dpt = [e.rs32(seg + 12 + 4 * k) for k in range(3)]
         out = F3()
         vv = (ctypes.c_float * (3 * nv))(*[float(c) for vtx in verts for c in vtx])
+        fixed_point = F3()
+        length = L.shim_dos_shot_face(vv, nv, normal, F3(*p0), F3(*p1), long_step, fixed_point)
+        dos_length = e.rs32(seg + 0x30) if dh else 0x7fffffff
+        rep.check(length == dos_length and (not dh or list(fixed_point) == dpt),
+                  'fixed segment %d: DOS %d %s port %d %s' % (case, dos_length, dpt, length, list(fixed_point)))
         ph = L.shim_seg_poly(vv, nv, F3(*nrm), F3(*map(float, p0)), F3(*map(float, p1)), out) != 0
         # how near the plane crossing is to the face's edges (in the plane), for the edge class
         dn = sum(nrm[k] * (p1[k] - p0[k]) for k in range(3))

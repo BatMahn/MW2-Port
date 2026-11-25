@@ -641,15 +641,15 @@ static int g_lodq = 1;
  * reference (focal 320), 3.2 at DOS's 1024 x 768 (115 m: the user's "about 115-120 m"), capped there (larger windows
  * keep the 1024 x 768 distances). Set each frame from the view */
 static float g_lod_focal = 320.0f;
-static float lod_a0(void) { return g_lod_focal / 160.0f * (g_zoom > 1 ? g_zoom : 1.0f) / (float)g_lodq; }
-static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_alod[64];
+static float lod_a0(float zoom) { return g_lod_focal / 160.0f * fmaxf(zoom, 1.0f) / (float)g_lodq; }
+static struct { mech3d m[4]; int ok[4], tried; char skel[17]; } g_alod[65];
 static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist, int repr)
 {
-    float a0 = lod_a0();
+    float a0 = lod_a0(g_zoom);
     int r = repr >= 0 ? repr : dist < a0 * 3600.0f ? 0 : dist < a0 * 8500.0f ? 1 : dist < a0 * 22500.0f ? 2 : 3;
     mech3d *m;
     if (getenv("MW2_NO_LOD") && repr < 0) r = 0;
-    if (r == 0 || k < 0 || k >= 64 || !g_ma) return NULL;
+    if (r == 0 || k < 0 || k >= 65 || !g_ma) return NULL;
     if (!g_alod[k].tried || strcmp(g_alod[k].skel, skel) != 0) {
         int q;
         for (q = 1; q < 4; q++) if (g_alod[k].ok[q]) { mech3d_free(&g_alod[k].m[q]); g_alod[k].ok[q] = 0; }
@@ -664,9 +664,7 @@ static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist
     if (getenv("MW2_LOD_TRACE")) fprintf(stderr, "lod actor %d %s %.0f m -> repr %d (%d parts)\n", k, skel, dist / 100.0f, r, r ? g_alod[k].m[r].part_count : 0);
     if (r == 0) return NULL;
     m = &g_alod[k].m[r];
-    memcpy(m->origin, full->origin, sizeof m->origin);
-    m->heading = full->heading; m->twist = full->twist; m->pose_off = full->pose_off;
-    mech3d_pose(m, (const anim_set *)full->pose_anim, full->pose_t);
+    mech3d_pose_like(m, full);
     if (full->part_count > 0) { int q; for (q = 0; q < m->part_count; q++) m->parts[q].tex_offset = full->parts[0].tex_offset; }   /* the star's camo / insignia */
     return m;
 }
@@ -694,9 +692,7 @@ static mech3d *ti_actor(int k, const mech3d *full, const char *skel, int repr)
     while (repr > 0 && !g_tiact[k].ok[repr]) repr--;
     if (!g_tiact[k].ok[repr]) return NULL;
     m = &g_tiact[k].m[repr];
-    memcpy(m->origin, full->origin, sizeof m->origin);
-    m->heading = full->heading; m->twist = full->twist;
-    mech3d_pose(m, (const anim_set *)full->pose_anim, full->pose_t);
+    mech3d_pose_like(m, full);
     if (full->part_count > 0) for (q = 0; q < m->part_count; q++) m->parts[q].tex_offset = full->parts[0].tex_offset;   /* its star */
     return m;
 }
@@ -3408,42 +3404,12 @@ static const combat_unit *g_wire_unit;
  * the structure both count, and a location with more than 75 points stays undamaged on the display until it is down to 75
  * (the 3D editions' rule, the armour's fifteenths alone, went red with a fifth of the armour left). Found by the GBL port
  * (GBL 0x265e0 / 0x2f930); MW2.EXE the same code */
-static float (*g_int0)[MEK_LOC_COUNT];
-static int g_int0_n;
-static void int0_capture(void)
-{
-    int k, l;
-    free(g_int0); g_int0 = NULL; g_int0_n = 0;
-    if (!g_sim_ok || !g_sim.units) return;
-    g_int0 = calloc((size_t)g_sim.actor_count + 1, sizeof *g_int0);
-    if (!g_int0) return;
-    g_int0_n = g_sim.actor_count + 1;
-    for (k = 0; k < g_sim.actor_count; k++) for (l = 0; l < MEK_LOC_COUNT; l++) g_int0[k][l] = g_sim.units[k].internal[l];
-    for (l = 0; l < MEK_LOC_COUNT; l++) g_int0[g_sim.actor_count][l] = g_sim.player_unit.internal[l];
-}
-static float int0_of(const combat_unit *u, int loc)
-{
-    int k = u == &g_sim.player_unit ? g_sim.actor_count : (int)(u - g_sim.units);
-    if (!g_int0 || k < 0 || k >= g_int0_n || loc < 0 || loc >= MEK_LOC_COUNT) return u->internal[loc];
-    return g_int0[k][loc];
-}
-static int dos_side_level(float armor, int armor_max, float mult, float internal, float int0, int div)
-{
-    const int m = (int)lrintf(mult) > 0 ? (int)lrintf(mult) : 1;
-    long long n = ((long long)lrintf(int0) + armor_max / m) / 5, a, v;
-    if (n < 1) return 0;
-    if (n > 15) n = 15;
-    a = (long long)(armor * 65536.0f);
-    v = 15 - ((a / div + (long long)(internal * 65536.0f)) * 3) / (n << 16);
-    return v < 1 ? 0 : v > 15 ? 15 : (int)v;
-}
 /* the player's outline (0x2f611..0x2f6e4): both sides' levels, the higher - a location with no rear armour has its rear
  * nibble from the structure alone */
 static int dos_hud_level(const combat_unit *u, int loc)
 {
-    float i0 = int0_of(u, loc);
-    int lf = dos_side_level(u->armor[loc], u->armor_max[loc], u->armor_mult, u->internal[loc], i0, 4);
-    int lr = dos_side_level(u->rear[loc], u->rear_max[loc], u->armor_mult, u->internal[loc], i0, 4);
+    int lf = combat_dos_damage_level(u, loc, 0, 4);
+    int lr = combat_dos_damage_level(u, loc, 1, 4);
     return lf > lr ? lf : lr;
 }
 /* a location's damage nibble 0-15 (the fifteenths of armour lost, front or rear - the location objects' +0 bits 4-7) */
@@ -3452,14 +3418,7 @@ static int loc_nibble(const combat_unit *tu, int gq)
     int loc, lf = 0, lr = 0;
     if (!tu || gq < 1 || gq > 8) return 0;
     loc = gq - 1;
-    if (msim_dos_int) {   /* the DOS hit's nibble (0x265e0 -> 0x1e7e0): the side hit, the rear only for the torsos; the higher */
-        int div = tu == &g_sim.player_unit ? 4 : (int)lrintf(combat_armor_mult(0, 1, g_sim.difficulty));
-        float i0 = int0_of(tu, loc);
-        if (div < 1) div = 1;
-        lf = dos_side_level(tu->armor[loc], tu->armor_max[loc], tu->armor_mult, tu->internal[loc], i0, div);
-        if (loc == MEK_RT || loc == MEK_CT || loc == MEK_LT) lr = dos_side_level(tu->rear[loc], tu->rear_max[loc], tu->armor_mult, tu->internal[loc], i0, div);
-        return lf > lr ? lf : lr;
-    }
+    if (msim_dos_int) return tu->dos_shade[loc];
     if (tu->armor_max[loc] > 0) lf = 15 - 15 * (int)tu->armor[loc] / tu->armor_max[loc];
     if (tu->rear_max[loc] > 0) lr = 15 - 15 * (int)tu->rear[loc] / tu->rear_max[loc];
     lf = lf > lr ? lf : lr;
@@ -4969,7 +4928,6 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         }
         g_exit_fade_t0 = -1;
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
-        int0_capture();   /* the starting structure (the DOS look's damage levels) */
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         g_sim.log = sim_log;
@@ -7341,8 +7299,9 @@ int main(int argc, char **argv)
             if (!g_auto_on && g_sim_ok && g_sim.now < 4000 && dt > 0.05f) dt = 0.05f;
             if (g_mm_depth || g_paused) dt = 0;   /* the MAIN MENU (and PAUSE_GAME) pauses the game (WinMain 0x10009770: "pause timer TRUE") */
             int32_t frame_ms = g_sim_ok && ((g_pl_ok && g_pilot) || g_patrol) ? sim_ms(dt) : 0;
+            int dos_ticks = msim_dos_frame_ticks(g_sim.now, frame_ms);
             /* DOS 0x40aad compares propagation delay to the current frame's whole ticks. */
-            g_snd_frame_ticks = msim_dos_frame_ticks(g_sim.now, frame_ms);
+            g_snd_frame_ticks = dos_ticks;
             mech3d all;
             int i;
             aprev = now;
@@ -7540,10 +7499,13 @@ int main(int argc, char **argv)
                      * the compass band goes on easing 12.8 -> 15.6 degrees for ~0.4 s after Period is released, and a held
                      * Keypad 5 eases it 13.8 -> 0 in ~0.7 s at 0.71 of the gap a 10.4-tick frame (1 - 10.4 / 36.2) */
                     {
-                        float k = dt * 182.0f / (msim_dos_int ? 36.0f : 36.2f);
-                        if (k > 1.0f) k = 1.0f;
-                        g_pl.twist += (g_twist_dem - g_pl.twist) * k;
-                        g_pitch += (g_pitch_dem - g_pitch) * k;
+                        if (msim_dos_int) {
+                            g_pl.twist = msim_dos_aim_servo(g_pl.twist, g_twist_dem, 36, dos_ticks);
+                            g_pitch = msim_dos_aim_servo(g_pitch, g_pitch_dem, 36, dos_ticks);
+                        } else {
+                            g_pl.twist = msim_servo(g_pl.twist, g_twist_dem, 36.2f, dt * 182.0f);
+                            g_pitch = msim_servo(g_pitch, g_pitch_dem, 36.2f, dt * 182.0f);
+                        }
                         g_twist_srv = g_pl.twist; g_pitch_srv = g_pitch;
                     }
                     if (getenv("MW2_SINK_TRACE")) printf("SINK t=%.3f pan=%.4f tilt=%.4f thr=%.4f twist=%.2f pitch=%.2f dtw=%.2f dpi=%.2f mouse=%d,%d\n", g_sim.now / 1000.0, (double)sp.val, (double)st.val, (double)sth.val,
@@ -7890,6 +7852,9 @@ int main(int argc, char **argv)
                     memcpy(g_sim.pl_shown.mount_pos, g_pl.mount_pos, sizeof g_pl.mount_pos);
                     memcpy(g_sim.pl_shown.mount_from, g_pl.mount_from, sizeof g_pl.mount_from);
                     g_sim.pl_shown.mount_ok = g_pl.mount_ok;
+                    g_sim.pl_shown.pose_anim = g_pl.pose_anim;
+                    g_sim.pl_shown.pose_t = g_pl.pose_t;
+                    g_sim.pl_shown.pose_off = g_pl.pose_off;
                     g_sim.pl_shown_ok = 1;
                 }
             } else if (g_pl_ok && g_pilot && g_sim_ok) {
@@ -8208,7 +8173,8 @@ int main(int argc, char **argv)
                 g_sim.player_aim_yaw = g_pl.heading + g_pl.twist;
                 g_sim.player_aim_pitch = g_pitch;
                 g_sim.player_twist = g_pl.twist;   /* poses the player's collision pieces */
-                g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");   /* 0x100267d0: LOD 4 in camera mode 0 (TEST ONLY: MW2_HULL_FULL the full model) */
+                if (!msim_dos_int)
+                    g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");
                 {   /* the aim ray's origin: the eye the cockpit camera rides (repr 4's EYEO, else the full model's) */
                     float ep[3];
                     g_sim.player_eye_ok = (g_plpit_ok && !getenv("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, ep) == 0) || mech3d_head_point(&g_pl, ep) == 0;
@@ -8294,6 +8260,12 @@ int main(int argc, char **argv)
                     v.eye[0] += g_jolt_view[0]; v.eye[1] += g_jolt_view[1]; v.eye[2] += g_jolt_view[2]; v.look_pitch -= g_jolt_view[3];   /* camera +0x10 positive = down */
                 }
             }
+            if (msim_dos_int && g_world && g_sim_ok && g_pl_ok && g_pilot) {
+                v.vfov = g_cockpit ? 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / g_zoom) * 180.0f / 3.14159265f : 40.0f;
+                camera_modes(&v);
+                g_sim.player_external = g_camode != 0 && !getenv("MW2_HULL_FULL");
+                g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");
+            }
             all.parts = NULL;
             g_pit_first = -1;
             if (g_sim_ok) {   /* leave destroyed pieces out; add the player's mech (not in the cockpit) */
@@ -8306,16 +8278,13 @@ int main(int argc, char **argv)
                     float ex = g_cam_eye[0] - g_sim.player_eye[0], ey = g_cam_eye[1] - g_sim.player_eye[1], ez = g_cam_eye[2] - g_sim.player_eye[2];
                     if (ex * ex + ey * ey + ez * ez < g_sim.player_radius * g_sim.player_radius) show_pl = 0;
                 }
-                /* the levels of detail are the simulation's (msim collision_lods: 0x100267d0, DOS 0x37580 - a unit is hit as it is
-                 * drawn): this frame's camera for its next step */
-                memcpy(g_sim.cam_eye, v.eye, sizeof g_sim.cam_eye);
+                /* DOS 0x35870 updates collision LODs from the camera used to draw this frame. */
                 g_lod_focal = (float)(h > 0 ? h : 480) * 0.5f / 0.75f;   /* the cockpit view's vertical tangent 0.75 (73.74 deg) */
                 /* at most the original's largest screen's: DOS 1024 x 768 (focal 512: 115 / 272 / 720 m). Above it the
                  * port had gone on scaling - 1440 lines 216 / 510 / 1350 m - so far mechs kept detail the original
                  * never shows (user report: DOS at 442 m on its third model, the port at 445 m on its second) */
                 if (g_lod_focal > 512.0f) g_lod_focal = 512.0f;
-                g_sim.cam_a0 = lod_a0();
-                g_sim.cam_ok = 1;
+                msim_camera_lods(&g_sim, v.eye, lod_a0(msim_dos_int && g_camode != 0 ? g_cam_zoom : g_zoom));
                 for (k = 0; k < g_actor_count; k++) total += g_actors[k].mech.part_count;
                 if (show_pl || (g_cockpit && g_pl_ok)) total += g_pl.part_count + (g_plpit_ok ? g_plpit.part_count : 0);
                 total += g_sim.shot_count + g_sim.debris_count;   /* projectiles in flight, debris */
@@ -8371,6 +8340,15 @@ int main(int argc, char **argv)
                     int q;
                     const unsigned fly = mech3d_fly_mask(g_sim.player_unit.loc_gone);
                     const mech3d *pm = &g_pl;
+                    if (msim_dos_int && g_sim.player_col_repr) {
+                        mech3d *lm = actor_lod(64, &g_pl, g_sim.player_skel, 0.0f, g_sim.player_col_repr);
+                        if (lm && lm->part_count > g_pl.part_count) {
+                            mech3d_part *grown = realloc(all.parts, (size_t)(total + lm->part_count) * sizeof *all.parts);
+                            if (grown) { total += lm->part_count; all.parts = grown; }
+                            else lm = NULL;
+                        }
+                        if (lm) pm = lm;
+                    }
                     if (c3d_ti && g_tex_kind != 3) {   /* TEXTURES TITANIUM: the player's mech as its Titanium model */
                         mech3d *tm = ti_actor(64, &g_pl, g_sim.player_skel, 0);
                         mech3d_part *grown = tm ? realloc(all.parts, (size_t)(total + tm->part_count) * sizeof *all.parts) : NULL;
@@ -9063,8 +9041,9 @@ int main(int argc, char **argv)
             }
         }
         /* cockpit: 90 degrees horizontal at 4:3 = 73.74 vertical (DOS, measured against the same scene); chase: 40 */
-        if (g_world) v.vfov = g_cockpit ? 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / g_zoom) * 180.0f / 3.14159265f : 40.0f;   /* zoom_factor narrows the cockpit view */
-        if (g_world && g_sim_ok && g_pl_ok && g_pilot) camera_modes(&v);   /* ordnance (3) / ejection (4) camera */
+        if (g_world && !(msim_dos_int && g_sim_ok && g_pl_ok && g_pilot))
+            v.vfov = g_cockpit ? 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / g_zoom) * 180.0f / 3.14159265f : 40.0f;
+        if (!msim_dos_int && g_world && g_sim_ok && g_pl_ok && g_pilot) camera_modes(&v);
         {   /* 0x1002df60 (each frame from 0x1002dc90, and on entering a camera mode): the camera's zoom (+0x18) changed -
              * VIEWZOOM 0x147 (0x10032b60 edx 0x64, pan 0x40, priority 0x50). The zoom is DAT_1024e658 (the cockpit zoom
              * factor) in mode 0 (the cockpit) and DAT_1024e65c in the others: mode 1 (external / death orbit, 0x1002e280)

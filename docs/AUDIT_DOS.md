@@ -296,16 +296,88 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   thresholds and measures from the camera to each unit's centre as DOS does. The page 7 pose, mech and
   settings remain to be matched.
 
+### Projectile flight
+
+- MW2.EXE 0x506f0 and 0x50750 advance each projectile once per frame using the whole tick delta. The
+  position step rounds down to whole centimetres, and the impact check at 0x5091c precedes expiry at
+  0x50bc6. The port follows this order in DOS mode and retains the projectile's 16.16 velocity between
+  frames. The differential test covers flight and expiry endpoints over varying tick deltas.
+- Launch direction (0x527dc), gravity (0x4e62e and 0x52806), missile launch offsets (0x53410), and
+  missile steering and proximity (0x50d50) have differential coverage. Launch offsets consume one
+  random roll for missiles. Other projectiles consume none in this routine. In the DOS TNJ6 sequence,
+  all ten locked LRMs hit the stationary instructor at about 5.4 m above its feet.
+- DOS reserves projectile slots in BTHG record order (0x4f326). The retail MW2_SHT1 record contains 159
+  slots, with a limit of 175 in the loader. The allocator scans for the first free slot of the weapon's
+  projectile type (0x52710). The active list is also processed in slot order, including after a slot is
+  reused. The career shot count advances even when the pool cannot supply a slot. The flamer's zero
+  launch speed exits at 0x526fc before allocating a projectile.
+- DOS 0x1c3f0 searches the collision list in order and replaces a hit only with a strictly nearer one.
+  World tests use the integer sphere (0x3a745), box clip (0x1ec60), and polygon plane crossing (0x1c7a0).
+  The segment uses the octagonal length up through 3,000 cm and the Euclidean length above it. The height
+  fallback at 0x50b4e applies to negative endpoints. Ground above zero is covered by the terrain face test.
+  Differential checks cover both segment length modes, spheres, boxes and oblique face crossings.
+  The bullet impact on a unit uses X and Z from the 100 cm offset calculated at 0x5093c. The impact
+  handler at 0x510c1 retains the contact height. Other tested impacts use the contact position.
+- Mech pieces use the original integer bounding sphere (0x37f60) and round the transformed centre
+  after the 3.29 matrix products (0x3aefc). The port scans current mech representations and scenery
+  together. Differential cases exercise tied contacts between two parts and a scenery object, and verify
+  the shooter is excluded. Blown-off parts leave the scan. Solid wrecks still block it. Aquiline Fire passes
+  the DOSBox damage window with the combined scan in use.
+- The reticle and gun convergence pass a fixed 150,000 cm ray from the pilot's eye (0x1d8a0). AI line-of-fire
+  and jump sightlines instead use the original octagonal segment length (0x2bf20 and 0x2e150).
+  Player and AI avoidance also use that collision scan. Their step endpoints, lateral offsets, and
+  velocity-scaled probe range follow 0x2db80 and 0x2df30. The TNJ4 wall-follow sequence covers the resulting
+  slowdown, turn, and return to the nav route.
+- DOS 0x37580 uses the horizontal and slant lengths from 0x2ab60. The original trigonometry tables depend on
+  the x87 control word set by Watcom startup. The emulator now sets that word before building the tables.
+  The comparison covers representations around their boundaries, wrecks, the cockpit and external cameras,
+  and the order of simultaneous representation changes. Original 0x15da7 calls 0x35870 after projectile upkeep.
+  The port now ranks collision hulls from the active draw camera at that point. The ordnance-camera sequence
+  follows a missile far enough to switch the player's exterior representation, then returns to the cockpit.
+- Representation swaps now retain the posed torso pitch and animation sample. The DOS player also passes the
+  current pilot pose to the cockpit and exterior collision meshes.
+
+### AI manoeuvre timing and model damage
+
+- The attack dispatcher at 0x2c210 starts a manoeuvre on one update and runs its movement on following
+  updates. The differential test exercises start, movement input, and the ending frame for manoeuvres
+  0, 4, 8, 10, and 11 with fixed target geometry. A separate comparison runs manoeuvre 9 with supplied
+  sightline results and checks the jet phases, descent brake, steering input, and attack deadline.
+  The approach and glide calculations divide by whole elapsed ticks and hold the previous distance on
+  updates with zero ticks. The approach end threshold uses the fixed-point scale at 0x2d42f. Comparisons
+  exercise approach, weave, and charge inputs with and without an obstacle. The weave still changes
+  sign on schedule while deflected. A charge ignores a deflection when its own target is the obstacle,
+  and its self-destruct check still runs at 0x2d4e4.
+- Additional comparisons exercise the glide at 0x2d7b0, flank steering at 0x2d290 and circling at 0x2d990.
+  They cover fuel and heat boundaries, glide thrust direction, the waypoint-to-target steering transition,
+  and waypoint advancement after the current steering input. The DOS obstacle avoidance cache now uses an
+  absolute tick deadline, so two queries in a single update see the same deadline.
+- DOS type 2 missile and PPC warnings use the unit tracked by the shooter's AI state (0x2e4c5)
+  separately from the projectile's homing lock. The sweep pilot moves clear of a training instructor's
+  firing lane if a protected target is nearby.
+- The model shade uses the nibble written by 0x26567 and 0x1e7e0. The MEK loader computes separate
+  front and rear scales at 0x4ca25. Hits use the side that took the damage and can only raise the
+  recorded shade for that location. The cockpit readout evaluates current values for both sides.
+  The differential runs the original MEK scale and hit routines.
+- All 41 executable comparison groups passed across seeds 47 and 149 at 100 cases per test. The objective
+  sweeps completed 59 DOS and 54 Enhanced scenarios without fallbacks. The DOS sweep also passed with
+  AddressSanitizer and UndefinedBehaviorSanitizer. The OpenGL suite reproduced the same 23 failures as
+  v1.1.59 after the new ordnance fixture was corrected to select the LRM explicitly. The corrected sequence
+  passed with both OpenGL and Vulkan. Aquiline Fire uses a DOSBox timing window because its firing
+  sequence varies with the random seed and frame timing.
+
 ## Not checked
 
-- **The manoeuvre steps** (the step table 0x2c1d0: 0 to 12 per tick) are not emulated. They need a live unit, its
-  target and the world for the line-of-sight and probe calls. They were ported by reading the disassembly; the
-  chooser, the starts, the flank pick and the patrol sweep around them are emulated.
-- **The missile warning's AI target bookkeeping.** DOS type 2 takes the unit's current target word. The port uses
-  its combat target. These can diverge if the AI changes targets between selecting a weapon and releasing a projectile.
-- **The weapon pick's follow-up** after 0x2ea63, including the pitch offset for weapon types 0 and 4. Selection
-  through 0x2ea63 now has differential coverage for the range, heat, readiness, ammunition and random roll.
-- **The damage nibble written into the world model on a hit** (0x26570) remains a disassembly comparison.
+- **Live manoeuvre execution.** Glide, flank, and circling inputs have controlled comparisons. Their paths through
+  live terrain, including rebuilding patrol points around a moving target, still need DOS traces.
+- **Full hull poses.** Bounds, representation changes, and hit ordering have executable comparisons.
+  The port still derives the animation hierarchy from its pose solver. The original's fixed-point matrix
+  composition and full per-frame pose changes need direct coverage.
+- **Live AI warning timing.** The recipient now comes from the AI's tracked target. A live trace is still
+  needed across a target handoff during an active volley.
+- **The weapon pick's follow-up** after 0x2ea63. Selection through 0x2ea63 has differential coverage for
+  range, heat, readiness, ammunition and the random roll. The pitch additions for weapon IDs 0 and 4
+  are overwritten at 0x2e971 in the caller before the torso controller reads the input.
 - **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's
   IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
   jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule

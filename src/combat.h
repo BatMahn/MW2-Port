@@ -83,6 +83,9 @@ typedef struct {
     float         armor[MEK_LOC_COUNT], rear[MEK_LOC_COUNT], internal[MEK_LOC_COUNT];   /* floats, as the engine keeps them */
     int           armor_max[MEK_LOC_COUNT], rear_max[MEK_LOC_COUNT];   /* starting values (HUD damage levels) */
     float         armor_mult;       /* the loader's armour factor (combat_set_armor_mult; 1 until set) */
+    uint8_t       dos_shade_scale[2][MEK_LOC_COUNT];  /* side's original armour plus structure, divided by five */
+    uint8_t       dos_shade[MEK_LOC_COUNT];           /* largest shade written by a hit to the location */
+    int           dos_shade_divisor;                  /* 0x961d8 for the player, 0x961d4 for other units */
     combat_weapon weapons[COMBAT_MAX_WEAPONS];
     int           weapon_count;
     float         heat, sink_per_tick;
@@ -210,6 +213,7 @@ void combat_set_player_difficulty(combat_unit *u, int difficulty);
  * for any other (enemy, neutral). combat_armor_mult gives the factor, combat_set_armor_mult applies it once */
 float combat_armor_mult(int player, int alliance, int difficulty);
 void combat_set_armor_mult(combat_unit *u, float mult);
+int combat_dos_damage_level(const combat_unit *u, int loc, int rear, int divisor);
 /* Advance weapon cycles, heat and shutdown by dt seconds. DOS heat override uses the whole clock ticks elapsed. */
 void combat_tick(combat_unit *u, float dt, int dos_ticks);
 /* trigger ready weapons in range at `target` and resolve projectiles now due.

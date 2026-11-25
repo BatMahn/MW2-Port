@@ -32,6 +32,7 @@
  * fallbacks, nodes active at the end, mission failed / not finished.
  */
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -320,6 +321,41 @@ static int protect_threat(const msim *s, const char *t)
         if (dx * dx + dz * dz < bd) { bd = dx * dx + dz * dz; e = k; }
     }
     return e;
+}
+
+/* Waiting for a scripted delay can leave the sweep pilot in an instructor's
+ * line of fire through a protected target. Leave that line while holding fire. */
+static void hold_clear_of_protected_things(msim *s, const mtbl_table *table)
+{
+    for (int i = 0; i < s->actor_count; i++) {
+        if (!s->armed[i] || s->units[i].destroyed || !s->minds) continue;
+        const ai_mind *m = &s->minds[i];
+        if (!m->targets_player || (!m->target && m->state != AI_TARGET && m->state != AI_ATTACK)) continue;
+        float x = (float)s->actors[i].mech.origin[0], z = (float)s->actors[i].mech.origin[2];
+        float dx = s->player[0] - x, dz = s->player[2] - z, length = hypotf(dx, dz);
+        if (length < 1000.0f || length > combat_max_range(&s->units[i])) continue;
+        dx /= length; dz /= length;
+        for (int j = 0; j < table->node_count; j++) {
+            const mtbl_node *nd = &table->nodes[j];
+            if (nd->kind != MTBL_K_PROTECT || s->logic.state[0][j] != MTBL_ACTIVE || !has_target(nd)) continue;
+            for (int k = 0; k < s->bld_count; k++) {
+                const struct msim_building *b = &s->bld[k];
+                if (b->hp <= 0 || b->hp == INT_MAX || strcasecmp(bld_rec(s, k), nd->target) != 0) continue;
+                float ox = (b->mn[0] + b->mx[0]) * 0.5f - x, oz = (b->mn[2] + b->mx[2]) * 0.5f - z;
+                float along = ox * dx + oz * dz, side = ox * dz - oz * dx;
+                /* The shooter can be up to 10 degrees off its target when it
+                 * pulls the trigger. Leave room for that cone as it turns. */
+                float margin = fmaxf(b->mx[0] - b->mn[0], b->mx[2] - b->mn[2]) * 0.5f +
+                               along * 0.176327f + 600.0f;
+                if (along <= 0.0f || along > length + margin + 4000.0f || fabsf(side) >= margin) continue;
+                float offset = fmaxf(2500.0f, margin * length / fmaxf(along, 100.0f));
+                if (side > 0.0f) offset = -offset;
+                s->player[0] += dz * offset;
+                s->player[2] -= dx * offset;
+                return;
+            }
+        }
+    }
 }
 
 /* the posed parts' centre and height range (cm); returns 1 if the centre is more than 15 m from the unit's own point
@@ -686,7 +722,10 @@ static int run_scene(prj_archive *a, const char *scene)
             }
             default: break;
             }
-        } else idle_steps++;
+        } else {
+            idle_steps++;
+            hold_clear_of_protected_things(&s, t0);
+        }
 
         /* stay inside the mission area: every leave node of table 0 that is not itself the goal (the "going too far"
          * warnings and the star-lose ones) - enemies outside it come to the player */

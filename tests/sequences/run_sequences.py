@@ -2248,7 +2248,9 @@ def aqua_time_to_death(c):
       'farthest %.0f m' % max(hits_d or [0]))
     c(far and max(far) >= 450.0, 'the Stormcrow fires the ER ML from beyond 450 m (DOSBox: from ~505 m, 21 s) - those miss',
       '%s' % ['%.0f' % d for d in far])
-    c(all(22.0 <= t <= 90.0 for t in ttd), 'each seed dead within DOSBox\'s range (game time 28.6-87.1 s, 20 timed runs)', '%s' % ttd)
+    # DOSBox produced a run that was still alive at the 90 s cutoff. Keep the median and early-death checks below.
+    c(sum(22.0 <= t <= 90.0 for t in ttd) >= len(ttd) - 1 and all(t >= 22.0 for t in ttd),
+      'all but at most one seed dead within the DOSBox window', '%s' % ttd)
     st = sorted(ttd)
     # 2026-10-21: with the DOS nav steering in whole degrees (ai_nav_turn, DOS 0x229e0) the attackers approach on lines
     # 0-1 degree right of the float ones: port seeds 1-48 median 37.5, mean 44.2 (float steering: seeds 1-41 median 44,
@@ -3986,8 +3988,10 @@ def locked_lrm_hits_trainer(c):
     env = {'MW2_START': '-18364,79502', 'MW2_START_HEADING': 180, 'MW2_TEST_TARGET': '0', 'MW2_TEST_HOLD_ACTOR': '0',
            'MW2_MISSILE_TRACE': '1'}
     sel = [(6 + 0.4 * i, 6.1 + 0.4 * i, 'enter') for i in range(4)]   # TNJ6 Mad Dog MDG02TRN (LRM 10 x2): sel 1 -> 5
-    for suffix, extra in (('', {}), ('_walking', {'MW2_TEST_STRAFE': '0,500,9,30'})):
-        r = c.run(suffix, secs=18, env=dict(env, **extra), mission='TNJ6SCN1', hold=sel + [(11, 11.1, 'space')])
+    for suffix, extra, dos_look in (('', {}, False), ('_walking', {'MW2_TEST_STRAFE': '0,500,9,30'}, False),
+                                    ('_dos', {}, True)):
+        r = c.run(suffix, secs=18, env=dict(env, **extra), mission='TNJ6SCN1', hold=sel + [(11, 11.1, 'space')],
+                  dos_look=dos_look)
         c(r.at(10.9)['lock'] & 0x80, suffix + ' locked when fired', 'lock 0x%x' % r.at(10.9)['lock'])
         paths, tgt = missile_paths(r)
         c(len(paths) >= 10, suffix + ' an LRM 10 volley in flight', '%d missiles' % len(paths))
@@ -4349,6 +4353,18 @@ def dos_jenner_lod_at_450m(c):
 
 
 @sequence
+def dos_player_lod_in_ordnance_camera(c):
+    """The cockpit uses its own hull. The DOS ordnance camera ranks the player's exterior by distance."""
+    select = [(0.15 + 0.25 * i, 0.25 + 0.25 * i, 'enter') for i in range(7)]
+    r = c.run(secs=14, nostart=True, dos_look=True, env={'MW2_LOD_TRACE': '1'}, keys=[(6.3, 'f10')],
+              hold=select + [(6, 6.08, 'space')], dump='/0.1')
+    c(any(s['camode'] == 3 and s['follow'] > 0 for s in r.states), 'F10 rides the LRM')
+    reprs = set(re.findall(r'^lod actor 64 TIMBRWLF .* -> repr (\d)', r.out, re.M))
+    c(bool(reprs & {'1', '2', '3'}), 'the player uses an exterior LOD as the missile flies away', str(reprs))
+    c(r.last['camode'] == 0, 'the cockpit returns when the missile is gone', str(r.last['camode']))
+
+
+@sequence
 def shot_hits_piece_spheres(c):
     """a shot against a unit is tested against its pieces' bounding spheres only (0x10044f60 -> 0x100103e0): each piece is
     a type 6 object (0x10026430 -> 0x1000ffd0(6)) with no test of its own in 0x1024b3a8, so 0x10010650 -> 0x100107b0 takes
@@ -4435,9 +4451,9 @@ def airborne_press_face_drops(c):
 def torso_servo(c):
     """the player's torso servos (0x100190d0: controller +4 twist / +0x14 pitch, T = 0.2 s x 181 = 36.2 ticks; stepped a frame
     by 0x1003b7e0 in 0x10019310; DOS 0x266e0 / 0x49b80: T 36 in 16.16 degrees): the sinks set the demands c[2] / c[6], the
-    twist c[3] and pitch c[7] (view, aim, compass band) follow by frame ticks / T of the gap a frame (30 fps: 6.07 / 36.2 =
-    0.168). '.' held 1 s: the twist lags the demand and goes on easing after release; Keypad 5 held 0.2 s: the demands 0
-    at once, the twist / pitch ease to 0 (0.832 a frame) - DOSBox YELLSCN1 (ZMBV, 10.4-tick frames): the compass band
+    twist c[3] and pitch c[7] (view, aim, compass band) follow by frame ticks / T of the gap. At 30 fps DOS advances
+    by 6 or 7 whole ticks. '.' held 1 s: the twist lags the demand and goes on easing after release; Keypad 5 held
+    0.2 s zeros the demands and the twist and pitch ease toward them. DOSBox YELLSCN1 (ZMBV, 10.4-tick frames): the compass band
     38 -> 50 degrees over ~0.4 s after Period's release (the engine's ramp + servo at those frames: 39.8 -> 51), Keypad 5
     held: 31 -> 22 -> 16 -> 12 -> 9 (0.71 = 1 - 10.4 / 36.2 a frame) to 0; a sub-frame tap (xdotool) is not seen at all"""
     t0 = UP
@@ -4457,13 +4473,20 @@ def torso_servo(c):
         c(rel['twist'] < rel['dtw'] - 3, '%s: at the release the twist lags its demand' % ed, '%.2f / %.2f' % (rel['twist'], rel['dtw']))
         c(abs(at(t0 + 2.4)['twist'] - at(t0 + 2.4)['dtw']) < 0.05 and abs(at(t0 + 2.4)['dtw'] - rel['dtw']) < 1e-3,
           '%s: the demand held after release, the twist eased onto it' % ed, '%.2f / %.2f' % (at(t0 + 2.4)['twist'], at(t0 + 2.4)['dtw']))
-        k = 1 - (182.0 / 30) / (36.0 if ed == 'dos' else 36.2)
-        ease = [d for d in sk if t0 + 2.55 <= d['t'] <= t0 + 3.0]
-        ratios = [b['twist'] / a['twist'] for a, b in zip(ease, ease[1:]) if a['twist'] > 0.5 and b['dtw'] == 0]
-        c(len(ratios) >= 5 and all(abs(x - k) < 0.01 for x in ratios), '%s: Keypad 5 eases the twist %.3f a frame' % (ed, k),
-          ' '.join('%.3f' % x for x in ratios[:8]))
-        pr = [b['pitch'] / a['pitch'] for a, b in zip(ease, ease[1:]) if abs(a['pitch']) > 0.5 and b['dpi'] == 0]
-        c(len(pr) >= 3 and all(abs(x - k) < 0.01 for x in pr), '%s: and the pitch' % ed, ' '.join('%.3f' % x for x in pr[:8]))
+        errors = {'twist': [], 'pitch': []}
+        for a, b, after in zip(sk, sk[1:], sk[2:]):
+            if not t0 + 2.55 <= a['t'] <= t0 + 3.0:
+                continue
+            # The trace prints the pose after the update with the timestamp at the start of that frame.
+            ticks = round(after['t'] * 1000) * 182 // 1000 - round(b['t'] * 1000) * 182 // 1000
+            k = 1 - ticks / 36 if ed == 'dos' else 1 - (182.0 / 30) / 36.2
+            for angle, demand in (('twist', 'dtw'), ('pitch', 'dpi')):
+                if abs(a[angle]) > 0.5 and b[demand] == 0:
+                    errors[angle].append(abs(b[angle] - a[angle] * k))
+        for angle, minimum in (('twist', 5), ('pitch', 3)):
+            residuals = errors[angle]
+            c(len(residuals) >= minimum and max(residuals) <= 0.011, '%s: Keypad 5 eases %s by the expected game ticks' % (ed, angle),
+              'maximum error %.4f degrees over %d frames' % (max(residuals, default=0), len(residuals)))
         c(abs(at(t0 + 3.9)['twist']) < 0.05 and abs(at(t0 + 3.9)['pitch']) < 0.05, '%s: fully recentred' % ed,
           '%.3f %.3f' % (at(t0 + 3.9)['twist'], at(t0 + 3.9)['pitch']))
 
@@ -7838,10 +7861,10 @@ def dos_cockpit_strut_seams(c):
         im = np.frombuffer(px, dtype=np.uint8, count=w * h * 3).reshape(h, w, 3)[:30].astype(np.int32)
         sky = im[:, :, 2] - im[:, :, 0] > 30
         dark = (im.sum(axis=2) < 140) & ~sky
-        left = np.zeros_like(dark); right = np.zeros_like(dark)
-        left[:, 2:] = dark[:, 1:-1] | dark[:, :-2]
-        right[:, :-2] = dark[:, 1:-1] | dark[:, 2:]
-        holes = np.argwhere(sky & left & right)
+        # A dotted seam is a sky pixel touching both sides of the join. Looking
+        # two pixels away also matches the centre of the open wedge between separate struts.
+        holes = np.argwhere(sky[:, 1:-1] & dark[:, :-2] & dark[:, 2:])
+        holes[:, 1] += 1
         c(len(holes) == 0, '%s: no sky through the strut joins' % k, '%d pixels, e.g. %s' % (len(holes), holes[:4].tolist()))
 
 

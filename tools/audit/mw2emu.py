@@ -9,7 +9,7 @@ function's memory footprint is not what it assumed)."""
 import os, struct
 from unicorn import Uc, UcError, UC_ARCH_X86, UC_MODE_32, UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_HOOK_MEM_INVALID
 from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX, UC_X86_REG_EDX, UC_X86_REG_ESI,
-                               UC_X86_REG_EDI, UC_X86_REG_EBP, UC_X86_REG_ESP, UC_X86_REG_EIP)
+                               UC_X86_REG_EDI, UC_X86_REG_EBP, UC_X86_REG_ESP, UC_X86_REG_EIP, UC_X86_REG_FPCW)
 
 STACK_TOP = 0x00300000
 STACK_BASE = 0x00200000
@@ -47,7 +47,8 @@ class Emu:
         self.uc.hook_add(UC_HOOK_CODE, self._code)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._wr)
         self.uc.hook_add(UC_HOOK_MEM_INVALID, self._bad)
-        # the engine's start-up tables the sim's maths reads: the sine / atan tables (0x3aa90 -> 0xfe1d4 / 0xfe5dc)
+        self.uc.reg_write(UC_X86_REG_FPCW, self.r16(0xa4520))  # Watcom startup at 0x78159
+        # The sine and atan tables depend on the x87 precision in effect at startup.
         self.call(0x3aa90)
         self.pristine = {va: bytes(self.uc.mem_read(va, hi - va)) for va, hi, _ in self.segs if va >= 0x90000}
 

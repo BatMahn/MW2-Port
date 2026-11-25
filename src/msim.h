@@ -42,6 +42,7 @@ typedef struct {
 } msim_nav;
 
 #define MSIM_MAX_SHOTS 768
+#define MSIM_DOS_MAX_SHOTS 175
 
 /* a thing (structure, index into msim.bld) as a lock / homing target - the engine's target kind 0x400 (mech +0xdc,
  * missile slot +0x34): player_lock_target, combat_unit.lock_target, msim_shot.homing */
@@ -51,6 +52,8 @@ typedef struct {
 
 typedef struct {
     float x, y, z, vx, vy, vz;   /* cm, cm per tick */
+    int32_t dos_vel[3];          /* DOS flight retains the 16.16 components between frames */
+    int dos_slot;                /* index in the DOS mission's projectile pool */
     float ax, ay, az;            /* acceleration, cm/tick^2 (+0x14..+0x1c): at launch (0, -drop flag x planet gravity, 0);
                                   * a guided missile's is replaced by the guidance each tick, gravity and all (0x10045910) */
     float life;                  /* ticks left */
@@ -91,6 +94,8 @@ typedef struct {
     unsigned     rng;
     msim_shot    shots[MSIM_MAX_SHOTS];
     int          shot_count;
+    uint8_t      dos_shot_kinds[MSIM_DOS_MAX_SHOTS];
+    int          dos_shot_slots;
     mech3d       pl_mech;        /* the player's collision model (Timber Wolf) */
     int          pl_mech_ok;
     float       *height;         /* per actor: model height (cm), for muzzle and aim points */
@@ -263,6 +268,8 @@ typedef struct {
     mech3d       pl_pit;          /* the player's cockpit representation (repr 4 on the full skeleton): its collision */
     int          pl_pit_ok;        /* model while the view is the cockpit (player_cockpit) */
     int          player_cockpit;   /* 1: the camera is in the cockpit (mode 0; the front end sets it, default 1) */
+    int          player_external;  /* DOS distance-ranked representation in an external camera */
+    unsigned char player_col_repr;
     /* levels of detail in the collision list (3Dfx 0x100267d0 -> 0x10026330 -> 0x10026430, DOS 0x37580 -> 0x37060): a unit's
      * pieces are those of the representation it is DRAWN at - picked each frame by its distance from the camera - so shots,
      * probes and the aim ray meet that representation's spheres. cam_*: the render camera (the front end sets it each
@@ -270,7 +277,7 @@ typedef struct {
     float        cam_eye[3], cam_a0;
     int          cam_ok;
     unsigned char *col_repr;       /* per actor: the representation 0-3 in the collision list */
-    mech3d     (*col_lod)[3];      /* per actor: representations 1-3 on the full skeleton, loaded when first needed */
+    mech3d     (*col_lod)[3];      /* actors, then player: representations 1-3, loaded when first needed */
     unsigned char (*col_lod_ok)[3];
     int          no_col_lod;       /* TEST ONLY (MW2_NO_COL_LOD): representation 0 for every unit, as before */
     float        player_twist;     /* the player's torso twist, degrees (the front end; poses the collision models) */
@@ -283,6 +290,10 @@ typedef struct {
      * runs from the highest. Filled by msim_set_world (clist_order) and building_swap */
     int         *clist_seq;
     int          clist_seq_n, clist_next;
+    struct msim_dos_hull {
+        const mech3d *repr;
+        int unit, sequence;
+    } *dos_hulls;                 /* current collision representations in newest-first order */
 } msim;
 
 /* Lancemate orders. point 0 = all points, 1 = Point 2, 2 = Point 3 ... (the lance position, engine object +0xc).
@@ -404,6 +415,7 @@ int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], flo
  * emulated here (3D floats ~50 %, DOS whole cm ~12 %, msim_dos_int). 1: refused. */
 int  msim_contact_retest(const float p0[3], const float p1[3], const float q[3], float rr);
 /* the representation actor k is drawn and collided at (0-3; see col_repr) and its collision model, posed as the unit */
+void msim_camera_lods(msim *s, const float eye[3], float scale);
 int  msim_unit_repr(const msim *s, int k);
 const mech3d *msim_unit_hull(const msim *s, int k);
 /* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second
@@ -442,7 +454,9 @@ extern int msim_dos_int;
 float msim_servo(float cur, float tgt, float T, float ticks);
 float msim_dos_len(float x, float y, float z);
 float msim_leg_demand(float input, float spd, int player, float gain, int airborne, int autopilot, float prev);   /* DOS 0x27cd4 */
-float msim_twist_round(float cur, float demand, float T, float ticks);   /* DOS 0x2edd1: a turret's whole-turn twist step */   /* MW2.EXE's octagonal vector length (4 max + mid + min) / 4 */   /* the servo 0x1003b7e0 / DOS 0x49b80 (float form) */
+/* DOS 0x49b80: the angle servo uses 16.16 degrees and whole clock ticks. */
+float msim_dos_aim_servo(float cur, float demand, int tau, int ticks);
+float msim_twist_round(float cur, float demand, int tau, int ticks);   /* DOS 0x2edd1: a turret's whole-turn twist */
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks);
 /* a mech's full-throttle speed c[0x22] / 64 (cm/s) on a planet of gravity_g, in DOS MW2.EXE's integer steps */
 float msim_top_speed(int walk_mp, float gravity_g);

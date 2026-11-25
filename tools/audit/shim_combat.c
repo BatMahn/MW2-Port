@@ -5,6 +5,22 @@ combat_unit *shim_unit_new(void) { combat_unit *u = calloc(1, sizeof *u); return
 void shim_unit_free(combat_unit *u) { free(u); }
 void shim_set_dos(int on) { combat_dos = on; }
 
+int shim_dos_damage_shade(const int base[3], const int remaining[3], int divisor,
+                          int previous, int damage, int rear, int loc)
+{
+    combat_unit unit = {.dos_shade_divisor = divisor};
+    int i = loc - 1;
+    unit.armor[i] = (float)remaining[0] / 65536.0f;
+    unit.rear[i] = (float)remaining[1] / 65536.0f;
+    unit.internal[i] = (float)remaining[2] / 65536.0f;
+    unit.dos_shade_scale[0][i] = dos_shade_scale(base[0], base[2]);
+    unit.dos_shade_scale[1][i] = dos_shade_scale(base[1], base[2]);
+    unit.dos_shade[i] = (uint8_t)previous;
+    unsigned seed = 1;
+    apply_damage_at(&unit, (float)damage / 65536.0f, rear, loc, &seed);
+    return unit.dos_shade[i];
+}
+
 static unsigned record_weapon_roll(void *ctx, unsigned bound)
 {
     *(unsigned *)ctx = bound;

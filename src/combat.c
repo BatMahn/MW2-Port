@@ -78,6 +78,13 @@ uint16_t combat_mek_rating(const mek_def *d)
     return (uint16_t)r;
 }
 
+/* DOS MEK load 0x4ca25: pack each side's original total into a denominator of 0..15. */
+static uint8_t dos_shade_scale(int armor, int internal)
+{
+    int scale = (armor + internal) / 5;
+    return scale < 1 ? 0 : scale > 15 ? 15 : (uint8_t)scale;
+}
+
 int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
 {
     mek_def d;
@@ -87,6 +94,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     u->speed_gain = 1.0f;
     u->rng = 0x9E3779B9u;
     u->armor_mult = 1.0f;
+    u->dos_shade_divisor = 1;
     u->lock_target = -2;
     if (mek_load(a, loadout, &d) != 0) return -1;   /* the archive, else a user design MEK\\<name>.MEK */
     if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s: %d items, %d ammo bins, '%s'\n", loadout, d.item_count, d.link_count, d.config_name);
@@ -98,6 +106,8 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
         u->internal[l] = (float)d.loc[l].internal;
         u->armor_max[l] = (int)d.loc[l].armor;
         u->rear_max[l] = (int)d.loc[l].rear_armor;
+        u->dos_shade_scale[0][l] = dos_shade_scale((int)d.loc[l].armor, (int)d.loc[l].internal);
+        u->dos_shade_scale[1][l] = dos_shade_scale((int)d.loc[l].rear_armor, (int)d.loc[l].internal);
         u->slot_count[l] = d.loc[l].slot_count <= MEK_SLOTS ? d.loc[l].slot_count : MEK_SLOTS;
         for (k = 0; k < MEK_SLOTS; k++) u->slots[l][k] = d.loc[l].slots[k];
     }
@@ -522,6 +532,25 @@ int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front
 float combat_test_wheat[31];   /* TEST ONLY */
 int combat_dos = 0;   /* combat rules and weapon data for the DOS edition */
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
+
+int combat_dos_damage_level(const combat_unit *u, int loc, int rear, int divisor)
+{
+    const int scale = u->dos_shade_scale[rear][loc];
+    if (!scale || divisor <= 0) return 0;
+    int64_t armor = (int64_t)((rear ? u->rear[loc] : u->armor[loc]) * 65536.0f) / divisor;
+    int64_t structure = (int64_t)(u->internal[loc] * 65536.0f);
+    int level = 15 - (int)(3 * (armor + structure) / (scale * 65536));
+    return level > 0 && level < 16 ? level : 0;
+}
+
+/* DOS 0x26567 uses the side that actually took damage. 0x1e7e0 only raises the model's shade. */
+static void record_dos_shade(combat_unit *u, int loc, int rear)
+{
+    if (!combat_dos) return;
+    int level = combat_dos_damage_level(u, loc, rear, u->dos_shade_divisor);
+    if (level > u->dos_shade[loc]) u->dos_shade[loc] = (uint8_t)level;
+}
+
 static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsigned *rng)
 {
     int i, r, n;
@@ -540,9 +569,10 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
     i = loc - 1;
     t->damage_taken += (int)dmg;
     if (t->loc_gone[i]) return;                              /* already gone: no transfer (nothing more can happen) */
-    arm = (rear && (loc == 2 || loc == 3 || loc == 4)) ? &t->rear[i] : &t->armor[i];
+    rear = rear && (loc == 2 || loc == 3 || loc == 4);
+    arm = rear ? &t->rear[i] : &t->armor[i];
     *arm -= dmg;
-    if (*arm >= 1e-7f) return;
+    if (*arm >= 1e-7f) { record_dos_shade(t, i, rear); return; }
     /* 0x1001732e: the first time a location's armour is used up (flag 0x4000, front and rear share it) the player, up
      * (state 2), hears MECRDWA1 0xec */
     if (!(t->breach_latch & (1u << i))) { t->breach_latch |= 1u << i; if (t->human && !t->shutdown && !t->destroyed) t->breach_sound = 1; }
@@ -563,6 +593,7 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
             if (t->destroyed || t->loc_gone[i]) return;
         }
     }
+    record_dos_shade(t, i, rear);
 }
 
 int combat_fire(combat_unit *u, combat_unit *t, float distance, float rel_angle, unsigned *rng)

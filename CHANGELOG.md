@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.1.60 (2026-11-24)
+
+- **AI targeting.** Mechs use their attacker's position immediately when switching targets in response to an attack.
+- **DOS aiming.** Player torso, AI torso, and turret movement update on whole game ticks using the original fixed-point servo calculation.
+- **DOS AI manoeuvres.** Attack manoeuvres start and move on separate updates. Approach and weave use whole-tick
+  closing speeds. Attacking mechs retain obstacle avoidance steering, and jump attacks use the original sightline,
+  jet phase timer, and descent brake. A charging mech keeps steering toward its target when that target blocks its path.
+- **DOS AI fire.** Mechs use fixed-point sightlines for firing decisions. A missile or PPC warning goes to the unit
+  the shooter is tracking when the volley begins.
+- **DOS projectiles.** Shots travel one segment per frame and can hit on the frame they expire. Launch speed, missile offset, gravity, and homing now use the original fixed-point calculations.
+- **DOS projectile pool.** Each weapon uses the projectile slots assigned to its type by the game data. Impacts resolve in slot order, and the flamer stops creating a projectile in DOS mode.
+- **DOS collisions and aiming.** Projectiles, the reticle, and obstacle probes check scenery and mech parts in one
+  collision list. Mech bounds use whole centimetres, and equally near contacts resolve in insertion order, newest first.
+  The reticle uses the original 1.5 km aim ray. Autocannon effects on mechs use the original horizontal impact offset.
+- **DOS autopilot.** Obstacle probes use the original angles, speed scaling, and side offset when following a wall.
+- **DOS collision detail.** The camera ranks hulls in whole centimetres after projectile upkeep. Fully replaced hulls
+  enter the collision list in unit order. External cameras rank the player's hull alongside the other units.
+- **Mech poses.** Lower-detail models retain torso pitch and walk animation. The DOS player's collision hull uses
+  the current pilot pose.
+- **DOS movement.** Glide jets obey the original fuel and heat boundaries. Flanking mechs switch from waypoint
+  steering to facing their target on the original update. Circling aircraft finish steering for a waypoint before advancing.
+- **DOS damage shading.** Mech model shading updates from the armour and structure on the side hit. Cockpit damage readings continue to show current armour and structure.
+
 ## v1.1.59 (2026-11-24)
 
 - **Campaign progression.** Unlimited ammunition, invulnerability, and disabled collision damage block campaign

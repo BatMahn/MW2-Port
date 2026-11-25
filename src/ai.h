@@ -88,9 +88,12 @@ typedef struct {
     int  *flank_slots;       /* attackers per 45-degree slot around the enemy (engine target +0x1a2) */
     int   can_jump;          /* has jump jets and fuel (engine 0x10020a30) */
     float height;            /* current height above ground, cm */
+    float world_height, target_world_height;  /* DOS centre elevations in cm */
+    float vertical_speed;    /* DOS descent braking, cm per tick */
+    int   jets_installed;
     float jet_fuel;          /* jet fuel, ticks (controller +0xc0; manoeuvre 5 ends under 1, 0x1001ea40) */
     float enemy_height;      /* target's height, cm (for "target above me", 0x10020090) */
-    int   jump_low;          /* DOS 0x2da50: a unit target 8 m above, hidden along the line from the unit's feet */
+    int   jump_low;          /* DOS 0x2da50: a unit target 8 m above, hidden along the line from the unit's centre */
     int  *own_flank;         /* DOS: this unit's own manoeuvre 1 counters (+0x19c; 0x2e6f0's front case reads them) */
     float enemy_dist3;       /* the 3D distance to the target (DOS +0xc4) */
     int   jump_view;         /* DOS: the target 8 m above, hidden from the feet, in view at its height (0x2da50) */
@@ -112,6 +115,8 @@ typedef struct {
     int   grounded;          /* on the ground (object +0x78) */
     int   out_of_weapons;    /* 0x10020880: no weapon with ammunition / working */
     int   moving;            /* controller +0x88 != 0 (0x1001ea40's out-of-weapons test) */
+    int (*dos_avoid)(void *context, float goal_bearing);
+    void *avoid_context;
 } ai_view;
 
 typedef struct {
@@ -130,7 +135,9 @@ typedef struct {
     float next_fire;         /* ticks until the next fire decision (engine +0x15a) */
     float weave, weave_ticks;/* attack manoeuvre 3 */
     int   man, prev_man, forced_man;   /* attack manoeuvre (engine +0x170 / +0x172 / +0x174), -1 none */
+    int   dos_avoid_unit;    /* first blocking unit, -1 player, -2 scenery or none */
     float man_ticks, man_limit;
+    float man_phase_ticks;   /* DOS manoeuvre 9 has a separate jet phase deadline. */
     int   flank_slot;        /* manoeuvre 1: slot taken (-1 none) */
     float flank_x, flank_z, flank_retarget;
     int   flank_face;        /* manoeuvre 1: +0x184 = 1 - at the slot, turning to face the target (0x1001f9d0) */
@@ -160,6 +167,7 @@ typedef struct {
     float leg_srv;           /* DOS look: the leg turn servo's value c[0xf], deg/s (MW2.EXE servo +0x34, T 0.3 s = 54 ticks) */
     int   drive_slow;        /* servo +0x24's T: 0 = 36.2 ticks (0x100190d0) until a walk key flagged 0x10 runs, then 90.5 */
     int   targets_player;    /* this step's enemy is the player (+0x14e == player | 0x200): the MISLTRCK check (0x10031e30) */
+    int   dos_warning_unit;  /* unit in the current aim reference (DOS +0xdc), -2 if none */
     int   lock;              /* missile lock flags (0x10044560): 0x8000 on target, 0x40 acquiring, 0x80 locked */
     float lock_ticks;
     int   tgt;               /* the target picked by condition 7 / the group assignment (actor, -1 player, -2 none) */
@@ -207,6 +215,6 @@ void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int in_
 extern int ai_dos_int;
 float ai_nav_turn(float err);
 /* one AI step: evaluate the current state's rules, then move per state. dt in seconds. */
-void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt);
+void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt, int dos_ticks);
 
 #endif

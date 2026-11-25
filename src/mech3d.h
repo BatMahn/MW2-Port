@@ -51,6 +51,7 @@ typedef struct {
     int       hull_count;
     float     hull_center[3], hull_radius;   /* the piece's bounding sphere (model space): its type 6 collision volume */
     int       sphere_ok;     /* hull_center / hull_radius computed */
+    int32_t   dos_sphere[4]; /* local whole-centimetre centre and radius */
     int       moving;        /* world objects: carried by a path task (PTBL, world3d_paths) - pos / rot change every step:
                                 left out of the static world mesh and collision lists, drawn and hit-tested as they are */
     int       facing;        /* world objects of class 0x10 / 0x60 (the fire and smoke cards, OBJ type word): turned about
@@ -147,6 +148,7 @@ struct anim_set_s;
  * position/rotation (rest pose if anim is NULL). */
 #include "anim.h"
 void mech3d_pose(mech3d *m, const anim_set *anim, float t);
+void mech3d_pose_like(mech3d *m, const mech3d *base);
 /* Relative chance of each damage location (index 0-7 = location 1-8) being struck by a
  * shot aimed at the mech: each OBJL group's front-view area in the rest pose. */
 void mech3d_hit_weights(const mech3d *m, float w[8]);
@@ -159,6 +161,9 @@ int  mech3d_head_point(const mech3d *m, float out[3]);
  * Pieces hidden or blown off (under a location in gone_mask, mech3d_fly_mask) are out of the list. Returns 1 on a
  * hit with the segment fraction in *t and the piece's location (OBJL group, 0 = none: no damage) in *loc, else 0. */
 int  mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone_mask, float *t, int *loc);
+void mech3d_dos_model_sphere(const wtb_object *o, int32_t sphere[4]);
+void mech3d_dos_transform_point(const float rotation[9], const int32_t origin[3], const int32_t point[3], int32_t out[3]);
+int  mech3d_dos_hull_sphere(const mech3d *m, int part, unsigned gone_mask, float sphere[4]);
 /* Average forward body travel per key over keys [first, first+count): how far
  * the planted (lowest bound) foot moves backwards. Used to time the animation
  * to ground speed so feet don't slide. */

@@ -177,7 +177,14 @@ static int mech3d_load_repr(prj_archive *a, const char *record, int repr, mech3d
         if (strcmp(chunks[k].tag, "OBJL") == 0 && chunks[k].size >= 4) {
             int nodei = (int16_t)(chunks[k].data[0] | (chunks[k].data[1] << 8));
             int grp = (int16_t)(chunks[k].data[2] | (chunks[k].data[3] << 8));
-            for (i = 0; i < out->part_count; i++) if (out->parts[i].node == nodei) { out->parts[i].group = grp; out->parts[i].objl = 1; }
+            for (i = 0; i < out->part_count; i++) {
+                mech3d_part *p = &out->parts[i];
+                if (p->node != nodei) continue;
+                p->group = grp;
+                p->objl = 1;
+                if (p->model.object_count > 0)
+                    mech3d_dos_model_sphere(&p->model.objects[0], p->dos_sphere);
+            }
         }
     /* pieces with no OBJL group (JN1DECLL / JN1DECLR: the Jenner's arm decals) belong to the location of the nearest
      * grouped piece up the node tree - they went on floating when their arm was shot off */
@@ -1086,6 +1093,17 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
     }
 }
 
+void mech3d_pose_like(mech3d *m, const mech3d *base)
+{
+    memcpy(m->origin, base->origin, sizeof m->origin);
+    m->heading = base->heading;
+    m->twist = base->twist;
+    m->tilt = base->tilt;
+    m->pitch = base->pitch;
+    m->pose_off = base->pose_off;
+    mech3d_pose(m, (const anim_set *)base->pose_anim, base->pose_t);
+}
+
 float mech3d_stride(const mech3d *m, const anim_set *anim, int first, int count)
 {
     /* body travel per key = backward motion of the planted (lowest) foot */
@@ -1249,6 +1267,62 @@ static void build_sphere(mech3d_part *p)
     }
     memcpy(p->hull_center, c, sizeof c);
     p->hull_radius = sqrtf(r2);
+}
+
+/* DOS 0x37f60: midpoint rounded down, then the farthest vertex radius truncated. */
+void mech3d_dos_model_sphere(const wtb_object *o, int32_t sphere[4])
+{
+    if (o->vert_count == 0) {
+        memset(sphere, 0, 4 * sizeof *sphere);
+        return;
+    }
+    int32_t mn[3] = {o->verts[0].x, o->verts[0].y, o->verts[0].z};
+    int32_t mx[3] = {mn[0], mn[1], mn[2]};
+    for (int i = 1; i < o->vert_count; i++) {
+        const int32_t v[3] = {o->verts[i].x, o->verts[i].y, o->verts[i].z};
+        for (int j = 0; j < 3; j++) {
+            if (v[j] < mn[j]) mn[j] = v[j];
+            if (v[j] > mx[j]) mx[j] = v[j];
+        }
+    }
+    for (int j = 0; j < 3; j++) sphere[j] = (int32_t)(((int64_t)mn[j] + mx[j]) >> 1);
+    double radius2 = 0;
+    for (int i = 0; i < o->vert_count; i++) {
+        double dx = (double)o->verts[i].x - sphere[0];
+        double dy = (double)o->verts[i].y - sphere[1];
+        double dz = (double)o->verts[i].z - sphere[2];
+        radius2 = fmax(radius2, dx * dx + dy * dy + dz * dz);
+    }
+    sphere[3] = (int32_t)sqrt(radius2);
+}
+
+/* DOS 0x3aefc sums the 3.29 products before rounding each output coordinate. */
+void mech3d_dos_transform_point(const float rotation[9], const int32_t origin[3], const int32_t point[3], int32_t out[3])
+{
+    for (int i = 0; i < 3; i++) {
+        int64_t sum = 0;
+        for (int j = 0; j < 3; j++)
+            sum += llround((double)rotation[i * 3 + j] * 536870912.0) * point[j];
+        out[i] = origin[i] + (int32_t)((sum + (1 << 28)) >> 29);
+    }
+}
+
+int mech3d_dos_hull_sphere(const mech3d *m, int part, unsigned gone_mask, float sphere[4])
+{
+    const mech3d_part *p = &m->parts[part];
+    if (p->hidden || !p->objl || mech3d_fly_loc(m, part, gone_mask)) return 0;
+    const int32_t *local = p->dos_sphere;
+    if (local[3] <= 0) return 0;
+    int32_t centre[3];
+    if (p->has_rot) mech3d_dos_transform_point(p->rot, p->pos, local, centre);
+    else {
+        const float yaw = p->yaw * 3.14159265f / 180.0f, sn = sinf(yaw), cs = cosf(yaw);
+        const float rotation[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
+        mech3d_dos_transform_point(rotation, p->pos, local, centre);
+    }
+    for (int i = 0; i < 3; i++) sphere[i] = (float)centre[i];
+    sphere[3] = (float)local[3];
+    return 1;
 }
 
 /* Engine 0x100103e0 over a unit's pieces: each piece is a type 6 object (0x10026430 -> 0x1000ffd0(6)), which has no
