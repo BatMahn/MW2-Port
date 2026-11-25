@@ -5,6 +5,23 @@ float shim_servo(float cur, float tgt, float T, float ticks) { return drive_serv
 int32_t shim_dos_drive_servo(int32_t value, int32_t target, int ticks, int tau) { return dos_drive_servo(value, target, ticks, tau); }
 float shim_oct_len(float x, float y, float z) { return oct_len(x, y, z); }
 
+void shim_dos_random(const unsigned *limits, unsigned *out, int count)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    for (int i = 0; i < count; i++) out[i] = ms_roll(&s, limits[i]);
+}
+
+int shim_dos_warning_roll(unsigned *index, int weapon, int level)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    s.dos_random_index = *index;
+    int react = dos_warning_roll(&s, weapon, level);
+    *index = s.dos_random_index;
+    return react;
+}
+
 void shim_dos_anim_frames(const int32_t *keys, int count, const int32_t *frames,
                           int frame_count, int rate, int kind, unsigned phase, int32_t *out)
 {
@@ -356,12 +373,12 @@ int shim_dos_projectile_terrain(int barrier)
     return alive;
 }
 
-unsigned shim_dos_projectile_launch(int weapon, unsigned seed, int32_t gravity, const int32_t from[3],
+unsigned shim_dos_projectile_launch(int weapon, unsigned roll, int32_t gravity, const int32_t from[3],
                                     const int32_t to[3], int32_t out[7])
 {
     msim *s = calloc(1, sizeof *s);
-    if (!s) return seed;
-    s->rng = seed;
+    if (!s) return 0;
+    s->dos_random[0] = (uint16_t)roll;
     s->planet.gravity_g = (float)gravity / 65536.0f;
     const float muzzle[3] = {(float)from[0], (float)from[1], (float)from[2]};
     const float aim[3] = {(float)to[0], (float)to[1], (float)to[2]};
@@ -370,9 +387,9 @@ unsigned shim_dos_projectile_launch(int weapon, unsigned seed, int32_t gravity, 
     out[0] = (int32_t)sh->x; out[1] = (int32_t)sh->y; out[2] = (int32_t)sh->z;
     memcpy(out + 3, sh->dos_vel, sizeof sh->dos_vel);
     out[6] = (int32_t)lrintf(sh->ay * 65536.0f);
-    seed = s->rng;
+    unsigned draws = s->dos_random_index;
     free(s);
-    return seed;
+    return draws;
 }
 
 int shim_dos_projectile_guide(const int32_t vel[3], int32_t delta[3], int32_t acc[3])

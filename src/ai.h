@@ -197,6 +197,8 @@ typedef struct {
     float guard[16][2];
     int   guard_n;
     unsigned rng;
+    unsigned (*random_roll)(void *context, unsigned limit);
+    void *random_context;
 } ai_mind;
 
 void ai_init(ai_mind *m, int order_prog);
@@ -207,6 +209,8 @@ void ai_post(ai_mind *m, int cond);
 /* the target of a guided launch reacts (engine 0x10020ac0): shooter_level = the shooter's pilot level (player 1).
  * side_free(ctx, side) reports whether a 50 m sidestep that way (-1 left, +1 right) is clear. */
 void ai_set_class(ai_mind *m, int unit_class, int tons);   /* DOS: the manoeuvre record by class (MW2.EXE 0x2c880) */
+void ai_dos_missile_react(ai_mind *m, const ai_view *v, int in_view, float shooter_rel,
+                          int (*side_free)(void *ctx, int side), void *ctx);
 void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int in_view, float shooter_rel,
                         int (*side_free)(void *ctx, int side), void *ctx);
 /* The nav steering (3Dfx 0x10013600 / DOS 0x229e0, the AI's and the player's autopilot): err = bearing - heading in

@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.63 (2026-11-25)
+
+- **DOS startup and AI.** Mech startup and AI decisions share the original 127-entry random sequence.
+  Startup uses whole game ticks and includes the startup sound's random draw. The TNJ1 instructor
+  selects the original opening flank manoeuvre and moves only briefly before the scripted idle order.
+- **DOS simulation at high refresh rates.** The player and AI share a 30 Hz game update when
+  rendering faster. Training slides keep their direction and jump jets refill at the same rate
+  across display refresh rates.
+- **DOS mission animation.** AI mech joints update before the player's joints, then scenery and
+  pooled debris. Circling scenery and debris use fixed-point rotation and share the DOS normalization
+  counter. Multiple rotation tasks on one object update the same matrix in the original order.
+- **DOS AI volleys.** Volley startup consumes the warning roll in the original order, including
+  when the weapon or its target cannot trigger a reaction.
+- **Menu audio.** Combat Variables previews each volume slider and applies music and effects levels
+  immediately. Cadet Training starts its ambience on entry, long Archive entries play their
+  projector cue, and room-specific audio stops when leaving.
+
 ## v1.1.62 (2026-11-25)
 
 - **DOS scenery animation.** Spinning objects use whole game ticks and the original fixed-point rotation.

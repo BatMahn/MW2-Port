@@ -56,7 +56,12 @@ int ai_load(ai_library *lib, prj_archive *a)
     return lib->count == 9 ? 0 : -1;
 }
 
-static unsigned ai_rand(ai_mind *m, unsigned n) { m->rng = m->rng * 1103515245u + 12345u; return n ? ((m->rng >> 16) & 0x7FFF) % n : 0; }
+static unsigned ai_rand(ai_mind *m, unsigned n)
+{
+    if (m->random_roll) return m->random_roll(m->random_context, n);
+    m->rng = m->rng * 1103515245u + 12345u;
+    return n ? ((m->rng >> 16) & 0x7FFF) % n : 0;
+}
 
 void ai_post(ai_mind *m, int cond) { if (m->event_cond == 0) m->event_cond = cond; }
 
@@ -762,28 +767,34 @@ static int program_allows(const ai_library *lib, const ai_mind *m, int state)
 
 int ai_allows(const ai_library *lib, const ai_mind *m, int state) { return program_allows(lib, m, state); }
 
+void ai_dos_missile_react(ai_mind *m, const ai_view *v, int in_view, float shooter_rel,
+                          int (*side_free)(void *ctx, int side), void *ctx)
+{
+    /* DOS MW2.EXE 0x2e450: the shooter's +0x198 bit 4 (pilot level <= 2) and rand(3) != 0; a guided weapon or the PPC; the
+     * target not already set to jump (+0x16e != 4); jets with heat < 65 (0x2e3d0(0x41)) and rand(3) != 0 -> the dodge
+     * direction from the shooter's quadrant off the target's heading (q = (bearing - heading + 360) % 360 / 90): +0x17a =
+     * ((q + 1) % 4) x 4, then a 50 m probe one side at random, then the other: clear -> manoeuvre 11. Otherwise a level
+     * <= 3 pilot with no manoeuvre forced jumps (4) */
+    int side, k, q;
+    float r;
+    if (!in_view || m->forced_man == 4) return;   /* the forced manoeuvre waits for the next chooser call, +0x16e */
+    if (!jets_ok(v, 65.0f)) return;
+    if (ai_rand(m, 3) != 0) {
+        r = fmodf(shooter_rel + 360.0f, 360.0f);
+        q = (int)(r / 90.0f) & 3;
+        side = ai_rand(m, 2) == 0 ? 1 : -1;   /* 0x2e62d: rand(2) != 0 -> -1 */
+        for (k = 0; k < 2; k++, side = -side)
+            if (!side_free || side_free(ctx, side)) { m->forced_man = 11; m->dodge_fwd = ((q + 1) % 4) * 4 > 2; return; }
+    }
+    if (m->forced_man == -1 && v->pilot_level <= 3) m->forced_man = 4;
+}
+
 void ai_missile_warning(ai_mind *m, const ai_view *v, int shooter_level, int in_view, float shooter_rel,
                         int (*side_free)(void *ctx, int side), void *ctx)
 {
     if (ai_dos_int) {
-        /* DOS MW2.EXE 0x2e450: the shooter's +0x198 bit 4 (pilot level <= 2) and rand(3) != 0; a guided weapon or the PPC; the
-         * target not already set to jump (+0x16e != 4); jets with heat < 65 (0x2e3d0(0x41)) and rand(3) != 0 -> the dodge
-         * direction from the shooter's quadrant off the target's heading (q = (bearing - heading + 360) % 360 / 90): +0x17a =
-         * ((q + 1) % 4) x 4, then a 50 m probe one side at random, then the other: clear -> manoeuvre 11. Otherwise a level
-         * <= 3 pilot with no manoeuvre forced jumps (4) */
-        int side, k, q;
-        float r;
-        if (shooter_level > 2 || ai_rand(m, 3) == 0) return;
-        if (!in_view || m->forced_man == 4) return;   /* the forced manoeuvre waits for the next chooser call, +0x16e */
-        if (!jets_ok(v, 65.0f)) return;
-        if (ai_rand(m, 3) != 0) {
-            r = fmodf(shooter_rel + 360.0f, 360.0f);
-            q = (int)(r / 90.0f) & 3;
-            side = ai_rand(m, 2) == 0 ? 1 : -1;   /* 0x2e62d: rand(2) != 0 -> -1 */
-            for (k = 0; k < 2; k++, side = -side)
-                if (!side_free || side_free(ctx, side)) { m->forced_man = 11; m->dodge_fwd = ((q + 1) % 4) * 4 > 2; return; }
-        }
-        if (m->forced_man == -1 && v->pilot_level <= 3) m->forced_man = 4;
+        if (shooter_level <= 2 && ai_rand(m, 3) != 0)
+            ai_dos_missile_react(m, v, in_view, shooter_rel, side_free, ctx);
         return;
     }
     /* 0x10020ac0: shooter +0x19e bit 4 (level < 3) and rand(3) != 0; then the target: jets and heat < 65

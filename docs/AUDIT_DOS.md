@@ -29,7 +29,7 @@ The suite runs in Linux with Python and Unicorn. Use a Linux container or VM if 
   DOS-edition flags are switched on.
 - Where a routine draws random numbers, MW2.EXE's `rand` (0x4a070) is stubbed with the port's own generator, so both
   sides see the same numbers. The chooser and missile-warning tests also check that both sides make the same number
-  of draws.
+  of draws. The random-stream test calls the original initialization and `rand` directly.
 
 ## Sim tests and results
 
@@ -477,27 +477,65 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   all cover instructor contact trajectories and timing. The Vulkan selection passed all 24 checks,
   including all 17 Titanium, Rendition and texture switching checks.
 
+### DOS startup and training contact
+
+- The Watcom generator starts at seed zero (0x49fe0). DOS caches its first 127 values and cycles through
+  them (0x4a070). In TNJ1SCN1 the player and instructor drew entries 0 and 2 for startup. Their startup
+  sounds drew entries 1 and 3 through 0x40d50. The instructor's initial target-state timer, flank choice,
+  and flank side drew entries 4–6. The port shares this sequence between startup, AI and missile
+  offsets. Damage and effects still have their own generators in the port.
+- The original waits until the tick after `0x444 + rand(0x16c)` (0x2817c and 0x2823a). The player made
+  its first draw at ticks 167–171 in TNJ1SCN1, TNJ6SCN1, and GOLDSCN1. The port uses tick 168 as the
+  initial controller reference. A restart counts from the current game tick. Fixed turrets use the
+  same deadline rule (0x2ee85) and consume no startup sound draw.
+- In TNJ1SCN1, the original instructor moved 91 cm west before the player's throttle command at tick
+  1750. During contact the Firemoth slid west and pushed the instructor north. In TNJ6SCN1, the Mad Dog
+  slid east. The training regressions check these directions, timing, recoil, and armour against the
+  instructor's current position. The port limits the DOS update rate to 30 Hz above that display rate
+  so both units use the same interval for centimetre rounding and reciprocal contacts.
+- The 301 OpenGL sequences passed across the full run and focused reruns. Three Vulkan training
+  sequences passed. The 51 executable comparison groups passed, including two complete wraps of the
+  DOS random table. The sanitized DOS mission sweep completed all 59 scenes without fallbacks. Its
+  scripted player now checks for protected structures behind the target before firing. This keeps
+  missed shots from destroying Sable Flame's Sensor Array Dome during the sweep.
+
+### Mission animation order and volley warnings
+
+- The DOSBox traces in HEIDSCN1, TEALSCN1, YELLSCN1, GOLDSCN1, AQUASCN1, CYANSCN1 and
+  PLUMSCN1 show the animated AI units in reverse creation order, then the player joints, scenery
+  and pooled debris. Golden Spade and Aquiline Fire show several mech skeletons in the same frame.
+  The port applies the joint, scenery and pooled debris passes in that order.
+- Blade Splint's helicopter has three circling tasks on one node. The native task list applies
+  its three TSK rotations in reverse record order. All three decrement the same node countdown.
+  Circling now follows the DOS simulation frame schedule and rounds each movement step to whole
+  centimetres. As a result the searchlight discs' cumulative drift depends on the frame schedule.
+- The native debris pass (0x15da2 → 0x2b740 → 0x2b930) rotates active chunks after scenery.
+  The port seeds pooled chunks from the type-11 XPLO allocations and keeps their countdowns across
+  reuse. A replay of the captured input angles, starting matrices and phase matched 9,748 circling
+  updates in Blade Splint and 17,295 chunk rotations across Aquiline Fire, Golden Spade and
+  Plum Wine. The replay checks the rotation, countdown and next phase. It excludes the first
+  observation of each matrix and any update without a usable previous snapshot.
+- Native combat traces in Aquiline Fire and Golden Spade captured flank manoeuvres and live
+  volleys. The warning code (0x2e450) rolls before it tests the weapon and reads its target
+  reference at the start of the volley. The port now also consumes this draw for ineligible
+  weapons or recipients. The executable comparison varied pilot skill, weapon and recipient,
+  including handoffs between two units and a missing recipient.
+
+
 ## Not checked
 
 - **Live manoeuvre execution.** Glide, flank, and circling have controlled comparisons. Their paths
   through terrain and interleaved waypoints from several aircraft still need DOS traces.
-- **Complete mission poses.** Initial countdowns match the four captured missions. Spinning scenery now
-  uses the shared phase. Other rotating tasks, effects, and the relative update order of the player,
-  scenery and AI still need a full-mission comparison.
-- **Complete contact trajectories.** Fixed-point movement and the sampled bounce calculations match the
-  original given the same input states. These checks leave open independent replay through terrain
-  face selection, unit controller decisions and differing frame schedules. In the TNJ1SCN1 capture
-  the instructor began flank movement (0x2d290) before the player's first contact. The port now acquires
-  the instructor's target but still diverges in contact trajectory and duration. TNJ6SCN1 gets past the
-  instructor with a different contact duration.
-- **DOS startup timing and random draws.** The original picks `0x444 + rand(0x16c)` at 0x2817c and
-  waits until the tick after that deadline (0x2823a). In TNJ1SCN1 the player's draw read entry 0
-  (value 0) at tick 168, and the instructor read entry 2 (value 9,988) at tick 182. The mission-wide
-  table cycles through 127 entries at 0x4a070. Applying the DOS delay range with the port's current
-  random sequence stopped the Golden Spade starmate from firing in the turret regression, so that
-  change was reverted. Startup and AI draw ordering still need to be traced together.
-- **Live AI warning timing.** The recipient now comes from the AI's tracked target. A live trace is still
-  needed across a target handoff during an active volley.
+- **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
+  Full playback comparisons across every mission, the flight of detached mech parts and world
+  fragments, and exact debris spawn timing and trajectories remain open.
+- **Complete contact trajectories.** The two training traces establish which side the player passes
+  on and how the instructor recoils. Frame-by-frame replay through terrain face selection, controller
+  decisions and differing frame schedules still needs comparison.
+- **Mission-wide random ordering.** Startup, AI, and missile offsets share the DOS table. Calls from
+  damage, effects, and other sound playback still need comparison against the live call order.
+- **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
+  start. The stock mission captures still lack a natural target handoff during an active volley.
 - **The weapon pick's follow-up** after 0x2ea63. Selection through 0x2ea63 has differential coverage for
   range, heat, readiness, ammunition and the random roll. The pitch additions for weapon IDs 0 and 4
   are overwritten at 0x2e971 in the caller before the torso controller reads the input.

@@ -893,7 +893,7 @@ def projectile_launch(rep, rnd, n):
         muzzle[:] = [s32(em.reg(r)) for r in ('edx', 'ebx', 'ecx')]
     def roll(em):
         calls.append(em.reg('eax'))
-        return ((next_seed >> 16) & 0x7fff) % 200
+        return sample % 200
     e.stub(RAND, roll)
     e.stub(0x1e100, pops=4)
     e.stub(0x1df60, mount_position)
@@ -905,8 +905,7 @@ def projectile_launch(rep, rnd, n):
         aim = [pos + rnd.randint(-10000, 10000) for pos in start]
         if aim == start:
             aim[2] += 1
-        seed = rnd.getrandbits(32)
-        next_seed = (1103515245 * seed + 12345) & 0xffffffff
+        sample = rnd.randrange(32768)
         for i in range(3):
             e.w32(work + 4 * i, aim[i] - start[i])
         e.call(0x3fa50, eax=work, edx=work + 4, ebx=work + 8)
@@ -917,10 +916,10 @@ def projectile_launch(rep, rnd, n):
         e.w32(planet + 8, gravity)
         e.run(0x4e62e, 0x4e644, ecx=planet)
         e.run(0x52806, 0x5282c, ebx=0x9ee58 + weapon * 0x58, esi=shot)
-        port_seed = L.shim_dos_projectile_launch(weapon, seed, gravity, vec(*start), vec(*aim), out)
+        port_draws = L.shim_dos_projectile_launch(weapon, sample, gravity, vec(*start), vec(*aim), out)
         rep.check(list(out[:3]) == muzzle and list(out[3:6]) == [v * speed for v in d] and
                   out[6] == e.rs32(shot + 0x18) and
-                  calls == ([200] if missile else []) and port_seed == (next_seed if missile else seed),
+                  calls == ([200] if missile else []) and port_draws == missile,
                   'weapon %d: DOS muzzle %s gravity %d, port %s gravity %d' %
                   (weapon, muzzle, e.rs32(shot + 0x18), out[:3], out[6]))
 
@@ -1059,6 +1058,88 @@ def dos_leg_heading(rep, rnd, n):
             want = (e.rs32(control + 60), orig_angle)
             got = (round(servo.value * 65536), round(angle.value * 65536))
             rep.check(want == got, 'frame %d %d ticks, target %d: DOS %s port %s' % (i, ticks, target, want, got))
+
+
+@test
+def dos_random_stream(rep, rnd, n):
+    """Check the initialized 127-entry table and its wrap with the executable's own rand."""
+    e = emu()
+    e.call(0x49fe0, eax=0)
+    count = 2 * 127 + 16
+    words = ctypes.c_uint * count
+    limits = words(*(rnd.choice((1, 2, 6, 10, 364, 32768)) for _ in range(count)))
+    got = words()
+    shim = lib('msim').shim_dos_random
+    shim.argtypes = [ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint), ctypes.c_int]
+    shim.restype = None
+    shim(limits, got, count)
+    for i, limit in enumerate(limits):
+        want = e.call(RAND, eax=limit)
+        rep.check(want == got[i], 'draw %d, limit %d: DOS %d port %d' % (i, limit, want, got[i]))
+
+
+@test
+def dos_shared_rotations(rep, rnd, n):
+    """Mech joints, multiple tasks on one scenery node, and a debris slot share one normalization counter."""
+    e = mw2emu.Emu()
+    matrix = ctypes.c_int32 * 9
+    rotate = lib('msim').mech3d_dos_rotate
+    rotate.argtypes = [matrix, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint)] + [ctypes.c_int32] * 3
+    rotate.restype = None
+    nodes = [e.alloc(128) for _ in range(5)]
+    identity = [1 << 29, 0, 0, 0, 1 << 29, 0, 0, 0, 1 << 29]
+    matrices = [matrix(*identity) for _ in nodes]
+    countdowns = [ctypes.c_uint(rnd.randint(1, 12)) for _ in nodes]
+    phase = ctypes.c_uint(rnd.randint(64, 191))
+    e.w32(0x95ae4, phase.value)
+    for node, left in zip(nodes, countdowns):
+        for i, v in enumerate(identity):
+            e.w32(node + 12 + 4 * i, v)
+        e.w32(node + 120, left.value)
+    for _ in range(n * 5):
+        for i in (0, 1, 2, 2, 2, 3, 4):
+            node, mat, left = nodes[i], matrices[i], countdowns[i]
+            pitch, yaw, roll = [rnd.randint(-327680, 327680) for _ in range(3)]
+            if i < 4:
+                pitch, roll = 0, 0
+            e.call(0x1e140, eax=node, edx=pitch, ebx=yaw, ecx=roll, stack=(0,))
+            rotate(mat, ctypes.byref(left), ctypes.byref(phase), pitch, yaw, roll)
+            orig = [e.rs32(node + 12 + 4 * k) for k in range(9)]
+            rep.check(orig == list(mat) and e.r32(node + 120) == left.value and e.r32(0x95ae4) == phase.value,
+                      'node %d axes %d,%d,%d: DOS %s (%d/%d), port %s (%d/%d)' %
+                      (i, pitch, yaw, roll, orig, e.r32(node + 120), e.r32(0x95ae4), list(mat), left.value, phase.value))
+
+
+@test
+def dos_volley_warning_order(rep, rnd, n):
+    """Track each volley-start draw when the shooter's aim reference changes or has no recipient."""
+    e = mw2emu.Emu()
+    e.call(0x49fe0, eax=0)
+    shooter, control, shot, a, b = (e.alloc(0x200) for _ in range(5))
+    e.w32(control, shooter)
+    e.w32(shooter + 0x10, 2)
+    for i, target in enumerate((a, b)):
+        e.w32(0xf8a40 + 4 * (i + 1), target)
+        e.w32(target + 0x16e, 4)  # already jumping, so only the launch's first draw is relevant
+    decision = []
+    def recipient(_uc, _addr, _size, _data):
+        decision.append(e.reg('eax'))
+    e.uc.hook_add(UC_HOOK_CODE, recipient, begin=0x2e4cb, end=0x2e4cb)
+    shim = lib('msim').shim_dos_warning_roll
+    shim.argtypes = [ctypes.POINTER(ctypes.c_uint), ctypes.c_int, ctypes.c_int]
+    i = ctypes.c_uint()
+    for _ in range(n * 15):
+        w, lv, ref = rnd.choice((0x15, 0x2, 0x10)), rnd.randint(1, 4), rnd.choice((0, 0x201, 0x202))
+        e.w32(shot + 4, w)
+        e.w8(shooter + 0x198, 4 if lv <= 2 else 0)
+        e.w32(shooter + 0xdc, ref)
+        e.w32(0x9ee70 + w * 0x58, int(w == 2))
+        decision.clear()
+        e.call(0x2e450, eax=shot, edx=control)
+        react = shim(ctypes.byref(i), w, lv)
+        rep.check(decision == ([ref] if react else []) and i.value == e.r32(0x9e8f4),
+                  'weapon %d level %d target %#x: DOS %s draw %d port %d draw %d' %
+                  (w, lv, ref, decision, e.r32(0x9e8f4), react, i.value))
 
 
 @test

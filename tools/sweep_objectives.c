@@ -784,7 +784,14 @@ static int run_scene(prj_archive *a, const char *scene)
                     if (g->hp <= 0 || !(widen((unsigned)g->type) & 4) || strcasecmp(bld_rec(&s, b2), t0->nodes[q].target) != 0) continue;
                     if (obstruction == -2) {
                         const float from[3] = {s.player[0], s.player_unit.y + SWEEP_AIM_HEIGHT, s.player[2]};
-                        obstruction = msim_shot_obstruction(&s, from, aim_point);
+                        /* A missed shot can hit the protected structure behind the target. */
+                        float end[3] = {aim_point[0], aim_point[1], aim_point[2]};
+                        float distance = hypotf(end[0] - from[0], end[2] - from[2]);
+                        if (distance > 1.0f && distance < 60000.0f) {
+                            float scale = 60000.0f / distance;
+                            for (int axis = 0; axis < 3; axis++) end[axis] = from[axis] + (end[axis] - from[axis]) * scale;
+                        }
+                        obstruction = msim_shot_obstruction(&s, from, end);
                     }
                     if (obstruction == g->intact) {
                         s.player_attacks = 0;

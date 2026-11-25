@@ -926,6 +926,19 @@ static unsigned dos_next_normalization(unsigned *phase)
     return next;
 }
 
+void mech3d_dos_rotate(int32_t r[9], unsigned *left, unsigned *phase, int32_t pitch, int32_t yaw, int32_t roll)
+{
+    dos_matrix old = {0};
+    memcpy(old.r, r, sizeof old.r);
+    const dos_matrix delta = dos_matrix_rotation(pitch, yaw, roll);
+    dos_matrix result = dos_matrix_compose(&old, &delta);
+    if (--*left == 0) {
+        *left = dos_next_normalization(phase);
+        dos_anim_normalize(result.r);
+    }
+    memcpy(r, result.r, sizeof result.r);
+}
+
 void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
 {
     const dos_matrix identity = dos_matrix_rotation(0, 0, 0);
@@ -949,15 +962,8 @@ void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, anim_player *pl
         int type = anim->tracks[tr].type;
         int32_t step = player->dos_step[tr];
         if (!player->dos_rot_left[slot]) continue;
-        dos_matrix old = {0};
-        memcpy(old.r, player->dos_rot[slot], sizeof old.r);
-        dos_matrix delta = dos_matrix_rotation(type == 3 ? step : 0, type == 4 ? step : 0, type >= 5 ? step : 0);
-        dos_matrix local = dos_matrix_compose(&old, &delta);   /* 0x1e140 -> 0x1e0b0 */
-        if (--player->dos_rot_left[slot] == 0) {
-            player->dos_rot_left[slot] = dos_next_normalization(phase);
-            dos_anim_normalize(local.r);
-        }
-        memcpy(player->dos_rot[slot], local.r, sizeof local.r);
+        mech3d_dos_rotate(player->dos_rot[slot], &player->dos_rot_left[slot], phase,
+                          type == 3 ? step : 0, type == 4 ? step : 0, type >= 5 ? step : 0);
     }
 }
 
@@ -1475,11 +1481,6 @@ int mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone
 /* the path tasks' clock: the 3Dfx DLL's 181 ticks a second (0x10248490, 0x102471c4, 0x102471e4); the DOS edition's 182
  * (MW2.EXE 0x1b9a0 / 0x1b729 0xb6, the servos chop(0.3 x 182) = 54 - the GBL port's audit; MW2.EXE the same code) */
 #define WP_CLOCK (mech3d_dos_hips ? 182.0f : 181.0f)
-/* DOS runs its tasks once a frame, and its circling step (0x1b6ef) works in whole centimetres per run, so how far a node
- * strays depends on the frame rate: the port runs it at a fixed rate measured in DOSBox (Blade Splint's
- * helicopter and its searchlight discs, read from memory dumps at known ticks, match a 52 a second run: 30.2 s in, the
- * helicopter at -6102, -15045 and the light 796, 718 from it in DOSBox, -6096, -15297 and 814, 752 here) */
-#define WP_DOS_RUN_HZ 52.0
 #define WP_TAU (mech3d_dos_hips ? 54.0f : 0.3f * 181.0f)   /* the filters' time constant */
 typedef struct { float R[9], t[3]; } wp_xf;
 typedef struct { float last, target, cur; } wp_filt;
@@ -1507,8 +1508,8 @@ typedef struct {
     char     snd[24];             /* type 4: the sound's SNDTABLE name */
     int      runs;                /* type 4: runs so far (the caller acts once per run, 0x1000ec90 case 1) */
     int32_t  dyaw, dspd, dang;    /* type 2, DOS (0x1b5e0): yaw deg / s and cm / s in 16.16, the angle in 16.16 */
-    double   dclock;              /* type 2, DOS: the fixed-rate run clock (ticks, WP_DOS_RUN_HZ) */
-    int32_t  spin[3], spin_period, spin_last;   /* type 0, DOS: 16.16 angles per period, whole ticks */
+    int32_t  spin[3], spin_period, spin_last;   /* DOS task angles and last whole tick */
+    int      dos_rotation;        /* index + 1 of the first rotation task for this node */
     unsigned spin_left;
     dos_matrix spin_matrix;
 } wp_task;
@@ -1714,24 +1715,24 @@ static void wp_turn(wp_xf *x, float pitch, float yaw, float roll)
     memcpy(x->R, o, sizeof o);
 }
 
+static void wp_dos_turn(wp_task *t, wp_xf *x, int32_t pitch, int32_t yaw, int32_t roll, unsigned *phase)
+{
+    mech3d_dos_rotate(t->spin_matrix.r, &t->spin_left, phase, pitch, yaw, roll);
+    for (int i = 0; i < 9; i++) x->R[i] = (float)t->spin_matrix.r[i] / 536870912.0f;
+}
+
 /* one run of a type 0-4 task; 0 = the task ends */
 static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now, unsigned *dos_phase)
 {
     wp_rec *r = &P->recs[t->rec];
     wp_xf *x = &r->local[t->node];
-    if (t->type == 0 && dos_phase && t->spin_left) {   /* MW2.EXE 0x1b55b -> 0x1e140 */
+    if (t->type == 0 && dos_phase && t->dos_rotation) {   /* MW2.EXE 0x1b55b -> 0x1e140 */
         int32_t tick = (int32_t)now;
         int32_t elapsed = (int32_t)((uint32_t)(tick - t->spin_last) << 16) / t->spin_period;
         int32_t angle[3];
         t->spin_last = tick;
         for (int i = 0; i < 3; i++) angle[i] = (int32_t)(((int64_t)t->spin[i] * elapsed + 32768) >> 16);
-        dos_matrix delta = dos_matrix_rotation(angle[0], angle[1], angle[2]);
-        t->spin_matrix = dos_matrix_compose(&t->spin_matrix, &delta);
-        if (--t->spin_left == 0) {
-            t->spin_left = dos_next_normalization(dos_phase);
-            dos_anim_normalize(t->spin_matrix.r);
-        }
-        for (int i = 0; i < 9; i++) x->R[i] = (float)t->spin_matrix.r[i] / 536870912.0f;
+        wp_dos_turn(&P->tasks[t->dos_rotation - 1], x, angle[0], angle[1], angle[2], dos_phase);
         return 1;
     }
     if (t->type == 0) {   /* spin (0x1000e880): each angle turns by its rate x elapsed / (seconds x 181) */
@@ -1740,30 +1741,18 @@ static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now, 
         wp_turn(x, t->k[0] * q, t->k[1] * q, t->k[2] * q);
         return 1;
     }
-    if (t->type == 2 && mech3d_dos_hips) {   /* circling, DOS (0x1b6ef): the same step and turn in integers */
-        if (t->k[3] == 0) return 0;
-        while (t->dclock + WP_CLOCK / WP_DOS_RUN_HZ <= now) {
-            int32_t nw, dt16, d16, c, dx, dz, y16;
-            int64_t v;
-            double a;
-            t->dclock += WP_CLOCK / WP_DOS_RUN_HZ;
-            nw = (int32_t)t->dclock;
-            dt16 = (int32_t)(((int64_t)(nw - (int32_t)t->last) << 16) / 182);   /* 0x1b750: (now - last) << 16 / 0xb6 */
-            t->last = (float)nw;
-            d16 = (int32_t)(((int64_t)t->dspd * dt16 + 0x8000) >> 16);          /* rounded (shrd, adc) */
-            c = d16 >> 16;                                                      /* whole cm, floored (sar): a step
-                                                                                 * under 1 cm backwards is -1 cm */
-            a = t->dang / 65536.0 * 0.017453292519943295;
-            v = (int64_t)llround(cos(a) * 536870912.0) * c;                     /* 0x3a8a8 / 0x3a838: 2^29 sin, cos */
-            dx = (int32_t)((v + 0x8000) >> 16) >> 13;
-            v = (int64_t)(-llround(sin(a) * 536870912.0)) * c;
-            dz = (int32_t)((v + 0x8000) >> 16) >> 13;
-            x->t[0] += (float)dx;                                               /* MoveObj 0x1dfc0: the local translation */
-            x->t[2] += (float)dz;
-            y16 = (int32_t)(((int64_t)t->dyaw * dt16 + 0x8000) >> 16);
-            wp_turn(x, 0.0f, (float)(y16 / 65536.0), 0.0f);
-            t->dang = (int32_t)(((int64_t)t->dang + y16) % (360 * 65536));     /* idiv 0x1680000: the remainder */
-        }
+    if (t->type == 2 && dos_phase && t->dos_rotation) {   /* DOS 0x1b6ef: once when the task is due */
+        int32_t tick = (int32_t)now;
+        int32_t dt16 = (int32_t)(((int64_t)(tick - t->spin_last) * 65536) / 182);
+        int32_t distance = (int32_t)(((int64_t)t->dspd * dt16 + 0x8000) >> 16) >> 16;
+        int32_t turn = (int32_t)(((int64_t)t->dyaw * dt16 + 0x8000) >> 16);
+        int64_t dx = (int64_t)dos_cos(t->dang) * distance;
+        int64_t dz = -(int64_t)dos_sin(t->dang) * distance;
+        t->spin_last = tick;
+        x->t[0] += (float)(((dx + 0x8000) >> 16) >> 13);
+        x->t[2] += (float)(((dz + 0x8000) >> 16) >> 13);
+        wp_dos_turn(&P->tasks[t->dos_rotation - 1], x, 0, turn, 0, dos_phase);
+        t->dang = (int32_t)(((int64_t)t->dang + turn) % (360 * 65536));
         return 1;
     }
     if (t->type == 2) {   /* circling (0x1000ea50): a step along the heading + 90, then a yaw turn */
@@ -2047,14 +2036,37 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
 
 int world3d_paths_tasks(const world3d_paths *p) { return p ? p->ntask : 0; }
 
+static int wp_rotation_for(const world3d_paths *P, int i, const char *record, int node)
+{
+    const wp_task *t = &P->tasks[i];
+    return (t->type == 0 || t->type == 2) && t->node == node && strcasecmp(P->recs[t->rec].rec, record) == 0;
+}
+
 void world3d_paths_dos_seed(world3d_paths *P, const char *record, int node, unsigned period, int32_t yaw)
 {
     if (!P) return;
+    /* The DOS task list runs the newest rotation on each node first. */
+    int first = 0, last = P->ntask - 1;
+    while (first < last) {
+        while (first < last && !wp_rotation_for(P, first, record, node)) first++;
+        while (first < last && !wp_rotation_for(P, last, record, node)) last--;
+        if (first < last) {
+            wp_task swap = P->tasks[first];
+            P->tasks[first++] = P->tasks[last];
+            P->tasks[last--] = swap;
+        }
+    }
+    wp_task *rotation = NULL;
     for (int i = 0; i < P->ntask; i++) {
-        wp_task *t = &P->tasks[i];
-        if (t->type != 0 || t->node != node || strcasecmp(P->recs[t->rec].rec, record)) continue;
-        t->spin_left = period - 1;   /* the task's initial zero-angle rotation at tick 0 already ran */
-        t->spin_matrix = dos_matrix_rotation(0, yaw, 0);
+        if (!wp_rotation_for(P, i, record, node)) continue;
+        if (!rotation) {
+            rotation = &P->tasks[i];
+            rotation->spin_left = period;
+            rotation->spin_matrix = dos_matrix_rotation(0, yaw, 0);
+        }
+        P->tasks[i].dos_rotation = (int)(rotation - P->tasks) + 1;
+        /* All stock scenes have fewer initial zero-angle updates than the node's countdown. */
+        if (rotation->spin_left > 1) --rotation->spin_left;
     }
 }
 

@@ -6107,6 +6107,7 @@ static void test_dump(const char *tag)
     for (i = 0; i < pu->weapon_count; i++) printf("%s%d:%d:%d:%d", i ? ";" : "", pu->weapons[i].weapon, pu->weapons[i].state, pu->weapons[i].ammo, pu->weapons[i].location);
     printf(" orb=%.0f,%.0f,%.1f orbtilt=%.2f campitch=%.2f pilot=%d fog=%g", (double)g_orb_d, (double)g_orb_h, (double)g_orb_ang, (double)g_orb_tilt, (double)g_cam_pitch,
            g_pilot, g_view ? (double)g_view->fog_density : -1.0);
+    printf(" contact=%d", g_pl_contact);
     printf(" lvl=%d,%d,%d dhits=%d,%d snow=%d,%d snow_n=%d,%d snow_on=%d,%d snow_flips=%d,%d", g_inst_lvl[INST_RADAR], g_inst_lvl[INST_AUX], g_inst_lvl[INST_TGT],
            pu->display_hits, pu->display_hits5, g_snow_show[0], g_snow_show[1], g_snow_n[0], g_snow_n[1], g_snow_on_n[0], g_snow_on_n[1], g_snow_flips[0], g_snow_flips[1]);
     {   /* spawn overlap (training report) and the scrub billboards: units within 10 m of the player, the player's mech */
@@ -7319,6 +7320,7 @@ int main(int argc, char **argv)
         if (g_world && (g_actors || g_sim_ok)) {   /* (a mission with no units still has its player: PROVSCN1 launched alone) */
             /* actors: animate (walking only while P is on), move along their heading */
             static Uint64 aprev;
+            static float dos_pending;
             Uint64 now = SDL_GetTicks();
             float dt = aprev ? (float)(now - aprev) / 1000.0f : 0;
             if (g_auto_on) dt = g_auto_dt;
@@ -7364,6 +7366,16 @@ int main(int argc, char **argv)
              * and the fade forward. Port choice: the original's first frames ran on its own clock */
             if (!g_auto_on && g_sim_ok && g_sim.now < 4000 && dt > 0.05f) dt = 0.05f;
             if (g_mm_depth || g_paused) dt = 0;   /* the MAIN MENU (and PAUSE_GAME) pauses the game (WinMain 0x10009770: "pause timer TRUE") */
+            if (!msim_dos_int || !g_sim_ok || reload) dos_pending = 0.0f;
+            if (msim_dos_int && g_sim_ok && dt > 0.0f) {
+                /* DOS rounds movement to centimetres on each game update. At high display refresh rates,
+                 * use the same 30 Hz update interval for both members of a contact. */
+                const float step = 1.0f / 30.0f;
+                dos_pending += dt;
+                if (dt >= step) dt = dos_pending;
+                else dt = dos_pending + 1e-6f >= step ? step : 0.0f;
+                dos_pending -= dt;
+            }
             int32_t frame_ms = g_sim_ok && ((g_pl_ok && g_pilot) || g_patrol) ? sim_ms(dt) : 0;
             int dos_ticks = msim_dos_frame_ticks(g_sim.now, frame_ms);
             /* DOS 0x40aad compares propagation delay to the current frame's whole ticks. */
@@ -7879,7 +7891,7 @@ int main(int argc, char **argv)
                     if (g_pl_anim_held) anim_player_hold(&g_pl_ap);
                     ev = anim_player_step(&g_pl_anim, &g_pl_ap, seq, gait, r0,
                                           msim_dos_int ? (float)dos_ticks : dt * 182.0f, msim_dos_int);
-                    if (msim_dos_int) mech3d_dos_anim_step(&g_pl, &g_pl_anim, &g_pl_ap, &g_sim.dos_anim_phase);
+
                     g_pl_t = g_pl_ap.t;
                     if (seq < 0) seq = 0;
                     if (mw2_development_env("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
@@ -8245,12 +8257,20 @@ int main(int argc, char **argv)
                         for (fg = 0; fg < 3; fg++) if (H(FG[fg]) && group_select(fg)) mask |= g_groups[fg];
                     }
                     g_cur_group = sel_group() < 0 ? 0 : sel_group();   /* (the state dump's "curgrp") */
+                    if (msim_dos_int) {
+                        static uint32_t pending_trigger;
+                        /* Keep a trigger tap that landed between two simulated frames. */
+                        if (!targeting_online() || g_mm_depth || g_paused) pending_trigger = 0;
+                        else pending_trigger |= mask;
+                        if (frame_ms > 0) { mask |= pending_trigger; pending_trigger = 0; }
+                    }
                     g_sim.player_fire_mask = all ? 0 : mask;
                     g_sim.player_attacks = (all || mask) != 0;   /* the trigger fires with or without a target (along the aim line) */
                     if (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) { g_sim.player_fire_mask = 0; g_sim.player_attacks = 0; }   /* starting up */
                     {   /* the triggers held now (combat.c fires on their press); autopilot fire tests press every other frame */
                         static int auto_tog;
-                        g_sim.player_unit.fire_held = !g_sim.player_attacks ? 0 : all ? ((auto_tog ^= 1) ? 0xFFFFFFFFu : 0) : mask;
+                        if (!msim_dos_int || frame_ms > 0)
+                            g_sim.player_unit.fire_held = !g_sim.player_attacks ? 0 : all ? ((auto_tog ^= 1) ? 0xFFFFFFFFu : 0) : mask;
                     }
                 }
                 g_sim.player_sel_w = g_sel_weapon;
@@ -8284,7 +8304,17 @@ int main(int argc, char **argv)
                 /* the lock works on the selected target (T / E / Q): a unit, or a thing (kind 0x400, 0x10044560) */
                 g_sim.player_lock_target = g_tgt_sel >= 0 ? g_tgt_sel : g_tgt_thing >= 0 ? MSIM_TGT_THING(g_tgt_thing) : -1;
                 g_sim.radio_busy = g_radio_qn > 0 || g_vq_n > 0;   /* the engine's one queue (DAT_1024f6bc): radio and messages */
+                g_sim.dos_player_anim = msim_dos_int && g_pl_ok && g_pl_ap_ok && !g_sim.player_unit.destroyed ? &g_pl_ap : NULL;
+                if (g_sim.dos_player_anim) {
+                    g_sim.dos_player_model = &g_pl;
+                    g_sim.dos_player_anim_set = &g_pl_anim;
+                }
                 if (!g_mm_depth && !g_paused) msim_step(&g_sim, frame_ms);
+                if (g_sim.dos_player_anim && !g_mm_depth && !g_paused && frame_ms > 0) {
+                    mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);
+                    if (g_plpit_ok) mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
+                }
+                g_sim.dos_player_anim = NULL;
                 if (!g_mm_depth && !g_paused) start_up_sounds();   /* the first frame's unit updates (0x1001ab71) */
                 if (!g_mm_depth && !g_paused) player_upkeep();   /* self-destruct countdown, automatic ejection */
                 if (!g_mm_depth && !g_paused) player_messages();   /* heat, shutdown, criticals: messages + voices */
@@ -8546,6 +8576,8 @@ int main(int argc, char **argv)
                     pp.rot[0] = cb * cc + sb * sa * sc; pp.rot[1] = -cb * sc + sb * sa * cc; pp.rot[2] = sb * ca;
                     pp.rot[3] = ca * sc;                pp.rot[4] = ca * cc;                 pp.rot[5] = -sa;
                     pp.rot[6] = -sb * cc + cb * sa * sc; pp.rot[7] = sb * sc + cb * sa * cc; pp.rot[8] = cb * ca;
+                    if (d->dos_chunk)
+                        for (int q = 0; q < 9; q++) pp.rot[q] = (float)d->dos_rot[q] / 536870912.0f;
                     if (d->kind < 2) { int q; for (q = 0; q < 9; q++) pp.rot[q] *= 2.0f; }   /* the debris objects' OBJ scale 2 (MW2_SHT1) */
                     if (d->kind < 2 && tipool) { static int said; if (!said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: debris chunk drawn as pool model %s\n", pp.model_name); } }
                     if (d->kind == 2) {   /* a blown-off part tumbles from the orientation it had on the mech */

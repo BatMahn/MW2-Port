@@ -1,7 +1,6 @@
 /* msim.c - see msim.h. */
 #include "development.h"
 #include "msim.h"
-static unsigned rnd_ms(unsigned *x);
 #include "fx.h"
 #include "datapath.h"
 #include "dos_matrix.h"
@@ -15,6 +14,36 @@ static unsigned rnd_ms(unsigned *x);
 #include <limits.h>
 
 #include "bwd.h"
+
+/* The native DOS controller first runs about 168 ticks into the mission clock. */
+#define DOS_FIRST_CONTROL_TICK 168
+
+static unsigned rnd_ms(unsigned *x);
+static unsigned ms_roll(void *ctx, unsigned n);
+
+static void dos_random_init(msim *s)
+{
+    unsigned seed = 0;
+    for (size_t i = 0; i < sizeof s->dos_random / sizeof s->dos_random[0]; i++)
+        s->dos_random[i] = (uint16_t)rnd_ms(&seed);
+    s->dos_random_index = 0;
+}
+
+static unsigned startup_ticks(msim *s, int sound)
+{
+    if (!msim_dos_int) return 0x43e + ms_roll(s, 0x16a);
+    unsigned ticks = 0x444 + ms_roll(s, 0x16c) + 1;   /* 0x2823f waits through the deadline. */
+    if (sound) ms_roll(s, 10);   /* The startup sound's pitch draw follows the deadline draw (0x40d50). */
+    return ticks;
+}
+
+static float startup_deadline(const msim *s, unsigned delay, int initial)
+{
+    if (!msim_dos_int) return (float)s->now + (float)delay * 1000.0f / 182.0f;
+    int start = msim_dos_frame_ticks(0, s->now);
+    if (initial) start += DOS_FIRST_CONTROL_TICK;
+    return (float)(delay + (unsigned)start) * 1000.0f / 182.0f;
+}
 
 static float g_block_n[3] = {0, 1, 0};   /* see refuse() */
 static const char *g_block_what;   /* TEST ONLY (MW2_BLOCK_TRACE): what refused the last step */
@@ -334,6 +363,7 @@ static void dos_shot_pool_load(msim *s, prj_archive *a)
 
 static void dos_init_actor_anim(msim *s, int actor)
 {
+    if (s->dos_anim_order) s->dos_anim_order[s->dos_anim_count++] = actor;
     const world_actor *ac = &s->actors[actor];
     anim_player *player = s->anim_pl ? &s->anim_pl[actor] : NULL;
     mech3d_dos_anim_init(&ac->mech, player && ac->have_anim ? &ac->anim : NULL, player, &s->dos_anim_phase);
@@ -350,7 +380,7 @@ static void dos_init_spin(msim *s, const bwd_record *record, const bwd_obj *obj)
 {
     for (int i = 0; i < record->chunk_count; i++) {
         bwd_tsk task;
-        if (bwd_tsk_decode(&record->chunks[i], &task) != 0 || task.type != 0 || task.node != obj->index) continue;
+        if (bwd_tsk_decode(&record->chunks[i], &task) != 0 || (task.type != 0 && task.type != 2) || task.node != obj->index) continue;
         struct msim_spin_seed *seeds = realloc(s->dos_spin_seeds, (size_t)(s->dos_spin_count + 1) * sizeof *seeds);
         if (!seeds) return;
         s->dos_spin_seeds = seeds;
@@ -360,6 +390,20 @@ static void dos_init_spin(msim *s, const bwd_record *record, const bwd_obj *obj)
         seed->period = s->dos_anim_phase;
         seed->yaw = obj->rotation[1];
         return;
+    }
+}
+
+static void dos_init_chunk(msim *s, const bwd_record *record, int obj_index)
+{
+    /* MW2_SHT1 pairs each pooled chunk's OBJ with an XPLO declaration of type 11. */
+    for (int k = obj_index + 1; k < record->chunk_count; k++) {
+        const bwd_chunk *c = &record->chunks[k];
+        if (!strcmp(c->tag, "OBJ")) break;
+        if (!strcmp(c->tag, "XPLO") && c->size >= 6 && c->data[4] == 11 && c->data[5] == 0 &&
+            s->dos_chunk_count < MSIM_DOS_CHUNK_COUNT) {
+            s->dos_chunk_left[s->dos_chunk_count++] = s->dos_anim_phase;
+            break;
+        }
     }
 }
 
@@ -375,7 +419,7 @@ static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
     int has_spin = 0;
     for (int k = 0; k < record->chunk_count && !has_spin; k++) {
         bwd_tsk task;
-        has_spin = bwd_tsk_decode(&record->chunks[k], &task) == 0 && task.type == 0;
+        has_spin = bwd_tsk_decode(&record->chunks[k], &task) == 0 && (task.type == 0 || task.type == 2);
     }
     for (int k = 0; k < record->chunk_count; k++) {
         const bwd_chunk *chunk = &record->chunks[k];
@@ -391,6 +435,7 @@ static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
             }
         } else if (bwd_obj_decode(chunk, &obj) == 0 && (pool || obj.parent != -2)) {
             if (has_spin) dos_init_spin(s, record, &obj);
+            if (pool) dos_init_chunk(s, record, k);
             s->dos_anim_phase = 64 + ((s->dos_anim_phase + 7) & 127);
         } else if (bwd_gps_decode(chunk, &gps) == 0) {
             if (gps.is_player) {
@@ -417,6 +462,7 @@ static void dos_init_anim_order(msim *s, const bwd_mission *mission)
     unsigned char *seen = calloc(records + actors + 1, 1);
     unsigned char *spawned = seen ? seen + records : NULL;
     int player_seen = 0;
+    s->dos_anim_order = calloc(actors, sizeof *s->dos_anim_order);
     if (seen && records) dos_init_anim_record(s, mission, 0, seen, spawned, &player_seen);
     if (!player_seen && s->pl_mech_ok) {
         s->dos_player_anim_phase = s->dos_anim_phase;
@@ -441,6 +487,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->actors = actors;
     s->actor_count = count;
     s->rng = 12345u;
+    if (msim_dos_int) dos_random_init(s);
     if (msim_dos_int) dos_shot_pool_load(s, a);
     {   /* the planet (PLNT chunk) before any unit is built */
         bwd_mission bm;
@@ -500,8 +547,9 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->sd_at = calloc((size_t)(count > 0 ? count : 1), sizeof *s->sd_at);
     s->seen_node = malloc((size_t)(count > 0 ? count : 1) * sizeof *s->seen_node);
     for (i = 0; s->seen_node && i < count; i++) s->seen_node[i] = -2;
-    for (i = 0; s->online_at && i < count; i++) s->online_at[i] = (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
-    s->player_online_at = (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
+    for (i = 0; s->online_at && i < count; i++)
+        s->online_at[i] = msim_dos_int ? -1.0f : (float)startup_ticks(s, 0) * 1000.0f / 182.0f;
+    s->player_online_at = startup_deadline(s, startup_ticks(s, 1), 1);
     combat_damage_live = getenv("MW2_NO_STARTUP") != NULL;   /* DAT_1024c570 = 0 at the mission start (0x1002388d) */
     s->armed = calloc((size_t)(count > 0 ? count : 1), sizeof *s->armed);
     if (!s->units || !s->armed) return -1;
@@ -688,8 +736,15 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
         if (s->mate_target) s->mate_target[i] = -1;
         s->engage[i] = !(actors[i].friendly && actors[i].table == 0);   /* 0x100124a0: the player's group 0 */
     }
-    for (i = 0; s->minds && i < count; i++) ai_init(&s->minds[i], actors[i].leader ? AIP_LDEFEND : AIP_FDEFEND);
-    if (getenv("MW2_AI_SEED")) for (i = 0; s->minds && i < count; i++) s->minds[i].rng ^= (unsigned)strtoul(getenv("MW2_AI_SEED"), NULL, 0) * 2654435761u;   /* TEST ONLY: sample the AI's random choices */
+    const char *ai_seed = mw2_development_env("MW2_AI_SEED");   /* TEST ONLY: sample the AI's random choices */
+    for (i = 0; s->minds && i < count; i++) {
+        ai_init(&s->minds[i], actors[i].leader ? AIP_LDEFEND : AIP_FDEFEND);
+        if (ai_seed) s->minds[i].rng ^= (unsigned)strtoul(ai_seed, NULL, 0) * 2654435761u;
+        else if (msim_dos_int) {
+            s->minds[i].random_roll = ms_roll;
+            s->minds[i].random_context = s;
+        }
+    }
     s->air_speed = calloc((size_t)(count ? count : 1), sizeof *s->air_speed);
     s->avoid_turn = calloc((size_t)(count ? count : 1), sizeof *s->avoid_turn);
     s->avoid_thr = calloc((size_t)(count ? count : 1), sizeof *s->avoid_thr);
@@ -831,8 +886,13 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
  * *who = actor index, or -1 for the player. */
 /* power down (0x10014520 states 10 / 11: object +0x14 |= 0x10, mech +0xa0 |= 3) and wake (0x10013790: a new state entry
  * clears it and the start-up runs again - 0x43e + rand(0x16a) ticks; NONPSTRT 0x104 at the mech once the player is up) */
-static unsigned rnd_ms(unsigned *x);
 static void ai_power_down(msim *s, int i) { if (s->powered_down) s->powered_down[i] = 1; }
+static unsigned actor_startup_ticks(msim *s, int i)
+{
+    const world_actor *actor = &s->actors[i];
+    int sound = !fixed_unit(actor) && (actor->friendly || actor->alliance != 1 || s->now >= s->player_online_at);
+    return startup_ticks(s, sound);
+}
 /* a unit's state 0 -> 1 (0x1001ab71): an enemy (0x10019040 == 1) NONPSTRT 0x104 only once the player is up (+0x15 &
  * 0x20), any other MECTURX2 0xf7 - both at the mech */
 static void unit_startup(msim *s, int i)
@@ -855,7 +915,7 @@ static void ai_wake(msim *s, int i)
 {
     if (!s->powered_down || !s->powered_down[i]) return;
     s->powered_down[i] = 0;
-    if (s->online_at) s->online_at[i] = (float)s->now + (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
+    if (s->online_at) s->online_at[i] = startup_deadline(s, actor_startup_ticks(s, i), 0);
     unit_startup(s, i);
 }
 /* TEST ONLY (glview MW2_TEST_APOWER): power actor i down (up = 0) or wake it (up = 1) as a mission node would */
@@ -1004,7 +1064,7 @@ static void group_assign(msim *s, int table, int leader, int who)
         ai_mind *m = &s->minds[pick];
         m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = who;
         if (msim_dos_int) m->counter = 1;   /* DOS: the assignment pushes (state, target), depth 1 (the GBL port's audit) */
-        m->next_fire = (float)(rnd_ms(&s->rng) % 10u * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
+        m->next_fire = (float)(ms_roll(s, 10) * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
         ai_wake(s, pick);
     }
 }
@@ -1224,7 +1284,7 @@ static void node_assign(msim *s, int table, int leader)
         m->node_tgt = tcode;
         m->prev_state = m->state; m->state = st; m->target = st == AI_TARGET; m->tgt = unit && st == AI_TARGET ? (tcode & 0xffff) - 1 : -2;
         m->to_navref = 0;
-        if (st == AI_TARGET) m->next_fire = (float)(rnd_ms(&s->rng) % 10u * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
+        if (st == AI_TARGET) m->next_fire = (float)(ms_roll(s, 10) * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
         if (st == AI_PATROL) guard_enter(s, m, tcode);                       /* entry case 7 -> 0x10013f00 */
         ai_wake(s, pick);
     }
@@ -1262,10 +1322,17 @@ static int dos_avoid_attack(void *context, float bearing)
     int avoided = avoid_obstacles(c->s, c->actor, c->mind, bearing, c->ticks);
     return avoided && !(c->mind->man == 6 && c->target_unit >= -1 && c->target_unit == c->mind->dos_avoid_unit);
 }
-static unsigned rnd_ms(unsigned *x);
 static unsigned rnd_ms(unsigned *x) { *x = *x * 1103515245u + 12345u; return (*x >> 16) & 0x7FFF; }
 static float frand_ms(unsigned *x) { return (float)rnd_ms(x) / 32768.0f; }
-static unsigned ms_roll(void *ctx, unsigned n) { return n ? (unsigned)rnd_ms((unsigned *)ctx) % n : 0; }
+static unsigned ms_roll(void *ctx, unsigned n)
+{
+    msim *s = ctx;
+    if (!n) return 0;
+    if (!msim_dos_int) return rnd_ms(&s->rng) % n;
+    unsigned value = s->dos_random[s->dos_random_index];
+    s->dos_random_index = (s->dos_random_index + 1) % (sizeof s->dos_random / sizeof s->dos_random[0]);
+    return value % n;
+}
 
 
 /* engine death state 4 (0x1001a180 / 0x10021f20 -> 0x1001be40): the death explosion (0x0d) at once,
@@ -1288,12 +1355,26 @@ static void spawn_debris(msim *s, int count, const float p[3])
     /* (not gated by CHUNKY EXPLOSIONS: the engine reads that only when instantiating GT 0x8000 debris nodes, 0x100254ad) */
     int32_t now = (int32_t)((int64_t)s->now * 182 / 1000);
     int chunks = 0, k;
-    for (k = 0; k < s->debris_count; k++) chunks += s->debris[k].kind < 2;
+    uint32_t occupied = 0;
+    for (k = 0; k < s->debris_count; k++) {
+        chunks += s->debris[k].kind < 2;
+        if (s->debris[k].dos_chunk) occupied |= UINT32_C(1) << (s->debris[k].dos_chunk - 1);
+    }
     /* MW2_SHT1 has 32 chunk (type 0x0b) objects - the chunks' own pool; the physics bodies (128) are shared with the
      * blown-off parts (0x10015230) */
-    while (count-- > 0 && chunks < 32 && s->debris_count < MSIM_MAX_DEBRIS) {
+    while (count-- > 0 && chunks < MSIM_DOS_CHUNK_COUNT && s->debris_count < MSIM_MAX_DEBRIS) {
         msim_debris *d = &s->debris[s->debris_count++];
         d->kind = chunks++ & 1;
+        d->dos_chunk = 0;
+        for (int i = 0; i < s->dos_chunk_count; i++) {
+            uint32_t slot = UINT32_C(1) << i;
+            if (occupied & slot) continue;
+            occupied |= slot;
+            d->dos_chunk = i + 1;
+            const dos_matrix identity = dos_matrix_rotation(0, 0, 0);
+            memcpy(d->dos_rot, identity.r, sizeof d->dos_rot);
+            break;
+        }
         memcpy(d->p, p, sizeof d->p);
         d->v[0] = gauss(&s->rng) * 5.5f;
         d->v[1] = (gauss(&s->rng) + 1.0f) * 5.5f;
@@ -1468,6 +1549,7 @@ static void blow_off(msim *s, int unit, unsigned mask, unsigned old)
         msim_debris *d;
         if (m->parts[q].model.object_count < 1 || !mech3d_fly_loc(m, q, mask) || mech3d_fly_loc(m, q, old)) continue;
         d = &s->debris[s->debris_count++];
+        d->dos_chunk = 0;
         d->kind = 2; d->actor = unit; d->part = q;
         for (k = 0; k < 3; k++) d->p[k] = (float)m->parts[q].pos[k];
         d->v[0] = gauss(&s->rng) * 5.5f;
@@ -1494,9 +1576,15 @@ static void debris_step(msim *s, float ticks)
 {
     int32_t now = (int32_t)((int64_t)s->now * 182 / 1000);
     int i, k;
+    msim_debris *rotating[MSIM_DOS_CHUNK_COUNT] = {0};
+    int32_t angle[MSIM_DOS_CHUNK_COUNT][3];
     for (i = 0; i < s->debris_count; i++) {
         msim_debris *d = &s->debris[i];
-        if (now >= d->until) { s->debris[i--] = s->debris[--s->debris_count]; continue; }
+        if (now >= d->until) {
+            if (i < --s->debris_count) s->debris[i] = s->debris[s->debris_count];
+            i--;
+            continue;
+        }
         if (!d->moving) continue;
         {   /* 0x100156f0, in its order: the new vertical speed and height; touching the ground (vy under 1e-7 and the height
              * at or under it) - at rest if the speed was under 0.5525 cm/tick (0xbf0d6fbc) or it had been rising, the
@@ -1519,8 +1607,19 @@ static void debris_step(msim *s, float ticks)
             d->p[0] += d->v[0] * ticks; d->p[2] += d->v[2] * ticks;
             for (k = 0; k < 3; k++) d->ang[k] += d->spin[k] * ticks;
             d->p[1] = ny; d->v[1] = vy;
+            if (d->dos_chunk) {
+                int slot = d->dos_chunk - 1;
+                rotating[slot] = d;
+                for (int axis = 0; axis < 3; axis++) angle[slot][axis] = (int32_t)lrintf(d->spin[axis] * ticks * 65536.0f);
+            }
             if (rest) { d->moving = 0; d->v[0] = d->v[1] = d->v[2] = 0; for (k = 0; k < 3; k++) d->spin[k] = 0; }
         }
+    }
+    for (int slot = 0; slot < s->dos_chunk_count; slot++) {
+        msim_debris *d = rotating[slot];
+        if (!d) continue;
+        mech3d_dos_rotate(d->dos_rot, &s->dos_chunk_left[slot], &s->dos_anim_phase,
+                          angle[slot][0], angle[slot][1], angle[slot][2]);
     }
 }
 
@@ -1671,7 +1770,7 @@ void msim_step(msim *s, int32_t dt_ms)
     int i;
     w.user = s; w.targets = cb_targets; w.finished = cb_finished; w.started = cb_started;
     s->now += dt_ms;
-    if (s->paths && s->world) paths_step(s);
+    if (!msim_dos_int && s->paths && s->world) paths_step(s);
     if (s->player_vertical) {   /* tools without their own player physics: stand the player on the terrain */
         s->player_unit.ground = msim_ground(s, s->player[0], s->player[2], s->player_unit.y + s->player_centre_h);
         combat_jets(&s->player_unit, 0, dt, &s->rng);
@@ -1703,7 +1802,7 @@ void msim_step(msim *s, int32_t dt_ms)
     }
     wrecks(s, dt_ms);
     blow_offs(s);   /* locations destroyed since the last step: their parts fly */
-    debris_step(s, (float)dt_ms * 0.182f);
+    if (!msim_dos_int) debris_step(s, (float)dt_ms * 0.182f);
     unit_messages(s);   /* deaths so far: announced before the mission tables look at them (0x10016280 posts at once) */
     mtbl_logic_step(&s->logic, s->now, &w);
     /* mission end (engine 0x10009f50 for the player's star; 0x100374e0 end sequence: 0x71c ticks) */
@@ -1845,6 +1944,9 @@ void msim_step(msim *s, int32_t dt_ms)
             if (in_star) { if (!(s->cmd && s->cmd[i]) && m->state != AI_REST && m->state != AI_SHUTDOWN) { m->state = AI_FOLLOW; m->target = 0; } }
             (void)kk;   /* 0x400 / 0x800 power-down (states 10 / 11) not applied yet: the port's AI has no rest / wake path */
         }
+        if (s->online_at && s->online_at[i] < 0.0f && !(s->powered_down && s->powered_down[i])) {
+            s->online_at[i] = startup_deadline(s, actor_startup_ticks(s, i), 1);
+        }
         memset(&v, 0, sizeof v);
         v.heading = ac->mech.heading;
         v.heat = s->units[i].heat;
@@ -1866,7 +1968,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 int al = s->actors[q3].friendly ? 0 : s->actors[q3].alliance;
                 if (q3 != i && s->armed[q3] && !s->units[q3].destroyed && s->ai_who[q3] == i && al != self_al) att = q3;
             }
-            if (att != -2 && s->ai_focus[i] != att) { s->ai_focus[i] = att; m->prev_state = m->state; if (msim_dos_int) { m->counter = 1; m->next_fire = (float)(rnd_ms(&s->rng) % 10u * 18u); } m->state = AI_TARGET; m->target = 1; ai_wake(s, i); }   /* DOS: pushed; the entry's fire delay */
+            if (att != -2 && s->ai_focus[i] != att) { s->ai_focus[i] = att; m->prev_state = m->state; if (msim_dos_int) { m->counter = 1; m->next_fire = (float)(ms_roll(s, 10) * 18u); } m->state = AI_TARGET; m->target = 1; ai_wake(s, i); }   /* DOS: pushed; the entry's fire delay */
         }
         if (s->ai_focus && s->ai_focus[i] >= 0 && (!s->armed[s->ai_focus[i]] || s->units[s->ai_focus[i]].destroyed)) s->ai_focus[i] = -2;
         if (s->ai_focus && s->ai_focus[i] == -1 && s->player_unit.destroyed) s->ai_focus[i] = -2;
@@ -2547,7 +2649,10 @@ void msim_step(msim *s, int32_t dt_ms)
     /* pose everyone: the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13] and the key
      * player (0x1000dec0, anim_player_step) walks the keys toward it - a stopping mech finishes its stride and comes to
      * the standing pose (the old code froze the keys mid-stride whenever the ground speed fell under 1 cm/s) */
-    for (i = 0; i < s->actor_count; i++) {
+    /* DOS animation tasks run newest first. The player gait tasks follow the other units,
+     * then scenery tasks consume the next normalization periods. */
+    for (int k = 0; k < s->actor_count; k++) {
+        i = !msim_dos_int ? k : s->dos_anim_order ? s->dos_anim_order[s->actor_count - k - 1] : s->actor_count - k - 1;
         world_actor *ac = &s->actors[i];
         /* no walk animation (vehicles, turrets, dropships): the rest pose, placed at the unit's position and heading -
          * the model drawn and hit is where the unit is */
@@ -2595,6 +2700,12 @@ void msim_step(msim *s, int32_t dt_ms)
         ac->mech.pose_dos = msim_dos_int ? ap : NULL;
         mech3d_pose(&ac->mech, &ac->anim, ac->t);
     }
+    if (msim_dos_int) {
+        if (s->dos_player_anim)
+            mech3d_dos_anim_step(s->dos_player_model, s->dos_player_anim_set, s->dos_player_anim, &s->dos_anim_phase);
+        if (s->paths && s->world) paths_step(s);
+        debris_step(s, (float)dos_ticks);
+    }
     if (!msim_dos_int || !s->cam_ok) {
         collision_lods(s);
         dos_sync_hull_order(s);
@@ -2627,6 +2738,7 @@ void msim_free(msim *s)
     free(s->obstacle_part); s->obstacle_part = NULL; s->world = NULL;
     free(s->los_terrain); free(s->los_terrain_box); s->los_terrain = NULL; s->los_terrain_box = NULL; s->los_terrain_count = 0;
     world3d_paths_free(s->paths); s->paths = NULL;
+    free(s->dos_anim_order);
     free(s->dos_spin_seeds); s->dos_spin_seeds = NULL; s->dos_spin_count = 0;
     terrain_release(s->terrain); s->terrain = NULL;
     free(s->clist_seq); s->clist_seq = NULL; s->clist_seq_n = 0;
@@ -3115,7 +3227,7 @@ static msim_shot *spawn_shot_h(msim *s, int weapon, int owner, const float from[
         sh->vy = (float)sh->dos_vel[1] / 65536.0f;
         sh->vz = (float)sh->dos_vel[2] / 65536.0f;
         sh->x = (float)(int32_t)from[0]; sh->y = (float)(int32_t)from[1]; sh->z = (float)(int32_t)from[2];
-        if (kind == 3 || kind == 4) dos_missile_offset(sh, dos_dir, (int32_t)(rnd_ms(&s->rng) % 200u) - 100);
+        if (kind == 3 || kind == 4) dos_missile_offset(sh, dos_dir, (int32_t)ms_roll(s, 200) - 100);
     } else {
         d[0] = to[0] - from[0] + (frand_ms(&s->rng) - 0.5f) * 2.0f * scatter;
         d[1] = to[1] - from[1] + (frand_ms(&s->rng) - 0.5f) * 2.0f * scatter;
@@ -3254,6 +3366,7 @@ static void building_swap(msim *s, int b)
                     for (int piece = 0; s->chunky && piece < pieces && s->debris_count < MSIM_MAX_DEBRIS; piece++) {
                         msim_debris *dd = &s->debris[s->debris_count++];
                         int k;
+                        dd->dos_chunk = 0;
                         dd->kind = 3; dd->actor = -2; dd->part = q; dd->object = piece;
                         for (k = 0; k < 3; k++) dd->p[k] = (float)c->pos[k];
                         dd->v[0] = gauss(&s->rng) * 5.5f;
@@ -3420,10 +3533,18 @@ static void missile_warning(msim *s, int t, int lv, float sx, float sz, int in_v
     v.heat = s->units[t].heat;
     v.pilot_level = s->actors[t].ai_level >= 1 && s->actors[t].ai_level <= 4 ? s->actors[t].ai_level : 1;
     c.s = s; c.i = t;
-    ai_missile_warning(&s->minds[t], &v, lv, in_view, rel, side_free, &c);
+    if (msim_dos_int) ai_dos_missile_react(&s->minds[t], &v, in_view, rel, side_free, &c);
+    else ai_missile_warning(&s->minds[t], &v, lv, in_view, rel, side_free, &c);
 }
 
-static void dos_player_warning(msim *s, const float aim[3])
+/* DOS 0x2e450 consumes the shooter's roll before testing the weapon and
+ * resolving the tracked unit. A shot without a warning recipient still uses the roll. */
+static int dos_warning_roll(msim *s, int weapon, int level)
+{
+    return level <= 2 && ms_roll(s, 3) != 0 && (msim_weapon_guided(weapon) || weapon == 0x15);
+}
+
+static void dos_player_warning(msim *s, const float aim[3], int react)
 {
     int t = s->dos_warning_target;
     if (!s->dos_warning_view || t < 0 || t >= s->actor_count || !s->armed[t] || s->units[t].destroyed) return;
@@ -3432,7 +3553,7 @@ static void dos_player_warning(msim *s, const float aim[3])
     const float shooter[3] = {s->player[0], s->player_unit.y + s->player_centre_h, s->player[2]};
     int in_view = s->dos_warning_view(s->shot_user, aim, target, shooter, s->player_facing);
     if (mw2_development_env("MW2_MISSILE_TRACE")) fprintf(stderr, "mwarn unit %d view %d\n", t, in_view);
-    missile_warning(s, t, 1, shooter[0], shooter[2], in_view);
+    if (react) missile_warning(s, t, 1, shooter[0], shooter[2], in_view);
 }
 
 /* the units a shot's step o..o+dv enters (0x10044f60 -> 0x100103e0): the player and actors near the segment, the
@@ -3620,11 +3741,11 @@ static void combat_step(msim *s, float dt, int dos_ticks)
          * last frame */
         if (s->minds && s->ai_ok) {
             int started = combat_ai_trigger(&s->units[i]);
-            if (msim_dos_int && (msim_weapon_guided(started) || started == 0x15)) {
+            if (msim_dos_int && started >= 0) {
                 /* Type 2 reads the current aim reference at the start of a volley (0x2e4c5). */
                 int who = s->minds[i].dos_warning_unit;
-                if (who >= 0) {
-                    int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
+                int lv = s->actors[i].ai_level >= 1 && s->actors[i].ai_level <= 4 ? s->actors[i].ai_level : 1;
+                if (dos_warning_roll(s, started, lv) && who >= 0) {
                     missile_warning(s, who, lv, (float)s->actors[i].mech.origin[0], (float)s->actors[i].mech.origin[2], 1);
                 }
             }
@@ -3671,13 +3792,13 @@ static void combat_step(msim *s, float dt, int dos_ticks)
     /* the heat restart sets state 0 (0x10016201), which runs the start-up again (0x1001ab71: online 0x43e + rand(0x16a)
      * ticks later; no throttle, turning, jets or weapons until then) */
     if (s->player_unit.restarted) {
-        unsigned d = 0x43e + rnd_ms(&s->rng) % 0x16a;
-        s->player_online_at = (float)s->now + (float)d * 1000.0f / 182.0f;
+        unsigned d = startup_ticks(s, 1);
+        s->player_online_at = startup_deadline(s, d, 0);
         s->player_unit.seq_ticks = -(float)d;   /* state 0 sets c[0x23] to the online time (0x1001ab71): the overheat timer counts from it */
     }
     for (i = 0; s->online_at && i < s->actor_count; i++)
         if (s->armed[i] && s->units[i].restarted) {
-            s->online_at[i] = (float)s->now + (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
+            s->online_at[i] = startup_deadline(s, actor_startup_ticks(s, i), 0);
             unit_startup(s, i);   /* state 0 again (0x10015f50 -> 0x1001ab71) */
         }
 
@@ -3747,13 +3868,13 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                     int fw;
                     s->units[i].lock_target = !(m->lock & 0x80) ? -2 : who >= -1 ? who
                                             : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
-                    fw = combat_ai_select(cu, sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);
+                    fw = combat_ai_select(cu, sqrtf(dx * dx + dz * dz), ms_roll, s);
                     /* DOS MW2.EXE 0x2ea8d..0x2eab0: a guided weapon chosen, and the fire decision's range byte (+0x154 =
                      * skill + 1) at most 4 - rand(+0x154 + 1) == 0 locks it there and then (+0x10c |= 0x80), whatever
                      * the timed lock (0x52ea0) says; the volley (0x52080, the same frame) homes */
                     if (msim_dos_int && fw >= 0 && msim_weapon_guided(cu->weapons[fw].weapon)) {
                         int rb = (s->actors[i].ai_skill > 0 ? s->actors[i].ai_skill : 1) + 1;
-                        if (rb <= 4 && ms_roll(&s->rng, (unsigned)rb + 1u) == 0)
+                        if (rb <= 4 && ms_roll(s, (unsigned)rb + 1u) == 0)
                             s->units[i].lock_target = who >= -1 ? who : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
                     }
                     if (fw >= 0 && who == -1 && msim_weapon_guided(cu->weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
@@ -3785,7 +3906,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
             /* homing only if locked when triggered (0x100437a0 / 0x100443a0): the volley latches the target in its slot */
             s->units[i].lock_target = !m || !(m->lock & 0x80) ? -2 : who >= -1 ? who
                                     : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
-            fw = combat_ai_fire(&s->units[i], sqrtf(dx * dx + dz * dz), ms_roll, &s->rng);   /* one weapon per decision (0x100232b0) */
+            fw = combat_ai_fire(&s->units[i], sqrtf(dx * dx + dz * dz), ms_roll, s);   /* one weapon per decision (0x100232b0) */
             /* 0x10023428: a guided weapon (weapon table +0x18) fired at the player (+0x14e == player | 0x200): ENEMYFIR
              * 0x6f, volume 0x32, not positional (pos NULL) */
             if (fw >= 0 && who == -1 && msim_weapon_guided(s->units[i].weapons[fw].weapon) && s->on_sound) s->on_sound(s->shot_user, 0x6f, NULL);
@@ -3914,8 +4035,9 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                 if (msim_dos_int)
                     for (int slot = 0; slot < s->player_unit.weapon_count && slot < 32; slot++) {
                         int weapon = s->player_unit.weapons[slot].weapon;
-                        if ((started & (1u << slot)) && (msim_weapon_guided(weapon) || weapon == 0x15))
-                            dos_player_warning(s, to);
+                        if (!(started & (1u << slot))) continue;
+                        int react = dos_warning_roll(s, weapon, 1);
+                        if (msim_weapon_guided(weapon) || weapon == 0x15) dos_player_warning(s, to, react);
                     }
             }
             {
@@ -6692,7 +6814,7 @@ int msim_player_restart(msim *s)
     combat_unit *u = &s->player_unit;
     if (!u->shutdown || u->destroyed || (u->shutdown_pending && !u->override)) return 0;
     u->shutdown = 0; u->manual_down = 0;
-    s->player_online_at = (float)s->now + (float)(0x43e + rnd_ms(&s->rng) % 0x16a) * 1000.0f / 182.0f;
+    s->player_online_at = startup_deadline(s, startup_ticks(s, 1), 0);
     return 1;
 }
 

@@ -174,9 +174,9 @@ static void *g_sc55;         /* (the legacy build: no SC-55) */
 static int  g_sc55_on;       /* a song is playing on the SC-55 */
 static long g_song_len;
 static int  g_song_rate = 44100;
-static void music_cb(void *u, float *out, int frames)
+static float g_music_gain = 1.0f;
+static void music_render(float *out, int frames)
 {
-    (void)u;
 #ifndef MW2_NO_SC55
     if (g_sc55) { sc55_render(g_sc55, out, frames); return; }   /* (queued by its thread; the song loops there) */
 #endif
@@ -192,6 +192,12 @@ static void music_cb(void *u, float *out, int frames)
         gus_song_close(g_song);
         g_song = GUS_OPEN(g_song_data, (size_t)g_song_len, g_song_rate);
     }
+}
+static void music_cb(void *u, float *out, int frames)
+{
+    (void)u;
+    music_render(out, frames);
+    for (int i = 0; i < frames * 2; i++) out[i] *= g_music_gain;
 }
 static shelldb g_db;
 static sfx *g_sfx;
@@ -846,32 +852,6 @@ static void clip_close(clip *c)
 /* screen contexts: clan 0 Wolf, 1 Jade Falcon, 2 / 3 Instant Action friendly / enemy star (context 2 visuals) */
 #define CTX(c) ((c) >= 2 ? 2 : (c))
 
-/* ---- ambient WAV from DATABASE (RIFF, 8-bit mono) ---- */
-static uint8_t *g_amb; static long g_amblen;
-static void play_ambient_vol(int entry, int vol);
-static void play_ambient(int entry) { play_ambient_vol(entry, 0x1e); }
-/* entry: the DATABASE entry (index - 1), looped at vol (0-127); -1 stops */
-static void play_ambient_vol(int entry, int vol)
-{
-    long n, i;
-    sfx_stop_loops(g_sfx);
-    free(g_amb); g_amb = NULL;
-    if (entry < 0 || !g_sfx) return;
-    n = shelldb_entry(&g_db, entry, &g_amb);
-    g_amblen = n;
-    int rate = 11025;
-    for (i = 12; i + 8 <= n; ) {   /* find fmt / data chunks */
-        uint32_t cl = g_amb[i + 4] | g_amb[i + 5] << 8 | g_amb[i + 6] << 16 | (uint32_t)g_amb[i + 7] << 24;
-        if (!memcmp(g_amb + i, "fmt ", 4) && i + 14 <= n) rate = g_amb[i + 12] | g_amb[i + 13] << 8;
-        if (!memcmp(g_amb + i, "data", 4)) {
-            sfx_play_pcm(g_sfx, g_amb + i + 8, (int)(cl < (uint32_t)(n - i - 8) ? cl : (uint32_t)(n - i - 8)), rate, (float)vol / 127.0f, 1);   /* the main
-                                         * menu's loop (0x2a4c9): faded up to volume 0x1e, the voice's level */
-            return;
-        }
-        i += 8 + (long)cl + (cl & 1);
-    }
-}
-
 /* ---- the shell's sound objects (MW2SHELL FUN_0003a340 make, 0x3a6e0 volume 0-127, 0x3a560 play, 0x3a400 stop): DATABASE
  * WAVs by the getter's 1-based index (entry = index - 1). Each object is one sample handle: playing it again restarts it.
  * Buttons (made at start-up, 0x36c1e): 0x65 and 0x66 at volume 0x32; the Mech Lab's chassis voices (the chassis table
@@ -916,6 +896,28 @@ static void shell_sound(int index, int vol)
     sfx_play_pcm(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f, 0);
 }
 static void shell_sound_stop(int index) { if (index > 0 && index <= 160 && g_sfx && g_snd[index - 1].pcm) sfx_stop_pcm(g_sfx, g_snd[index - 1].pcm); }
+static shell_snd *g_amb;
+static float g_amb_level;
+static unsigned char *g_clip_loop, *g_clip_pcm;
+
+static void clip_sound_stop(void)
+{
+    sfx_stop_pcm(g_sfx, g_clip_pcm);
+    free(g_clip_pcm);
+    g_clip_pcm = NULL;
+}
+
+static void play_ambient_vol(int entry, int vol)
+{
+    sfx_stop_loops(g_sfx);
+    g_amb = entry >= 0 && g_sfx ? shell_sound_load(entry + 1) : NULL;
+    if (!g_amb) return;
+    g_amb_level = (float)vol / 127.0f;
+    sfx_play_pcm(g_sfx, g_amb->pcm, g_amb->len, g_amb->rate, g_amb_level, 1);
+}
+
+static void play_ambient(int entry) { play_ambient_vol(entry, 0x1e); }
+
 /* the Mech Lab's chassis voices, in the lab's chassis order (0x8367c + 0x10; -1 none) */
 static const int LAB_VOICE[18] = {0x55, 0x59, 0x58, 0x5c, 0x5e, 0x5a, 0x57, 0x5d, 0x5f, 0x60, 0x56, 0x61, 0x5b, 0x62, 0x53, 0x54, -1, 0x63};
 
@@ -1788,6 +1790,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                     }
                     smk_rewind(ov[2].s);
                 }
+                shell_sound_stop(0x52);
                 launch_ia();
                 music_after_mission(7, 2);
                 play_ambient(-1);
@@ -1849,6 +1852,7 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
             SDL_Delay(10);
         }
     }
+    shell_sound_stop(0x52);   /* 0x2a3c6 frees the trial announcement on leaving */
     for (i = 0; i < 4; i++) ov_set(&ov[i], NULL, 0, 0);
     return next;
 }
@@ -4093,6 +4097,36 @@ static void wr32(uint8_t *b, int32_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v 
  * (the VOICE track ends at y 192), and the DETAIL heading moves up from the OBJECT TEXTURES row to the RENDERER row -
  * every row then 19-20 px apart as the original's, each group headed by its red word. */
 static int gm_script_event(const char **sp, SDL_Event *e);
+static float menu_volume(int32_t value)
+{
+    return (float)(value < 0 ? 0 : value > 65536 ? 65536 : value) / 65536.0f;
+}
+
+static void menu_audio_levels(const uint8_t *snd)
+{
+    sfx_lock(g_sfx);
+    g_music_gain = menu_volume(rd32(snd + 0x0c));
+    sfx_unlock(g_sfx);
+    sfx_set_gains(g_sfx, menu_volume(rd32(snd + 0x04)), menu_volume(rd32(snd + 0x08)));
+    if (g_amb) sfx_pcm_level(g_sfx, g_amb->pcm, g_amb_level, 0.0f);
+    sfx_pcm_level(g_sfx, g_clip_loop, 1.0f, 0.0f);
+}
+
+static void menu_slider(uint8_t *snd, int offset, int x)
+{
+    int old = rd32(snd + offset), value = x - 350;
+    value = (value < 0 ? 0 : value > 256 ? 256 : value) << 8;
+    if (old == value) return;
+    wr32(snd + offset, value);
+    menu_audio_levels(snd);
+    if (abs((int)(menu_volume(old) * 65536.0f) - value) >= 0xa00) {
+        /* 0x25551 plays the 0x66 sample using the gain of the slider being moved. */
+        sfx_set_gains(g_sfx, 1.0f, menu_volume(rd32(snd + 0x08)));
+        shell_sound(0x66, (0x32 * value) >> 16);
+        sfx_set_gains(g_sfx, menu_volume(rd32(snd + 0x04)), menu_volume(rd32(snd + 0x08)));
+    }
+}
+
 static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     const char *script = headless ? getenv("MW2_CV_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, all in
@@ -4101,7 +4135,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     char p[700];
     FILE *f;
     portcfg pc;
-    int done = 0, i, nmodes = 0, mi = -1, mm0;
+    int done = 0, i, nmodes = 0, mi = -1, mm0, slider = -1;
+    static const int SY[3] = {128, 152, 176}, SO[3] = {0x0c, 0x04, 0x08};
     struct { int w, h; } modes[64];
     smk *logo = open_smk("AMWLOGO1");
     /* the original's rows (DIFFICULTY and HEAT TRACKING 20 px up, see above), the port's DISPLAY, RENDERER, TEXTURES */
@@ -4151,6 +4186,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
                  * one the DOS keyboard reads as a character (not a lone Shift / Ctrl / Alt) */
                 if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && !key_is_modifier(e.key.key)) || (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) slider = -1;
+                if (e.type == SDL_EVENT_MOUSE_MOTION && slider >= 0) menu_slider(snd, SO[slider], (int)e.motion.x);
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     int x = e.button.x, y = e.button.y;
                     for (i = 0; i < 14; i++) {
@@ -4212,12 +4249,10 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         else if (i == 13 && !tx_lock)   /* the port's TEXTURES: ORIGINAL / TITANIUM */
                             pc.texset = g_cfg.texset = pc.texset == PORTCFG_TX_TITANIUM ? PORTCFG_TX_ORIGINAL : PORTCFG_TX_TITANIUM;
                     }
-                    for (i = 0; i < 3; i++) {   /* MUSIC / EFFECTS / VOICE: the knob's centre at x 350 + v */
-                        static const int SY[3] = {128, 152, 176}, SO[3] = {0x0c, 0x04, 0x08};
+                    for (i = 0; i < 3; i++) {   /* MUSIC / EFFECTS / VOICE */
                         if (x >= 335 && x <= 620 && y >= SY[i] && y <= SY[i] + 21) {
-                            int xc = x - (335 + 15);   /* 0x254f0: v = mouse x - (x + 15), 0..0x100, << 8 */
-                            xc = xc < 0 ? 0 : xc > 256 ? 256 : xc;
-                            wr32(snd + SO[i], xc << 8);
+                            slider = i;
+                            menu_slider(snd, SO[i], x);
                         }
                     }
                 }
@@ -4299,7 +4334,6 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         {   /* the sliders (MW2SHELL 0x25480): DATABASE entry 7 (SHP) - frame 1, the track, at (335, y), then frame 0, the
              * knob, at (335 + 15 + v - 7, y - 1), v = the 16.16 level >> 8 (0..256) */
             static uint8_t *sl_shp; static long sl_len = -1;
-            static const int SY[3] = {128, 152, 176}, SO[3] = {0x0c, 0x04, 0x08};
             if (sl_len < 0) sl_len = shelldb_entry(&g_db, 7, &sl_shp);
             for (i = 0; i < 3 && sl_shp && sl_len > 0; i++) {
                 int v = rd32(snd + SO[i]), fi;
@@ -4873,6 +4907,7 @@ static int gm_script_event(const char **sp, SDL_Event *e)
     memset(e, 0, sizeof *e);
     if (s[0] == 'm' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_EVENT_MOUSE_MOTION; e->motion.x = x; e->motion.y = y; }
     else if (s[0] == 'l' && sscanf(s + 1, "%d,%d", &x, &y) == 2) { e->type = SDL_EVENT_MOUSE_BUTTON_DOWN; e->button.button = SDL_BUTTON_LEFT; e->button.x = x; e->button.y = y; }
+    else if (s[0] == 'u') { e->type = SDL_EVENT_MOUSE_BUTTON_UP; e->button.button = SDL_BUTTON_LEFT; }
     else if (s[0] == 'r') { e->type = SDL_EVENT_MOUSE_BUTTON_DOWN; e->button.button = SDL_BUTTON_RIGHT; }
     else if (s[0] == 't') {   /* typed text (SDL_EVENT_TEXT_INPUT), up to the ';' */
         static char text[32];   /* SDL3's text event points at its text (SDL2's held 32 bytes) */
@@ -5065,18 +5100,17 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
  * and played as the clip starts; the buffer lives until the next call */
 static void clip_sound(const smk *s, int headless)
 {
-    static unsigned char *snd;
     int16_t *a = NULL;
     size_t ns = 0, i;
     int rate = 0, ch = 1;
     if (!s || headless || !g_sfx) return;
-    if (snd) { sfx_stop_pcm(g_sfx, snd); free(snd); snd = NULL; }
-    if (smk_audio(s, &a, &ns, &rate, &ch) == 0 && ns > 0 && (snd = malloc(ns / (size_t)ch + 1))) {
+    clip_sound_stop();
+    if (smk_audio(s, &a, &ns, &rate, &ch) == 0 && ns > 0 && (g_clip_pcm = malloc(ns / (size_t)ch + 1))) {
         for (i = 0; i < ns / (size_t)ch; i++) {
             int v = ch == 2 ? ((int)a[2 * i] + (int)a[2 * i + 1]) / 2 : a[i];
-            snd[i] = (unsigned char)((v >> 8) + 128);
+            g_clip_pcm[i] = (unsigned char)((v >> 8) + 128);
         }
-        sfx_play_pcm(g_sfx, snd, (int)(ns / (size_t)ch), rate, 1.0f, 0);
+        sfx_play_pcm(g_sfx, g_clip_pcm, (int)(ns / (size_t)ch), rate, 1.0f, 0);
     }
     free(a);
 }
@@ -5085,20 +5119,19 @@ static void clip_sound(const smk *s, int headless)
  * hall's clips have none (its ambience is DATABASE 0x4f). Stopped with the room's ambience (sfx_stop_loops) */
 static int clip_sound_loop(const smk *s, int headless)
 {
-    static unsigned char *snd;
     int16_t *a = NULL;
     size_t ns = 0, i;
     int rate = 0, ch = 1;
     int played = 0;
     if (!s || headless || !g_sfx) return 0;
     if (smk_audio(s, &a, &ns, &rate, &ch) == 0 && ns > 0) {
-        if (snd) { sfx_stop_pcm(g_sfx, snd); free(snd); snd = NULL; }
-        if ((snd = malloc(ns / (size_t)ch + 1))) {
+        if (g_clip_loop) { sfx_stop_pcm(g_sfx, g_clip_loop); free(g_clip_loop); g_clip_loop = NULL; }
+        if ((g_clip_loop = malloc(ns / (size_t)ch + 1))) {
             for (i = 0; i < ns / (size_t)ch; i++) {
                 int v = ch == 2 ? ((int)a[2 * i] + (int)a[2 * i + 1]) / 2 : a[i];
-                snd[i] = (unsigned char)((v >> 8) + 128);
+                g_clip_loop[i] = (unsigned char)((v >> 8) + 128);
             }
-            sfx_play_pcm(g_sfx, snd, (int)(ns / (size_t)ch), rate, 1.0f, 1);
+            sfx_play_pcm(g_sfx, g_clip_loop, (int)(ns / (size_t)ch), rate, 1.0f, 1);
             played = 1;
         }
     }
@@ -5113,6 +5146,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
     reg = reg_selected(clan);
     load_bg(clan == 1 ? 19 : 12);
     panel = open_smk(clan == 1 ? "AJFTRNWN" : "AWOTRNWN");
+    if (!headless) play_ambient_vol(0x4b, 0x32);   /* 0x3da54: loop starts on entry, before the panel finishes */
     clip_sound(panel, headless);   /* the panel switching on */
     inst = open_smk(clan == 1 ? "AJFTRNWA" : "AWOTRNWA");
     while (next == -1) {
@@ -5143,12 +5177,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         if (panel) {   /* the menu panel slides in once; its last frame stays */
             if (!menu_done) {
                 int fi = smk_next(panel);
-                if (fi < 0 || fi >= smk_frames(panel) - 1) {
-                    menu_done = 1;
-                    if (!headless) play_ambient_vol(0x4b, 0x32);   /* the room's ambience, DATABASE 0x4c looped at 0x32, once the
-                                                                    * panel is in (Windows 95 MW2SHELL cadet training: the buttons
-                                                                    * added when video slot 0 ends) */
-                }
+                if (fi < 0 || fi >= smk_frames(panel) - 1) menu_done = 1;
             }
             blit_smk(panel, clan == 1 ? 416 : 453, 0);
         } else menu_done = 1;
@@ -5179,6 +5208,7 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
         }
     }
     smk_close(panel); smk_close(inst);
+    clip_sound_stop();
     play_ambient(-1);
     return next;
 }
@@ -5226,7 +5256,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     uint8_t *d = NULL;
     long len = 0;
     FILE *f;
-    int page = 0, hist[64], hsub[64], nh = 0, next = -1, fr = 0, sub = 0, back = 0;
+    int page = 0, sound_page = -1, hist[64], hsub[64], nh = 0, next = -1, fr = 0, sub = 0, back = 0;
     const int (*hs)[6] = ARCH_HS[clan == 1];
     snprintf(path, sizeof path, "%s", gpath(clan == 1 ? "ARCHJF.MW2" : "ARCHWO.MW2"));
     if ((f = fopen(path, "rb"))) { fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET); d = malloc((size_t)len); if (d && fread(d, 1, (size_t)len, f) != (size_t)len) len = 0; fclose(f); }
@@ -5235,7 +5265,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     load_bg(clan == 1 ? 18 : 11);
     while (next == -1) {
         static arch_tok tok[3000];
-        int nt = 0, links[64], nl = 0, i, nlines = 1, npages, hover = -1, en[4], n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
+        int nt = 0, text_bytes = 0, links[64], nl = 0, i, nlines = 1, npages, hover = -1, en[4], n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
         char title[64] = "";
         {   /* parse and lay out the page */
             uint32_t a = 0, b = 0;
@@ -5270,6 +5300,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                             int wl = 0;
                             while (q < L && t[q] != ' ' && t[q] != '\n' && t[q] != '\r' && t[q] != '\\' && wl < 39) k->word[wl++] = t[q++];
                             k->word[wl] = 0;
+                            text_bytes += wl + 1;
                             k->w = text_width(&g_fthin, k->word);
                             {   /* FUN_0003ca70 measures a word with the spaces that follow it (appended to the token,
                                  * 0x3cba8..): a word before a backslash code or the text's end may run to the box's edge */
@@ -5287,6 +5318,10 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                     a += (uint32_t)L + 1;
                 } else a += (uint32_t)strlen((const char *)d + a) + 1;   /* other fields: skipped */
             }
+        }
+        if (page != sound_page) {
+            sound_page = page;
+            if (!headless && text_bytes >= 0x800) shell_sound(0x67, 0x32);   /* 0x27784 / 0x27e3b */
         }
         npages = (nlines + ARCH_LINES - 1) / ARCH_LINES;
         if (sub >= npages) sub = npages - 1;
@@ -6039,7 +6074,7 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
             Uint64 now = SDL_GetTicks();
             if (now - tlast >= (Uint64)smk_frame_ms(tbl)) {
                 tlast = now;
-                if (tdone) { smk_close(tbl); tbl = NULL; shell_sound_stop(0x64); next = 9; }
+                if (tdone) { smk_close(tbl); tbl = NULL; clip_sound_stop(); shell_sound_stop(0x64); next = 9; }
                 else { int fi = smk_next(tbl); if (fi < 0 || fi >= smk_frames(tbl) - 1) tdone = 1; }   /* the last frame shown once */
             }
             if (tbl) blit_smk(tbl, clan == 1 ? 276 : 305, clan == 1 ? 164 : 185);
@@ -6077,6 +6112,8 @@ static int run_ready_room(SDL_Renderer *rd, SDL_Texture *tx, int headless, int f
     smk_close(grid);
     if (tbl) smk_close(tbl);
     if (brief) smk_close(brief);
+    clip_sound_stop();
+    shell_sound_stop(0x64);
     return next;
 }
 
@@ -6321,6 +6358,14 @@ int main(int argc, char **argv)
     }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) && !SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     g_sfx = sfx_create(NULL);
+    {
+        uint8_t levels[16] = {0};
+        FILE *f = fopen(gpath("MW2SND.CFG"), "rb");
+        if (f) {
+            if (fread(levels, 1, sizeof levels, f) == sizeof levels) menu_audio_levels(levels);
+            fclose(f);
+        }
+    }
     music_device_open(g_cfg.menu_music, 1);
     if (!headless) {
         portcfg pc;
@@ -6704,7 +6749,11 @@ int main(int argc, char **argv)
         }
         smk_close(ov);
         if (holo) { smk_close(holo); holo = NULL; }
-        if (sd && sd->id == 8) shell_sound_stop(0x68);   /* the main menu's voice ends with the menu */
+        if (sd && sd->id == 8) shell_sound_stop(0x68);   /* the title voice ends on exit */
+        if (sd && sd->id == 1) {
+            clip_sound_stop();
+            shell_sound_stop(0x69);
+        }
         { int q; for (q = 0; q < 8; q++) smk_close(xov[q]); }
         /* leaving the room: its ambience stops (the clan hall's into the Ready Room, the Register, cadet training; the
          * title's fire loop into the intro clip, the register, Trials of Grievance) - the original's rooms each free their
@@ -6716,11 +6765,14 @@ int main(int argc, char **argv)
     sfx_stop_loops(g_sfx);
     sfx_set_music(g_sfx, NULL, NULL);
     sfx_destroy(g_sfx);
+    for (int i = 0; i < 160; i++) free(g_snd[i].wav);
+    free(g_clip_loop);
+    free(g_clip_pcm);
     gus_song_close(g_song); free(g_song_data); gus_bank_close(g_bank);
 #ifndef MW2_NO_SC55
     sc55_close(g_sc55);
 #endif
-    free(g_amb); free(g_flabel.d); free(g_flist.d);
+    free(g_flabel.d); free(g_flist.d);
     shell_image_free(&g_bg);
     shelldb_close(&g_db);
     if (tx) SDL_DestroyTexture(tx);

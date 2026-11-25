@@ -4,8 +4,8 @@ Open issues in the port. Technical details and evidence are in [ASSUMPTIONS.md](
 [the DOS parity audit](docs/AUDIT_DOS.md).
 
 ## Open
-- **DOS training and poses**. Instructor contact trajectories in TNJ1 and TNJ6 still differ from DOS.
-  The full mission update order for normalization across scenery, mechs and effects needs more tracing.
+- **DOS mission parity**. The live comparison still has gaps for aircraft manoeuvres, targeting
+  handoffs and detached debris. The DOS parity audit lists the remaining replay and weapon checks.
 - **Titanium simulation**. The Titanium and Rendition looks use the base edition's simulation and
   weapon data. Native Windows combat timing remains unverified. A direct load of the Titanium archive
   still has objective sweep failures in BRONSCN1, GOUDSCN1 and MAROSCN1.

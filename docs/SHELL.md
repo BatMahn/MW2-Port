@@ -43,6 +43,27 @@ CADET TRAINING / ARCHIVE HOLOPROJECTOR / READY ROOM / REGISTER, the Ready Room's
 Star Configuration's NEXT / PREV FORMATION, ADD / DELETE STARMATE, CHANGE MECH and the Mech Lab's NEXT / PREV CHASSIS /
 VARIANT (DOSBox: each starts at its x). Every screen's loop also calls the global menu (below) each pass.
 
+## Menu sound audit
+
+The sample IDs below are the original shell's one-based DATABASE IDs. The shell's WAVs use
+the effects level. Combat Variables previews each of its three sliders with sound 0x66 at the
+changed slider's gain when the level moves at least ten pixels (0x25551). Music and effects
+changes apply immediately, and the levels are saved to MW2SND.CFG.
+
+| Screen | Playback checked against the executable and assets |
+|---|---|
+| Title | DOS loops 0x4a at target volume 0x1e. The Windows 95 title plays its edition's 0x68 introduction before starting the loop. |
+| Clan halls | Wolf loops 0x4f at 0x32. Jade Falcon plays the AJFBALL Smacker track. Opening the Archive plays 0x67 and the projector clip. Windows 95 adds the 0x69 training announcement for a new pilot. |
+| Trials of Grievance and Register | 0x52 and 0x51 respectively at 0x1e. The trial announcement only starts from the title, and both samples stop on leaving. |
+| Cadet Training and Ready Room | Training loops 0x4c at 0x32 from entry, with the panel's separate Smacker track. Ready Room uses 0x64 at 0x32 with the holotable before entering the lab. |
+| Star Configuration and Mech Lab | 0x65 for formation, roster and variant buttons. 0x66 for the Lab and Star Configuration transitions. Chassis introductions use 0x53–0x63 at 0x28, with the previous chassis sound stopped. The lab initializes 0x4b without playing it. |
+| Customize | 0x50 at 0x28 when selecting a location on the armour or criticals diagram. |
+| Archive | 0x67 at 0x32 on opening a long entry. Ordinary page changes use the current room audio. |
+| In-mission menu | The DOS engine uses SNDS 0xdb for selection movement and 0xe1 to open a page. Both use the camera-relative mixer. The camera listener sequence checks their sample IDs, levels and pans. |
+
+The title's DOS fade timing, the Windows Jade Falcon announcement's door-clip timing and the
+Archive's embedded-media sound object (0x4d) still need playback comparisons.
+
 ## Music (XMIDI) and the Gravis UltraSound
 - DATABASE entries 33-72 are 40 LZSS-packed XMIDI songs in five arrangements of eight, one per
   Miles driver family. Getters are 1-based (FUN_00021ad0 / FUN_00021a30 use index - 1).

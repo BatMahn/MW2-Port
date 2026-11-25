@@ -2086,73 +2086,69 @@ def splash_area_damage(c):
 
 @sequence
 def dos_training_instructor_releases_target(c):
-    """TNJ1: the instructor can acquire the player during startup and returns to idle at the next scripted order."""
+    """TNJ1: the instructor acquires the player, chooses the recorded flank, and then returns to idle."""
     r = c.run(secs=10, throttle=0, mission='TNJ1SCN1', dos_look=True, env={'MW2_AI_TRACE': '1'})
-    states = [(float(t), state) for t, state in re.findall(r'^ai ([\d.]+)s actor 1 (\S+) man ', r.out, re.M)]
-    opening = [state for t, state in states if 1 <= t < 5]
-    after_order = [state for t, state in states if 8.2 <= t < 10]
-    c(opening and 'attack' in opening, 'the neutral instructor can acquire the player', str(opening))
+    states = [(float(t), state, int(man)) for t, state, man in
+              re.findall(r'^ai ([\d.]+)s actor 1 (\S+) man (-?\d+)', r.out, re.M)]
+    opening = [(state, man) for t, state, man in states if 1 <= t < 5]
+    after_order = [state for t, state, _ in states if 8.2 <= t < 10]
+    c(opening and all(state == 'attack' and man == 1 for state, man in opening),
+      'the neutral instructor acquires the player and chooses the DOS flank', str(opening))
     c(after_order and all(state == 'idle' for state in after_order), 'the next scripted order clears the attack',
       str(after_order))
 
 
+def training_slide(c, mission, instructor, fps, dos=True, hold=False):
+    # DOSBox's recorded run applied full throttle at tick 1750, after the opening instructor order.
+    env = {'MW2_TEST_FPS': fps, 'MW2_TEST_WATCH': '0:%d' % instructor}
+    if hold:
+        env['MW2_TEST_HOLD_ACTOR'] = instructor
+    r = c.run('_%s_%s' % (fps, 'dos' if dos else '3d'), secs=25, keys=[(9.6, '0')], mission=mission,
+              dump='/0.015', env=env, dos_look=dos)
+    contacts = [state for state in r.states if state['contact'] == instructor]
+    c(contacts, '%s fps: the player contacts the instructor' % fps)
+    return r, contacts
+
+
 @sequence
 def tnj1_slide_round_instructor(c):
-    """agent report: TNJ1's Firemoth driven straight ahead from the start at FULL is "blocked about 4 s near z 8420, then
-    slides past". It is the instructor (TNJ1ENS2, a Mad Dog standing at TNW1ST21 17000,9500 until ~25 s), 198 cm to the
-    side of the player's line: contact spheres 550 + 500 (MGEO int[6]). The engine (0x1000b5e0 -> 0x1000ba20) projects the
-    end of every move that comes inside r1 + r2 onto that sphere and sets the velocity to n x max(1, |(dvx, dvy, the
-    other's vz)| / 2) (the mover's own z velocity is overwritten by the other's, 0x1000bc93) - walking as well as
-    airborne; the drive brings the velocity back at 1/45 a tick (its part across the heading easing off the same way) and
-    each frame moves by the mean velocity (v + a dt / 2) dt (0x10019310), the next move projected again: the mech creeps
-    round the sphere, faster at lower frame rates. Heading 0 the bounce is the 1 cm/tick floor and the contact speed
-    |(dvx, dvy)| ~ 0: no damage. DOSBox (MCGA, cycles 40000, ~32 fps): ~8 s in contact, the readout 9-28 km/h, then on at
-    full speed (~1.5 s at the SVGA default's ~5 fps); the port at 30 fps 8 s (it had pushed a walker back 60 cm at -30 %
-    speed: 4.5 s, a back-and-forth stagger)"""
+    """TNJ1: the Firemoth slides left and the instructor recoils as in the DOSBox contact trace."""
     tnj1_slide(c, 30)
 
 
 def tnj1_slide(c, fps):
-    """TNJ1's slide round the standing instructor at `fps` frames a second (MW2_TEST_FPS; 30 = the default)"""
-    r = c.run(suffix='' if fps == 30 else '_%d' % fps, secs=22, throttle=1, mission='TNJ1SCN1', dump='/0.25',
-              env={'MW2_TEST_FPS': fps} if fps != 30 else None, dos_look=True)   # the DOS edition: DOSBox's (agent GC: the
-    # second try's x 2 is by edition, msim_contact_retest - the 3D editions' slide is shorter, contact_retest_by_edition)
-    if fps != 30:
-        c0 = c
-        c = lambda cond, what, detail='': c0(cond, '%d fps: %s' % (fps, what), detail)
-    pre = r.before(8.0)
-    c(pre.get('kmh', 0) > 100 and pre.get('x') == 16802, 'full speed straight up the start line before the instructor',
-      'kmh %s x %s' % (pre.get('kmh'), pre.get('x')))
-    slow = [s for s in r.span(8.0, 22.0) if s['kmh'] < 30]
-    c(slow and slow[0]['t'] < 8.5, 'stopped by the instructor at ~8 s', str([(s['t'], round(s['kmh'])) for s in r.span(7.5, 9.0)]))
-    if not slow:
+    r, contacts = training_slide(c, 'TNJ1SCN1', 1, fps)
+    if not contacts:
         return
-    t0, t1 = slow[0]['t'], slow[-1]['t']
-    c(6.0 <= t1 - t0 <= 10.0, 'in contact 6-10 s (DOSBox ~8 s at ~32 fps)', '%.2f..%.2f' % (t0, t1))
-    con = r.span(t0, t1)
-    d = [math.hypot(s['x'] - 17000, s['z'] - 9500) for s in con]
-    c(min(d) >= 1040 and max(d) < 1100, 'on the contact sphere throughout (r1 + r2 = 1050; across the ground ~1046, the centres 661 / 550 high)', '%.0f..%.0f' % (min(d), max(d)))
-    xs = [s['x'] for s in con]
-    c(all(b <= a for a, b in zip(xs, xs[1:])), 'creeps round it to the left (x never back)', str(xs[:12]))
-    c(all(0 <= s['y'] < 10 for s in con), 'feet on the ground but for the projection\'s lift (0x1000ba20 in 3D: n.y x the penetration, a few cm)',
-      str(sorted(set(s['y'] for s in con))))
-    end = r.at(21.5)
-    c(end.get('kmh', 0) > 100 and end.get('z', 0) > 9500 + 5000 and abs(end.get('heading', 1)) < 0.1, 'then on past it at full speed, heading 0',
-      'kmh %s z %s heading %s' % (end.get('kmh'), end.get('z'), end.get('heading')))
-    c(r.at(1.0).get('parmor') == end.get('parmor'), 'no collision damage (contact speed |(dvx, dvy)| ~ 0)', '%s -> %s' % (r.at(1.0).get('parmor'), end.get('parmor')))
-    return t1 - t0
-
+    first, last = contacts[0], contacts[-1]
+    start, finish = r.at(9.6), r.at(24)
+    duration = last['t'] - first['t']
+    c(16802 < start['a_x'] < 17000 and abs(start['a_z'] - 9500) < 100,
+      '%s fps: the instructor takes a short step west before contact' % fps, str((start['a_x'], start['a_z'])))
+    c(11.3 < first['t'] < 11.9 and 4.5 <= duration <= 8.0,
+      '%s fps: repeated contacts while passing the instructor' % fps, '%.2f..%.2f' % (first['t'], last['t']))
+    distances = [math.hypot(state['x'] - state['a_x'], state['z'] - state['a_z']) for state in contacts]
+    c(min(distances) >= 900 and max(distances) <= 1140,
+      '%s fps: each rebound ends near the moving instructor’s contact surface' % fps,
+      '%.0f..%.0f cm' % (min(distances), max(distances)))
+    c(last['x'] < first['x'] - 350 and last['a_z'] > first['a_z'] + 450,
+      '%s fps: the player moves left and the instructor recoils north' % fps,
+      'player x %d -> %d, instructor z %d -> %d' % (first['x'], last['x'], first['a_z'], last['a_z']))
+    c(finish['kmh'] > 100 and finish['z'] > finish['a_z'] + 5000 and abs(finish['heading']) < 0.1,
+      '%s fps: the player continues straight at full speed' % fps, str((finish['kmh'], finish['z'], finish['heading'])))
+    c(start['parmor'] == finish['parmor'], '%s fps: the slide does no armour damage' % fps,
+      '%s -> %s' % (start['parmor'], finish['parmor']))
+    return duration, finish['x']
 
 
 @sequence
 def tnj1_slide_frame_rates(c):
-    """the walking contact slide is per frame in the engine (0x10019310 / 0x1000ba20: each frame's move projected onto
-    the contact sphere, the velocity reset to n x max(1, dv / 2) and restored at 1/45 a tick - DOSBox TNJ1 ~8 s at ~32
-    fps, 4.6 s at ~60, ~1.5 s at ~5); the port's standing rule normalises per-frame effects to the 30 fps reference, so
-    in contact the player's move runs in 1/30 s steps (the remainder carried): TNJ1's slide round the instructor takes the
-    30 fps time at 60, 120 and 144 fps (MW2_TEST_FPS)"""
-    ts = [tnj1_slide(c, fps) for fps in (60, 120, 144)]
-    c(all(t is not None and 6.0 <= t <= 10.0 for t in ts), 'the same ~8 s at 60 / 120 / 144 fps', str(ts))
+    """High refresh displays share the 30 Hz DOS game update for both participants."""
+    outcomes = [tnj1_slide(c, fps) for fps in (30, 60, 120, 144)]
+    if all(outcomes):
+        durations, final_x = zip(*outcomes)
+        c(max(durations) - min(durations) <= 2.0 and max(final_x) - min(final_x) < 150,
+          'the same side and comparable contact duration at 30, 60, 120 and 144 Hz', str(outcomes))
 
 
 @sequence
@@ -2220,9 +2216,10 @@ def aqua_time_to_death(c):
     (DOS: ~380 m at its 8-22 fps). Port, the timer kept (seeds 1-24): 24.3-76.5 s, median 43 (was 32); 4 of 24 by 30 s
     (DOSBox 2 of 20; 12 runs 29.4-77.5 s, median 45)"""
     ttd, uac, reach = [], [], []
-    for seed in ('1', '2', '3', '4', '5', '6'):
-        r = c.run(suffix='_' + seed, secs=90, throttle=0, twist=0, mission='AQUASCN1', edition='dos', dump='/1',
-                  mech='maddog/mdg00std', env={'MW2_AI_AIM_TRACE': '1', 'MW2_AI_SEED': seed})
+    # The DOS stream starts at the same index each mission. Frame cadence changes when each unit draws from it.
+    for fps in (12, 14, 16, 18, 24, 30):
+        r = c.run(suffix='_%d' % fps, secs=90, throttle=0, twist=0, mission='AQUASCN1', dos_look=True, dump='/1',
+                  mech='maddog/mdg00std', env={'MW2_AI_AIM_TRACE': '1', 'MW2_TEST_FPS': fps})
         dead = [s['t'] for s in r.states if s.get('dead')]
         ttd.append(dead[0] if dead else 999.0)
         end = dead[0] if dead else 90.0
@@ -2242,7 +2239,7 @@ def aqua_time_to_death(c):
                     if prev:
                         reach.append(prev[-1])
         reach.append(-max([d for t, d in ml if t < 23.0] or [0.0]))   # negative: the farthest shot before 23 s
-        if seed != '3':
+        if fps != 18:
             continue
         hits = [float(l.split()[1]) for l in r.out.splitlines() if l.startswith('plhit ')]
         c(hits and 11.0 <= hits[0] <= 17.0, 'first hit at ~13 s from ~650 m (DOSBox ~13.5 s)', '%s' % hits[:3])
@@ -2267,12 +2264,10 @@ def aqua_time_to_death(c):
       '%s' % ['%.0f' % d for d in far])
     # DOSBox produced a run that was still alive at the 90 s cutoff. Keep the median and early-death checks below.
     c(sum(22.0 <= t <= 90.0 for t in ttd) >= len(ttd) - 1 and all(t >= 22.0 for t in ttd),
-      'all but at most one seed dead within the DOSBox window', '%s' % ttd)
+      'all but at most one run ends within the DOSBox window', '%s' % ttd)
     st = sorted(ttd)
-    # 2026-10-21: with the DOS nav steering in whole degrees (ai_nav_turn, DOS 0x229e0) the attackers approach on lines
-    # 0-1 degree right of the float ones: port seeds 1-48 median 37.5, mean 44.2 (float steering: seeds 1-41 median 44,
-    # mean 44.9); seeds 1-6 median 34
-    c(32.0 <= (st[2] + st[3]) / 2.0 <= 52.0, 'the median of seeds 1-6 near DOSBox\'s (median 45 of 12 runs, 41 of 8; port seeds 1-48 37.5)', '%s' % ttd)
+    c(32.0 <= (st[2] + st[3]) / 2.0 <= 52.0,
+      'the median across frame rates is near DOSBox’s 41–45 s', str(ttd))
     c(sum(1 for t in ttd if t <= 30.0) <= 2, 'few early deaths (DOSBox 2 of 20 by 30 s)', '%s' % ttd)
     c(all(u <= 6 and u < m for u, m in uac),
       'the Stormcrow fires its weapons in turn: few UAC/20 rounds by 45 s (DOSBox 0-4 sounds), lasers outnumber them',
@@ -2914,7 +2909,8 @@ def star_in_mw2prm(c):
     with open(dest, 'wb') as f:
         f.write(old)
     e = dict(os.environ, MW2_STAR_PRM=d, **HEADLESS, MW2_CONFIG=os.path.join(d, 'x.cfg'))
-    out = subprocess.run([os.path.join(os.path.dirname(GLVIEW), 'mw2'), mech2], env=e, capture_output=True, text=True, timeout=120).stdout
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    out = subprocess.run([shell, mech2], env=e, capture_output=True, text=True, timeout=120).stdout
     lines = [l for l in out.splitlines() if l.startswith('star ')]
     with open(dest, 'rb') as f:
         new = f.read()
@@ -4415,27 +4411,20 @@ def shot_hits_piece_spheres(c):
 
 @sequence
 def tnj6_slide_round_instructor(c):
-    """TNJ6's Mad Dog driven straight ahead at FULL into the standing instructor (TNJ6's Mad Dog at -18364,9502, 148 cm to the
-    left of the line; spheres 500 + 500): it creeps round the right of it as TNJ1's Firemoth does (0x1000ba20 projection,
-    n x max(1, dv / 2), the drive's 1/45 a tick). DOSBox (MCGA, the readout until back at 79 kph) is frame-rate chaotic:
-    4.5-6.2 s at 40-55 fps (cycles 30000-40000), 10.1 s at ~34 fps (22000), 8.0 s at ~27 fps (18000), 6 s at ~17 fps
-    (12000) - the "~5 s" of session 15 was a 40 fps reading; the port's 30 fps reference: ~10.4 s. The second try's
-    velocity x 2 (0x10019a61, 0x102473d4) is not the gap: the projection lands ON the sphere, so the retest is decided by
-    rounding (DOS 0x200d0's integers: inside ~12 % of the time; the 3D editions' floats ~half) - modelled at the 3D
-    editions' rate it made TNJ6 6.9 s and TNJ1 6.3 s against DOSBox's 8 s. Agent GC: modelled by edition
-    (msim_contact_retest, the engines' own arithmetic): DOSBox is the DOS edition, so this runs the DOS edition (its ~12 %:
-    ~9.3 s); the 3D editions' ~half is checked in contact_retest_by_edition"""
-    r = c.run(secs=24, throttle=1, mission='TNJ6SCN1', dump='/0.25', dos_look=True)
-    slow = [s for s in r.span(8.0, 24.0) if s['kmh'] < 30]
-    c(slow and 9.0 < slow[0]['t'] < 10.5, 'stopped by the instructor at ~9.5 s', str([(s['t'], round(s['kmh'])) for s in r.span(9.0, 10.5)]))
-    if not slow:
+    """TNJ6: the Mad Dog passes on the right in a run near the captured DOS cadence (median 13 ticks)."""
+    r, contacts = training_slide(c, 'TNJ6SCN1', 0, 14)
+    if not contacts:
         return
-    t0, t1 = slow[0]['t'], slow[-1]['t']
-    c(8.0 <= t1 - t0 <= 11.5, 'in contact 8-11.5 s (DOSBox at 27-34 fps: 8.0-10.1 s)', '%.2f..%.2f' % (t0, t1))
-    xs = [s['x'] for s in r.span(t0, t1)]
-    c(xs and xs[-1] > xs[0] + 500, 'round the instructor to the right (x grows)', '%s -> %s' % (xs[:1], xs[-1:]))
-    end = r.at(23.5)
-    c(end.get('kmh', 0) > 50 and end.get('z', 0) > 9502 + 3000, 'then on past it at full speed', 'kmh %s z %s' % (end.get('kmh'), end.get('z')))
+    first, last = contacts[0], contacts[-1]
+    c(12.6 < first['t'] < 13.4 and 5.0 < last['t'] - first['t'] < 9.0,
+      'contact starts near 13 s and repeats over several seconds', '%.2f..%.2f' % (first['t'], last['t']))
+    c(last['x'] > first['x'] + 450 and last['a_z'] > first['a_z'] + 75,
+      'the player slides right and pushes the instructor forward',
+      'player x %d -> %d, instructor z %d -> %d' % (first['x'], last['x'], first['a_z'], last['a_z']))
+    finish = r.at(24)
+    c(finish['kmh'] > 50 and finish['z'] > finish['a_z'] + 2500,
+      'the player clears the instructor and returns to full speed', str((finish['kmh'], finish['z'], finish['a_z'])))
+    c(finish['parmor'] == r.at(9.6)['parmor'], 'the slide does no armour damage')
 
 
 @sequence
@@ -4774,7 +4763,7 @@ def directional_jets_steer_in_flight(c):
 @sequence
 def jet_refill_dos_rule(c):
     """DOS 0x27c63 refills one quarter of the frame's whole ticks, rounded down.
-    This gives one fuel tick per frame at 30 fps and zero per frame at 120 fps.
+    A 30 Hz game update refills one fuel tick at both 30 and 120 Hz display rates.
     The Enhanced edition refills a continuous quarter of the elapsed ticks."""
     for ed, per_s in (('enhanced', 45.5), ('dos', 30.0)):
         r = c.run('_' + ed, secs=UP + 9, mech='summoner/smn00std', edition=ed, hold=[(UP, UP + 2, 'j')], dump='/0.5')
@@ -4784,7 +4773,8 @@ def jet_refill_dos_rule(c):
     r = c.run('_dos_120', secs=4, mech='summoner/smn00std', edition='dos', nostart=True,
               env={'MW2_TEST_FPS': 120}, hold=[(0.5, 1.5, 'j')], dump='/0.25')
     a, b = r.at(2).get('fuel', -1), r.at(3.75).get('fuel', -1)
-    c(0 <= a < 1820 and a == b, 'DOS at 120 fps: frames shorter than four ticks refill zero fuel',
+    c(0 <= a < 1820 and abs((b - a) - 1.75 * 30) <= 1,
+      'DOS at 120 fps: refills one fuel tick per 30 Hz game update',
       '%d -> %d' % (a, b))
 
 
@@ -5960,21 +5950,19 @@ def nav_visited_only_engine_paths(c):
 
 @sequence
 def contact_retest_by_edition(c):
-    """agent GC: after a mech-mech contact the engine tries the move to the end projected onto the sphere again (0x10019310
-    -> 0x10019a61, DOS 0x26990 -> 0x27109); that end lies ON the sphere, so the retest is decided by rounding, and refused
-    the velocity is doubled (0x102473d4, DOS 0x2713b: add eax,eax) - msim_contact_retest runs each engine's own
-    arithmetic: 3D floats (0x1000ba20: n = d / est(d), est (4 max + mid + min) / 4 0x10030330, the end rebuilt as old +
-    (end - old) by 0x1000b5e0) refuse ~50 %; DOS whole cm (0x200d0: n = d << 16 / est, idiv; end rounded at bit 15)
-    ~12 %. TNJ1's Firemoth pressing on round the instructor: the DOS edition ~7 s (DOSBox ~8 s at ~32 fps), the 3D
-    editions' doubled bounces make it ~5 s"""
-    out = {}
+    """The DOS reciprocal contact gives a stationary instructor a rebound during the same update."""
+    results = {}
     for dos in (True, False):
-        r = c.run('_dos' if dos else '_3d', secs=22, throttle=1, mission='TNJ1SCN1', dump='/0.25', dos_look=dos)
-        slow = [s for s in r.span(8.0, 22.0) if s['kmh'] < 30]
-        out[dos] = slow[-1]['t'] - slow[0]['t'] if slow else None
-    c(out[True] is not None and 6.0 <= out[True] <= 9.0, 'DOS edition: in contact 6-9 s (DOSBox ~8 s)', str(out))
-    c(out[False] is not None and 3.5 <= out[False] <= 6.5 and out[False] < out[True] - 1.0,
-      '3D editions: shorter by over 1 s (the doubled bounce about half the time)', str(out))
+        run, contacts = training_slide(c, 'TNJ1SCN1', 1, 30, dos=dos, hold=True)
+        if not contacts:
+            continue
+        first, finish = contacts[0], run.at(22)
+        results[dos] = finish['a_z'] - first['a_z']
+        c(finish['x'] < first['x'] - 350 and finish['kmh'] > 100,
+          '%s: the player slides around the instructor' % ('DOS' if dos else 'Enhanced'),
+          str((first['x'], finish['x'], finish['kmh'])))
+    c(results.get(True, 0) > 400 and abs(results.get(False, 100)) <= 5,
+      'DOS transfers contact motion to the instructor while Enhanced keeps the stationary instructor in place', str(results))
 
 
 @sequence
@@ -8263,6 +8251,34 @@ def shell_menu_music_setting(c):
       'the left part still cycles DIFFICULTY; the device unchanged (not reopened)', '%s %s' % (mm, now))
     shutil.rmtree(stub)
     shutil.rmtree(empty)
+
+
+@sequence
+def shell_volume_previews(c):
+    """Combat Variables plays DATABASE 0x66 at the adjusted row's gain for moves of at least ten pixels."""
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    game = install_dir(c.name, None)
+    work = os.path.join(OUT, c.name)
+    config = os.path.join(game, 'MW2SND.CFG')
+    audio = bytearray(60)
+    struct.pack_into('<III', audio, 4, 65536, 65536, 65536)
+    with open(config, 'wb') as f:
+        f.write(audio)
+    env = _shell_env(work, MW2_SHELL_CV=1, MW2_SHELL_SHOT=os.path.join(work, 'volume.ppm'), MW2_SFX_LOG=1,
+                     MW2_CV_EVENTS='l 475,128;m 480,128;m 510,128;u;m 599,128;l 414,152;u;l 382,176;u')
+    run = subprocess.run([shell, game], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30 * TSCALE)
+    log = run.stdout.decode('latin-1')
+    with open(os.path.join(work, 'audio.log'), 'w') as f:
+        f.write(log)
+    volumes = re.findall(r'SFXLOG -1.000 pcm 5886 vol (\d+\.\d+)', log)
+    c(run.returncode == 0 and volumes == ['0.19', '0.24', '0.09', '0.05'],
+      'a qualifying click or drag previews the row at its own gain', str(volumes))
+    with open(config, 'rb') as f:
+        gains = struct.unpack_from('<III', f.read(), 4)
+    c(gains == (16384, 8192, 40960), 'the new levels survive closing the menu', str(gains))
 
 
 def main():

@@ -21,6 +21,7 @@
 
 /* flying debris (engine 0x10015230 / 0x100152e0 / 0x100156f0): chunks thrown by explosions */
 #define MSIM_MAX_DEBRIS 128
+#define MSIM_DOS_CHUNK_COUNT 32
 typedef struct {
     int     kind;            /* 0 / 1: CHUNKER1 / CHUNKER2; 2: a blown-off part (actor, part); 3: a world debris node (world part) */
     int     object;          /* WTB fragment index for a world debris node */
@@ -29,6 +30,8 @@ typedef struct {
     float   ang[3], spin[3]; /* degrees, degrees/tick */
     int32_t until;           /* ticks */
     int     moving;
+    int     dos_chunk;       /* pooled chunk index + 1, or zero for unpooled debris */
+    int32_t dos_rot[9];
 } msim_debris;
 
 typedef struct {
@@ -92,11 +95,20 @@ typedef struct {
     float        player_heading; /* the start point's facing (degrees) */
     float        player_facing;  /* the player's current heading (updated by the front end) */
     unsigned     rng;
+    uint16_t     dos_random[127]; /* Watcom draws, seeded once and reused by DOS rand (0x4a070). */
+    unsigned     dos_random_index;
     msim_shot    shots[MSIM_MAX_SHOTS];
     int          shot_count;
+    unsigned     dos_chunk_left[MSIM_DOS_CHUNK_COUNT];
+    int          dos_chunk_count;
     unsigned     dos_anim_phase;   /* DOS local-matrix normalization period */
     struct msim_spin_seed *dos_spin_seeds;
     int          dos_spin_count;
+    int         *dos_anim_order;   /* actor animation task creation order */
+    int          dos_anim_count;
+    const mech3d *dos_player_model;
+    const anim_set *dos_player_anim_set;
+    anim_player *dos_player_anim;   /* player gait prepared by the front end for this frame */
     unsigned     dos_player_anim_phase;   /* phase at the player skeleton allocation */
     uint8_t      dos_shot_kinds[MSIM_DOS_MAX_SHOTS];
     int          dos_shot_slots;

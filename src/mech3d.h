@@ -154,6 +154,7 @@ struct anim_set_s;
 #include "anim.h"
 void mech3d_pose(mech3d *m, const anim_set *anim, float t);
 /* Seed the local rotations once when the model joins the mission. */
+void mech3d_dos_rotate(int32_t r[9], unsigned *left, unsigned *phase, int32_t pitch, int32_t yaw, int32_t roll);
 void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
 /* Apply this frame's DOS angular track deltas to the persistent local transforms. */
 void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
