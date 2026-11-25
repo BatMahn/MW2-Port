@@ -1,4 +1,5 @@
 /* msim.c - see msim.h. */
+#include "development.h"
 #include "msim.h"
 static unsigned rnd_ms(unsigned *x);
 #include "fx.h"
@@ -290,7 +291,7 @@ static void cb_finished(void *u, int t, int i, int ok)
      * "%s successful" / "%s failed" text goes to 0x100086d0, which appends it to a log file - not the screen.)
      * Nothing is queued once the end sequence has flushed the radio (0x10031640 sets DAT_1024f6c4) */
     if (t == 0 && !s->logic.announced[i] && !s->logic.silent && !(s->end_flush_at && s->now >= s->end_flush_at)) {
-        if (say[0] && strcmp(say, "NULL") != 0 && s->on_radio) { if (getenv("MW2_RADIO_TRACE")) fprintf(stderr, "radio node %d at %d ms\n", i, (int)s->now); s->on_radio(s->shot_user, say); }   /* TEST ONLY trace */
+        if (say[0] && strcmp(say, "NULL") != 0 && s->on_radio) { if (mw2_development_env("MW2_RADIO_TRACE")) fprintf(stderr, "radio node %d at %d ms\n", i, (int)s->now); s->on_radio(s->shot_user, say); }   /* TEST ONLY trace */
         s->logic.announced[i] = 1;
     }
     if (!s->log) return;
@@ -338,6 +339,30 @@ static void dos_init_actor_anim(msim *s, int actor)
     mech3d_dos_anim_init(&ac->mech, player && ac->have_anim ? &ac->anim : NULL, player, &s->dos_anim_phase);
 }
 
+struct msim_spin_seed {
+    char record[11];
+    int node;
+    unsigned period;
+    int32_t yaw;
+};
+
+static void dos_init_spin(msim *s, const bwd_record *record, const bwd_obj *obj)
+{
+    for (int i = 0; i < record->chunk_count; i++) {
+        bwd_tsk task;
+        if (bwd_tsk_decode(&record->chunks[i], &task) != 0 || task.type != 0 || task.node != obj->index) continue;
+        struct msim_spin_seed *seeds = realloc(s->dos_spin_seeds, (size_t)(s->dos_spin_count + 1) * sizeof *seeds);
+        if (!seeds) return;
+        s->dos_spin_seeds = seeds;
+        struct msim_spin_seed *seed = &seeds[s->dos_spin_count++];
+        snprintf(seed->record, sizeof seed->record, "%.10s", record->name);
+        seed->node = obj->index;
+        seed->period = s->dos_anim_phase;
+        seed->yaw = obj->rotation[1];
+        return;
+    }
+}
+
 /* INCL recurses in place in DOS. GPS copies a unit skeleton at that point,
  * interleaved with allocations for scenery and the projectile/effect pool. */
 static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
@@ -347,6 +372,11 @@ static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
     seen[index] = 1;
     const bwd_record *record = &mission->records[index];
     int pool = strcasecmp(record->name, "MW2_SHT1") == 0;
+    int has_spin = 0;
+    for (int k = 0; k < record->chunk_count && !has_spin; k++) {
+        bwd_tsk task;
+        has_spin = bwd_tsk_decode(&record->chunks[k], &task) == 0 && task.type == 0;
+    }
     for (int k = 0; k < record->chunk_count; k++) {
         const bwd_chunk *chunk = &record->chunks[k];
         uint16_t id;
@@ -360,6 +390,7 @@ static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
                 break;
             }
         } else if (bwd_obj_decode(chunk, &obj) == 0 && (pool || obj.parent != -2)) {
+            if (has_spin) dos_init_spin(s, record, &obj);
             s->dos_anim_phase = 64 + ((s->dos_anim_phase + 7) & 127);
         } else if (bwd_gps_decode(chunk, &gps) == 0) {
             if (gps.is_player) {
@@ -447,7 +478,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
             }
         }
         if (pl.gravity_g <= 0) pl.gravity_g = 1.0f;
-        if (getenv("MW2_DEBUG_PLANET")) fprintf(stderr, "planet %s: %.4f g, temp %d, jet damping %.0f\n", scene, pl.gravity_g, (int)pl.temperature, pl.jet_damping);
+        if (mw2_development_env("MW2_DEBUG_PLANET")) fprintf(stderr, "planet %s: %.4f g, temp %d, jet damping %.0f\n", scene, pl.gravity_g, (int)pl.temperature, pl.jet_damping);
         combat_set_planet(&pl);
         s->planet = pl;
         /* top speed falls with the planet's gravity: DOSBox, the Timber Wolf at full throttle reads 75 kph on JACK (1.1 g)
@@ -549,16 +580,16 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
             free(d);
         }
     }
-    if (getenv("MW2_TEST_PLAYER_MECH")) {   /* TEST ONLY: "SKELETON,LOADOUT" for the player (e.g. MADDOG,MDG00STD) */
+    if (mw2_development_env("MW2_TEST_PLAYER_MECH")) {   /* TEST ONLY: "SKELETON,LOADOUT" for the player (e.g. MADDOG,MDG00STD) */
         char sk[32] = "", lo[32] = "";
-        if (sscanf(getenv("MW2_TEST_PLAYER_MECH"), "%31[^,],%31s", sk, lo) == 2) {
+        if (sscanf(mw2_development_env("MW2_TEST_PLAYER_MECH"), "%31[^,],%31s", sk, lo) == 2) {
             snprintf(s->player_skel, sizeof s->player_skel, "%s", sk);
             snprintf(s->player_loadout, sizeof s->player_loadout, "%s", lo);
         }
     }
-    if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "player loadout %s\n", s->player_loadout);   /* tests */
+    if (mw2_development_env("MW2_DEBUG_LOADOUT")) fprintf(stderr, "player loadout %s\n", s->player_loadout);   /* tests */
     if (combat_init(&s->player_unit, a, s->player_loadout) != 0) {
-        if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s failed: TBR00STD\n", s->player_loadout);
+        if (mw2_development_env("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s failed: TBR00STD\n", s->player_loadout);
         snprintf(s->player_skel, sizeof s->player_skel, "TIMBRWLF");
         snprintf(s->player_loadout, sizeof s->player_loadout, "TBR00STD");
         combat_init(&s->player_unit, a, s->player_loadout);
@@ -593,7 +624,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
             s->chunky = 1;
             if (dp_read_file("MW2SND.CFG", &snd, &sl) == 0) { if (sl >= 0x28) s->chunky = (snd[0x24] | snd[0x25] << 8 | snd[0x26] << 16 | snd[0x27] << 24) != 0; free(snd); }
         }
-        if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "MW2DIF: unlimited ammo %d, invulnerable %d, collision damage %d, heat tracking %d, difficulty %d\n", v[0], v[1], v[3], v[4], v[5]);
+        if (mw2_development_env("MW2_DEBUG_LOADOUT")) fprintf(stderr, "MW2DIF: unlimited ammo %d, invulnerable %d, collision damage %d, heat tracking %d, difficulty %d\n", v[0], v[1], v[3], v[4], v[5]);
     }
     s->player_unit.hold_fire_above = 65.0f;      /* headless test player; glview sets 0 (you decide) */
     pl_rec = s->player_skel;
@@ -774,7 +805,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     /* the player starts at table 0's start node target (e.g. CYANST01) */
     if (s->logic.table_count > 0) {
         const msim_nav *st = find_nav(s, s->logic.tables[0].nodes[0].target);
-        if (st) { s->player[0] = st->x; s->player[2] = st->z; s->player_unit.y = st->y; if (getenv("MW2_DBG_START")) fprintf(stderr, "START %s y=%.0f ground=%.0f\n", st->name, (double)st->y, (double)msim_ground(s, st->x, st->z, 1e9f)); }
+        if (st) { s->player[0] = st->x; s->player[2] = st->z; s->player_unit.y = st->y; if (mw2_development_env("MW2_DBG_START")) fprintf(stderr, "START %s y=%.0f ground=%.0f\n", st->name, (double)st->y, (double)msim_ground(s, st->x, st->z, 1e9f)); }
     }
     s->player_target = -1;
     s->player_facing = 0;
@@ -839,10 +870,9 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
     const world_actor *ac = &s->actors[i];
     float best = 1e30f, x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2];
     int k, found = 0;
-    /* the enemy iterator (0x10013a50): units of another alliance, never neutrals (2); a neutral itself picks nobody -
-     * DOSBox (TNW1: the instructor, alliance 2, never fires at the player unprovoked over 40 s; session 11's trace) -
-     * until the player hits it (0x10014110 -> 0x10013370, s->player_victim). A unit turned on its attacker
-     * (0x10012520, s->ai_focus) takes that one. */
+    /* DOS 0x22fc1..0x22fd3 excludes candidates on the same side or
+     * with alliance 2. A neutral observer can still pick another side.
+     * An explicit target or attacker takes priority in both editions. */
     int self_al = ac->friendly ? 0 : ac->alliance, f = s->ai_focus ? s->ai_focus[i] : -2;
     if (ac->friendly && s->cmd && s->cmd[i] == MSIM_CMD_ATTACK) {
         f = s->cmd_target[i];
@@ -879,7 +909,7 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
         *ex = p[0]; *ez = p[2]; *ey = p[1]; *eface = 0; *eh = 0; *who = -3;
         return 1;
     }
-    if (self_al != 0 && !s->player_unit.destroyed && (self_al != 2 || s->player_victim == i || (s->provoked && s->provoked[i] > 0))) {
+    if (self_al != 0 && !s->player_unit.destroyed && (msim_dos_int || self_al != 2 || s->player_victim == i || (s->provoked && s->provoked[i] > 0))) {
         float dx = s->player[0] - x0, dz = s->player[2] - z0;
         best = dx * dx + dz * dz;
         *ex = s->player[0]; *ez = s->player[2]; *ey = s->player_unit.y; *eface = s->player_facing; *eh = 0; *who = -1;
@@ -888,7 +918,7 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
     for (k = 0; k < s->actor_count; k++) {
         float dx, dz, d;
         int al = s->actors[k].friendly ? 0 : s->actors[k].alliance;
-        if (k == i || !s->armed[k] || s->units[k].destroyed || al == self_al || al == 2 || self_al == 2) continue;
+        if (k == i || !s->armed[k] || s->units[k].destroyed || al == self_al || al == 2 || (!msim_dos_int && self_al == 2)) continue;
         dx = (float)s->actors[k].mech.origin[0] - x0; dz = (float)s->actors[k].mech.origin[2] - z0;
         d = dx * dx + dz * dz;
         if (d < best) {
@@ -916,11 +946,11 @@ static int c7_pick(const msim *s, int i, float *nearest)
         float dx, dz, d;
         int claimed = 0;
         if (k < 0) {
-            if (self_al == 0 || s->player_unit.destroyed || (self_al == 2 && s->player_victim != i && !(s->provoked && s->provoked[i] > 0))) continue;
+            if (self_al == 0 || s->player_unit.destroyed || (!msim_dos_int && self_al == 2 && s->player_victim != i && !(s->provoked && s->provoked[i] > 0))) continue;
             dx = s->player[0] - x0; dz = s->player[2] - z0;
         } else {
             int al = s->actors[k].friendly ? 0 : s->actors[k].alliance;
-            if (k == i || !s->armed[k] || s->units[k].destroyed || al == self_al || al == 2 || self_al == 2) continue;
+            if (k == i || !s->armed[k] || s->units[k].destroyed || al == self_al || al == 2 || (!msim_dos_int && self_al == 2)) continue;
             dx = (float)s->actors[k].mech.origin[0] - x0; dz = (float)s->actors[k].mech.origin[2] - z0;
         }
         d = sqrtf(dx * dx + dz * dz);
@@ -958,7 +988,7 @@ static int assign_ok(const msim *s, int q)
 static void ai_wake(msim *s, int i);
 static void group_assign(msim *s, int table, int leader, int who)
 {
-    if (getenv("MW2_POST_TRACE")) fprintf(stderr, "group_assign %.2f table %d leader %d who %d ok %d\n", s->now / 1000.0, table, leader, who, leader >= 0 ? assign_ok(s, leader) : -1);   /* TEST ONLY */
+    if (mw2_development_env("MW2_POST_TRACE")) fprintf(stderr, "group_assign %.2f table %d leader %d who %d ok %d\n", s->now / 1000.0, table, leader, who, leader >= 0 ? assign_ok(s, leader) : -1);   /* TEST ONLY */
     int q, pick = -1, best = 0x7fff;
     int want = who == -1 ? s->player_unit.rating : who >= 0 && who < s->actor_count ? s->units[who].rating : 0;
     for (q = 0; q < s->actor_count; q++) {
@@ -1184,7 +1214,7 @@ static void node_assign(msim *s, int table, int leader)
          * pop reads slot +0x140 - 1 (+0x128): the assignment is lost */
         if (m->counter) return;
         if (!ai_allows(&s->ai, m, st)) return;                      /* 0x10013e00 -> 0x10013d90 */
-        if (getenv("MW2_DEBUG_NODE_TASKS")) {   /* TEST ONLY */
+        if (mw2_development_env("MW2_DEBUG_NODE_TASKS")) {   /* TEST ONLY */
             float tp[3] = {0, 0, 0}, tr = 0;
             task_pos(s, tcode, tp, &tr);
             fprintf(stderr, "node task %.2f table %d kind %#x actor %d (%s) state %d -> %d target %#x %s at %.0f,%.0f,%.0f range %.0f\n", s->now / 1000.0,
@@ -1284,7 +1314,7 @@ static void aim_trace(const msim *s, const msim_shot *sh, const char *what, cons
     const float *d = sh->aim_d;
     float ay = atan2f(d[0], d[2]), v[3], t, m[3], ml, vl;
     int k;
-    if (!getenv("MW2_AIM_TRACE") || !s->player_eye_ok) return;
+    if (!mw2_development_env("MW2_AIM_TRACE") || !s->player_eye_ok) return;
     for (k = 0; k < 3; k++) v[k] = p[k] - sh->aim_o[k];
     t = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
     for (k = 0; k < 3; k++) m[k] = v[k] - d[k] * t;
@@ -1373,7 +1403,7 @@ static void fires_heat(msim *s, float ticks)
         float c[3], r;
         if ((p->objtype & 0xf0) != 0x10 || p->hidden || part_sphere(p, c, &r) != 0) continue;
         r *= 2.0f;
-        if (getenv("MW2_FIRE_TRACE")) { static int said; if (said++ < 10) { fprintf(stderr, "fire %d %s at %.0f,%.0f,%.0f r %.0f\n", q, p->model_name, c[0], c[1], c[2], r); } }   /* TEST ONLY */
+        if (mw2_development_env("MW2_FIRE_TRACE")) { static int said; if (said++ < 10) { fprintf(stderr, "fire %d %s at %.0f,%.0f,%.0f r %.0f\n", q, p->model_name, c[0], c[1], c[2], r); } }   /* TEST ONLY */
         for (u = -1; u < s->actor_count; u++) {
             combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
             float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
@@ -1568,7 +1598,8 @@ static void mov_refresh(msim *s);
 static void paths_step(msim *s)
 {
     int b;
-    if (world3d_paths_step(s->paths, (mech3d *)s->world, (float)((double)s->now * 182.0 / 1000.0)) > 0)
+    if (world3d_paths_step(s->paths, (mech3d *)s->world, (float)((double)s->now * 182.0 / 1000.0),
+                           msim_dos_int ? &s->dos_anim_phase : NULL) > 0)
         s->world_dirty = s->world_rebuild = 1;   /* parts whose paths ended: back in the static mesh and collision */
     for (b = 0; b < s->bld_count; b++) {
         struct msim_building *g = &s->bld[b];
@@ -1646,7 +1677,7 @@ void msim_step(msim *s, int32_t dt_ms)
         combat_jets(&s->player_unit, 0, dt, &s->rng);
     }
     combat_step(s, dt, dos_ticks);
-    if (getenv("MW2_TEST_FALLSIM")) {   /* TEST ONLY: units (the player -1, wrecks too) under every type 5 surface at their x, z,
+    if (mw2_development_env("MW2_TEST_FALLSIM")) {   /* TEST ONLY: units (the player -1, wrecks too) under every type 5 surface at their x, z,
                                          * every 0.25 s: "FALLSIM t= unit= skel [WRECK] x= z= y= vy= ground= floor=lo..hi" */
         static int32_t fl_t = -100000;
         int q, d4;
@@ -1757,30 +1788,15 @@ void msim_step(msim *s, int32_t dt_ms)
         float dx, dz;
         ai_set_class(m, ac->unit_class, s->units[i].tons);   /* the manoeuvre record (DOS 0x2c880: by class, the 1-ton jumper) */
         int enemy_who = -1, in_star = ac->friendly && ac->table == 0 && !s->player_unit.destroyed;
-        if (s->armed[i] && s->units[i].destroyed && !fixed_unit(ac) && s->units[i].y > s->units[i].ground + 1.0f) {
-            /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 on the ground
-             * (object +0x78) - it stops dead; killed in the air it flies on at its velocity (no drive, LAB_1001aae9), falls
-             * and freezes on touching down (0x1000c4d0 sets +0x78). Its move is the ordinary one (0x1000b5e0: the 3D segment
-             * centre to centre with the frame's (v + a t / 2) t fall, against the collision list): refused - a wall, a
-             * roof, a hillside, a sphere - state 4 takes 0x10019ae1 -> 0x1000c4d0 before the position is written
-             * (0x10019fa0): it stays where it was and +0x10d bit 0 stops its physics for good (0x10019310 returns at once).
-             * The ground is asked at its new CENTRE (0x10019d8b -> 0x10010080, as for a live unit). The port had moved the
-             * wreck with no move test and asked the ground at its feet: an enemy killed in the air flew through buildings
-             * and hillsides and came to rest inside them (player report "enemies falling through geometry") */
-            float h = ac->mech.heading * 3.14159265f / 180.0f, v = m->speed, a = s->across ? s->across[i] : 0.0f;   /* the one velocity */
-            float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], ch = s->centre_h ? s->centre_h[i] : 550.0f;
-            float nx = x0 + (sinf(h) * v + cosf(h) * a) * dt, nz = z0 + (cosf(h) * v - sinf(h) * a) * dt;
-            float dy = combat_jets_dy(&s->units[i], 0, dt);
-            if (!msim_can_move(s, x0, z0, nx, nz, s->units[i].y, dy, ch, s->radius ? s->radius[i] : 450.0f)) {
-                m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0;
-                s->units[i].vy = 0;
-                s->units[i].ground = s->units[i].y;   /* frozen where it was (+0x10d): never moved again */
-            } else {
-                ac->mech.origin[0] = (int32_t)lrintf(nx);
-                ac->mech.origin[2] = (int32_t)lrintf(nz);
-                s->units[i].ground = msim_ground(s, nx, nz, s->units[i].y + dy + ch);
-                combat_jets(&s->units[i], 0, dt, &s->rng);
-                if (s->units[i].y <= s->units[i].ground + 1.0f) { m->speed = 0; if (s->air_speed) s->air_speed[i] = 0; if (s->across) s->across[i] = 0; }
+        if (s->armed[i] && s->units[i].destroyed && !fixed_unit(ac)) {
+            float h = ac->mech.heading * 3.14159265f / 180.0f;
+            float across = s->across ? s->across[i] : 0.0f;
+            msim_wreck_step(s, i, ac->mech.origin, sinf(h) * m->speed + cosf(h) * across,
+                            cosf(h) * m->speed - sinf(h) * across, dt, dos_ticks);
+            if (s->units[i].wreck_stopped) {
+                m->speed = 0;
+                if (s->air_speed) s->air_speed[i] = 0;
+                if (s->across) s->across[i] = 0;
             }
             ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
@@ -2126,7 +2142,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 }
             }
         }
-        if (getenv("MW2_TEST_HOLD_ACTOR") && atoi(getenv("MW2_TEST_HOLD_ACTOR")) == i) {   /* TEST hook: this unit stands still
+        if (mw2_development_env("MW2_TEST_HOLD_ACTOR") && atoi(mw2_development_env("MW2_TEST_HOLD_ACTOR")) == i) {   /* TEST hook: this unit stands still
                                                                                                * (no walking, turning, jets, dodges or fire) */
             m->throttle = 0; m->turn = 0; m->jet = 0; m->jet_forward = 0; m->jet_back = 0; m->jet_side = 0; m->wants_fire = 0; m->reverse = 0;
         }
@@ -2153,7 +2169,7 @@ void msim_step(msim *s, int32_t dt_ms)
         if (m->post_cond && in_star) { if (!s->star_post) s->star_post = m->post_who + 2; }
         else if (m->post_cond) {
             ai_mind *lm = l ? &s->minds[l - s->actors] : m;
-            if (getenv("MW2_POST_TRACE")) fprintf(stderr, "post %.2f actor %d cond %d who %d leader %d pending %d\n", s->now / 1000.0, i, m->post_cond, m->post_who, l ? (int)(l - s->actors) : -1, lm->event_cond);   /* TEST ONLY */
+            if (mw2_development_env("MW2_POST_TRACE")) fprintf(stderr, "post %.2f actor %d cond %d who %d leader %d pending %d\n", s->now / 1000.0, i, m->post_cond, m->post_who, l ? (int)(l - s->actors) : -1, lm->event_cond);   /* TEST ONLY */
             if (lm->event_cond == 0) { lm->event_cond = m->post_cond; lm->event_who = m->post_who; }
         }
         if (m->c7_fired && (m->state == AI_TARGET || m->state == AI_ATTACK)) m->tgt = m->post_who;   /* ref2 0x25: the pick */
@@ -2367,7 +2383,7 @@ void msim_step(msim *s, int32_t dt_ms)
                             float bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
                             float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);   /* projected onto its sphere */
                             float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
-                            if (getenv("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
+                            if (mw2_development_env("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
                             if (msim_dos_int) {
                                 float end[3], bounce[3];
                                 int retry_hit = msim_dos_unit_impact(s, i, p0, ch, s->radius[i], hit, c, n, rr, sv, ov, end, bounce);
@@ -2472,7 +2488,7 @@ void msim_step(msim *s, int32_t dt_ms)
                             msim_impact_damage(s, i, sp3);
                         }
                     touched = 1;
-                        if (getenv("MW2_BLOCK_TRACE") && atoi(getenv("MW2_BLOCK_TRACE")) == i)   /* TEST ONLY */
+                        if (mw2_development_env("MW2_BLOCK_TRACE") && atoi(mw2_development_env("MW2_BLOCK_TRACE")) == i)   /* TEST ONLY */
                             fprintf(stderr, "block %.2fs actor %d at %d,%d by %s n %.2f %.2f %.2f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2],
                                     g_block_what ? g_block_what : "terrain", wn[0], wn[1], wn[2]);
                     }
@@ -2516,10 +2532,10 @@ void msim_step(msim *s, int32_t dt_ms)
             if (s->units[i].jet_on && s->on_effect) msim_jet_flames_at(s, &ac->mech, (float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2], ac->mech.heading);
             ac->mech.origin[1] = (int32_t)msim_draw_y(s, i);
         }
-        if (getenv("MW2_TEST_LEG") && s->now >= atoi(getenv("MW2_TEST_LEG")) && s->armed[i] && !s->units[i].loc_gone[7]) {   /* tests: the left leg shot off */
+        if (mw2_development_env("MW2_TEST_LEG") && s->now >= atoi(mw2_development_env("MW2_TEST_LEG")) && s->armed[i] && !s->units[i].loc_gone[7]) {   /* tests: the left leg shot off */
             int q; for (q = 0; q < 80 && !s->units[i].loc_gone[7]; q++) combat_hit(&s->units[i], 11, 8, 180.0f, &s->rng);
         }
-        if (getenv("MW2_AI_TRACE") && i == atoi(getenv("MW2_AI_TRACE")) && (s->now / dt_ms) % 10 == 0) {   /* tests: one AI every 10 steps */
+        if (mw2_development_env("MW2_AI_TRACE") && i == atoi(mw2_development_env("MW2_AI_TRACE")) && (s->now / dt_ms) % 10 == 0) {   /* tests: one AI every 10 steps */
             fprintf(stderr, "ai %.2fs actor %d at %d,%d y %.0f immobile %d heading %.1f turn %.0f avoid %.0f/%d goal %.1f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2], s->units[i].y, s->units[i].immobile,
                     ac->mech.heading, m->turn, s->avoid_turn ? s->avoid_turn[i] : 0.0f, s->avoid_side ? s->avoid_side[i] : 0, v.has_goal ? v.goal_bearing : -999.0f);
             fprintf(stderr, "ai %.2fs actor %d %s man %d (prev %d) thr %.2f%s speed %.0f twist %.1f->%.1f pitch %.1f->%.1f lock %#x tgt %d fire %d heat %.1f\n",
@@ -2572,7 +2588,7 @@ void msim_step(msim *s, int32_t dt_ms)
             if ((ev & ANIM_EV_SLOW) && m && fabsf(m->speed) > 1.0f) s->minds[i].drive_slow = 1;
             ac->t = s->anim_pl[i].t;
         }
-        if (getenv("MW2_ANIM_TRACE") && i == atoi(getenv("MW2_ANIM_TRACE")))   /* tests: one actor every step */
+        if (mw2_development_env("MW2_ANIM_TRACE") && i == atoi(mw2_development_env("MW2_ANIM_TRACE")))   /* tests: one actor every step */
             fprintf(stderr, "anim %.2fs actor %d held %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, held, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
         const anim_player *ap = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? &s->anim_pl[i] : NULL;
         ac->mech.pose_off = ap && !msim_dos_int ? ap->off : NULL;
@@ -2611,6 +2627,7 @@ void msim_free(msim *s)
     free(s->obstacle_part); s->obstacle_part = NULL; s->world = NULL;
     free(s->los_terrain); free(s->los_terrain_box); s->los_terrain = NULL; s->los_terrain_box = NULL; s->los_terrain_count = 0;
     world3d_paths_free(s->paths); s->paths = NULL;
+    free(s->dos_spin_seeds); s->dos_spin_seeds = NULL; s->dos_spin_count = 0;
     terrain_release(s->terrain); s->terrain = NULL;
     free(s->clist_seq); s->clist_seq = NULL; s->clist_seq_n = 0;
     free(s->dos_hulls); s->dos_hulls = NULL;
@@ -3267,12 +3284,12 @@ static void building_damage(msim *s, int b, float dmg, int owner, const float at
     struct msim_building *bd = &s->bld[b];
     mech3d_part *pi;
     char line[96];
-    if (getenv("MW2_DAMAGE_LOG"))   /* TEST ONLY: who damages which structure */
+    if (mw2_development_env("MW2_DAMAGE_LOG"))   /* TEST ONLY: who damages which structure */
         printf("damage structure %s by %s %.3f\n", bd->name, owner < 0 ? (owner == -1 ? "player" : "none") : s->actors[owner].group, (double)dmg);
     int changed = 1;
     (void)owner;
     if (bd->hp <= 0) return;
-    if (getenv("MW2_BLD_TRACE")) fprintf(stderr, "bld hit %s (%s) %.1f -> hp %d at %.0f,%.0f,%.0f by %d\n", bd->name, bd->sub, (double)dmg, bd->hp - (int)dmg, at ? (double)at[0] : 0.0, at ? (double)at[1] : 0.0, at ? (double)at[2] : 0.0, owner);
+    if (mw2_development_env("MW2_BLD_TRACE")) fprintf(stderr, "bld hit %s (%s) %.1f -> hp %d at %.0f,%.0f,%.0f by %d\n", bd->name, bd->sub, (double)dmg, bd->hp - (int)dmg, at ? (double)at[0] : 0.0, at ? (double)at[1] : 0.0, at ? (double)at[2] : 0.0, owner);
     bd->hp -= (int)dmg;   /* __ftol: truncated */
     if (bd->hp > 0) return;
     building_swap(s, b);
@@ -3306,7 +3323,7 @@ static void building_damage(msim *s, int b, float dmg, int owner, const float at
     s->world_rebuild = 1;                        /* the collision surfaces without it: rebuilt once per step */
     snprintf(line, sizeof line, "%6.1fs %s (%s) destroyed", s->now / 1000.0, bd->name, bd->sub);
     if (s->log) s->log(s->log_user, line);
-    if (getenv("MW2_BLD_TRACE")) {   /* TEST ONLY: what of the record stands after the swap (model/OBJ index) */
+    if (mw2_development_env("MW2_BLD_TRACE")) {   /* TEST ONLY: what of the record stands after the swap (model/OBJ index) */
         int q;
         fprintf(stderr, "bld shown %s after %d:", pi->rec, b);
         for (q = 0; q < s->world->part_count; q++)
@@ -3367,7 +3384,7 @@ int msim_inspect(msim *s, int actor, int thing)
                          * 0x10018920 leave it), so 200 m from its point; DOS sets it to the model's bounding radius (0x4fdad) */
         if (msim_dos_int && s->world && g->intact >= 0 && g->intact < s->world->part_count)
             r += (float)thing_model_radius(&s->world->parts[g->intact]);   /* DOS 0x2a8d2: +0x10 + 0x4e20 against +0xc0 */
-        if (getenv("MW2_STATE_DUMP")) printf("INSPECT_THING d=%.0f r=%.0f\n", (double)sqrtf(dx * dx + dz * dz), (double)r);   /* TEST hook (tests/sequences) */
+        if (mw2_development_env("MW2_STATE_DUMP")) printf("INSPECT_THING d=%.0f r=%.0f\n", (double)sqrtf(dx * dx + dz * dz), (double)r);   /* TEST hook (tests/sequences) */
         if (dx * dx + dz * dz >= r * r) return 2;   /* DOS 0x2a8e3: out of range when radius + 200 m <= the distance */
         g->inspected = 1;
         return 1;
@@ -3414,7 +3431,7 @@ static void dos_player_warning(msim *s, const float aim[3])
     const float target[3] = {(float)origin[0], s->units[t].y + (s->centre_h ? s->centre_h[t] : 550.0f), (float)origin[2]};
     const float shooter[3] = {s->player[0], s->player_unit.y + s->player_centre_h, s->player[2]};
     int in_view = s->dos_warning_view(s->shot_user, aim, target, shooter, s->player_facing);
-    if (getenv("MW2_MISSILE_TRACE")) fprintf(stderr, "mwarn unit %d view %d\n", t, in_view);
+    if (mw2_development_env("MW2_MISSILE_TRACE")) fprintf(stderr, "mwarn unit %d view %d\n", t, in_view);
     missile_warning(s, t, 1, shooter[0], shooter[2], in_view);
 }
 
@@ -3832,7 +3849,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                  * high mounts over a low turret by converging well behind it. */
                 if (target_range > 0.0f) r = target_range;
                 to[0] = eye[0] + dir[0] * r; to[1] = eye[1] + dir[1] * r; to[2] = eye[2] + dir[2] * r;
-                if (getenv("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
+                if (mw2_development_env("MW2_AI_AIM_TRACE"))   /* TEST ONLY */
                     fprintf(stderr, "aiaim %.2f actor %d w %d hit %d dist %.0f range %d conv %.0f eye %.0f %.0f %.0f yaw %.2f body %.2f pitch %.2f\n",
                             s->now / 1000.0, i, w, hit, dist, s->aim[i].range.value, r, eye[0], eye[1], eye[2], ey2 * 180.0f / 3.14159265f,
                             wrap180(am->heading + m->twist), pr * 180.0f / 3.14159265f);
@@ -3908,7 +3925,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                     float o[3] = {s->player[0], s->player_unit.y, s->player[2]}, mf[3];
                     const float *src = (s->pl_shown_ok && mech3d_mount_world(&s->pl_shown, mech3d_mount_slot(loc), o, s->player_facing, mf) == 0) ||
                                        (s->pl_mech_ok && mech3d_mount_world(&s->pl_mech, mech3d_mount_slot(loc), o, s->player_facing, mf) == 0) ? mf : from;
-                    if (getenv("MW2_MUZZLE_TRACE")) {   /* tests: each player shot's start in the mech's frame (right, up, forward) */
+                    if (mw2_development_env("MW2_MUZZLE_TRACE")) {   /* tests: each player shot's start in the mech's frame (right, up, forward) */
                         float hh = s->player_facing * 3.14159265f / 180.0f, dx2 = src[0] - s->player[0], dz2 = src[2] - s->player[2];
                         fprintf(stderr, "muzzle w %d loc %d slot %d: right %.0f up %.0f fwd %.0f (%s) eye %.0f %.0f %.0f to %.0f %.0f %.0f\n", w, loc, mech3d_mount_slot(loc), dx2 * cosf(hh) - dz2 * sinf(hh), src[1] - s->player_unit.y, dx2 * sinf(hh) + dz2 * cosf(hh), src == from ? "body" : "mount", from[0], from[1], from[2], to[0], to[1], to[2]);
                     }
@@ -4024,7 +4041,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                 const int ft = fx_impact_type(combat_weapon_visual(sh->weapon), b2 >= 0 || (s->world->parts[part].objtype & 0x600) ? FX_HIT_STRUCT : FX_HIT_GROUND);
                 if (ft >= 0) effect(s, ft, hp3, missile_fx(sh->weapon));
                 if (b2 >= 0) building_damage(s, b2, combat_weapon_damage(sh->weapon), sh->owner, hp3);
-                if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
+                if (sh->owner == -1 && sh->homing != -2 && mw2_development_env("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
                     fprintf(stderr, "mhit %.3f object %s %.0f %.0f %.0f\n", s->now / 1000.0, s->world->parts[part].model_name, hp3[0], hp3[1], hp3[2]);
                 gone = 1;
                 sh->life = 0;
@@ -4078,7 +4095,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                             int ft = fx_impact_type(combat_weapon_visual(sh->weapon), FX_HIT_GROUND);
                             if (ft >= 0) effect(s, ft, gp, missile_fx(sh->weapon));
                             if (sh->owner == -1) aim_trace(s, sh, "ground", gp);   /* TEST ONLY */
-                            if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
+                            if (sh->owner == -1 && sh->homing != -2 && mw2_development_env("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
                                 fprintf(stderr, "mhit %.3f ground %.0f %.0f %.0f\n", s->now / 1000.0, gp[0], gp[1], gp[2]);
                         }
                         sh->life = 0;
@@ -4096,8 +4113,8 @@ static void combat_step(msim *s, float dt, int dos_ticks)
             int gone_before[8], li;
             int was = tu->destroyed, dealt;
             memcpy(gone_before, tu->loc_gone, sizeof gone_before);
-            if (hit_unit == -1 && getenv("MW2_TEST_PLHIT_GROUP")) hit_group = atoi(getenv("MW2_TEST_PLHIT_GROUP"));   /* TEST ONLY: the location struck */
-            if (hit_unit == -1 && getenv("MW2_AI_AIM_TRACE")) {   /* TEST ONLY: where the player was struck (right, up, forward of the player) */
+            if (hit_unit == -1 && mw2_development_env("MW2_TEST_PLHIT_GROUP")) hit_group = atoi(mw2_development_env("MW2_TEST_PLHIT_GROUP"));   /* TEST ONLY: the location struck */
+            if (hit_unit == -1 && mw2_development_env("MW2_AI_AIM_TRACE")) {   /* TEST ONLY: where the player was struck (right, up, forward of the player) */
                 float hx = hp[0] - s->player[0], hz = hp[2] - s->player[2], fh = s->player_facing * 3.14159265f / 180.0f;
                 fprintf(stderr, "plhit %.2f from %d w %d group %d right %.0f up %.0f fwd %.0f\n", s->now / 1000.0, sh->owner, sh->weapon, hit_group,
                         hx * cosf(fh) - hz * sinf(fh), hp[1] - s->player_unit.y, hx * sinf(fh) + hz * cosf(fh));
@@ -4151,10 +4168,10 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                 }
                 s->fx_player_hit = 0;
                 if (sh->owner == -1) aim_trace(s, sh, "unit", hp);   /* TEST ONLY */
-                if (sh->owner == -1 && sh->homing != -2 && getenv("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
+                if (sh->owner == -1 && sh->homing != -2 && mw2_development_env("MW2_MISSILE_TRACE"))   /* TEST ONLY: a guided shot's end */
                     fprintf(stderr, "mhit %.3f unit %d group %d prox %d up %.0f id %u\n", s->now / 1000.0, hit_unit, hit_group, tbest == 0,
                             hp[1] - (hit_unit == -1 ? s->player_unit.y : s->units[hit_unit].y), sh->id);
-                if (getenv("MW2_FX_TRACE") && hit_unit == -1) fprintf(stderr, "plfx %.2f group %d type %d\n", s->now / 1000.0, hit_group, ft);   /* TEST ONLY */
+                if (mw2_development_env("MW2_FX_TRACE") && hit_unit == -1) fprintf(stderr, "plfx %.2f group %d type %d\n", s->now / 1000.0, hit_group, ft);   /* TEST ONLY */
                 (void)was;   /* the death explosion comes from the death sequence (wrecks) */
             }
             if (s->log) {
@@ -4172,7 +4189,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
         } else if (sh->life <= 0) {   /* Below-zero world height is valid; impact or expiry ends flight. */
             gone = 1;
             s->misses++;
-            if (getenv("MW2_BLD_TRACE") && sh->owner == -1)
+            if (mw2_development_env("MW2_BLD_TRACE") && sh->owner == -1)
                 fprintf(stderr, "miss w %d at %.0f,%.0f,%.0f life %.1f\n", sh->weapon, sh->x, sh->y, sh->z, sh->life);
         }
         if (gone) { remove_shot(s, k); k--; }
@@ -5469,6 +5486,45 @@ void msim_dos_walk(combat_unit *u, float heading, float drive, float top, int fr
                      freev, jet_dir, ticks, move);
 }
 
+/* DOS 0x269ca and 0x2717c, 3D 0x10019ae1: a wreck stops at the last
+ * position if either a wall or a unit refuses the proposed airborne move. */
+void msim_wreck_step(msim *s, int actor, int32_t origin[3], float vx, float vz, float dt, int dos_ticks)
+{
+    combat_unit *u = actor < 0 ? &s->player_unit : &s->units[actor];
+    if (dt <= 0.0f || (msim_dos_int && !dos_ticks)) return;
+    u->jet_on = 0;
+    if (u->wreck_stopped) return;
+    if (u->y <= u->ground) {
+        u->wreck_stopped = 1;
+        return;
+    }
+
+    float h = actor < 0 ? s->player_centre_h : s->centre_h ? s->centre_h[actor] : 550.0f;
+    float r = actor < 0 ? s->player_radius : s->radius ? s->radius[actor] : 450.0f;
+    float x = (float)origin[0] + vx * dt, z = (float)origin[2] + vz * dt;
+    combat_motion lift;
+    if (msim_dos_int) {
+        int32_t delta[2];
+        dos_motion_plane(u->dos_vel, 0, 0, 0, 0, 0, 1, 0, dos_ticks, delta);
+        x = (float)(origin[0] + delta[0]);
+        z = (float)(origin[2] + delta[1]);
+        lift = msim_dos_lift(u, &s->planet, 0, dos_ticks);
+    } else lift = (combat_motion){.dy = combat_jets_dy(u, 0, dt)};
+    float before[3] = {(float)origin[0], u->y + h, (float)origin[2]};
+    float after[3] = {x, u->y + h + lift.dy, z}, normal[3], centre[3], velocity[3], radius;
+    if (msim_unit_contact(s, actor, before, after, normal, centre, &radius, velocity) != -2 ||
+        !msim_can_move(s, before[0], before[2], x, z, u->y, lift.dy, h, r)) {
+        u->wreck_stopped = 1;
+        u->vy = 0;
+        return;
+    }
+    origin[0] = (int32_t)lrintf(x);
+    origin[2] = (int32_t)lrintf(z);
+    u->ground = msim_ground(s, x, z, u->y + lift.dy + h);
+    combat_jets_motion(u, 0, dt, &s->rng, msim_dos_int ? &lift : NULL);
+    u->wreck_stopped = u->y <= u->ground;
+}
+
 void msim_dos_project_velocity(const combat_unit *u, float heading, float *along, float *across)
 {
     const float scale = 182.0f / 65536.0f;
@@ -6210,7 +6266,7 @@ static void clist_order(msim *s, const mech3d *w)
         free(done);
     }
     s->clist_next = seq;
-    if (getenv("MW2_CLIST_TRACE")) {   /* TEST ONLY: the insertion order found */
+    if (mw2_development_env("MW2_CLIST_TRACE")) {   /* TEST ONLY: the insertion order found */
         int q, z = 0;
         for (q = 0; q < w->part_count; q++) z += s->clist_seq[q] == 0;
         fprintf(stderr, "clist order %s: %d parts, %d objects seen, %d parts unplaced\n", s->scene, w->part_count, seq, z);
@@ -6225,11 +6281,15 @@ void msim_set_world(msim *s, const mech3d *world)
         /* path tasks first: the carried parts are flagged `moving` and kept out of the static lists below */
         world3d_paths_free(s->paths);
         s->paths = s->arch && s->scene[0] ? world3d_paths_load(s->arch, s->scene, (mech3d *)world) : NULL;
+        for (int k = 0; k < s->dos_spin_count; k++) {
+            const struct msim_spin_seed *seed = &s->dos_spin_seeds[k];
+            world3d_paths_dos_seed(s->paths, seed->record, seed->node, seed->period, seed->yaw);
+        }
         buildings_init(s, world);
     }
     terrain_free((terrain_t *)s->terrain);
     s->terrain = terrain_build(world, s->clist_seq, s->clist_seq_n);
-    if (getenv("MW2_CLIST_TRACE") && s->terrain && ((terrain_t *)s->terrain)->nco > 0) {   /* TEST ONLY: the list's head */
+    if (mw2_development_env("MW2_CLIST_TRACE") && s->terrain && ((terrain_t *)s->terrain)->nco > 0) {   /* TEST ONLY: the list's head */
         const terrain_t *tt = (const terrain_t *)s->terrain;
         int q;
         fprintf(stderr, "clist head at %.2fs:", s->now / 1000.0);
@@ -6382,7 +6442,7 @@ static int probe_engine(const msim *s, int self, const float p0[3], const float 
                 if (!(e < tt) || !(hl < tt)) continue;
                 tt = hl;
                 hit = 2; *climb = 0; *ox = sph[0]; *oz = sph[2];
-                if (getenv("MW2_PROBE_TRACE")) fprintf(stderr, "probe %.2fs actor %d: unit %d piece %s r %.0f at %.0f of %.0f\n", s->now / 1000.0, self, k, pp->model_name, sph[3], hl, g0.len);   /* TEST ONLY */
+                if (mw2_development_env("MW2_PROBE_TRACE")) fprintf(stderr, "probe %.2fs actor %d: unit %d piece %s r %.0f at %.0f of %.0f\n", s->now / 1000.0, self, k, pp->model_name, sph[3], hl, g0.len);   /* TEST ONLY */
             }
         }
     }
@@ -6582,7 +6642,7 @@ int msim_player_avoid(msim *s, float heading, float along, float across, float t
         *thr = step != 0 ? 0.25f : saved_thr;   /* 0x100 of the 0x400 full scale */
     }
     s->pav_next = now + 10.0f;
-    if (getenv("MW2_PAV_TRACE")) fprintf(stderr, "pav %.2fs side %d hit %d steps %d turn %.1f len %.0f\n", s->now / 1000.0, side, s->pav_hit, step, (double)accum, (double)len);   /* TEST ONLY */
+    if (mw2_development_env("MW2_PAV_TRACE")) fprintf(stderr, "pav %.2fs side %d hit %d steps %d turn %.1f len %.0f\n", s->now / 1000.0, side, s->pav_hit, step, (double)accum, (double)len);   /* TEST ONLY */
     return accum != 0;
 }
 
@@ -6620,7 +6680,7 @@ static int los_blocked(const msim *s, float x0, float y0, float z0, float x1, fl
         one.parts = (mech3d_part *)&s->world->parts[s->los_terrain[i]];
         one.part_count = 1;
         if (seg_mech(&one, o3, d3, &t) && t < 0.995f) {   /* (not the target's own footing at the far end) */
-            if (getenv("MW2_LOS_TRACE")) { static int said; if (said++ < 40) fprintf(stderr, "los: %.2fs blocked by %s at t %.2f from %.0f,%.0f\n", s->now / 1000.0, s->world->parts[s->los_terrain[i]].model_name, (double)t, x0, z0); }   /* TEST ONLY */
+            if (mw2_development_env("MW2_LOS_TRACE")) { static int said; if (said++ < 40) fprintf(stderr, "los: %.2fs blocked by %s at t %.2f from %.0f,%.0f\n", s->now / 1000.0, s->world->parts[s->los_terrain[i]].model_name, (double)t, x0, z0); }   /* TEST ONLY */
             return 1;
         }
     }

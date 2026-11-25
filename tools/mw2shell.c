@@ -6,6 +6,7 @@
  * the shell's tables (title: FUN_0002a410, hotspot table 0x7e7fc).
  * Headless capture: MW2_SHELL_SHOT=out.ppm MW2_SHELL_FRAMES=n MW2_SHELL_MOUSE=x,y MW2_SHELL_SCREEN=id
  */
+#include "development.h"
 #include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
 /* the 640 x 480 screen's scaling: SDL 3.4's pixel-art mode (nearest sampling with the pixel edges blended, so a
  * fractional scale - 1080 lines: 2.25 - keeps every pixel the same size); older SDL (the system's on some Linux
@@ -1026,7 +1027,7 @@ static int movie_present(SDL_Renderer *rd, const smk *s, int look, int fit, SDL_
     ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
     SDL_UnlockTexture(*mtx);
     if (r != 0) return -1;
-    if (getenv("MW2_SHELL_MOVIE_LOG"))   /* TEST ONLY */
+    if (mw2_development_env("MW2_SHELL_MOVIE_LOG"))   /* TEST ONLY */
         fprintf(stderr, "movie: look %s fit %s window %dx%d picture %d,%d %dx%d drawn %dx%d rows %d-%d: %.1f ms\n", PORTCFG_VID_NAME[look],
                 PORTCFG_FIT_NAME[fit], w, h, d.x, d.y, d.w, d.h, iw, ih, ya, yb, ms);
     if (ms > 0.6 * smk_frame_ms(s) && mp->sc > 0.5) { if (++mp->slow >= 2) { mp->sc = mp->sc * 0.75 < 0.5 ? 0.5 : mp->sc * 0.75; mp->slow = 0; } }
@@ -1073,7 +1074,7 @@ static void movie_test_shot(const smk *s)
                     memcpy(win + ((size_t)(d.y + y) * (size_t)w + (size_t)(d.x + x)) * 3, g_fb + ((size_t)(y / k) * W + (size_t)(x / k)) * 3, 3);
         t1 = SDL_GetPerformanceCounter();
     }
-    if (getenv("MW2_SHELL_MOVIE_LOG"))
+    if (mw2_development_env("MW2_SHELL_MOVIE_LOG"))
         fprintf(stderr, "movie: look %s fit %s window %dx%d picture %d,%d %dx%d rows %d-%d: %.1f ms\n", look < 0 ? "frame640" : PORTCFG_VID_NAME[look],
                 PORTCFG_FIT_NAME[fit], w, h, d.x, d.y, d.w, d.h, ya, yb, (double)(t1 - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
     if ((f = fopen(shot, "wb"))) { fprintf(f, "P6\n%d %d\n255\n", w, h); fwrite(win, 1, (size_t)w * (size_t)h * 3, f); fclose(f); }
@@ -1110,7 +1111,7 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
             sfx_play_pcm(g_sfx, snd, (int)(ns / (size_t)ch), rate, 1.0f, 0);
         }
         free(a);
-        if (getenv("MW2_SMK_TRACE")) fprintf(stderr, "cinematic %s: %d frames, audio %zu samples at %d Hz, %d channel(s)\n", name, smk_frames(s), ns, rate, ch);
+        if (mw2_development_env("MW2_SMK_TRACE")) fprintf(stderr, "cinematic %s: %d frames, audio %zu samples at %d Hz, %d channel(s)\n", name, smk_frames(s), ns, rate, ch);
     }
     t0 = SDL_GetTicks();
     for (f = 0; f < n; f++) {
@@ -1163,7 +1164,7 @@ static void apply_music(int screen, int clan)
     if (!v) return;
     if (v & 0x20000000) {   /* 0x35c4c / main loop 0x36700: the song closed and forgotten (0xa6380 = 0, 0xa6384 = 0) */
         sfx_lock(g_sfx);
-        if ((g_song || g_msong || g_sc55_on) && getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
+        if ((g_song || g_msong || g_sc55_on) && mw2_development_env("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (screen %d)\n", screen);   /* TEST ONLY */
         gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1;
         sfx_unlock(g_sfx);
         return;
@@ -1197,7 +1198,7 @@ static void play_entry(int entry, int screen)
         }
         g_song_entry = entry;
         g_song_len = n; g_song_rate = sfx_rate(g_sfx);
-        if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: start entry %d (screen %d)\n", entry, screen);   /* TEST ONLY */
+        if (mw2_development_env("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: start entry %d (screen %d)\n", entry, screen);   /* TEST ONLY */
     }
 }
 
@@ -1711,7 +1712,7 @@ static int launch_ia(void)
     { char cl[8]; snprintf(cl, sizeof cl, "%d", g_ia.clan[0]); setenv("MW2_CLAN", cl, 1); }   /* (the friendly clan: the world's decals) */
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
-    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
+    if (mw2_development_env("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     shell_hide_for_sim();
     snprintf(path, sizeof path, "%s/MW2MSN.CFG", save);
@@ -3421,8 +3422,8 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
      * 0x34668, 0x34982) */
     for (i = 0; i < 9; i++) cl[i] = clip_open(CL[cx][i]);
     if (!headless) shell_sound(LAB_VOICE[m], 0x28);   /* the chassis' name on entering (0x34441) */
-    if (getenv("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the chassis by lance index, as NEXT CHASSIS would reach it */
-        m = atoi(getenv("MW2_SHELL_LAB_CHASSIS")) % lance_mech_count();
+    if (mw2_development_env("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the chassis by lance index, as NEXT CHASSIS would reach it */
+        m = atoi(mw2_development_env("MW2_SHELL_LAB_CHASSIS")) % lance_mech_count();
         nv = mek_variants(lance_mech_code(m), var, 24); vi = 0;
         printf("lab chassis %d %s, %d variants\n", m, MECHS[m].name, nv);
     }
@@ -3433,7 +3434,7 @@ static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         mek_mass mm;
         int have = nv > 0 && load_mek(var[vi], &d) == 0, hover = -1;
         if (have) mek_masses(&d, &mm);
-        if (headless && f == 0 && getenv("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the variant list and the main page's masses */
+        if (headless && f == 0 && mw2_development_env("MW2_SHELL_LAB_CHASSIS")) {   /* TEST ONLY: the variant list and the main page's masses */
             printf("lab variants:");
             for (i = 0; i < nv; i++) printf(" %s", var[i]);
             if (have) printf("\nlab mass: weapons %.2f equipment %.2f used %.2f\n", mm.weapons, mm.equip, mm.used);
@@ -3861,7 +3862,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         }
     }
     if (text_on) SDL_StopTextInput(g_win);
-    if (getenv("MW2_SC_EVENTS")) { printf("sc: names"); for (k = 0; k < 3; k++) printf(" '%s'", st->slot[k].pilot); printf("\n"); fflush(stdout); }   /* TEST ONLY */
+    if (mw2_development_env("MW2_SC_EVENTS")) { printf("sc: names"); for (k = 0; k < 3; k++) printf(" '%s'", st->slot[k].pilot); printf("\n"); fflush(stdout); }   /* TEST ONLY */
     for (k = 0; k < 10; k++) clip_close(cl[k]);
     return next;
 }
@@ -3927,7 +3928,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     { char cl[8]; snprintf(cl, sizeof cl, "%d", clan); setenv("MW2_CLAN", cl, 1); }   /* (the world's insignia decals) */
     sim_command(line, sizeof line, scen, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
-    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
+    if (mw2_development_env("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     shell_hide_for_sim();
     loading_screen(g_load_clan);
@@ -3996,7 +3997,7 @@ static void hall_of_honor(SDL_Renderer *rd, SDL_Texture *tx, int headless)
             int c = r->clan >= 0 && r->clan < 3 ? r->clan : (int)((r - g_reg) / 10);
             if (!r->used) continue;
             memcpy(nm, r->name, 16); nm[16] = 0;
-            if (headless && getenv("MW2_SHELL_HOH")) printf("hoh: %s\n", nm);   /* TEST ONLY */
+            if (headless && mw2_development_env("MW2_SHELL_HOH")) printf("hoh: %s\n", nm);   /* TEST ONLY */
             draw_text(&g_fthin, CX[0], y, nm, pal, -1);
             draw_text(&g_fthin, CX[1], y, CLAN_NAME[c], pal, -1);
             draw_text(&g_fthin, CX[2], y, RANK_TITLE[r->title >= 0 && r->title < 9 ? r->title : 0], pal, -1);
@@ -4583,7 +4584,7 @@ static int cc_accept(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
     if (cc_write_inputmap(rd, tx, headless, &g_cccur) != 0) return -1;
     cc_save(&g_cccur, inst_write_path("GIDDI", "CONFIG00.CPC"));   /* FUN_00020b00(0): slot 0, the name kept */
-    if (headless && getenv("MW2_CC_CLICKS")) printf("cc: accepted \"%s\"\n", g_cccur.name);   /* TEST ONLY */
+    if (headless && mw2_development_env("MW2_CC_CLICKS")) printf("cc: accepted \"%s\"\n", g_cccur.name);   /* TEST ONLY */
     shell_message(rd, tx, headless, "Cockpit Control Configured.#Ok");
     return 0;
 }
@@ -4727,7 +4728,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
                 if (end) {
                     snprintf(cfg->name, sizeof cfg->name, "%s", nbuf);
                     naming = 0;
-                    if (script) printf("cc: name '%s'\n", cfg->name);   /* TEST ONLY */
+                    if (script && mw2_development_env("MW2_CC_EVENTS")) printf("cc: name '%s'\n", cfg->name);   /* TEST ONLY */
                 }
                 if (script) break;
                 continue;
@@ -5050,7 +5051,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
     { char cl[8]; snprintf(cl, sizeof cl, "%d", clan); setenv("MW2_CLAN", cl, 1); }   /* (the world's insignia decals) */
     sim_command(line, sizeof line, up, save);
     sfx_lock(g_sfx); gus_song_close(g_song); g_song = NULL; mt32_song_close(g_msong); g_msong = NULL; SC55_STOP(); g_sc55_on = 0; g_song_entry = -1; sfx_unlock(g_sfx);   /* the menu music stops for the mission (the MT-32 one too) */
-    if (getenv("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
+    if (mw2_development_env("MW2_SHELL_MUSICLOG")) fprintf(stderr, "music: stop (mission)\n");   /* TEST ONLY */
     sfx_stop_loops(g_sfx);
     shell_hide_for_sim();
     loading_screen(g_load_clan);
@@ -5352,7 +5353,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             if (sub > 0) sub = 0;
             else if (nh) { nh--; page = hist[nh]; sub = hsub[nh]; }
             else next = 1;
-            if (getenv("MW2_ARCH_BACK")) printf("archive back: page %d sub %d next %d\n", page, sub, next);
+            if (mw2_development_env("MW2_ARCH_BACK")) printf("archive back: page %d sub %d next %d\n", page, sub, next);
             continue;
         }
         draw_bg();
@@ -6282,9 +6283,9 @@ int main(int argc, char **argv)
     g_f26.len = shelldb_entry(&g_db, 26, &g_f26.d);       /* shell font 0x1b (DAT_00091174): The Keshik's headings */
     g_f28.len = shelldb_entry(&g_db, 27, &g_f28.d);       /* shell font 0x1c (DAT_00091178) */
     if (getenv("MW2_SHELL_MOUSE")) sscanf(getenv("MW2_SHELL_MOUSE"), "%d,%d", &mx, &my);
-    if (getenv("MW2_STAR_PRM")) {   /* TEST ONLY: the star record in <dir>/MW2PRM.CFG - load, print, save with formation + 1, reload */
+    if (mw2_development_env("MW2_STAR_PRM")) {   /* TEST ONLY: the star record in <dir>/MW2PRM.CFG - load, print, save with formation + 1, reload */
         int k, pass;
-        snprintf(g_dir, sizeof g_dir, "%s", getenv("MW2_STAR_PRM"));
+        snprintf(g_dir, sizeof g_dir, "%s", mw2_development_env("MW2_STAR_PRM"));
         for (pass = 0; pass < 2; pass++) {
             star_load(0);
             printf("star formation %d size %d", g_star[0].formation, g_star[0].size);
@@ -6294,7 +6295,7 @@ int main(int argc, char **argv)
         }
         return 0;
     }
-    if (getenv("MW2_LAB_MASSES")) {   /* tests: every stock design's mass as the CUSTOMIZE panel computes it */
+    if (mw2_development_env("MW2_LAB_MASSES")) {   /* tests: every stock design's mass as the CUSTOMIZE panel computes it */
         char err[256];
         prj_archive *a = prj_open(gpath("MW2.PRJ"), err, sizeof err);
         int t = a ? prj_find_type(a, "MEK") : -1, n = t >= 0 ? prj_symbol_count(a, t) : 0, i2, over = 0, cnt = 0;
@@ -6687,7 +6688,7 @@ int main(int argc, char **argv)
                 draw_text(&g_flabel, 320 - text_width(&g_flabel, msg) / 2, 460, msg, (const uint8_t (*)[3])g_bg.pal, -1);
             }
             f++;
-            if (headless && getenv("MW2_SHELL_MUSICLOG") && g_song) fprintf(stderr, "music entry %d playing\n", g_song_entry);
+            if (headless && mw2_development_env("MW2_SHELL_MUSICLOG") && g_song) fprintf(stderr, "music entry %d playing\n", g_song_entry);
             if (headless) {
                 if (f >= frames && (getenv("MW2_SHELL_MENU") || getenv("MW2_SHELL_MENU_EVENTS"))) global_menu(rd, tx, headless, mx, my);   /* tests: the menu over this screen */
                 if (f >= frames) {

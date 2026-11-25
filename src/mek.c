@@ -78,19 +78,25 @@ static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); 
 #define MEK_LOC_SIZE 40
 #define MEK_ITEMS_AT (MEK_HEADER + MEK_LOC_COUNT * MEK_LOC_SIZE)
 #define MEK_NAME_LEN 50
+#define MEK_TITANIUM_PAD 8
 
 int mek_parse(const uint8_t *d, size_t len, mek_def *m)
 {
     uint32_t items;
     uint16_t links;
     size_t need, i, k;
+    static const uint8_t zero[MEK_TITANIUM_PAD];
 
     memset(m, 0, sizeof *m);
     if (len < MEK_ITEMS_AT + MEK_NAME_LEN) return -1;
     items = rd32(d + 0x10);
     links = rd16(d + 0x14);
-    if (items + links > MEK_MAX_ITEMS) return -1;
+    if (links > MEK_MAX_ITEMS || items > (uint32_t)(MEK_MAX_ITEMS - links)) return -1;
     need = MEK_ITEMS_AT + (size_t)(items + links) * 8 + MEK_NAME_LEN;
+    if (len == need + sizeof zero && memcmp(d + need, zero, sizeof zero) == 0) {
+        m->config_padding = sizeof zero;
+        len = need;
+    }
     if (len < need && (need - len) % 8 == 0 && (need - len) / 8 <= links) {
         /* two 3D-edition records (GRG03STD, STM04STD) are one entry shorter than their counts: the trailing ammo
          * link(s) taken as missing (ASSUMED) */
@@ -131,9 +137,13 @@ static void wr32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v
 static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 size_t mek_write(const mek_def *m, uint8_t *out, size_t cap)
 {
-    size_t n = MEK_ITEMS_AT + (size_t)(m->item_count + m->link_count) * 8 + MEK_NAME_LEN, i, k;
+    size_t n, name, i, k;
     int any_raw = 0;
-    if (cap < n || m->item_count + m->link_count > MEK_MAX_ITEMS) return 0;
+    if (m->item_count < 0 || m->link_count < 0 || m->link_count > MEK_MAX_ITEMS ||
+        m->item_count > MEK_MAX_ITEMS - m->link_count) return 0;
+    name = MEK_ITEMS_AT + (size_t)(m->item_count + m->link_count) * 8;
+    n = name + MEK_NAME_LEN + (m->config_padding == MEK_TITANIUM_PAD ? MEK_TITANIUM_PAD : 0);
+    if (cap < n) return 0;
     memset(out, 0, n);
     wr32(out, m->tonnage); wr32(out + 4, m->walk_mp); wr32(out + 8, m->jump_mp); wr32(out + 12, m->heat_sinking);
     wr32(out + 0x10, (uint32_t)m->item_count); wr16(out + 0x14, (uint16_t)m->link_count); wr16(out + 0x16, m->unknown16);
@@ -149,8 +159,8 @@ size_t mek_write(const mek_def *m, uint8_t *out, size_t cap)
         wr32(out + MEK_ITEMS_AT + i * 8 + 4, (uint32_t)m->items[i].linked_id);
     }
     for (i = 0; i < MEK_NAME_LEN; i++) if (m->config_raw[i]) any_raw = 1;
-    if (any_raw) memcpy(out + n - MEK_NAME_LEN, m->config_raw, MEK_NAME_LEN);
-    else { size_t L = strlen(m->config_name); memcpy(out + n - MEK_NAME_LEN, m->config_name, L < MEK_NAME_LEN ? L : MEK_NAME_LEN - 1); }
+    if (any_raw) memcpy(out + name, m->config_raw, MEK_NAME_LEN);
+    else { size_t L = strlen(m->config_name); memcpy(out + name, m->config_name, L < MEK_NAME_LEN ? L : MEK_NAME_LEN - 1); }
     return n;
 }
 

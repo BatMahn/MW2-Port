@@ -443,19 +443,59 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   the previous 23 and four training contact checks: the TNJ1 slide at 30 fps, the TNJ1 frame-rate
   comparison, the TNJ6 slide, and the contact retest comparison between editions.
 
+### Runtime scenery normalization and training state
+
+- The spin task (0x1b55b) takes the elapsed whole ticks since its last run, divides by the task period
+  in 16.16, and multiplies each encoded angle by that fraction. It calls the same local matrix update
+  (0x1e140) as the rotating joints. In HEIDSCN1, the CINDWLD1 spinner starts with a countdown of 138
+  and consumes the first shared normalization period before any unit does. In a replay using the
+  original update ticks and observed phase at each reset, all 687 local matrices and countdowns
+  matched, including six normalizations. At tick 2,766 the original updated a player joint before
+  the scenery task, as the port does.
+- In the TNJ1SCN1 DOSBox trace, the instructor receives the player's target reference during startup
+  (0x2421f) and then enters attack through an AI rule (0x21750). DOS target search excludes neutral
+  candidates (0x22fc1), and an observer with neutral alliance can still select another side. Committing
+  the rule clears the saved state at 0x2333f. The script returns the instructor to idle just after its
+  startup (0x23c48). The port now allows that search and clears the saved state at the rule transition.
+
+### Titanium archive coverage
+
+- The Titanium archive contains 133 MEK records with eight zero bytes after the 50-byte name. All 133
+  round-trip byte for byte with the new parser. Using the raw Titanium archive and the same 54 base-game
+  scenes as the Enhanced objective sweep, 51 scenes completed without fallbacks, up from 13 with the old
+  parser. BRONSCN1, GOUDSCN1 and MAROSCN1 still fail in this raw archive configuration.
+- The normal Titanium and Rendition looks use the base mission and equipment data alongside the Titanium
+  graphics resources. The objective sweep exercises load compatibility separately from that normal path.
+  Native Windows AI, weapon tables and combat timing still need a live comparison. Proton's Wineserver
+  could not bind its socket in the sandbox, so the original Windows simulation did not start.
+
+### Verification
+
+- The DOS sweep completed 59 of 59 scenes under AddressSanitizer and UndefinedBehaviorSanitizer with
+  zero fallbacks. All 50 executable comparison groups passed. OpenGL passed 296 of the 300 existing
+  sequences, and the new instructor state regression passed separately. The four remaining failures
+  all cover instructor contact trajectories and timing. The Vulkan selection passed all 24 checks,
+  including all 17 Titanium, Rendition and texture switching checks.
+
 ## Not checked
 
 - **Live manoeuvre execution.** Glide, flank, and circling have controlled comparisons. Their paths
   through terrain and interleaved waypoints from several aircraft still need DOS traces.
-- **Complete mission poses.** Initial countdowns match the four captured missions. Runtime normalization
-  by scenery tasks and effects can advance the original shared phase. Full-mission phase synchronization
-  still needs a trace that follows those updates as well as unit animation.
+- **Complete mission poses.** Initial countdowns match the four captured missions. Spinning scenery now
+  uses the shared phase. Other rotating tasks, effects, and the relative update order of the player,
+  scenery and AI still need a full-mission comparison.
 - **Complete contact trajectories.** Fixed-point movement and the sampled bounce calculations match the
   original given the same input states. These checks leave open independent replay through terrain
   face selection, unit controller decisions and differing frame schedules. In the TNJ1SCN1 capture
-  the instructor began flank movement (0x2d290) before the player's first contact, while the port's
-  instructor stayed idle in the same opening. That changes the contact centre before the first
-  rebound. TNJ6SCN1 now gets past the instructor, with contact duration still differing.
+  the instructor began flank movement (0x2d290) before the player's first contact. The port now acquires
+  the instructor's target but still diverges in contact trajectory and duration. TNJ6SCN1 gets past the
+  instructor with a different contact duration.
+- **DOS startup timing and random draws.** The original picks `0x444 + rand(0x16c)` at 0x2817c and
+  waits until the tick after that deadline (0x2823a). In TNJ1SCN1 the player's draw read entry 0
+  (value 0) at tick 168, and the instructor read entry 2 (value 9,988) at tick 182. The mission-wide
+  table cycles through 127 entries at 0x4a070. Applying the DOS delay range with the port's current
+  random sequence stopped the Golden Spade starmate from firing in the turret regression, so that
+  change was reverted. Startup and AI draw ordering still need to be traced together.
 - **Live AI warning timing.** The recipient now comes from the AI's tracked target. A live trace is still
   needed across a target handoff during an active volley.
 - **The weapon pick's follow-up** after 0x2ea63. Selection through 0x2ea63 has differential coverage for

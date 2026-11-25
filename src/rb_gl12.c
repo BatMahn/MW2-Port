@@ -14,6 +14,7 @@
  * Test switches: MW2_GL12_MAXTEX=n (the largest texture the card takes, e.g. 256 as a Voodoo 3), MW2_GL12_NO_MULTITEX=1,
  * MW2_GL12_NOFOG=1, MW2_GL12_TRACE=1 (textures padded / resampled / tiled, the context).
  */
+#include "development.h"
 #include "rb_gl12.h"
 
 #include <math.h>
@@ -241,7 +242,7 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
         }
 #endif
     }
-    g12_trace = getenv("MW2_GL12_TRACE") != NULL;
+    g12_trace = mw2_development_env("MW2_GL12_TRACE") != NULL;
     g12_nofog = getenv("MW2_GL12_NOFOG") != NULL;
     g_fogn = g12_maxtex < 2048 ? g12_maxtex : 2048;
     {   /* vsync (none on SDL's offscreen driver: the tests) */
@@ -276,7 +277,7 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     printf("gpu: OpenGL (%s)\n", g_devname);
     fflush(stdout);
-    if (g12_trace) fprintf(stderr, "gl12: extensions %s\n", ext ? ext : "");
+    if (MW2_DEVELOPMENT_LOGS && g12_trace) fprintf(stderr, "gl12: extensions %s\n", ext ? ext : "");
     return 0;
 }
 
@@ -529,7 +530,7 @@ static void tex_note(GLuint id, int w, int h, int bytes, int level)
 {
     static int armed;
     unsigned long long b = (unsigned long long)w * (unsigned long long)h * (unsigned long long)bytes;
-    if (!armed) { armed = 1; if (getenv("MW2_GL12_TRACE")) atexit(tex_report); }
+    if (!armed) { armed = 1; if (mw2_development_env("MW2_GL12_TRACE")) atexit(tex_report); }
     if (id >= g_tex_cap) {
         unsigned n = g_tex_cap ? g_tex_cap : 256, i;
         unsigned long long *q;
@@ -578,7 +579,7 @@ static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
         if (H > g12_maxtex) H = g12_maxtex;
         if (W != w || H != h) {
             uint8_t *r = resample(px, w, h, W, H);
-            if (g12_trace) fprintf(stderr, "gl12: texture %d x %d resampled to %d x %d\n", w, h, W, H);
+            if (MW2_DEVELOPMENT_LOGS && g12_trace) fprintf(stderr, "gl12: texture %d x %d resampled to %d x %d\n", w, h, W, H);
             if (r) { free(px); px = cur = r; w = W; h = H; }
         }
         v->ntx = v->nty = 1;
@@ -619,7 +620,7 @@ static gl12_var *var_make(gl12_tex *t, int kind, int param, int tiled)
         v->t = calloc((size_t)(cnt[0] * cnt[1]), sizeof *v->t);
         tile = malloc((size_t)P[0] * (size_t)P[1] * 4);
         if (!v->t || !tile) { free(v->t); free(tile); free(xs); free(ys); free(px); free(v); return NULL; }
-        if (g12_trace && (cnt[0] * cnt[1] > 1 || P[0] != w || P[1] != h))
+        if (MW2_DEVELOPMENT_LOGS && g12_trace && (cnt[0] * cnt[1] > 1 || P[0] != w || P[1] != h))
             fprintf(stderr, "gl12: texture %d x %d (variant %d) in %d x %d tile(s), the largest %d x %d\n", w, h, kind, cnt[0], cnt[1], P[0], P[1]);
         for (j = 0; j < cnt[1]; j++)
             for (i = 0; i < cnt[0]; i++) {
@@ -790,7 +791,7 @@ static void store_make(gl12_tex *t)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, P[0], P[1], 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         }
     C.bound[0] = 0;
-    if (g12_trace) fprintf(stderr, "gl12: target %d x %d kept in %d x %d tile(s) of %d x %d\n", t->w, t->h, cnt[0], cnt[1], P[0], P[1]);
+    if (MW2_DEVELOPMENT_LOGS && g12_trace) fprintf(stderr, "gl12: target %d x %d kept in %d x %d tile(s) of %d x %d\n", t->w, t->h, cnt[0], cnt[1], P[0], P[1]);
 }
 
 /* copy the back buffer's picture of t (its 0,0 .. w,h) into its store; the borders take the edge pixels (clamp) */
@@ -971,7 +972,7 @@ void gl12_fog_table(const float rgb[3], int kind)
         glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, ramp);
         C.bound[0] = 0;
         free(tab);
-        if (g12_trace) fprintf(stderr, "gl12: fog colour %.3f %.3f %.3f, table %d entries\n", rgb[0], rgb[1], rgb[2], g_fogn);
+        if (MW2_DEVELOPMENT_LOGS && g12_trace) fprintf(stderr, "gl12: fog colour %.3f %.3f %.3f, table %d entries\n", rgb[0], rgb[1], rgb[2], g_fogn);
     }
 }
 static GLuint lum_ramp(void)

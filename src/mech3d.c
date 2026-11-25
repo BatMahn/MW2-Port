@@ -1,4 +1,5 @@
 /* mech3d.c - see mech3d.h. */
+#include "development.h"
 #include "mech3d.h"
 #include "bwd.h"
 #include "anim.h"
@@ -415,7 +416,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
                 if (p->pos[1] + o->verts[0].y <= 2 && p->pos[1] + o->verts[0].y >= -2) p->pos[1] += 4;
             }
         }
-        if (getenv("MW2_DEBUG_WORLD")) fprintf(stderr, "world %s obj %d %s at %d,%d,%d type 0x%x\n", record, i, p->model_name, p->pos[0], p->pos[1], p->pos[2], (unsigned)p->objtype);   /* tests */
+        if (mw2_development_env("MW2_DEBUG_WORLD")) fprintf(stderr, "world %s obj %d %s at %d,%d,%d type 0x%x\n", record, i, p->model_name, p->pos[0], p->pos[1], p->pos[2], (unsigned)p->objtype);   /* tests */
         out->part_count++;
     }
     {   /* a destroyed variant's children (its SCD / SCE chunks) wait with it: hidden while any ancestor is hidden */
@@ -529,7 +530,7 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
                     e->yaw = pyaw;
                     memcpy(e->t, pt, sizeof e->t);
                     e->set = 1;
-                    if (getenv("MW2_BLK_TRACE")) fprintf(stderr, "blk %s: %s inherits %s (%.0f, %.0f, %.0f, yaw %.1f)\n", scene, nm, r->name, (double)pt[0], (double)pt[1], (double)pt[2], (double)pyaw);   /* TEST ONLY */
+                    if (mw2_development_env("MW2_BLK_TRACE")) fprintf(stderr, "blk %s: %s inherits %s (%.0f, %.0f, %.0f, yaw %.1f)\n", scene, nm, r->name, (double)pt[0], (double)pt[1], (double)pt[2], (double)pyaw);   /* TEST ONLY */
                 }
                 have = 0;
             }
@@ -680,7 +681,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     memcpy(star[e], q + 8, 16);
                     star_tex[e] = (int)((uint32_t)q[0] | (uint32_t)q[1] << 8 | (uint32_t)q[2] << 16 | (uint32_t)q[3] << 24);
                     star_all[e] = (int)((uint32_t)q[4] | (uint32_t)q[5] << 8 | (uint32_t)q[6] << 16 | (uint32_t)q[7] << 24);
-                    if (getenv("MW2_DEBUG_STARALL")) fprintf(stderr, "star %d %.16s alliance %d tex %d\n", (int)e, star[e], star_all[e], star_tex[e]);
+                    if (mw2_development_env("MW2_DEBUG_STARALL")) fprintf(stderr, "star %d %.16s alliance %d tex %d\n", (int)e, star[e], star_all[e], star_tex[e]);
                 }
             }
         }
@@ -755,8 +756,8 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     *actors = grown;
                     ac = &(*actors)[(*count)++];
                     memset(ac, 0, sizeof *ac);
-                    if (getenv("MW2_DEBUG_SPAWN") && slot > 0 && f.found && slot - 1 < f.count) fprintf(stderr, "  slot raw %d,%d yaw %.1f leader_yaw %.1f nav heading %.1f\n", f.x[slot - 1], f.z[slot - 1], (double)f.yaw[slot - 1], (double)f.leader_yaw, (double)nav.heading);
-                    if (getenv("MW2_DEBUG_SPAWN")) fprintf(stderr, "spawn %s table %d slot %d formation %s (found %d, %d slots) start %s %d,%d off %.0f,%.0f %s\n", m.records[i].name, g.table, slot,
+                    if (mw2_development_env("MW2_DEBUG_SPAWN") && slot > 0 && f.found && slot - 1 < f.count) fprintf(stderr, "  slot raw %d,%d yaw %.1f leader_yaw %.1f nav heading %.1f\n", f.x[slot - 1], f.z[slot - 1], (double)f.yaw[slot - 1], (double)f.leader_yaw, (double)nav.heading);
+                    if (mw2_development_env("MW2_DEBUG_SPAWN")) fprintf(stderr, "spawn %s table %d slot %d formation %s (found %d, %d slots) start %s %d,%d off %.0f,%.0f %s\n", m.records[i].name, g.table, slot,
                                                             star[g.table][0] ? star[g.table] : "star", f.found, f.count, start_name, nav.x, nav.z, (double)fx, (double)fz, skel);   /* tests */
                     piece.origin[0] += (int32_t)lrintf(fx);
                     piece.origin[2] += (int32_t)lrintf(fz);
@@ -1507,6 +1508,9 @@ typedef struct {
     int      runs;                /* type 4: runs so far (the caller acts once per run, 0x1000ec90 case 1) */
     int32_t  dyaw, dspd, dang;    /* type 2, DOS (0x1b5e0): yaw deg / s and cm / s in 16.16, the angle in 16.16 */
     double   dclock;              /* type 2, DOS: the fixed-rate run clock (ticks, WP_DOS_RUN_HZ) */
+    int32_t  spin[3], spin_period, spin_last;   /* type 0, DOS: 16.16 angles per period, whole ticks */
+    unsigned spin_left;
+    dos_matrix spin_matrix;
 } wp_task;
 struct world3d_paths {
     wp_rec   *recs;
@@ -1711,10 +1715,25 @@ static void wp_turn(wp_xf *x, float pitch, float yaw, float roll)
 }
 
 /* one run of a type 0-4 task; 0 = the task ends */
-static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now)
+static int wp_run_other(world3d_paths *P, mech3d *world, wp_task *t, float now, unsigned *dos_phase)
 {
     wp_rec *r = &P->recs[t->rec];
     wp_xf *x = &r->local[t->node];
+    if (t->type == 0 && dos_phase && t->spin_left) {   /* MW2.EXE 0x1b55b -> 0x1e140 */
+        int32_t tick = (int32_t)now;
+        int32_t elapsed = (int32_t)((uint32_t)(tick - t->spin_last) << 16) / t->spin_period;
+        int32_t angle[3];
+        t->spin_last = tick;
+        for (int i = 0; i < 3; i++) angle[i] = (int32_t)(((int64_t)t->spin[i] * elapsed + 32768) >> 16);
+        dos_matrix delta = dos_matrix_rotation(angle[0], angle[1], angle[2]);
+        t->spin_matrix = dos_matrix_compose(&t->spin_matrix, &delta);
+        if (--t->spin_left == 0) {
+            t->spin_left = dos_next_normalization(dos_phase);
+            dos_anim_normalize(t->spin_matrix.r);
+        }
+        for (int i = 0; i < 9; i++) x->R[i] = (float)t->spin_matrix.r[i] / 536870912.0f;
+        return 1;
+    }
     if (t->type == 0) {   /* spin (0x1000e880): each angle turns by its rate x elapsed / (seconds x 181) */
         float q = (now - t->last) / (t->k[3] * (WP_CLOCK / 181.0f));   /* (k[3] = seconds x 181 at the load) */
         t->last = now;
@@ -1920,6 +1939,12 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                 int ok = 1;
                 if (tk.type == 0) {        /* "%f,%f,%f,%f": pitch, yaw, roll degrees per <4th> seconds (x 181 ticks) */
                     ok = sscanf(tk.params, "%f,%f,%f,%f", &t->k[0], &t->k[1], &t->k[2], &t->k[3]) == 4;
+                    for (int j = 0; j < 3; j++) {
+                        double a = trunc(t->k[j] * 65536.0 + 0.5);
+                        t->spin[j] = a >= INT32_MIN && a <= INT32_MAX ? (int32_t)a : INT32_MIN;
+                    }
+                    double d = trunc(t->k[3] * 182.0);
+                    t->spin_period = d && d >= INT32_MIN && d <= INT32_MAX ? (int32_t)d : 182;
                     t->k[3] *= 181.0f;     /* 0x102471c4 */
                     if (fabsf(t->k[3]) < 1e-7f) t->k[3] = 181.0f;
                     if (ok) P->recs[ri].anim[tk.node] = 1;
@@ -1999,7 +2024,7 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
                 P->part_rec[q] = i; P->part_node[q] = pp->obj_index;
                 pp->moving = 1;
                 if (pp->model.object_count > 0) vehicle_decals(&pp->model.objects[0]);
-                if (getenv("MW2_DEBUG_CARDS")) fprintf(stderr, "carried %d %s %s\n", q, pp->rec, pp->model_name);   /* TEST hook */
+                if (mw2_development_env("MW2_DEBUG_CARDS")) fprintf(stderr, "carried %d %s %s\n", q, pp->rec, pp->model_name);   /* TEST hook */
                 break;
             }
     }
@@ -2016,13 +2041,24 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
             pp->moving = 1;   /* redrawn every frame (the actor layer); its collision follows the moving parts' rules */
         }
     }
-    world3d_paths_step(P, world, 0.0f);
+    world3d_paths_step(P, world, 0.0f, NULL);
     return P;
 }
 
 int world3d_paths_tasks(const world3d_paths *p) { return p ? p->ntask : 0; }
 
-int world3d_paths_step(world3d_paths *P, mech3d *world, float now)
+void world3d_paths_dos_seed(world3d_paths *P, const char *record, int node, unsigned period, int32_t yaw)
+{
+    if (!P) return;
+    for (int i = 0; i < P->ntask; i++) {
+        wp_task *t = &P->tasks[i];
+        if (t->type != 0 || t->node != node || strcasecmp(P->recs[t->rec].rec, record)) continue;
+        t->spin_left = period - 1;   /* the task's initial zero-angle rotation at tick 0 already ran */
+        t->spin_matrix = dos_matrix_rotation(0, yaw, 0);
+    }
+}
+
+int world3d_paths_step(world3d_paths *P, mech3d *world, float now, unsigned *dos_phase)
 {
     int i, q, ended = 0, settled = 0;
     if (!P || !world) return 0;
@@ -2031,7 +2067,7 @@ int world3d_paths_step(world3d_paths *P, mech3d *world, float now)
         if (t->ended) { ended |= t->ended == 1; t->ended = 2; continue; }   /* 1: ended since the last step */
         if (now < t->due) continue;
         t->due = now + (float)t->period;                    /* 0x100083d0: next run at now + period */
-        if (!(t->type == 5 ? wp_run(P, t, now) : wp_run_other(P, world, t, now))) { t->ended = 2; ended = 1; }
+        if (!(t->type == 5 ? wp_run(P, t, now) : wp_run_other(P, world, t, now, dos_phase))) { t->ended = 2; ended = 1; }
     }
     wp_place_parts(P, world, -1, -1);
     for (q = 0; ended && q < P->nparts && q < world->part_count; q++) {   /* parts no running task carries: fixed again */

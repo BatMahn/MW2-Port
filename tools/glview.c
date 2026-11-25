@@ -21,6 +21,7 @@
  * Sky/ground/fog: MW2_SKYGND=3dfx skygnd.par, MW2_SKYGND_FOG=PowerVR skygnd.par
  * Any window size or aspect ratio; wider screens see more to the sides.
  */
+#include "development.h"
 #if defined(__APPLE__)
 #include <dlfcn.h>   /* the system-shortcut switch, looked up at run time (syskeys_apply) */
 #ifndef RTLD_DEFAULT
@@ -240,7 +241,8 @@ static void write_results(void)
     char rp[1100];
     if (g_results_written || !g_sim_ok || !getenv("MW2_INSTALL_DIR")) return;
     snprintf(rp, sizeof rp, "%s/MW2MSN.CFG", getenv("MW2_INSTALL_DIR"));
-    if (msim_write_results(&g_sim, rp) == 0) printf("results: %s (%s)\n", rp, msim_outcome_text(&g_sim) ? msim_outcome_text(&g_sim) : "left early");
+    if (msim_write_results(&g_sim, rp) == 0 && MW2_DEVELOPMENT_LOGS)
+        printf("results: %s (%s)\n", rp, msim_outcome_text(&g_sim) ? msim_outcome_text(&g_sim) : "left early");
     snprintf(rp, sizeof rp, "%s/MW2CAR.CFG", getenv("MW2_INSTALL_DIR"));
     msim_write_career(&g_sim, rp);
     g_results_written = 1;
@@ -442,7 +444,7 @@ static void hud_message_ex(const char *m, int ticks, int pri)
     g_msg_line[pick].until = now + ticks * 1000 / 182;
     g_msg_line[pick].pri = pri;
     g_msg_t = 1;
-    if (getenv("MW2_STATE_DUMP")) printf("MSG now=%d %s\n", (int)now, m);   /* TEST hook (tests/sequences) */
+    if (mw2_development_env("MW2_STATE_DUMP")) printf("MSG now=%d %s\n", (int)now, m);   /* TEST hook (tests/sequences) */
 }
 /* a message line's text (0x10002e40): in the line's window - the bar across the top (line 0) or the bottom (1), as tall as
  * the MSGBAR drawn there - at x = (0.01) of the width (0x10249854 = 0x28f, 0x10005ec0 rounded) and y = (the bar's height -
@@ -605,7 +607,7 @@ static void music_start(int track)
     sfx_unlock(g_sfx);
     sfx_set_music(g_sfx, cd_music_cb, NULL);
     printf("music: CD track %d\n", track);
-    if (getenv("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG %.3f music %d\n", sfx_log_time, track);   /* TEST ONLY */
+    if (mw2_development_env("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG %.3f music %d\n", sfx_log_time, track);   /* TEST ONLY */
 }
 static void music_poll(void)   /* the track ended: again (the original's loop) */
 {
@@ -661,7 +663,7 @@ static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist
         }
     }
     while (r > 0 && !g_alod[k].ok[r]) r--;
-    if (getenv("MW2_LOD_TRACE")) fprintf(stderr, "lod actor %d %s %.0f m -> repr %d (%d parts)\n", k, skel, dist / 100.0f, r, r ? g_alod[k].m[r].part_count : 0);
+    if (mw2_development_env("MW2_LOD_TRACE")) fprintf(stderr, "lod actor %d %s %.0f m -> repr %d (%d parts)\n", k, skel, dist / 100.0f, r, r ? g_alod[k].m[r].part_count : 0);
     if (r == 0) return NULL;
     m = &g_alod[k].m[r];
     mech3d_pose_like(m, full);
@@ -804,7 +806,7 @@ static void ti_particles(glr *r, const glr_view *v, float now_ticks, const char 
             g_tip_n++;
             {   /* (tests) */
                 static float said = -1;
-                if (said < 0 || last < said) { said = last; printf("titanium: missile smoke from %.1f s\n", (double)g_sim.now / 1000.0); }
+                if (said < 0 || last < said) { said = last; if (MW2_DEVELOPMENT_LOGS) printf("titanium: missile smoke from %.1f s\n", (double)g_sim.now / 1000.0); }
             }
         }
     }
@@ -843,7 +845,7 @@ static void ti_world_attach(mech3d *world)
         int got = world3d_ti_attach(c3d_ti, world, &g_ti_world), k, scrub = 0;
         g_ti_world_n = world->part_count;
         for (k = 0; k < world->part_count; k++) scrub += world->parts[k].scrg != 0;
-        printf("titanium: %d of %d world objects with a Titanium model, %d scrub-patch objects not drawn\n", got, world->part_count, scrub);
+        if (MW2_DEVELOPMENT_LOGS) printf("titanium: %d of %d world objects with a Titanium model, %d scrub-patch objects not drawn\n", got, world->part_count, scrub);
     }
 }
 
@@ -967,7 +969,7 @@ static void on_effect(void *u, int type, const float pos[3])
         g_fxw.e[fi].has_rot = g_sim.fx_rot_ok;   /* a muzzle flash / jet flame: its mount node's orientation (0x10044a70) */
         if (g_sim.fx_rot_ok) memcpy(g_fxw.e[fi].rot, g_sim.fx_rot, sizeof g_fxw.e[fi].rot);
     }
-    if (getenv("MW2_FX_TRACE")) fprintf(stderr, "fx %.1fs type %x at %.0f,%.0f,%.0f\n", g_sim.now / 1000.0, type, pos[0], pos[1], pos[2]);
+    if (mw2_development_env("MW2_FX_TRACE")) fprintf(stderr, "fx %.1fs type %x at %.0f,%.0f,%.0f\n", g_sim.now / 1000.0, type, pos[0], pos[1], pos[2]);
     snd = fx_sound(type);
     /* 0x10045d00 end: halved in the cockpit view (camera mode 0, 0x1002df50) unless the type carries flag 0x4000 - a hit
      * on the player still alive (0x10045557) */
@@ -1090,7 +1092,7 @@ static void obj_sounds(void)
         pan = sfx_pos_pan(dx, dz, yaw);
         sfx_pcm_level(g_sfx, ch[c].pcm, (float)vol / 100.0f * 0.8f * 0.25f, pan);
         sfx_pcm_rate(g_sfx, ch[c].pcm, rate);
-        if (getenv("MW2_SFX_LOG")) fprintf(stderr, "LOOPLOG %.3f task %d %s run %d vol %d rate %d\n", sfx_log_time, s[i].task, s[i].name, s[i].runs, vol, rate);   /* TEST ONLY */
+        if (mw2_development_env("MW2_SFX_LOG")) fprintf(stderr, "LOOPLOG %.3f task %d %s run %d vol %d rate %d\n", sfx_log_time, s[i].task, s[i].name, s[i].runs, vol, rate);   /* TEST ONLY */
     }
 }
 /* engine 0x10037880: the display toggles (MFD cycle, HTAL, rear / down view, weapon / damage / target display, HUD)
@@ -1143,7 +1145,7 @@ static void on_radio(void *user, const char *name)
         if (!qn || !g_ma || now - t_free < 1200) return;
         st = prj_find_type(g_ma, "SNDS");
         id = st >= 0 ? prj_find_id(g_ma, st, queue[0]) : -1;
-        if (getenv("MW2_STATE_DUMP")) printf("RADIO now=%d %s id=%d\n", (int)g_sim.now, queue[0], id);   /* TEST hook (tests/sequences) */
+        if (mw2_development_env("MW2_STATE_DUMP")) printf("RADIO now=%d %s id=%d\n", (int)g_sim.now, queue[0], id);   /* TEST hook (tests/sequences) */
         if (id > 0) sfx_play_voice(g_sfx, id, 1.0f);
         else {   /* not in the archive: the disc's voice files - KEATING\<name>.SFL (the training instructor) */
             static unsigned char *pcm;   /* the line playing (one at a time) */
@@ -1174,7 +1176,7 @@ static void on_radio(void *user, const char *name)
         memmove(queue[0], queue[1], sizeof queue[0] * 7); memmove(qpri, qpri + 1, sizeof qpri[0] * 7); qn--;
         return;
     }
-    if (getenv("MW2_RADIO_TRACE")) fprintf(stderr, "radio %s\n", name);
+    if (mw2_development_env("MW2_RADIO_TRACE")) fprintf(stderr, "radio %s\n", name);
     if (qn < 8) {   /* lines queued together play in their numbered order (trn1_01S, the 41 s introduction, before trn1_02S) */
         int q2 = qn++;
         g_sim.radio_busy = 1;
@@ -1240,9 +1242,9 @@ static void load_ti_projectiles(void)
     load_projectiles_into(c3d_ti, g_tiproj, g_tiproj_scale, g_tiproj_len, g_tiproj_off, 1);
     for (i = 0; i < 9; i++) g_tiproj[i].ti = 1;   /* (its colour words read the Titanium way) */
     g_tiproj_src = c3d_ti;
-    printf("titanium: pool models %s %s %s %s %s %s %s, debris %s %s\n", g_tiproj[0].model_name, g_tiproj[1].model_name, g_tiproj[2].model_name,
+    if (MW2_DEVELOPMENT_LOGS) printf("titanium: pool models %s %s %s %s %s %s %s, debris %s %s\n", g_tiproj[0].model_name, g_tiproj[1].model_name, g_tiproj[2].model_name,
            g_tiproj[3].model_name, g_tiproj[4].model_name, g_tiproj[5].model_name, g_tiproj[6].model_name, g_tiproj[7].model_name, g_tiproj[8].model_name);
-    printf("titanium: cards PPC slot 0x%02x half %.0f, gauss slot 0x%02x half %.0f\n", g_card_slot[1][0], g_card_half[1][0], g_card_slot[1][1], g_card_half[1][1]);
+    if (MW2_DEVELOPMENT_LOGS) printf("titanium: cards PPC slot 0x%02x half %.0f, gauss slot 0x%02x half %.0f\n", g_card_slot[1][0], g_card_half[1][0], g_card_slot[1][1], g_card_half[1][1]);
 }
 static void load_projectiles_into(prj_archive *a, mech3d_part *proj, float (*pscale)[3], float *plen, float *poff, int cs)
 {
@@ -1496,7 +1498,7 @@ static void inspect_now(void)
         g_inspect_until = g_sim.now + 0x16a * 1000 / 182;
         if (r != 2 && g_sfx) sfx_play(g_sfx, 0xdc, SFX_V64, 0.0f);   /* 0x10020f63: 0x10032b60(0xdc, 0x64, 0x40, 5, 0x32) */
     }
-    if (getenv("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences) */
+    if (mw2_development_env("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences) */
         const char *t = r ? inspect_text(g_tgt_sel, g_tgt_sel < 0 ? g_tgt_thing : -1) : NULL;
         printf("INSPECT r=%d text=%s\n", r, t ? t : "-");
     }
@@ -1711,7 +1713,7 @@ static void start_up_sounds(void)
         if (ac->alliance == 1 && !ac->friendly) continue;
         if (g_sim.powered_down && g_sim.powered_down[a]) continue;   /* a resting group (0x10014520 states 10 / 11, set by its node at the start): no start-up */
         if (!(uc == 1 || uc == 2 || uc == 4 || uc == 5 || uc == 8)) continue;
-        if (getenv("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG start-up %s class %d alliance %d friendly %d at %.0f m\n", ac->name, uc, ac->alliance, ac->friendly,
+        if (mw2_development_env("MW2_SFX_LOG")) fprintf(stderr, "SFXLOG start-up %s class %d alliance %d friendly %d at %.0f m\n", ac->name, uc, ac->alliance, ac->friendly,
                                              hypot((double)ac->mech.origin[0] - g_pl.origin[0], (double)ac->mech.origin[2] - g_pl.origin[2]) / 100.0);   /* TEST ONLY */
         {
             float p3[3] = {(float)ac->mech.origin[0], a < g_sim.actor_count ? g_sim.units[a].y : (float)ac->mech.origin[1], (float)ac->mech.origin[2]};
@@ -1974,7 +1976,7 @@ static void red_flash(int dur, int32_t now)
     int dos = g_tex_kind == 3;
     float half = (float)(dur >> 1), frames = g_frame_ticks > 0 ? half / g_frame_ticks : 20.0f;
     if (fade_running(now)) {   /* mode 1 while a fade runs: dropped (0x1002ad50 / DOS 0x3e7d0 return 0) */
-        if (getenv("MW2_STATE_DUMP")) printf("FLASH_DROPPED now=%d dur=%d n=%d\n", (int)now, dur, g_flash_n);   /* TEST hook */
+        if (mw2_development_env("MW2_STATE_DUMP")) printf("FLASH_DROPPED now=%d dur=%d n=%d\n", (int)now, dur, g_flash_n);   /* TEST hook */
         return;
     }
     g_flash_from = flash_level(now, NULL);
@@ -1983,7 +1985,7 @@ static void red_flash(int dur, int32_t now)
     g_flash_t0 = now;
     g_flash_in = half;
     g_flash_back = dos ? frames : half;
-    if (getenv("MW2_STATE_DUMP")) printf("FLASH now=%d dur=%d in=%.0f back=%.0f from=%.2f n=%d\n", (int)now, dur, (double)g_flash_in, (double)g_flash_back, (double)g_flash_from, g_flash_n);   /* TEST hook */
+    if (mw2_development_env("MW2_STATE_DUMP")) printf("FLASH now=%d dur=%d in=%.0f back=%.0f from=%.2f n=%d\n", (int)now, dur, (double)g_flash_in, (double)g_flash_back, (double)g_flash_from, g_flash_n);   /* TEST hook */
 }
 static void flash_upkeep(void)
 {
@@ -2035,7 +2037,7 @@ static void hud_slot(int slot)    /* the engine's 0x1002ac40: the HUD table (and
     {
         Uint64 t0 = SDL_GetPerformanceCounter();
         hud_repalette(g_hud, g_pal_slot[slot]);
-        if (getenv("MW2_PERF")) printf("perf: HUD palette slot %d: %.1f ms\n", slot, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+        if (mw2_development_env("MW2_PERF")) printf("perf: HUD palette slot %d: %.1f ms\n", slot, (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency());
     }
     for (k = 0; k < 256; k++) hud_pal_color(g_hud, k, g_hp[k]);
     g_hud_slot = slot;
@@ -2087,7 +2089,7 @@ static void pal3_upkeep(int amp_now, int amp_was)
         if (g_pal3.want != g_pal3.cur) {
             g_pal3.cur = g_pal3.want;
             hud_slot(g_pal3.cur);
-            if (getenv("MW2_STATE_DUMP")) printf("PALSLOT now=%d slot=%d\n", (int)now, g_pal3.cur);   /* TEST hook */
+            if (mw2_development_env("MW2_STATE_DUMP")) printf("PALSLOT now=%d slot=%d\n", (int)now, g_pal3.cur);   /* TEST hook */
         }
     }
 }
@@ -2166,7 +2168,7 @@ static void scrub_follow(glr *r, float camx, float camz)
                 if (g_mech.parts[k].scrg) { g_mech.parts[k].pos[0] += dx; g_mech.parts[k].pos[2] += dz; }
             gx += dx; gz += dz; cellx = nx; cellz = nz;
             moved = 1;
-            if (getenv("MW2_STATE_DUMP")) {   /* TEST hook: the grid point and the patch's first piece */
+            if (mw2_development_env("MW2_STATE_DUMP")) {   /* TEST hook: the grid point and the patch's first piece */
                 const mech3d_part *pp = NULL;
                 for (k = 0; k < g_mech.part_count && !pp; k++) if (g_mech.parts[k].scrg) pp = &g_mech.parts[k];
                 printf("SCRG now=%d at %d,%d piece %d,%d\n", (int)g_sim.now, gx, gz, pp ? (int)pp->pos[0] : 0, pp ? (int)pp->pos[2] : 0);
@@ -2194,7 +2196,7 @@ static void scene_anim(glr *r)
         st = t / c3d_ti_scene.rate[i];
         f = c3d_ti_scene.mode[i] == 2 && st >= c3d_ti_scene.nfr[i] ? 0 : (int)(st % c3d_ti_scene.nfr[i]);
         if (c3d_ti_scene.fr[i][f]) c3d_ti_draw[i] = c3d_ti_scene.fr[i][f];
-        if (getenv("MW2_ANIM_LOG") && i == (int)strtol(getenv("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
+        if (mw2_development_env("MW2_ANIM_LOG") && i == (int)strtol(mw2_development_env("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
             static int last = -1;
             if (f != last) { last = f; printf("TIANIM t=%.3f slot %#x frame %d of %d rate %d\n", g_sim.now / 1000.0, i, f, c3d_ti_scene.nfr[i], c3d_ti_scene.rate[i]); }
         }
@@ -2206,7 +2208,7 @@ static void scene_anim(glr *r)
         st = t / g_scene.rate[i];
         f = g_scene.mode[i] == 2 && st >= g_scene.nfr[i] ? 0 : (int)(st % g_scene.nfr[i]);
         glr_slot_frame(r, i, g_scene.fr[i][f]);
-        if (getenv("MW2_ANIM_LOG") && i == (int)strtol(getenv("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
+        if (mw2_development_env("MW2_ANIM_LOG") && i == (int)strtol(mw2_development_env("MW2_ANIM_LOG"), NULL, 0)) {   /* TEST hook: one slot's frame */
             static int last = -1;
             if (f != last) { last = f; printf("ANIM t=%.3f slot %#x frame %d of %d rate %d\n", g_sim.now / 1000.0, i, f, g_scene.nfr[i], g_scene.rate[i]); }
         }
@@ -2416,7 +2418,7 @@ static void sat_draw(int w, int h)
         }
     }
     qsort(it, (size_t)n, sizeof *it, sat_cmp);
-    if (getenv("MW2_SAT_TRACE")) {   /* TEST hook: the items by colour, once */
+    if (mw2_development_env("MW2_SAT_TRACE")) {   /* TEST hook: the items by colour, once */
         static int once;
         if (!once++) {
             for (i = 0; i < n; i++) if ((it[i].part_src != -2 || it[i].side_col >= 0) && it[i].poly <= 0) printf("SATITEM src %d part %d col %d y %.0f type %#x\n", it[i].part_src, it[i].part, it[i].side_col, (double)it[i].y, sat_src(it[i].part_src)->parts[it[i].part].objtype);
@@ -2683,7 +2685,7 @@ static void hud_message_v2(const char *m, int voice, int suffix)
     int pri, lim, k, n = 0, at, v1 = voice > 0 ? voice : 0, v2 = suffix > 0 ? suffix : 0;
     size_t l = strlen(m);
     snprintf(txt, sizeof txt, "%s%s", m, l && m[l - 1] != '.' && (v1 || v2) ? "." : "");
-    if (getenv("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences): the text as posted, " +N" the second voice */
+    if (mw2_development_env("MW2_STATE_DUMP")) {   /* TEST hook (tests/sequences): the text as posted, " +N" the second voice */
         if (v2) printf("MSGV now=%d voice=%d %s +%d\n", (int)g_sim.now, v1, m, v2);
         else printf("MSGV now=%d voice=%d %s\n", (int)g_sim.now, v1, m);
     }
@@ -2703,7 +2705,7 @@ static void hud_message_v2(const char *m, int voice, int suffix)
     lim = v1 ? vq_rec(v1, 2) : -1;
     for (k = g_vq_phase ? 1 : 0, at = g_vq_n; k < g_vq_n; k++) {
         if (v1 && g_vq[k].v1 == v1 && (g_vq[k].v2 == 0 || g_vq[k].v2 == v2) && (lim == -1 || lim <= ++n)) {
-            if (getenv("MW2_STATE_DUMP")) printf("VQDROP now=%d voice=%d suffix=%d\n", (int)g_sim.now, v1, v2);   /* TEST hook */
+            if (mw2_development_env("MW2_STATE_DUMP")) printf("VQDROP now=%d voice=%d suffix=%d\n", (int)g_sim.now, v1, v2);   /* TEST hook */
             return;
         }
         if (g_vq[k].pri < pri) { at = k; break; }
@@ -2719,7 +2721,7 @@ static void hud_message_v2(const char *m, int voice, int suffix)
 static void hud_message_v(const char *m, int voice)
 {
     if (voice <= 0) {
-        if (getenv("MW2_STATE_DUMP")) printf("MSGV now=%d voice=0 %s\n", (int)g_sim.now, m);   /* TEST hook (tests/sequences) */
+        if (mw2_development_env("MW2_STATE_DUMP")) printf("MSGV now=%d voice=0 %s\n", (int)g_sim.now, m);   /* TEST hook (tests/sequences) */
         hud_message_ex(m, 0x16a, 0x32);
         return;
     }
@@ -2885,7 +2887,7 @@ static void build_pit(void)
         }
         dst = &g_pit[g_pit_n++];
         *dst = *src;
-        if (getenv("MW2_DEBUG_PIT")) fprintf(stderr, "cockpit piece: %s (node %d, eye node %d)\n", src->model_name, src->node, g_pl.eye_node);
+        if (mw2_development_env("MW2_DEBUG_PIT")) fprintf(stderr, "cockpit piece: %s (node %d, eye node %d)\n", src->model_name, src->node, g_pl.eye_node);
         memset(&dst->model, 0, sizeof dst->model);
         dst->model.object_count = 1;
         dst->model.extended = src->model.extended;
@@ -3129,7 +3131,7 @@ static int    g_perf_n;
 static double perf_now(void) { return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); }
 static void perf_frame_start(void)
 {
-    if (g_perf < 0) g_perf = getenv("MW2_PERF") ? atoi(getenv("MW2_PERF")) : 0;
+    if (g_perf < 0) g_perf = mw2_development_env("MW2_PERF") ? atoi(mw2_development_env("MW2_PERF")) : 0;
     if (g_perf <= 0) return;
     g_perf_t[4] = perf_now();
 }
@@ -3820,7 +3822,7 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
         if (band_off) g_dos_band = -1;
         bwd_mission_free(&bm);
     }
-    if (getenv("MW2_TEST_TOD_START")) g_dos_t0 = atoi(getenv("MW2_TEST_TOD_START"));   /* TEST ONLY: INIT +8 */
+    if (mw2_development_env("MW2_TEST_TOD_START")) g_dos_t0 = atoi(mw2_development_env("MW2_TEST_TOD_START"));   /* TEST ONLY: INIT +8 */
     if (pal_id >= 0) {
         prj_record pr;
         int pt = prj_find_type(ma, "PAL");
@@ -3842,11 +3844,11 @@ static void dos_scene(glr *r, prj_archive *ma, const char *mission)
             prj_record_free(&lr);
         }
     }
-    if (getenv("MW2_DEBUG_DOS")) fprintf(stderr, "dos: PAL %d, LUMA %d%s, light %.0f %.0f %.0f amb %.0f dir %.0f fog %.0f\n", pal_id, luma_id,
+    if (mw2_development_env("MW2_DEBUG_DOS")) fprintf(stderr, "dos: PAL %d, LUMA %d%s, light %.0f %.0f %.0f amb %.0f dir %.0f fog %.0f\n", pal_id, luma_id,
                                          have_luma ? "" : " (missing)", (double)g_dos_lite[0], (double)g_dos_lite[1], (double)g_dos_lite[2],
                                          (double)g_dos_lite[3], (double)g_dos_lite[4], (double)g_dos_lite[5]);
-    if (getenv("MW2_DEBUG_DOS")) fprintf(stderr, "dos: %d textures, band %.0f, day %d, t0 %d\n", g_scene.textures_loaded, (double)g_dos_band, g_dos_day, g_dos_t0);
-    if (getenv("MW2_DEBUG_DOS")) { int s2, q; for (s2 = 0; s2 < 20; s2++) if (g_dos_slot_ok[s2]) { fprintf(stderr, "slot %d:", s2); for (q = 0; q < 256; q++) if (s2 != 17 || g_dos_slotpal[s2][q * 3] != 63 || g_dos_slotpal[s2][q * 3 + 1]) fprintf(stderr, " %02x=%d,%d,%d", q, g_dos_slotpal[s2][q * 3], g_dos_slotpal[s2][q * 3 + 1], g_dos_slotpal[s2][q * 3 + 2]); fprintf(stderr, "\n"); } }
+    if (mw2_development_env("MW2_DEBUG_DOS")) fprintf(stderr, "dos: %d textures, band %.0f, day %d, t0 %d\n", g_scene.textures_loaded, (double)g_dos_band, g_dos_day, g_dos_t0);
+    if (mw2_development_env("MW2_DEBUG_DOS")) { int s2, q; for (s2 = 0; s2 < 20; s2++) if (g_dos_slot_ok[s2]) { fprintf(stderr, "slot %d:", s2); for (q = 0; q < 256; q++) if (s2 != 17 || g_dos_slotpal[s2][q * 3] != 63 || g_dos_slotpal[s2][q * 3 + 1]) fprintf(stderr, " %02x=%d,%d,%d", q, g_dos_slotpal[s2][q * 3], g_dos_slotpal[s2][q * 3 + 1], g_dos_slotpal[s2][q * 3 + 2]); fprintf(stderr, "\n"); } }
     glr_set_dos(r, (const uint8_t (*)[3])g_scene.palette, have_luma ? luma : NULL);
 }
 
@@ -3938,7 +3940,7 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
             }
         bwd_mission_free(&bm);
     }
-    if (getenv("MW2_TEST_TOD_START")) t0 = atoi(getenv("MW2_TEST_TOD_START"));   /* TEST ONLY: INIT +8 */
+    if (mw2_development_env("MW2_TEST_TOD_START")) t0 = atoi(mw2_development_env("MW2_TEST_TOD_START"));   /* TEST ONLY: INIT +8 */
     g_tod_day = day;
     g_tod_start = t0;
     if (day > 0) {   /* the time of day at the start (0x10007900: (ticks / 0xb5 + start) % day; hour = day / 24) */
@@ -3949,7 +3951,7 @@ static void hud_mission_palette(prj_archive *ma, const char *mission)
     g_hud_slot = -1;
     if (g_pal_slot_ok[slot]) hud_slot(slot);
     else for (k = 0; k < 256; k++) hud_pal_color(g_hud, k, g_hp[k]);
-    if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud palette: %s slot %d (%s) start %d day %d\n", name, slot, g_pal_slot_ok[slot] ? "PALG" : "COCKPIT", g_tod_start, day);
+    if (mw2_development_env("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud palette: %s slot %d (%s) start %d day %d\n", name, slot, g_pal_slot_ok[slot] ? "PALG" : "COCKPIT", g_tod_start, day);
 }
 
 /* the panel (0x10065cb0 -> 0x10065df0), laid out by 0x10065580 from the menu record: rect -> pixels (0x10005b70: fraction
@@ -3994,7 +3996,7 @@ static void cc_draw(void)
         if (r[q].val[0]) hud_text(g_hud, vx, y, r[q].val, col);
     }
     (void)num;
-    if (getenv("MW2_CC_TRACE")) fprintf(stderr, "cc layout: title %.1f,%.1f rows %.1f,%.1f pitch %.2f value x %.1f\n", tx, ty, nx, iy * uy, pitch * uy, vx);
+    if (mw2_development_env("MW2_CC_TRACE")) fprintf(stderr, "cc layout: title %.1f,%.1f rows %.1f,%.1f pitch %.2f value x %.1f\n", tx, ty, nx, iy * uy, pitch * uy, vx);
 }
 
 /* ---- the in-game MAIN MENU (GAMEKEY.MAP MAIN_MENU, Esc). The 3D editions' menu system (MW2.DLL 0x10065xxx): menu 4,
@@ -4704,7 +4706,7 @@ static void carried_in_front(const mech3d *w, int q, mech3d_part *cp, const floa
     const wtb_object *o;
     float r = 0, pr = 0, dl, dp, s, d[3];
     int j, k, c;
-    if (lp->parent_obj < 0 || !lp->has_rot || lp->model.object_count <= 0 || getenv("MW2_TEST_NO_INFRONT")) return;   /* (TEST hook: off) */
+    if (lp->parent_obj < 0 || !lp->has_rot || lp->model.object_count <= 0 || mw2_development_env("MW2_TEST_NO_INFRONT")) return;   /* (TEST hook: off) */
     o = &lp->model.objects[0];
     for (k = 0; k < o->vert_count; k++) {
         float r2 = (float)o->verts[k].x * o->verts[k].x + (float)o->verts[k].y * o->verts[k].y + (float)o->verts[k].z * o->verts[k].z;
@@ -4749,7 +4751,7 @@ static void carried_attachments(int q, mech3d_part *cp, const float eye[3])
     const wtb_object *o;
     int k, e, g;
     float bc[3] = {0, 0, 0}, db;
-    if (q < 0 || q >= MAXQ || !cp->has_rot || cp->model.object_count <= 0 || getenv("MW2_TEST_NO_INFRONT")) return;
+    if (q < 0 || q >= MAXQ || !cp->has_rot || cp->model.object_count <= 0 || mw2_development_env("MW2_TEST_NO_INFRONT")) return;
     o = &cp->model.objects[0];
     if (o->vert_count <= 0 || o->vert_count > MAXV) return;
     if (C[q].src != o->verts || C[q].nv != o->vert_count) {   /* the groups, once per model */
@@ -4845,13 +4847,13 @@ static void load_view_far(prj_archive *ma, const char *scene)
     for (k = 0; k < bm.record_count; k++)
         for (c = 0; c < bm.records[k].chunk_count; c++) {
             const bwd_chunk *ch = &bm.records[k].chunks[c];
-            if (strcmp(ch->tag, "VIEW") == 0 && ch->size >= 8 && getenv("MW2_DEBUG_VIEW")) fprintf(stderr, "VIEW %s near %d far %d\n", bm.records[k].name, (int)(ch->data[0] | ch->data[1] << 8 | ch->data[2] << 16 | (uint32_t)ch->data[3] << 24), (int)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24));
+            if (strcmp(ch->tag, "VIEW") == 0 && ch->size >= 8 && mw2_development_env("MW2_DEBUG_VIEW")) fprintf(stderr, "VIEW %s near %d far %d\n", bm.records[k].name, (int)(ch->data[0] | ch->data[1] << 8 | ch->data[2] << 16 | (uint32_t)ch->data[3] << 24), (int)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24));
             if (strcmp(ch->tag, "VIEW") == 0 && ch->size >= 8 && g_view_far <= 0)
                 g_view_far = (float)(int32_t)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24);
         }
     bwd_mission_free(&bm);
     if (getenv("MW2_NO_FAR_CULL")) g_view_far = 0;   /* comparison shots */
-    if (getenv("MW2_DEBUG_VIEW")) fprintf(stderr, "view far %.0f (%s)\n", (double)g_view_far, scene);   /* tests */
+    if (mw2_development_env("MW2_DEBUG_VIEW")) fprintf(stderr, "view far %.0f (%s)\n", (double)g_view_far, scene);   /* tests */
 }
 
 /* DOS 0x2e50d..0x2e5a7 tests the projected convergence point and selected unit's position.
@@ -4884,15 +4886,15 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         memset(&m, 0, sizeof m);
         snprintf(scene, sizeof scene, "%.4sSCN1", mission);
         if (world3d_mission(ma, scene, 1, &m) <= 0 || m.part_count == 0) { fprintf(stderr, "no world for %s\n", mission); return -1; }
-        if (getenv("MW2_DEBUG_POLYS")) {   /* TEST hook: the colour words of the world parts whose model name starts so */
+        if (mw2_development_env("MW2_DEBUG_POLYS")) {   /* TEST hook: the colour words of the world parts whose model name starts so */
             int q, k3;
             for (q = 0; q < m.part_count; q++) {
                 const mech3d_part *pp = &m.parts[q];
-                if (!pp->model.object_count || strncmp(pp->model_name, getenv("MW2_DEBUG_POLYS"), strlen(getenv("MW2_DEBUG_POLYS"))) != 0) continue;
+                if (!pp->model.object_count || strncmp(pp->model_name, mw2_development_env("MW2_DEBUG_POLYS"), strlen(mw2_development_env("MW2_DEBUG_POLYS"))) != 0) continue;
                 fprintf(stderr, "polys %s type %#x:", pp->model_name, pp->objtype);
                 for (k3 = 0; k3 < pp->model.objects[0].poly_count; k3++) fprintf(stderr, " %04x/%04x", pp->model.objects[0].polys[k3].color, pp->model.objects[0].polys[k3].material);
                 fprintf(stderr, "\n");
-                if (getenv("MW2_DEBUG_POLYV"))   /* TEST hook: each polygon's corners */
+                if (mw2_development_env("MW2_DEBUG_POLYV"))   /* TEST hook: each polygon's corners */
                     for (k3 = 0; k3 < pp->model.objects[0].poly_count; k3++) {
                         const wtb_poly *q3 = &pp->model.objects[0].polys[k3]; int e3;
                         fprintf(stderr, "  poly %d %04x n %d:", k3, q3->color, q3->n);
@@ -4901,7 +4903,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                     }
             }
         }
-        if (getenv("MW2_DEBUG_SPHERES")) {   /* TEST hook: each world part's bounding sphere (box centre, farthest vertex) */
+        if (mw2_development_env("MW2_DEBUG_SPHERES")) {   /* TEST hook: each world part's bounding sphere (box centre, farthest vertex) */
             int q, v3;
             for (q = 0; q < m.part_count; q++) {
                 const mech3d_part *pp = &m.parts[q];
@@ -4914,13 +4916,13 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
         }
         world3d_actors(ma, scene, &g_actors, &g_actor_count);   /* posable, drawn on the actor layer */
-        if (getenv("MW2_LIST_ACTORS")) {   /* TEST ONLY: "actor <k> <group> <skeleton> flags <GPS +0x1a> at <x> <z>" */
+        if (mw2_development_env("MW2_LIST_ACTORS")) {   /* TEST ONLY: "actor <k> <group> <skeleton> flags <GPS +0x1a> at <x> <z>" */
             int k;
             for (k = 0; k < g_actor_count; k++) { printf("actor %d %s %s flags %#x at %d %d parts %d table %d leader %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2], g_actors[k].mech.part_count, g_actors[k].table, g_actors[k].leader);
             if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s node %d pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->node, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
         }
         load_view_far(ma, scene);
-        if (getenv("MW2_DEBUG_CARDS")) {   /* TEST hook: the fire / smoke cards (class 0x10 / 0x60) and where they stand */
+        if (mw2_development_env("MW2_DEBUG_CARDS")) {   /* TEST hook: the fire / smoke cards (class 0x10 / 0x60) and where they stand */
             int q;
             for (q = 0; q < m.part_count; q++) if (m.parts[q].facing)
                 fprintf(stderr, "card %d %s %s type %x obj %d parent %d pos %d %d %d hidden %d\n", q, m.parts[q].rec, m.parts[q].model_name,
@@ -4930,7 +4932,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
-        g_sim.log = sim_log;
+        if (MW2_DEVELOPMENT_LOGS) g_sim.log = sim_log;
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
         if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
@@ -4940,28 +4942,28 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_sim.on_sound = on_sound;
         g_sim.on_player_down = on_player_down;
         g_sim.on_radio = on_radio;
-        g_sim.debug_invulnerable = getenv("MW2_DEBUG_INVULN") != NULL;   /* tests: the player survives */
+        g_sim.debug_invulnerable = mw2_development_env("MW2_DEBUG_INVULN") != NULL;   /* tests: the player survives */
         memset(&g_fxw, 0, sizeof g_fxw);
         if (!g_fx_ok) {
             g_fx_ok = fx_load(ma, &g_fxd) == 0;
             g_fx_ta = ta; g_fx_ati = ati;   /* before the dump: it loads frames */
-            if (g_fx_ok && getenv("MW2_DUMP_FXTEX")) {   /* tests: list effect texture slots and dump the first frame of some */
+            if (g_fx_ok && mw2_development_env("MW2_DUMP_FXTEX")) {   /* tests: list effect texture slots and dump the first frame of some */
                 int q;
                 for (q = 0; q < 512; q++) if (g_fxd.tex[q].frames > 0) {
                     texture *t0 = fx_texture(g_fxd.tex[q].cel[0]);
                     fprintf(stderr, "fxtex %03x frames %d rate %d %dx%d\n", q, g_fxd.tex[q].frames, g_fxd.tex[q].rate, t0 ? t0->w : 0, t0 ? t0->h : 0);
-                    if (t0) { char pn[64]; FILE *tf; int i3; snprintf(pn, sizeof pn, "%s/fxtex_%03x.ppm", getenv("MW2_DUMP_FXTEX"), q); tf = fopen(pn, "wb"); fprintf(tf, "P6 %d %d 255\n", t0->w, t0->h); for (i3 = 0; i3 < t0->w * t0->h; i3++) { const unsigned char *px = (const unsigned char *)t0->rgba + i3 * 4; fputc(px[3] < 128 ? 255 : px[0], tf); fputc(px[3] < 128 ? 0 : px[1], tf); fputc(px[3] < 128 ? 255 : px[2], tf); } fclose(tf); }
+                    if (t0) { char pn[64]; FILE *tf; int i3; snprintf(pn, sizeof pn, "%s/fxtex_%03x.ppm", mw2_development_env("MW2_DUMP_FXTEX"), q); tf = fopen(pn, "wb"); fprintf(tf, "P6 %d %d 255\n", t0->w, t0->h); for (i3 = 0; i3 < t0->w * t0->h; i3++) { const unsigned char *px = (const unsigned char *)t0->rgba + i3 * 4; fputc(px[3] < 128 ? 255 : px[0], tf); fputc(px[3] < 128 ? 0 : px[1], tf); fputc(px[3] < 128 ? 255 : px[2], tf); } fclose(tf); }
                 }
             }
             g_fx_ta = ta; g_fx_ati = ati;
             g_ma = ma;
-            if (getenv("MW2_TEST_TIME_LIMIT")) {   /* TEST ONLY: every star's time limit (s) */
+            if (mw2_development_env("MW2_TEST_TIME_LIMIT")) {   /* TEST ONLY: every star's time limit (s) */
                 int tl;
-                for (tl = 0; tl < g_sim.logic.table_count; tl++) g_sim.logic.tables[tl].time_limit = (uint32_t)atoi(getenv("MW2_TEST_TIME_LIMIT"));
+                for (tl = 0; tl < g_sim.logic.table_count; tl++) g_sim.logic.tables[tl].time_limit = (uint32_t)atoi(mw2_development_env("MW2_TEST_TIME_LIMIT"));
             }
-            if (getenv("MW2_TEST_SNDS_DUMP")) {   /* TEST ONLY: "id:path" - the decoded SNDS record (unsigned 8-bit) */
-                int id = atoi(getenv("MW2_TEST_SNDS_DUMP"));
-                const char *pth = strchr(getenv("MW2_TEST_SNDS_DUMP"), ':');
+            if (mw2_development_env("MW2_TEST_SNDS_DUMP")) {   /* TEST ONLY: "id:path" - the decoded SNDS record (unsigned 8-bit) */
+                int id = atoi(mw2_development_env("MW2_TEST_SNDS_DUMP"));
+                const char *pth = strchr(mw2_development_env("MW2_TEST_SNDS_DUMP"), ':');
                 unsigned char *pcm = NULL;
                 int n = sfx_decode(ma, id, &pcm);
                 FILE *df = pth && n > 0 ? fopen(pth + 1, "wb") : NULL;
@@ -4971,7 +4973,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         }
         g_sim.player_unit.hold_fire_above = 0;     /* a human pilot fires as they choose */
         g_sim.player_unit.human = 1;               /* edge-triggered fire, no range check (0x100437a0) */
-        if (getenv("MW2_HUD_TEST")) {             /* debug: show the damage colours */
+        if (mw2_development_env("MW2_HUD_TEST")) {             /* debug: show the damage colours */
             g_sim.player_unit.armor[MEK_RA] = 0;
             g_sim.player_unit.armor[MEK_LT] /= 2;
             g_sim.player_unit.loc_gone[MEK_LL] = 1; g_sim.player_unit.internal[MEK_LL] = 0; g_sim.player_unit.armor[MEK_LL] = 0;
@@ -4981,13 +4983,13 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         int lod_keep = mech3d_lod, pl_loaded;
         mech3d_lod = 0;   /* the player's own mech (the cockpit) always at full detail */
         pl_loaded = g_sim_ok && mech3d_load(ma, g_sim.player_skel, 0, &g_pl) == 0;
-        if (pl_loaded && getenv("MW2_FLY_DUMP")) { int l, q; for (l = 1; l <= 8; l++) { fprintf(stderr, "loc %d:", l); for (q = 0; q < g_pl.part_count; q++) if (mech3d_fly_loc(&g_pl, q, 1u << l)) fprintf(stderr, " %s(%d)", g_pl.parts[q].model_name, g_pl.parts[q].group); fprintf(stderr, "\n"); } }   /* TEST ONLY */
+        if (pl_loaded && mw2_development_env("MW2_FLY_DUMP")) { int l, q; for (l = 1; l <= 8; l++) { fprintf(stderr, "loc %d:", l); for (q = 0; q < g_pl.part_count; q++) if (mech3d_fly_loc(&g_pl, q, 1u << l)) fprintf(stderr, " %s(%d)", g_pl.parts[q].model_name, g_pl.parts[q].group); fprintf(stderr, "\n"); } }   /* TEST ONLY */
         if (g_plpit_ok) { mech3d_free(&g_plpit); g_plpit_ok = 0; }
         /* the cockpit view (engine 0x100267d0: in the cockpit the player's object takes level of detail 4, the
          * record's fifth representation - KF5_HEAD, the upper legs and arms - drawn like any object from the eye) */
         if (pl_loaded) g_plpit_ok = mech3d_load(ma, g_sim.player_skel, 4, &g_plpit) == 0 && g_plpit.part_count > 0;
         if (g_plpit_ok && !getenv("MW2_PIT_OWN_SKEL")) mech3d_use_skeleton(&g_plpit, &g_pl);   /* the engine's single skeleton (mech3d.c) */
-        if (getenv("MW2_DEBUG_PIT")) {
+        if (mw2_development_env("MW2_DEBUG_PIT")) {
             int q;
             fprintf(stderr, "cockpit repr 4: %d (%d parts, repr_count %d)\n", g_plpit_ok, g_plpit.part_count, g_pl.repr_count);
             for (q = 0; q < g_plpit.part_count; q++) {
@@ -5015,10 +5017,10 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 int q;
                 for (q = 0; q < g_pl.part_count; q++) g_pl.parts[q].tex_offset = g_sim.player_tex;
                 if (g_plpit_ok) for (q = 0; q < g_plpit.part_count; q++) g_plpit.parts[q].tex_offset = g_sim.player_tex;
-                if (getenv("MW2_DEBUG_STARALL")) fprintf(stderr, "player star tex %d\n", g_sim.player_tex);
+                if (mw2_development_env("MW2_DEBUG_STARALL")) fprintf(stderr, "player star tex %d\n", g_sim.player_tex);
             }
             g_frame_mech++;
-            if (getenv("MW2_DEBUG_NAVS")) { int q; for (q = 0; q < g_sim.nav_count; q++) fprintf(stderr, "nav %d %s '%s' %.0f %.0f %.0f shown %d sel %d\n", q, g_sim.navs[q].name, g_sim.navs[q].label, (double)g_sim.navs[q].x, (double)g_sim.navs[q].y, (double)g_sim.navs[q].z, g_sim.navs[q].shown, g_sim.navs[q].selectable); }   /* TEST hook */
+            if (mw2_development_env("MW2_DEBUG_NAVS")) { int q; for (q = 0; q < g_sim.nav_count; q++) fprintf(stderr, "nav %d %s '%s' %.0f %.0f %.0f shown %d sel %d\n", q, g_sim.navs[q].name, g_sim.navs[q].label, (double)g_sim.navs[q].x, (double)g_sim.navs[q].y, (double)g_sim.navs[q].z, g_sim.navs[q].shown, g_sim.navs[q].selectable); }   /* TEST hook */
             if (getenv("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
                 float sx0 = 0, sz0 = 0, sy0 = 0;
                 int nst = sscanf(getenv("MW2_START"), "%f,%f,%f", &sx0, &sz0, &sy0);
@@ -5054,12 +5056,12 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                 char dmg[16];
                 if (!g_hud) g_hud = hud_create(ma);
                 hud_mission_palette(ma, mission);   /* the mission's palette for the HUD (0x10260324, see there) */
-                const char *damage_sign = getenv("MW2_TEST_DSIGN");   /* TEST ONLY */
+                const char *damage_sign = mw2_development_env("MW2_TEST_DSIGN");   /* TEST ONLY */
                 glr_set_damage_shade(r, damage_sign ? atoi(damage_sign) : ati == 3 && g_plnt52);
                 g_hud_s = g_render_w == 320 ? 0.5f : 1.0f;
                 g_hud_sfx = g_render_w == 320 ? "" : g_render_w == 640 ? "6" : g_render_w == 1024 ? "K" :
                             abs(1024 - g_win_cols) + abs(768 - g_win_lines) < abs(640 - g_win_cols) + abs(480 - g_win_lines) ? "K" : "6";
-                if (getenv("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud set: '%s' for %dx%d\n", g_hud_sfx, g_win_cols, g_win_lines);
+                if (mw2_development_env("MW2_DEBUG_HUDPAL")) fprintf(stderr, "hud set: '%s' for %dx%d\n", g_hud_sfx, g_win_cols, g_win_lines);
                 if (g_hud) {
                     hud_sprite_free(&g_hs_compass); hud_sprite_free(&g_hs_reticle); hud_sprite_free(&g_hs_damage);
                     hud_sprite_load(g_hud, ma, HN("COMPASS"), 0, &g_hs_compass);
@@ -5232,14 +5234,14 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
     if (g_view) c3d_environment(r, &g_scene, mission, g_view, -1.0f);
     if (g_view && c3d_ti && ati != 3) {   /* the Titanium textures */
         c3d_ti_environment(r, &g_scene, mission, g_view, look_fog(g_edition));
-        printf("titanium: %d textures from the Titanium archive, %d from the mission's texture archive\n", c3d_ti_hits, c3d_ti_miss);
+        if (MW2_DEVELOPMENT_LOGS) printf("titanium: %d textures from the Titanium archive, %d from the mission's texture archive\n", c3d_ti_hits, c3d_ti_miss);
         if (g_world) { ti_world_attach(&m); glr_set_mech(r, &m, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, camo, clan); }
         else {   /* the single-mech viewer: the record's Titanium model (its own meshes and skeleton offsets, the same ANIM)
                   * - the Titanium engine has no other */
             mech3d tm;
             memset(&tm, 0, sizeof tm);
             if (mech3d_ti_load(c3d_ti, rec, 0, &tm) == 0 && tm.part_count > 0) {
-                printf("titanium: viewer %s as its Titanium model (%d parts, the original %d)\n", rec, tm.part_count, m.part_count);
+                if (MW2_DEVELOPMENT_LOGS) printf("titanium: viewer %s as its Titanium model (%d parts, the original %d)\n", rec, tm.part_count, m.part_count);
                 mech3d_free(&m);
                 m = tm;
                 if (g_have_anim) mech3d_pose(&m, &g_anim, 0);
@@ -5262,9 +5264,9 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         g_view->dos_band = g_dos_band > 0 ? g_dos_band : 0;
         dos_time_of_day(r, 0);
     }
-    if (getenv("MW2_DUMP_PAL")) { int q; for (q = 0; q < 256; q++) fprintf(stderr, "pal %02x: %d %d %d\n", q, g_scene.palette[q][0], g_scene.palette[q][1], g_scene.palette[q][2]); }
-    if (getenv("MW2_DUMP_SLOTS")) {   /* tests: write the listed texture slots as PPM */
-        const char *q = getenv("MW2_DUMP_SLOTS");
+    if (mw2_development_env("MW2_DUMP_PAL")) { int q; for (q = 0; q < 256; q++) fprintf(stderr, "pal %02x: %d %d %d\n", q, g_scene.palette[q][0], g_scene.palette[q][1], g_scene.palette[q][2]); }
+    if (mw2_development_env("MW2_DUMP_SLOTS")) {   /* tests: write the listed texture slots as PPM */
+        const char *q = mw2_development_env("MW2_DUMP_SLOTS");
         while (*q) {
             int sl = (int)strtol(q, (char **)&q, 16);
             if (sl >= 0 && sl < 256 && g_scene.slot[sl]) {
@@ -5310,7 +5312,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
  * reading) */
 static int look_cache(int ed)
 {
-    if (c3d_ti || getenv("MW2_TEST_NO_TEXCACHE")) return 0;   /* (TEST ONLY: each polygon its own flag's reading, as before) */
+    if (c3d_ti || mw2_development_env("MW2_TEST_NO_TEXCACHE")) return 0;   /* (TEST ONLY: each polygon its own flag's reading, as before) */
     return ed == PORTCFG_ED_3DFX || ed == PORTCFG_ED_ENHANCED ? 1 : ed == PORTCFG_ED_S3 ? 2 : 0;
 }
 
@@ -5455,7 +5457,7 @@ static int switch_look(glr *r, glr_view *v, prj_archive *ma, prj_archive **ta, i
     if (c3d_ti && g_world && g_ti_world_for != g_mech.parts) ti_world_attach(&g_mech);
     glr_set_mech(r, &g_mech, (const uint8_t (*)[3])g_scene.palette, g_scene.slot, g_camo, g_clan);   /* (with / without the Titanium models) */
     if (g_lite_level > 0) v->ambient = (float)g_lite_level * 3.0f / 256.0f;
-    if (c3d_ti) printf("titanium: %d textures from the Titanium archive, %d from %s\n", c3d_ti_hits, c3d_ti_miss, tx);
+    if (c3d_ti) if (MW2_DEVELOPMENT_LOGS) printf("titanium: %d textures from the Titanium archive, %d from %s\n", c3d_ti_hits, c3d_ti_miss, tx);
     portcfg_load(NULL, &raw);   /* the file's own values (unresolved), the look changed: the next mission's */
     raw.renderer = ed; raw.texset = ts;
     portcfg_save(NULL, &raw);
@@ -5709,7 +5711,7 @@ static int pl_move(float dt, float top)
                                             : sqrtf(g_pl_speed * g_pl_speed + across * across) / 182.0f;   /* |the attempted velocity|, cm/tick */
             float x0 = (float)g_pl.origin[0] + (touched ? g_pl_frac[0] : fx), z0 = (float)g_pl.origin[2] + (touched ? g_pl_frac[1] : fz), bx = nx, bz = nz;
             int imp;
-            if (getenv("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
+            if (mw2_development_env("MW2_WALK_TRACE")) { static int32_t wtl = -1000; if (g_sim.now - wtl >= 500) { wtl = g_sim.now; wt_block((float)g_pl.origin[0], (float)g_pl.origin[2], nx, nz); } }   /* TEST ONLY */
             {
                 /* the attempted velocity is the frame's END velocity: 0x10019310 adds the acceleration before the move
                  * (param_1[0x40..0x42] = v + a t), whose |v| and reflection the impact takes - vy + a t = 2 dy / t - vy */
@@ -5944,7 +5946,7 @@ static const bool *test_ks(void)
 /* "t:a:b:c,..." entries whose time has come, once each (up to 32 per variable): calls fn with the numbers after t */
 static void test_timed(const char *var, int *done, void (*fn)(const char *rest))
 {
-    const char *q = getenv(var);
+    const char *q = mw2_development_env(var);
     int idx = 0;
     while (q && *q && idx < 32) {
         float t = (float)atof(q);
@@ -6021,8 +6023,8 @@ static void test_shotseg(const char *r)
 }
 /* MW2_TEST_FIRELINE="t:k"  actor k's line of fire to the player as its fire decision tests it (0x10015090) */
 static void test_fireline(const char *r) { int k = atoi(r); printf("fireline %d %d\n", k, msim_test_fire_line(&g_sim, k)); }
-/* MW2_TEST_DROP="t:actor:dz:height:vy:hspeed"  actor put dz cm ahead (+z) of the player, its feet `height` cm above the
- * player's, falling at vy cm/tick (negative down), carrying hspeed cm/s toward the player */
+/* MW2_TEST_DROP="t:actor:dz:height:vy:hspeed"  place the specified unit (-1 for player) relative to the player's
+ * position and carry horizontal speed toward that position. */
 /* MW2_TEST_PROBE="t:dz:dy:len"  one AI avoidance probe at t from dz ahead (+z) of the player, dy above its centre, len cm
  * back along -z (msim_test_probe); prints "testprobe <kind> at <distance>" (the units' piece hits with MW2_PROBE_TRACE) */
 static void test_probe(const char *r)
@@ -6040,7 +6042,20 @@ static void test_drop(const char *r)
 {
     int a = -1;
     float dz = 0, hgt = 0, vy = 0, hs = 0, dx = 0;
-    if (sscanf(r, "%d:%f:%f:%f:%f:%f", &a, &dz, &hgt, &vy, &hs, &dx) < 3 || a < 0 || a >= g_actor_count) return;
+    if (sscanf(r, "%d:%f:%f:%f:%f:%f", &a, &dz, &hgt, &vy, &hs, &dx) < 3 || a < -1 || a >= g_actor_count) return;
+    if (a == -1) {
+        g_pl.origin[0] += (int32_t)dx;
+        g_pl.origin[2] += (int32_t)dz;
+        g_pl.heading = dz > 0 ? 180.0f : 0.0f;
+        g_pl_speed = hs;
+        g_jet_vx = g_jet_vz = g_pl_across = 0;
+        combat_unit *u = &g_sim.player_unit;
+        u->y += hgt;
+        u->vy = vy;
+        u->dos_vel[0] = 0;
+        u->dos_vel[1] = (int32_t)lrintf((dz > 0 ? -hs : hs) * (65536.0f / 182.0f));
+        return;
+    }
     test_drop_actor = a;
     g_actors[a].mech.origin[0] = g_pl.origin[0] + (int32_t)dx;
     g_actors[a].mech.origin[2] = g_pl.origin[2] + (int32_t)dz;
@@ -6048,6 +6063,8 @@ static void test_drop(const char *r)
     g_sim.units[a].y = g_sim.player_unit.y + hgt;
     g_actors[a].mech.origin[1] = (int32_t)msim_draw_y(&g_sim, a);
     g_sim.units[a].vy = vy;
+    g_sim.units[a].dos_vel[0] = 0;
+    g_sim.units[a].dos_vel[1] = (int32_t)lrintf((dz > 0 ? -hs : hs) * (65536.0f / 182.0f));
     if (g_sim.air_speed) g_sim.air_speed[a] = hs;
     if (g_sim.minds) g_sim.minds[a].speed = hs;
 }
@@ -6065,7 +6082,7 @@ static void test_dump(const char *tag)
 {
     const combat_unit *pu = &g_sim.player_unit;
     int i, gone = 0, dead = 0, armed = 0, intact = 0;
-    if (!getenv("MW2_STATE_DUMP") || !g_sim_ok) return;
+    if (!mw2_development_env("MW2_STATE_DUMP") || !g_sim_ok) return;
     for (i = 0; i < 8; i++) gone |= (pu->loc_gone[i] != 0) << i;
     for (i = 0; i < g_actor_count; i++) if (g_sim.armed[i]) { armed++; dead += g_sim.units[i].destroyed != 0; intact += g_sim.units[i].intact_out != 0; }
     printf("STATE %s t=%.2f now=%d pow=%d shut=%d pend=%d ovr=%d manual=%d dead=%d heat=%.1f kmh=%.1f heading=%.1f twist=%.1f "
@@ -6129,8 +6146,8 @@ static void test_dump(const char *tag)
         }
         printf(" poff=%.2f poff_tr=%d pseq=%d", (double)om, qm, g_pl_ap.cur);
     }
-    if (getenv("MW2_WATCH_ACTOR") && g_sim_ok && g_sim.anim_pl) {   /* TEST ONLY: an actor's walk animation (idle_mech_rests) */
-        int wa = atoi(getenv("MW2_WATCH_ACTOR"));
+    if (mw2_development_env("MW2_WATCH_ACTOR") && g_sim_ok && g_sim.anim_pl) {   /* TEST ONLY: an actor's walk animation (idle_mech_rests) */
+        int wa = atoi(mw2_development_env("MW2_WATCH_ACTOR"));
         if (wa >= 0 && wa < g_actor_count)
             printf(" w_key=%.3f w_seq=%d w_on=%d w_thr=%.3f w_x=%d w_z=%d w_hd=%.1f w_st=%d", (double)g_actors[wa].t, g_sim.anim_pl[wa].cur, g_sim.anim_pl[wa].on,
                    (double)(g_sim.minds ? g_sim.minds[wa].thr_servo : 0.0f), g_actors[wa].mech.origin[0], g_actors[wa].mech.origin[2],
@@ -6172,7 +6189,7 @@ static void test_frame(int w, int h)
 {
     static int d_phit, d_heat, d_thing, d_bld, d_shot, dump_idx, d_node;
     static float next_every = -1;
-    const char *sd = getenv("MW2_STATE_DUMP"), *sh = getenv("MW2_SHOT");
+    const char *sd = mw2_development_env("MW2_STATE_DUMP"), *sh = getenv("MW2_SHOT");
     if (!g_auto_on || !g_sim_ok || !g_world) return;
     {
         static int prev[COMBAT_MAX_WEAPONS];
@@ -6183,7 +6200,7 @@ static void test_frame(int w, int h)
             prev[i] = st;
         }
     }
-    if (getenv("MW2_TEST_BLD_LIST")) {   /* the structures: index, hit points, type, name, position */
+    if (mw2_development_env("MW2_TEST_BLD_LIST")) {   /* the structures: index, hit points, type, name, position */
         static int listed;
         int b;
         for (b = 0; !listed && b < g_sim.bld_count; b++)
@@ -6198,9 +6215,9 @@ static void test_frame(int w, int h)
     { static int d_fireline; test_timed("MW2_TEST_FIRELINE", &d_fireline, test_fireline); }
     { static int d_watch; test_timed("MW2_TEST_WATCH", &d_watch, test_watch); }
     { static int d_parmor; test_timed("MW2_TEST_PARMOR", &d_parmor, test_parmor); }
-    if (getenv("MW2_TEST_WHEAT")) {   /* TEST ONLY */
+    if (mw2_development_env("MW2_TEST_WHEAT")) {   /* TEST ONLY */
         int w = -1; float h = 0;
-        if (sscanf(getenv("MW2_TEST_WHEAT"), "%d:%f", &w, &h) == 2 && w >= 0 && w < 31) combat_test_wheat[w] = h;
+        if (sscanf(mw2_development_env("MW2_TEST_WHEAT"), "%d:%f", &w, &h) == 2 && w >= 0 && w < 31) combat_test_wheat[w] = h;
     }
     { static int d_rfl; test_timed("MW2_TEST_RFLASH", &d_rfl, test_rflash); }
     if (test_heat_next >= 0) { g_sim.player_unit.heat = g_sim.player_unit.heat_mark = test_heat_next; test_heat_next = -1; }
@@ -6300,7 +6317,7 @@ static void syskeys_update(int want)
     if (!registered) { atexit(syskeys_restore); registered = 1; }   /* any exit gives them back */
     syskeys_apply(want);
     g_syskeys_off = want;
-    if (getenv("MW2_STATE_DUMP")) printf("SYSKEYS now=%d %s text=%d\n", (int)g_sim.now, want ? "off" : "on", (int)(g_text_win && SDL_TextInputActive(g_text_win)));   /* TEST hook */
+    if (mw2_development_env("MW2_STATE_DUMP")) printf("SYSKEYS now=%d %s text=%d\n", (int)g_sim.now, want ? "off" : "on", (int)(g_text_win && SDL_TextInputActive(g_text_win)));   /* TEST hook */
 }
 
 /* the DOS look's radar (MW2.EXE 0x11950 -> 0x12c20): a view looking straight down from above the player's eye object (x,
@@ -6695,15 +6712,15 @@ int main(int argc, char **argv)
      * SDL_EVENT_KEY_DOWN) */
     g_text_win = win;
     SDL_StopTextInput(win);
-    if (getenv("MW2_STATE_DUMP")) printf("TEXTINPUT active=%d\n", (int)SDL_TextInputActive(win));   /* TEST hook */
+    if (mw2_development_env("MW2_STATE_DUMP")) printf("TEXTINPUT active=%d\n", (int)SDL_TextInputActive(win));   /* TEST hook */
     { int dw0, dh0; SDL_GetWindowSizeInPixels(win, &dw0, &dh0); g_win_lines = dh0; g_win_cols = dw0; }   /* the HUD set for native rendering */
     glr_default_view(&v);
     g_view = &v;
     if (rec[0] == '@') { g_world = 1; rec = MECHS[0]; SDL_SetWindowRelativeMouseMode(win, true); }
-    if (!g_world && getenv("MW2_TEST_VIEWER")) {   /* TEST ONLY: the single-mech viewer's orbit "yaw,pitch" (with MW2_AUTOPILOT's
+    if (!g_world && mw2_development_env("MW2_TEST_VIEWER")) {   /* TEST ONLY: the single-mech viewer's orbit "yaw,pitch" (with MW2_AUTOPILOT's
                                                     * seconds and file: a picture of it) */
         float vy = 0, vp = 0, vh = 0;
-        if (sscanf(getenv("MW2_TEST_VIEWER"), "%f,%f,%f", &vy, &vp, &vh) >= 1) { v.yaw = vy; v.pitch = vp; g_test_vhead = vh; }
+        if (sscanf(mw2_development_env("MW2_TEST_VIEWER"), "%f,%f,%f", &vy, &vp, &vh) >= 1) { v.yaw = vy; v.pitch = vp; g_test_vhead = vh; }
         g_walk = 0;   /* (a still pose) */
     }
     if (getenv("MW2_AUTOPILOT")) {
@@ -6712,7 +6729,7 @@ int main(int argc, char **argv)
         int jt = 0;
         if (sscanf(getenv("MW2_AUTOPILOT"), "%f,%f,%f,%d,%255[^,],%d,%d", &g_auto_secs, &g_auto_throttle, &g_auto_twist, &fire, out, &ck, &jt) >= 4) {
             g_auto_on = 1; g_auto_fire = fire; g_auto_cockpit = ck; g_auto_jet = jt;
-            if (getenv("MW2_TEST_FPS") && atof(getenv("MW2_TEST_FPS")) >= 1.0) g_auto_dt = (float)(1.0 / atof(getenv("MW2_TEST_FPS")));   /* TEST ONLY */
+            if (mw2_development_env("MW2_TEST_FPS") && atof(mw2_development_env("MW2_TEST_FPS")) >= 1.0) g_auto_dt = (float)(1.0 / atof(mw2_development_env("MW2_TEST_FPS")));   /* TEST ONLY */
             snprintf(g_auto_out, sizeof g_auto_out, "%s", out);
         }
     }
@@ -6825,8 +6842,8 @@ int main(int argc, char **argv)
         }
     }
     load_projectiles(ma);
-    if (getenv("MW2_SFX_TEST")) {   /* debug: play SNDS records at start ("199,75") */
-        const char *p = getenv("MW2_SFX_TEST");
+    if (mw2_development_env("MW2_SFX_TEST")) {   /* debug: play SNDS records at start ("199,75") */
+        const char *p = mw2_development_env("MW2_SFX_TEST");
         while (*p) { sfx_play(g_sfx, atoi(p), 0.9f, 0.0f); while (*p && *p != ',') p++; if (*p) p++; SDL_Delay(700); }
     }
 
@@ -7317,12 +7334,12 @@ int main(int argc, char **argv)
                 dt *= speed;
             }
             if (g_world && g_sim_ok) dt *= g_time_expand * g_time_compress;   /* the cheats' time expansion / compression (0x1000c337 / 0x1000c36f) */
-            if (g_auto_on && getenv("MW2_TEST_HITCH")) {   /* TEST ONLY: "every_s,ms[,jitter_ms]" - one long frame of ms every
+            if (g_auto_on && mw2_development_env("MW2_TEST_HITCH")) {   /* TEST ONLY: "every_s,ms[,jitter_ms]" - one long frame of ms every
                                                             * every_s seconds, other frames 1/N s +- a random jitter */
                 static float hacc;
                 static unsigned hr = 12345u;
                 float every = 0, ms = 0, jit = 0;
-                sscanf(getenv("MW2_TEST_HITCH"), "%f,%f,%f", &every, &ms, &jit);
+                sscanf(mw2_development_env("MW2_TEST_HITCH"), "%f,%f,%f", &every, &ms, &jit);
                 hr = hr * 1103515245u + 12345u;
                 if (jit > 0) dt += ((float)((hr >> 8) & 0xffff) / 65535.0f * 2.0f - 1.0f) * jit / 1000.0f;
                 if (dt < 0.001f) dt = 0.001f;
@@ -7364,26 +7381,26 @@ int main(int argc, char **argv)
                     if (!placed) {
                         placed = 1;
                         g_pl.origin[0] = g_actors[ka].mech.origin[0];
-                        g_pl.origin[2] = g_actors[ka].mech.origin[2] - (getenv("MW2_TEST_STANDOFF") ? atoi(getenv("MW2_TEST_STANDOFF")) : 6000);   /* TEST hook: distance (cm) */
+                        g_pl.origin[2] = g_actors[ka].mech.origin[2] - (mw2_development_env("MW2_TEST_STANDOFF") ? atoi(mw2_development_env("MW2_TEST_STANDOFF")) : 6000);   /* TEST hook: distance (cm) */
                         g_pl.heading = 0;
                         g_sim.player[0] = (float)g_pl.origin[0]; g_sim.player[2] = (float)g_pl.origin[2];
                     }
                     if (kc && g_sim.now >= (int32_t)(atof(kc + 1) * 1000) && !g_sim.units[ka].destroyed) g_sim.units[ka].destroyed = 1;
                 }
             }
-            if (g_sim_ok && getenv("MW2_TEST_STRAFE")) {   /* TEST ONLY: "k,cm_per_s,t0,t1" - actor k slides sideways (world +x)
+            if (g_sim_ok && mw2_development_env("MW2_TEST_STRAFE")) {   /* TEST ONLY: "k,cm_per_s,t0,t1" - actor k slides sideways (world +x)
                                                              * at cm_per_s from t0 to t1 s (with MW2_TEST_HOLD_ACTOR: no own moves) */
                 static int32_t x0;
                 static int have;
-                int ka = atoi(getenv("MW2_TEST_STRAFE"));
+                int ka = atoi(mw2_development_env("MW2_TEST_STRAFE"));
                 float v = 0, t0 = 0, t1 = 1e9f, tn = (float)g_sim.now / 1000.0f;
-                sscanf(getenv("MW2_TEST_STRAFE"), "%*d,%f,%f,%f", &v, &t0, &t1);
+                sscanf(mw2_development_env("MW2_TEST_STRAFE"), "%*d,%f,%f,%f", &v, &t0, &t1);
                 if (ka >= 0 && ka < g_actor_count && g_sim.armed[ka] && !g_sim.units[ka].destroyed) {
                     if (!have || tn < t0) { have = 1; x0 = g_actors[ka].mech.origin[0]; }
                     else g_actors[ka].mech.origin[0] = x0 + (int32_t)lrintf(v * ((tn < t1 ? tn : t1) - t0));
                 }
             }
-            if (g_sim_ok && getenv("MW2_MISSILE_TRACE")) {   /* TEST ONLY: the player's missiles in flight (table types 3 / 4) */
+            if (g_sim_ok && mw2_development_env("MW2_MISSILE_TRACE")) {   /* TEST ONLY: the player's missiles in flight (table types 3 / 4) */
                 int q;
                 for (q = 0; q < g_sim.shot_count; q++) {
                     const msim_shot *ms = &g_sim.shots[q];
@@ -7400,12 +7417,12 @@ int main(int argc, char **argv)
                 int b3;
                 for (b3 = 0; b3 < g_sim.bld_count; b3++) msim_damage_building(&g_sim, b3, 50.0f);
             }
-            if (g_sim_ok && getenv("MW2_DEBRIS_TRACE")) {   /* tests */
+            if (g_sim_ok && mw2_development_env("MW2_DEBRIS_TRACE")) {   /* tests */
                 static int32_t last;
                 if (g_sim.now - last >= 1000) { int q, n3 = 0, nh = 0; last = g_sim.now; for (q = 0; q < g_sim.debris_count; q++) n3 += g_sim.debris[q].kind == 3;
                     for (q = 0; q < g_mech.part_count; q++) nh += g_mech.parts[q].hidden;
                     fprintf(stderr, "debris %.1fs: %d pieces (%d world), %d hidden world parts, %d destroyed\n", g_sim.now / 1000.0, g_sim.debris_count, n3, nh, g_sim.buildings_destroyed);
-                    if (atoi(getenv("MW2_DEBRIS_TRACE")) > 1) for (q = 0; q < g_sim.debris_count; q++) fprintf(stderr, "  piece %d kind %d at %.0f %.0f %.0f v %.1f %.1f %.1f moving %d ground %.0f\n", q, g_sim.debris[q].kind,
+                    if (atoi(mw2_development_env("MW2_DEBRIS_TRACE")) > 1) for (q = 0; q < g_sim.debris_count; q++) fprintf(stderr, "  piece %d kind %d at %.0f %.0f %.0f v %.1f %.1f %.1f moving %d ground %.0f\n", q, g_sim.debris[q].kind,
                         g_sim.debris[q].p[0], g_sim.debris[q].p[1], g_sim.debris[q].p[2], g_sim.debris[q].v[0], g_sim.debris[q].v[1], g_sim.debris[q].v[2], g_sim.debris[q].moving, msim_ground(&g_sim, g_sim.debris[q].p[0], g_sim.debris[q].p[2], g_sim.debris[q].p[1])); }
             }
             if (g_sim_ok && g_sim.world_dirty && g_world) {   /* a building was destroyed: its destroyed variant shows */
@@ -7557,7 +7574,7 @@ int main(int argc, char **argv)
                         }
                         g_twist_srv = g_pl.twist; g_pitch_srv = g_pitch;
                     }
-                    if (getenv("MW2_SINK_TRACE")) printf("SINK t=%.3f pan=%.4f tilt=%.4f thr=%.4f twist=%.2f pitch=%.2f dtw=%.2f dpi=%.2f mouse=%d,%d\n", g_sim.now / 1000.0, (double)sp.val, (double)st.val, (double)sth.val,
+                    if (mw2_development_env("MW2_SINK_TRACE")) printf("SINK t=%.3f pan=%.4f tilt=%.4f thr=%.4f twist=%.2f pitch=%.2f dtw=%.2f dpi=%.2f mouse=%d,%d\n", g_sim.now / 1000.0, (double)sp.val, (double)st.val, (double)sth.val,
                                                          (double)g_pl.twist, (double)g_pitch, (double)g_twist_dem, (double)g_pitch_dem, g_im_dev.mouse_x, g_im_dev.mouse_y);   /* tests */
                 }
                 {   /* the torso servo (engine 0x1001a180 end, 0x1001ad3b..0x1001adb2; DOS MW2.EXE 0x282af..0x2830f): sound
@@ -7618,7 +7635,7 @@ int main(int argc, char **argv)
                     g_zoom_ramp.val = (g_zoom - 1.0f) / 1.5f - 1.0f;
                     key_ramp(&g_zoom_ramp, zp, zm, 6, 0, dt);
                     g_zoom = 1.0f + (g_zoom_ramp.val + 1.0f) * 1.5f;
-                    if (getenv("MW2_RAMP_TRACE")) printf("RAMP t=%.3f pan=%.2f tilt=%.2f zoom=%.3f\n", g_sim.now / 1000.0, (double)g_eye_pan, (double)g_eye_tilt, (double)g_zoom);   /* tests */
+                    if (mw2_development_env("MW2_RAMP_TRACE")) printf("RAMP t=%.3f pan=%.2f tilt=%.2f zoom=%.3f\n", g_sim.now / 1000.0, (double)g_eye_pan, (double)g_eye_tilt, (double)g_zoom);   /* tests */
                 }
                 if (g_eye_pan > 180) g_eye_pan = 180;
                 if (g_eye_pan < -180) g_eye_pan = -180;
@@ -7707,14 +7724,16 @@ int main(int argc, char **argv)
                             else g_nav_sel = nv = nx;
                         }
                     }
-                    if (getenv("MW2_TEST_NAVAUTO")) { static int once; if (!once++) fprintf(stderr, "nav autopilot: nav %d\n", nv); }
+                    if (mw2_development_env("MW2_TEST_NAVAUTO")) { static int once; if (!once++) fprintf(stderr, "nav autopilot: nav %d\n", nv); }
                     if (nv == -1) {   /* nothing to steer to: +0xc held */
                         g_pl.heading += turn * (g_ap_turn / 1024.0f) * dt;
                         if (fabsf(g_ap_turn) >= 1e-7f) g_pl_legs_turn = 1;
                     }
                     else if (nv >= 0) {
                         float dx2 = g_sim.navs[nv].x - (float)g_pl.origin[0], dz2 = g_sim.navs[nv].z - (float)g_pl.origin[2];
-                        float want = atan2f(dx2, dz2) * 180.0f / 3.14159265f, dh = want - g_pl.heading, c;
+                        float want = msim_dos_int ? (float)glr_dos_atan2((int32_t)dx2, (int32_t)dz2) / 65536.0f
+                                                 : atan2f(dx2, dz2) * 180.0f / 3.14159265f;
+                        float dh = want - g_pl.heading, c;
                         while (dh > 180) dh -= 360;
                         while (dh < -180) dh += 360;
                         int wrote = 0;
@@ -7729,7 +7748,7 @@ int main(int argc, char **argv)
                             if (g_ap_avoiding) { g_ap_avoiding = 0; g_throttle = g_ap_saved_thr; }
                             g_ap_saved_thr = g_throttle;
                         }
-                        if (getenv("MW2_AP_TRACE")) printf("APTRACE t=%.3f x=%d z=%d hd=%.1f err=%.1f avoid=%d side=%d turn=%.1f thr=%.3f\n", g_sim.now / 1000.0,
+                        if (mw2_development_env("MW2_AP_TRACE")) printf("APTRACE t=%.3f x=%d z=%d hd=%.1f err=%.1f avoid=%d side=%d turn=%.1f thr=%.3f\n", g_sim.now / 1000.0,
                                                            g_pl.origin[0], g_pl.origin[2], (double)g_pl.heading, (double)dh, g_ap_avoiding, g_sim.pav_side, (double)g_ap_turn, (double)g_throttle);   /* tests */
                         g_pl.heading += turn * (g_ap_turn / 1024.0f) * dt;
                         if (fabsf(g_ap_turn) >= 1e-7f) g_pl_legs_turn = 1;
@@ -7781,7 +7800,7 @@ int main(int argc, char **argv)
                     if (g_feet_to_torso && !offline) g_pl.twist -= step;
                     if (fabsf(leg_srv) >= 1e-4f) g_pl_legs_turn = 1;
                 }
-                if (getenv("MW2_POW_TRACE")) {   /* tests: power state, speed, torso, heading every 0.25 s */
+                if (mw2_development_env("MW2_POW_TRACE")) {   /* tests: power state, speed, torso, heading every 0.25 s */
                     static int32_t last_tr = -1000;
                     if (g_sim.now - last_tr >= 250) { last_tr = g_sim.now; fprintf(stderr, "pow %.2fs state %d speed %.0f twist %.1f pitch %.1f heading %.1f throttle %.2f heat %.1f pend %d ovr %d down %d dead %d\n", g_sim.now / 1000.0, g_pow, g_pl_speed, g_pl.twist, g_pitch, g_pl.heading, g_throttle,
                                                                                     g_sim.player_unit.heat, g_sim.player_unit.shutdown_pending, g_sim.player_unit.override, g_sim.player_unit.shutdown, g_sim.player_unit.destroyed); }
@@ -7863,7 +7882,7 @@ int main(int argc, char **argv)
                     if (msim_dos_int) mech3d_dos_anim_step(&g_pl, &g_pl_anim, &g_pl_ap, &g_sim.dos_anim_phase);
                     g_pl_t = g_pl_ap.t;
                     if (seq < 0) seq = 0;
-                    if (getenv("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
+                    if (mw2_development_env("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
                     if (ev & ANIM_EV_SLOW) g_drive_slow = 1;   /* a key flagged 0x10: 0x1001a180: T 90.5 from now on */
                     g_masc_key = g_pl_ap.key >= 0 && g_pl_ap.key < g_pl_anim.key_count && (g_pl_anim.key_flags[g_pl_ap.key] & 0x10);
                     if ((ev & ANIM_EV_STEP) && g_sfx && !g_sim.player_unit.destroyed)
@@ -7888,7 +7907,7 @@ int main(int argc, char **argv)
                         float p3[3];
                         snd_player_pos(p3);
                         snd_at(fs, p3, 1, snd_cockpit());
-                        if (getenv("MW2_STEP_TRACE")) fprintf(stderr, "footstep key %d sound %d\n", g_pl_ap.key, fs);
+                        if (mw2_development_env("MW2_STEP_TRACE")) fprintf(stderr, "footstep key %d sound %d\n", g_pl_ap.key, fs);
                     }
                     {   /* gait sounds (engine 0x1000b4e0, from the gait code 0x1000b3a0 every frame, the player only): by the
                          * sequence playing cur (+0x84, -1 none) and the one asked for req (+0x88: -1 stop, 0 walk, 1 run
@@ -7939,15 +7958,11 @@ int main(int argc, char **argv)
                     g_sim.pl_shown_ok = 1;
                 }
             } else if (g_pl_ok && g_pilot && g_sim_ok) {
-                /* destroyed (state 4): the physics 0x10019310 (DOS 0x26990) returns at once for a unit in state 4 that is on
-                 * the ground (object +0x78, set on every ground contact and by the wreck's landing 0x1000c4d0) - no move, no
-                 * servo, the velocity left as it was: it stops dead where it died. Killed in the air it flies on, its velocity
-                 * unchanged (no drive: the controller cleared it, LAB_1001aae9), falls, and freezes on touching down */
-                if (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f) {
-                    float h = g_pl.heading * 3.14159265f / 180.0f;
-                    g_pl.origin[0] = (int32_t)lrintf((float)g_pl.origin[0] + sinf(h) * g_pl_speed * dt);
-                    g_pl.origin[2] = (int32_t)lrintf((float)g_pl.origin[2] + cosf(h) * g_pl_speed * dt);
-                } else g_pl_speed = 0, g_pl_across = 0;
+                float h = g_pl.heading * 3.14159265f / 180.0f;
+                msim_wreck_step(&g_sim, -1, g_pl.origin,
+                                sinf(h) * g_pl_speed + cosf(h) * g_pl_across + g_jet_vx,
+                                cosf(h) * g_pl_speed - sinf(h) * g_pl_across + g_jet_vz, dt, dos_ticks);
+                if (g_sim.player_unit.wreck_stopped) g_pl_speed = g_pl_across = g_jet_vx = g_jet_vz = 0;
             }
             if (g_pl_ok && g_pilot) {   /* the external orbit's controls (camera mode 1, 0x1002dc90 -> 0x1002e280) - read alive
                  * or destroyed: the engine's sinks are updated every frame (0x10039ee0 from the input pass, skipped only
@@ -7986,7 +8001,7 @@ int main(int argc, char **argv)
                 {
                     const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
-                    if (!msim_dos_int) {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
+                    if (!msim_dos_int && !g_sim.player_unit.destroyed) {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
                          * the jets): while jetting, the FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
                          * along it - forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile.
                          * The engine has ONE velocity vector (+0xf4 / +0xfc): the thrust and the drag act on all of it, the
@@ -8048,13 +8063,12 @@ int main(int argc, char **argv)
                         }
                         g_jet_vx = jvx; g_jet_vz = jvz;
                     }
-                    {
+                    if (!g_sim.player_unit.destroyed) {
                         float y3 = g_sim.player_unit.y + g_pl_dy_done;
                         combat_motion impact = {g_pl_dy_done, g_pl_vy3, dos_ticks};
                         combat_jets_motion(&g_sim.player_unit, jet, dt, &g_sim.rng,
-                                           msim_dos_int && !g_sim.player_unit.destroyed ?
-                                           (g_pl_imp3 ? &impact : &g_pl_lift) : NULL);
-                        if (msim_dos_int && !g_sim.player_unit.destroyed) {
+                                           msim_dos_int ? (g_pl_imp3 ? &impact : &g_pl_lift) : NULL);
+                        if (msim_dos_int) {
                             if (g_pl_land3 && g_sim.player_unit.y > g_sim.player_unit.ground)
                                 combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);
                         } else if (g_pl_imp3 && g_pl_land3) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);   /* harmless: landed (0x10019c4e) */
@@ -8091,7 +8105,7 @@ int main(int argc, char **argv)
                         static const msim *seen_for;
                         int nv;
                         if (seen_for != &g_sim) { memset(g_nav_seen, 0, sizeof g_nav_seen); seen_for = &g_sim;
-                            if (getenv("MW2_TEST_NAVSEEN")) { const char *q = getenv("MW2_TEST_NAVSEEN"); while (*q) { int k = atoi(q); if (k >= 0 && k < 256) { g_nav_seen[k] = 1; if (k < g_sim.nav_count) g_sim.navs[k].visited = 1; } while (*q && *q != ',') q++; if (*q) q++; } }   /* TEST ONLY: navs already visited */
+                            if (mw2_development_env("MW2_TEST_NAVSEEN")) { const char *q = mw2_development_env("MW2_TEST_NAVSEEN"); while (*q) { int k = atoi(q); if (k >= 0 && k < 256) { g_nav_seen[k] = 1; if (k < g_sim.nav_count) g_sim.navs[k].visited = 1; } while (*q && *q != ',') q++; if (*q) q++; } }   /* TEST ONLY: navs already visited */
                         }
                         for (nv = 0; nv < g_sim.nav_count && nv < 256; nv++)
                             if (g_sim.navs[nv].visited && !seen[nv]) { seen[nv] = 1; if (g_sfx) sfx_play(g_sfx, 0xe7, SFX_V64, 0.0f); }   /* 0x10009b80: (0xe7, 0x64, 0x40, 5, 0x50) */
@@ -8121,8 +8135,8 @@ int main(int argc, char **argv)
                     }
                 }
                 g_pl.origin[1] = (int32_t)g_sim.player_unit.y;
-                if (getenv("MW2_TEST_PASSIVE")) { g_sim.player_unit.invulnerable = 1; g_sim.player_unit.no_heat = 1; }   /* TEST ONLY: no damage, no heat */
-                if (getenv("MW2_WALK_TRACE")) {   /* TEST ONLY (tools/sweep_walk.py): navs once, then the walk every 0.5 s */
+                if (mw2_development_env("MW2_TEST_PASSIVE")) { g_sim.player_unit.invulnerable = 1; g_sim.player_unit.no_heat = 1; }   /* TEST ONLY: no damage, no heat */
+                if (mw2_development_env("MW2_WALK_TRACE")) {   /* TEST ONLY (tools/sweep_walk.py): navs once, then the walk every 0.5 s */
                     static int32_t wtl = -1000; static int hdr;
                     if (!hdr++) { int q; fprintf(stderr, "walkstart %.0f %.0f %.0f heading %.1f\n", (float)g_pl.origin[0], g_sim.player_unit.y, (float)g_pl.origin[2], g_pl.heading);
                         for (q = 0; q < g_sim.nav_count; q++) fprintf(stderr, "walknav %d %s sel %d %.0f %.0f r %.0f\n", q, g_sim.navs[q].name, g_sim.navs[q].selectable, g_sim.navs[q].x, g_sim.navs[q].z, g_sim.navs[q].radius); }
@@ -8241,11 +8255,11 @@ int main(int argc, char **argv)
                 }
                 g_sim.player_sel_w = g_sel_weapon;
                 g_sim.player_aim_free = 1;
-                if (getenv("MW2_TEST_AIM")) {   /* TEST ONLY: "k,dist,dy" - stand dist cm south of actor k facing north, the
+                if (mw2_development_env("MW2_TEST_AIM")) {   /* TEST ONLY: "k,dist,dy" - stand dist cm south of actor k facing north, the
                                                   * reticle held on its centre + dy cm (dy -1e6: the ground at dist instead) */
                     static int placed;
                     int ka = -1; float dist = 10000.0f, dy = 0.0f, ep[3];
-                    sscanf(getenv("MW2_TEST_AIM"), "%d,%f,%f", &ka, &dist, &dy);
+                    sscanf(mw2_development_env("MW2_TEST_AIM"), "%d,%f,%f", &ka, &dist, &dy);
                     if (ka >= 0 && ka < g_actor_count) {
                         float tx = (float)g_actors[ka].mech.origin[0], tz = (float)g_actors[ka].mech.origin[2], ty;
                         if (!placed) { placed = 1; g_pl.origin[0] = (int32_t)tx; g_pl.origin[2] = (int32_t)(tz - dist); g_sim.player[0] = tx; g_sim.player[2] = tz - dist; }
@@ -8306,7 +8320,7 @@ int main(int argc, char **argv)
                         if (getenv("MW2_EYE_DY")) hp[1] += (float)atof(getenv("MW2_EYE_DY"));   /* tests */
                         if (getenv("MW2_EYE_DF")) { float df = (float)atof(getenv("MW2_EYE_DF")), hh2 = g_pl.heading * 3.14159265f / 180.0f; hp[0] += sinf(hh2) * df; hp[2] += cosf(hh2) * df; }
                         v.eye[0] = hp[0]; v.eye[1] = hp[1]; v.eye[2] = hp[2];
-                        if (getenv("MW2_DEBUG_EYE")) fprintf(stderr, "eye %.0f %.0f %.0f  origin %d %d %d\n", (double)hp[0], (double)hp[1], (double)hp[2], g_pl.origin[0], g_pl.origin[1], g_pl.origin[2]);
+                        if (mw2_development_env("MW2_DEBUG_EYE")) fprintf(stderr, "eye %.0f %.0f %.0f  origin %d %d %d\n", (double)hp[0], (double)hp[1], (double)hp[2], g_pl.origin[0], g_pl.origin[1], g_pl.origin[2]);
                     } else {
                         v.eye[0] = (float)g_pl.origin[0] + sinf(aim) * 250.0f;
                         v.eye[1] = 1050.0f + g_sim.player_unit.y;
@@ -8494,7 +8508,7 @@ int main(int argc, char **argv)
                      * 0: 0x400 -> colour 0xb; DOSBox YELLSCN1: missiles and lasers red outlines); their textures stay on with
                      * OBJECT TEXTURES off (0x1002a768 switches only 0x100 / 0x200 / 0x800 objects) */
                     pp.objtype = 0x400;
-                    if (tipool) { static int said; if (!said) { said = 1; printf("titanium: shot drawn as pool model %s\n", pp.model_name); } }
+                    if (tipool) { static int said; if (!said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: shot drawn as pool model %s\n", pp.model_name); } }
                     all.parts[all.part_count++] = pp;
                 }
                 for (k = 0; all.parts && g_proj_ok && k < g_sim.debris_count; k++) {   /* debris: tumbling chunks */
@@ -8520,7 +8534,7 @@ int main(int argc, char **argv)
                         const mech3d_part *tp = ti_debris_part(d->actor < 0 ? 64 : d->actor, d->actor < 0 ? &g_pl : &g_actors[d->actor].mech, d->part);
                         if (tp) {
                             static int said;   /* (tests) */
-                            if (!said) { said = 1; printf("titanium: blown-off piece %s as %s\n", pp.model_name, tp->model_name); }
+                            if (!said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: blown-off piece %s as %s\n", pp.model_name, tp->model_name); }
                             pp.model = tp->model; pp.ti = 1;
                         }
                     }
@@ -8533,7 +8547,7 @@ int main(int argc, char **argv)
                     pp.rot[3] = ca * sc;                pp.rot[4] = ca * cc;                 pp.rot[5] = -sa;
                     pp.rot[6] = -sb * cc + cb * sa * sc; pp.rot[7] = sb * sc + cb * sa * cc; pp.rot[8] = cb * ca;
                     if (d->kind < 2) { int q; for (q = 0; q < 9; q++) pp.rot[q] *= 2.0f; }   /* the debris objects' OBJ scale 2 (MW2_SHT1) */
-                    if (d->kind < 2 && tipool) { static int said; if (!said) { said = 1; printf("titanium: debris chunk drawn as pool model %s\n", pp.model_name); } }
+                    if (d->kind < 2 && tipool) { static int said; if (!said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: debris chunk drawn as pool model %s\n", pp.model_name); } }
                     if (d->kind == 2) {   /* a blown-off part tumbles from the orientation it had on the mech */
                         const mech3d_part *op = d->actor < 0 ? &g_pl.parts[d->part] : &g_actors[d->actor].mech.parts[d->part];
                         float o[9], rr[9];
@@ -8583,7 +8597,7 @@ int main(int argc, char **argv)
                             all.parts[all.part_count].facing = 0;
                             all.parts[all.part_count].has_rot = 0;
                             all.parts[all.part_count].yaw = mech3d_heading(eye[0] - (float)fp->pos[0], eye[2] - (float)fp->pos[2]);
-                            if (getenv("MW2_FACING_LOG") && fp->model.object_count > 0) {   /* TEST hook: once per card */
+                            if (mw2_development_env("MW2_FACING_LOG") && fp->model.object_count > 0) {   /* TEST hook: once per card */
                                 static unsigned char said[4096];
                                 if (q < 4096 && !said[q]) {
                                     const wtb_object *fo = &fp->model.objects[0];
@@ -8698,12 +8712,12 @@ int main(int argc, char **argv)
             skygnd sg;
             skygnd_defaults(&sg);
             skygnd_lookup(getenv("MW2_SKYGND"), mission, &sg);
-            if (last && !g_mm_depth && !g_paused && !getenv("MW2_TEST_SKY_STILL"))   /* (TEST ONLY: still - pictures compared pixel by pixel) */
+            if (last && !g_mm_depth && !g_paused && !mw2_development_env("MW2_TEST_SKY_STILL"))   /* (TEST ONLY: still - pictures compared pixel by pixel) */
                 v.sky_scroll += sg.tile_sky * sg.anim_rate * (float)(now - last) * 0.03f;   /* held while paused */
             if (c3d_ti) {   /* Titanium (mercsw 0x1005580d): each tick adds skyAnim / 181 to the clouds' U and V, wrapped
                              * past 1; the camera-height fog terms (with a renderer that fogs) */
                 int k2;
-                if (last && !g_mm_depth && !g_paused && !getenv("MW2_TEST_SKY_STILL"))   /* (TEST ONLY: still, as above) */
+                if (last && !g_mm_depth && !g_paused && !mw2_development_env("MW2_TEST_SKY_STILL"))   /* (TEST ONLY: still, as above) */
                     for (k2 = 0; k2 < 2; k2++) {
                         v.ti_scroll[k2] += c3d_ti_sg.anim[k2] * (float)(now - last) * 0.182f;
                         v.ti_scroll[k2] -= floorf(v.ti_scroll[k2]);
@@ -8729,7 +8743,7 @@ int main(int argc, char **argv)
         {   /* TEST ONLY: MW2_TEST_VIDEO=t:look[,t:look] - the GRAPHICS menu's choice at t autopilot seconds; look = a
              * renderer (enhanced, 3dfx, ...), a texture set (original, titanium) or renderer+textures */
             static int vdone;
-            const char *q = getenv("MW2_TEST_VIDEO");
+            const char *q = mw2_development_env("MW2_TEST_VIDEO");
             int idx = 0;
             while (q && *q) {
                 char nm[32] = "", *plus;
@@ -8767,8 +8781,8 @@ int main(int argc, char **argv)
             running = 0;
             if (g_mm_flee) exit_code = 42;   /* Flee, after its self-destruct: the shell leaves too */
         }
-        if (g_world && g_sim_ok && getenv("MW2_DEBUG_KILL") && g_sim.now >= 1000) {   /* test: destroy actors "n[,n...][@secs]" at 1 s (or secs) */
-            const char *q0 = getenv("MW2_DEBUG_KILL"), *at = strchr(q0, '@');
+        if (g_world && g_sim_ok && mw2_development_env("MW2_DEBUG_KILL") && g_sim.now >= 1000) {   /* test: destroy actors "n[,n...][@secs]" at 1 s (or secs) */
+            const char *q0 = mw2_development_env("MW2_DEBUG_KILL"), *at = strchr(q0, '@');
             if (!at || g_sim.now >= (int32_t)(atof(at + 1) * 1000.0)) {
                 const char *q1 = q0;
                 while (*q1 && *q1 != '@') {
@@ -8779,15 +8793,15 @@ int main(int argc, char **argv)
                 }
             }
         }
-        if (g_world && g_fx_ok && getenv("MW2_FX_TEST")) {   /* test: spawn an effect 30 m ahead of the player at 1 s ("type[:secs[:n]]":
+        if (g_world && g_fx_ok && mw2_development_env("MW2_FX_TEST")) {   /* test: spawn an effect 30 m ahead of the player at 1 s ("type[:secs[:n]]":
                                                                 * n - 1 of the type first, 200 m behind the player, so the
                                                                 * shown one takes pool slot n - 1) */
             static int done;
-            const char *at = strchr(getenv("MW2_FX_TEST"), ':'), *cnt = at ? strchr(at + 1, ':') : NULL;
+            const char *at = strchr(mw2_development_env("MW2_FX_TEST"), ':'), *cnt = at ? strchr(at + 1, ':') : NULL;
             if (!done && g_sim.now >= (at ? (int32_t)(atof(at + 1) * 1000.0) : 1000)) {
                 float h = (g_pl.heading + g_pl.twist) * 3.14159265f / 180.0f;
                 float p[3] = {(float)g_pl.origin[0] + sinf(h) * 3000.0f, g_sim.player_unit.y + 950.0f, (float)g_pl.origin[2] + cosf(h) * 3000.0f};
-                int q, nq = cnt ? atoi(cnt + 1) : 1, ty = (int)strtol(getenv("MW2_FX_TEST"), NULL, 16);
+                int q, nq = cnt ? atoi(cnt + 1) : 1, ty = (int)strtol(mw2_development_env("MW2_FX_TEST"), NULL, 16);
                 for (q = 1; q < nq; q++) {
                     float pb[3] = {(float)g_pl.origin[0] - sinf(h) * 20000.0f, g_sim.player_unit.y + 950.0f, (float)g_pl.origin[2] - cosf(h) * 20000.0f - (float)q * 1000.0f};
                     on_effect(NULL, ty, pb);
@@ -8834,7 +8848,7 @@ int main(int argc, char **argv)
                         memcpy(spr[n].quv, g_fxd.card_uv[e->type][cs][pq], sizeof spr[n].quv);
                         drawn = 1;
                     }
-                    if (getenv("MW2_FX_TEST") && getenv("MW2_STATE_DUMP") && e->pos[0] != 0)   /* TEST hook: the card's pool slot, front faces drawn */
+                    if (mw2_development_env("MW2_FX_TEST") && mw2_development_env("MW2_STATE_DUMP") && e->pos[0] != 0)   /* TEST hook: the card's pool slot, front faces drawn */
                         printf("FXCARD now=%d type %x slot %d polys %d drawn %d\n", (int)g_sim.now, e->type, e->slot, g_fxd.card_n[e->type][cs], drawn);
                     if (!drawn) continue;
                 }
@@ -8864,7 +8878,7 @@ int main(int argc, char **argv)
                 slot = g_card_slot[cs][kind == 6 ? 0 : 1];   /* from the pool object (load_projectiles) */
                 if (cs) {
                     t = c3d_ti_scene.bank0[slot];
-                    { static int said; if (!said) { said = 1; printf("titanium: card drawn from the Titanium pool, bank 0 slot 0x%02x, billboard 0x1004ef4c tint 0xc8\n", slot); } }
+                    { static int said; if (!said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: card drawn from the Titanium pool, bank 0 slot 0x%02x, billboard 0x1004ef4c tint 0xc8\n", slot); } }
                 } else {
                     an = &g_fxd.tex[slot];
                     if (an->frames <= 0) continue;
@@ -9098,7 +9112,7 @@ int main(int argc, char **argv)
                     }
                     {   /* (tests) */
                         static int said;
-                        if (v.ti_dyn_n > 0 && !said) { said = 1; printf("titanium: explosion light at %.1f s\n", (double)g_sim.now / 1000.0); }
+                        if (v.ti_dyn_n > 0 && !said) { said = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: explosion light at %.1f s\n", (double)g_sim.now / 1000.0); }
                     }
                     /* the projectiles' lights (ti_proj_light): every volley's first projectile in flight, the nearest
                      * the eye with the explosions' */
@@ -9121,7 +9135,7 @@ int main(int argc, char **argv)
                         v.ti_dyn[at][4] = col[0]; v.ti_dyn[at][5] = col[1]; v.ti_dyn[at][6] = col[2];
                         {   /* (tests) */
                             static int said2;
-                            if (!said2) { said2 = 1; printf("titanium: projectile light weapon %d colour %.2f %.2f %.2f at %.1f s\n", sh->weapon, col[0], col[1], col[2], (double)g_sim.now / 1000.0); }
+                            if (!said2) { said2 = 1; if (MW2_DEVELOPMENT_LOGS) printf("titanium: projectile light weapon %d colour %.2f %.2f %.2f at %.1f s\n", sh->weapon, col[0], col[1], col[2], (double)g_sim.now / 1000.0); }
                         }
                     }
                 }
@@ -9154,26 +9168,26 @@ int main(int argc, char **argv)
         if (getenv("MW2_VPORT") && g_vport == 0) g_vport = atoi(getenv("MW2_VPORT"));   /* tests: start with a viewport open */
         if (getenv("MW2_VISION")) g_vision = atoi(getenv("MW2_VISION"));   /* tests */
         if (getenv("MW2_TGTDISP")) { g_tgtdisp = atoi(getenv("MW2_TGTDISP")); g_tgtdisp_off = g_tgtdisp == 0; }   /* tests */
-        if (getenv("MW2_TEST_NAVAUTO")) { static int set; if (!set++) g_autopilot = 1; }   /* tests */
-        if (getenv("MW2_TEST_TARGET")) { static int set; if (!set++) { g_tgt_sel = atoi(getenv("MW2_TEST_TARGET")); g_tgt_any = 1; } }   /* tests (as q would) */
-        if (getenv("MW2_TEST_DMG") && g_tgt_sel >= 0 && g_sim.armed[g_tgt_sel]) {   /* tests: right arm yellow, left leg red, left arm off */
+        if (mw2_development_env("MW2_TEST_NAVAUTO")) { static int set; if (!set++) g_autopilot = 1; }   /* tests */
+        if (mw2_development_env("MW2_TEST_TARGET")) { static int set; if (!set++) { g_tgt_sel = atoi(mw2_development_env("MW2_TEST_TARGET")); g_tgt_any = 1; } }   /* tests (as q would) */
+        if (mw2_development_env("MW2_TEST_DMG") && g_tgt_sel >= 0 && g_sim.armed[g_tgt_sel]) {   /* tests: right arm yellow, left leg red, left arm off */
             static int set; combat_unit *tu = &g_sim.units[g_tgt_sel];
             if (!set++) { tu->armor[4] = tu->armor_max[4] / 2; tu->armor[7] = tu->armor_max[7] / 10; tu->loc_gone[5] = 1; }
         }
-        if (getenv("MW2_TEST_LEG") && g_tgt_sel >= 0 && g_sim.armed[g_tgt_sel] && g_sim.now > 3000) {   /* tests: shoot off the left leg at 3 s */
+        if (mw2_development_env("MW2_TEST_LEG") && g_tgt_sel >= 0 && g_sim.armed[g_tgt_sel] && g_sim.now > 3000) {   /* tests: shoot off the left leg at 3 s */
             static int set; static double last; combat_unit *tu = &g_sim.units[g_tgt_sel];
             if (!set++) { int q; for (q = 0; q < 60 && !tu->loc_gone[7]; q++) combat_hit(tu, 11, 8, 180.0f, &g_sim.rng); }
             if (g_sim.now - last >= 1000) { last = g_sim.now; fprintf(stderr, "leg test %.1fs: at %d,%d heading %.0f gone %d immobile %d destroyed %d\n", g_sim.now / 1000.0,
                 g_actors[g_tgt_sel].mech.origin[0], g_actors[g_tgt_sel].mech.origin[2], g_actors[g_tgt_sel].mech.heading, tu->loc_gone[7], tu->immobile, tu->destroyed); }
         }
-        if (getenv("MW2_TEST_MSG")) { static int sent; if (!sent++) hud_message_v(getenv("MW2_TEST_MSG"), 0); }   /* tests */
-        if (getenv("MW2_TEST_AMMO") && g_sim_ok && g_sim.now >= (int32_t)(atof(getenv("MW2_TEST_AMMO")) * 1000.0)) {
+        if (mw2_development_env("MW2_TEST_MSG")) { static int sent; if (!sent++) hud_message_v(mw2_development_env("MW2_TEST_MSG"), 0); }   /* tests */
+        if (mw2_development_env("MW2_TEST_AMMO") && g_sim_ok && g_sim.now >= (int32_t)(atof(mw2_development_env("MW2_TEST_AMMO")) * 1000.0)) {
             /* tests: "secs" an ammunition bin of the player explodes; "secs:ai" one of the nearest armed enemy with ammo */
             static int done;
             if (!done++) {
                 combat_unit *tu = &g_sim.player_unit;
                 int q, who = -1;
-                if (strstr(getenv("MW2_TEST_AMMO"), "ai")) {
+                if (strstr(mw2_development_env("MW2_TEST_AMMO"), "ai")) {
                     float bd = 1e30f;
                     tu = NULL;
                     for (q = 0; q < g_actor_count; q++) {
@@ -9196,8 +9210,8 @@ int main(int argc, char **argv)
          * types 5 / 9 / 11 perspective-correct; low -> 1, every textured polygon affine) */
         v.ati_tex = look_tex(g_edition);
         v.tex_cache = look_cache(g_edition);
-        v.alpha_blend = getenv("MW2_TEST_NO_ALPHA_BLEND") ? 0 : look_blend(g_edition);   /* (TEST ONLY: the 0.5 alpha test, as before) */
-        if (getenv("MW2_TEST_ATI_TEX")) { int tv = atoi(getenv("MW2_TEST_ATI_TEX")); v.ati_tex = tv == 0 ? 0 : (v.ati_tex & 4) | (tv == 2 ? 3 : 1); }   /* TEST ONLY: 0 every
+        v.alpha_blend = mw2_development_env("MW2_TEST_NO_ALPHA_BLEND") ? 0 : look_blend(g_edition);   /* (TEST ONLY: the 0.5 alpha test, as before) */
+        if (mw2_development_env("MW2_TEST_ATI_TEX")) { int tv = atoi(mw2_development_env("MW2_TEST_ATI_TEX")); v.ati_tex = tv == 0 ? 0 : (v.ati_tex & 4) | (tv == 2 ? 3 : 1); }   /* TEST ONLY: 0 every
                                                                     * polygon perspective-correct and masked (the port before), 2 all affine */
         if (getenv("MW2_SAT_ZOOM")) g_sat_i = atoi(getenv("MW2_SAT_ZOOM")) % 5;   /* tests: the satellite map's zoom step */
         if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
@@ -9568,7 +9582,7 @@ int main(int argc, char **argv)
                             /* DOSBox (YELL, E on the Falcon 43 degrees right): CMPMKR1 right of the centre, CRTRGHT beside the
                              * tape - the marker sits on the target's own side, although the tape's numbers rise leftward */
                             mx = dosc ? (float)(cw.rx + fx16_round(cpd * (long long)rel)) * ux : cxu + ux * (float)(int)(rel * ppd);
-                            if (getenv("MW2_DEBUG_CMP")) fprintf(stderr, "cmp rel %.1f mx %.1f tex %u\n", rel, mx, g_hs_cmpmk[0].tex);
+                            if (mw2_development_env("MW2_DEBUG_CMP")) fprintf(stderr, "cmp rel %.1f mx %.1f tex %u\n", rel, mx, g_hs_cmpmk[0].tex);
                             if (mx >= wl && mx <= wr && g_hs_cmpmk[0].tex) hud_draw(g_hud, &g_hs_cmpmk[0], mx, cyu, NULL);
                         }
                         if (elev > -3.0f && ar[2].tex) hud_draw(g_hud, &ar[2], cxu, cyu - 11.0f * uy, NULL);
@@ -9907,10 +9921,10 @@ int main(int argc, char **argv)
                         if (sp->tex) hud_draw(g_hud, sp, bx, by, NULL);
                         else if (nvq < 0) hud_rect(g_hud, bx - 1.5f, by - 1.5f, 3.0f, 3.0f, blipc);
                         if (nvq < 0 && !istgt) { if (q >= g_actor_count) nblip_t++; else nblip_u++; }
-                        if (nvq < 0 && !istgt && q >= g_actor_count && getenv("MW2_RADAR_LOG") && g_tex_kind == 3 && pxr && dd2 <= rad * rad)
+                        if (nvq < 0 && !istgt && q >= g_actor_count && mw2_development_env("MW2_RADAR_LOG") && g_tex_kind == 3 && pxr && dd2 <= rad * rad)
                             printf("RADARTHING now=%d %d %d\n", (int)g_sim.now, (int)lrintf(bx / rw.ux), (int)lrintf(by / rw.uy));   /* TEST hook: a thing's blip, screen pixels */
                     }
-                    if (getenv("MW2_RADAR_LOG")) {   /* TEST hook: the plain blips drawn (units, things) */
+                    if (mw2_development_env("MW2_RADAR_LOG")) {   /* TEST hook: the plain blips drawn (units, things) */
                         static double last = -1;
                         if (g_sim.now / 1000.0 >= last + 1.0) { last = g_sim.now / 1000.0; printf("RADAR t=%.1f units %d things %d\n", g_sim.now / 1000.0, nblip_u, nblip_t); }
                     }
@@ -10201,7 +10215,7 @@ int main(int argc, char **argv)
                         if (ax < ay) { t3 = ax; ax = ay; ay = t3; }
                         snprintf(kph, sizeof kph, "%d kph", (int)((double)(((4 * ax + az + ay) >> 2) / 10002) * 1.5) * (g_spd_srv < 0 ? -1 : 1));   /* the sign c[0xb]'s (+0x2c, 0x100184bf) */
                     }
-                    if (getenv("MW2_KPH_TRACE")) fprintf(stderr, "kph %.2fs %s (%.1f cm/s, heading %.2f)\n", g_sim.now / 1000.0, kph, g_pl_speed, g_pl.heading);   /* tests */
+                    if (mw2_development_env("MW2_KPH_TRACE")) fprintf(stderr, "kph %.2fs %s (%.1f cm/s, heading %.2f)\n", g_sim.now / 1000.0, kph, g_pl_speed, g_pl.heading);   /* tests */
                     {   /* at instrument 17's window (DOS table entry 17: (275,130)-(317,195)) and its reference (0, 0.9) (0x96ac0 ->
                          * +0x34, drawn there by 0x32085; 3Dfx 0x10018470 the same): 640 x 480 (551, 453), 1024 x 768 (882, 727)
                          * (the port had (551, 453) in HUD units: 2 px high at 1024 x 768). Reversing (+0x2c < 0) in blue,
@@ -10624,7 +10638,7 @@ int main(int argc, char **argv)
             }
         }
         test_frame(w, h);   /* TEST hook (tests/sequences) */
-        if (g_auto_on && (g_world || getenv("MW2_TEST_VIEWER")) && (g_auto_elapsed += g_auto_dt) >= g_auto_secs) {
+        if (g_auto_on && (g_world || mw2_development_env("MW2_TEST_VIEWER")) && (g_auto_elapsed += g_auto_dt) >= g_auto_secs) {
             test_dump("final");   /* TEST hook */
             unsigned char *px = malloc((size_t)w * (size_t)h * 3);
             FILE *of = fopen(g_auto_out, "wb");
@@ -10636,12 +10650,12 @@ int main(int argc, char **argv)
             }
             if (of) fclose(of);
             free(px);
-            if (getenv("MW2_DEBUG_PARTPOS")) {   /* TEST hook: where the named world parts are at the end */
-                int q; for (q = 0; q < g_mech.part_count; q++) if (strstr(getenv("MW2_DEBUG_PARTPOS"), g_mech.parts[q].model_name) || (!strcmp(getenv("MW2_DEBUG_PARTPOS"), "*moving") && g_mech.parts[q].moving))
+            if (mw2_development_env("MW2_DEBUG_PARTPOS")) {   /* TEST hook: where the named world parts are at the end */
+                int q; for (q = 0; q < g_mech.part_count; q++) if (strstr(mw2_development_env("MW2_DEBUG_PARTPOS"), g_mech.parts[q].model_name) || (!strcmp(mw2_development_env("MW2_DEBUG_PARTPOS"), "*moving") && g_mech.parts[q].moving))
                     printf("partpos %s %s %d %d %d hidden %d moving %d\n", g_mech.parts[q].rec, g_mech.parts[q].model_name, g_mech.parts[q].pos[0], g_mech.parts[q].pos[1], g_mech.parts[q].pos[2], g_mech.parts[q].hidden, g_mech.parts[q].moving);
             }
-            if (getenv("MW2_DEBUG_FIRE")) printf("fire: hits %d misses %d ending %d shots %d shutdown %d attacks %d mask %x w0 state %d ammo %d\n", g_sim.hits, g_sim.misses, g_sim.ending, g_sim.shot_count, g_sim.player_unit.shutdown, g_sim.player_attacks, g_sim.player_fire_mask, g_sim.player_unit.weapons[0].state, g_sim.player_unit.weapons[0].ammo);
-            printf("autopilot: %.1f s, height %.1f m, at %d,%d heading %.0f, %.0f km/h, armour %d, %s\n", (double)g_auto_elapsed,
+            if (mw2_development_env("MW2_DEBUG_FIRE")) printf("fire: hits %d misses %d ending %d shots %d shutdown %d attacks %d mask %x w0 state %d ammo %d\n", g_sim.hits, g_sim.misses, g_sim.ending, g_sim.shot_count, g_sim.player_unit.shutdown, g_sim.player_attacks, g_sim.player_fire_mask, g_sim.player_unit.weapons[0].state, g_sim.player_unit.weapons[0].ammo);
+            if (MW2_DEVELOPMENT_LOGS) printf("autopilot: %.1f s, height %.1f m, at %d,%d heading %.0f, %.0f km/h, armour %d, %s\n", (double)g_auto_elapsed,
                    (double)(g_sim.player_unit.y / 100.0f),
                    g_pl.origin[0], g_pl.origin[2], (double)g_pl.heading, (double)(g_pl_speed * 0.036f),
                    combat_health(&g_sim.player_unit), g_sim.player_unit.destroyed ? "destroyed" : "alive");
@@ -10696,7 +10710,7 @@ static void on_shot(void *u, int weapon, int owner, int first, float x, float z)
 {
     int snd = combat_weapon_sound(weapon);
     (void)u;
-    if (getenv("MW2_SFX_TRACE")) fprintf(stderr, "shot w=%d owner=%d first=%d snd=%d sfx=%p\n", weapon, owner, first, snd, (void *)g_sfx);
+    if (mw2_development_env("MW2_SFX_TRACE")) fprintf(stderr, "shot w=%d owner=%d first=%d snd=%d sfx=%p\n", weapon, owner, first, snd, (void *)g_sfx);
     if (!first || snd <= 0 || !g_sfx) return;
     if (owner < 0) {
         /* the player's own (0x100437a0 -> 0x10043b52, DOS 0x52080: the volley's first projectile): in the cockpit view

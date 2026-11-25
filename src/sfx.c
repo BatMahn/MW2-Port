@@ -1,4 +1,5 @@
 /* sfx.c - see sfx.h. */
+#include "development.h"
 #include "sfx.h"
 
 #include "sdlcompat.h"   /* SDL3 (SDL2 in the legacy build: SDL=2) */
@@ -358,7 +359,7 @@ void sfx_destroy(sfx *s)
     int i;
     if (!s) return;
     SDL_DestroyAudioStream(s->stream);   /* closes the device: no callback after this */
-    if (getenv("MW2_SFX_TRACE")) fprintf(stderr, "sfx: %ld plays, %ld callbacks, %ld frames mixed\n", s->plays, s->callbacks, s->mixed_frames);
+    if (mw2_development_env("MW2_SFX_TRACE")) fprintf(stderr, "sfx: %ld plays, %ld callbacks, %ld frames mixed\n", s->plays, s->callbacks, s->mixed_frames);
     for (i = 0; i < SFX_CACHE; i++) free(s->cache[i].data);
     free(s);
 }
@@ -400,7 +401,7 @@ static void sim_voice(int samples) { if (getenv("MW2_SFX_SIMCLOCK")) s_sim_voice
 static void sfx_log(const char *what, int index, float volume, int voice, float pan)
 {
     char pn[32] = "";
-    if (!getenv("MW2_SFX_LOG")) return;
+    if (!mw2_development_env("MW2_SFX_LOG")) return;
     if (pan != 0.0f) snprintf(pn, sizeof pn, " pan %.2f", (double)pan);   /* off centre only */
     if (s_delay > 0) fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f delay %.3f%s\n", sfx_log_time, what, index, (double)volume, s_delay, pn);
     else fprintf(stderr, "SFXLOG %.3f %s %d vol %.2f%s%s\n", sfx_log_time, what, index, (double)volume, voice ? " voice" : "", pn);

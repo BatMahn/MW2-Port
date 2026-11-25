@@ -17,6 +17,7 @@
  * Environment: MW2_GPU=vulkan|d3d12 overrides the configured backend; MW2_GPU_DEBUG=1 SDL's GPU debug mode (validation
  * layers when installed); MW2_GPU_STATS=1 prints each frame's commands, uploads and GPU time (waiting for it).
  */
+#include "development.h"
 #include "rb.h"
 #include "rb_shaders.h"
 
@@ -227,7 +228,7 @@ static SDL_PropertiesID device_props(int b)
     SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, b == RB_GPU_VULKAN);
     SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_DXIL_BOOLEAN, b == RB_GPU_D3D12);
     SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN, b == RB_GPU_METAL);
-    SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, getenv("MW2_GPU_DEBUG") != NULL);
+    SDL_SetBooleanProperty(p, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, mw2_development_env("MW2_GPU_DEBUG") != NULL);
     /* only what the renderer uses, so that older GPUs qualify: no clip distances, depth clamping (the pipelines clip),
      * indirect draws or anisotropic filtering (Vulkan); Direct3D 12 resource binding tier 1 (Haswell / Broadwell: the
      * shaders take 3 textures, 2 uniform blocks, 1 storage buffer); Metal GPU family Mac1 (no sRGB targets are drawn) */
@@ -498,7 +499,7 @@ static SDL_GPUGraphicsPipeline *pipeline(int prog, int has_depth, int samples, i
         if (g_probing) { SDL_snprintf(g_probe_err, sizeof g_probe_err, "program %d: %s", prog, SDL_GetError()); return NULL; }
         fprintf(stderr, "rb: pipeline (program %d): %s\n", prog, SDL_GetError()); exit(1);
     }
-    if (getenv("MW2_PIPE_TRACE")) fprintf(stderr, "rb: pipeline %d made: program %d blend %d depth %d/%d/%d bias %d mask %d samples %d\n", g_npipes, prog, blend, dtest, dwrite, dfunc, bias, cmask & 15, samples);   /* TEST ONLY */
+    if (mw2_development_env("MW2_PIPE_TRACE")) fprintf(stderr, "rb: pipeline %d made: program %d blend %d depth %d/%d/%d bias %d mask %d samples %d\n", g_npipes, prog, blend, dtest, dwrite, dfunc, bias, cmask & 15, samples);   /* TEST ONLY */
     g_npipes++;
     return e->p;
 }
@@ -1133,14 +1134,14 @@ void rb_present(void)
     Uint64 t0 = 0, t1 = 0, t2 = 0;
     int ndraw = 0, npass = 0, i;
     if (!g_dev) return;
-    if (stats < 0) stats = getenv("MW2_GPU_STATS") != NULL;
-    if (stats) {
+    if (MW2_DEVELOPMENT_LOGS && stats < 0) stats = mw2_development_env("MW2_GPU_STATS") != NULL;
+    if (MW2_DEVELOPMENT_LOGS && stats) {
         for (i = 0; i < g_ncmd; i++) { ndraw += g_cmd[i].type == C_DRAW && g_cmd[i].prog != RB_PROG_HUD; npass += g_cmd[i].type != C_DRAW && g_cmd[i].type != C_CLEAR; }
         t0 = SDL_GetPerformanceCounter();
     }
     cb = acquire();
     exec_list(cb);
-    if (stats) t1 = SDL_GetPerformanceCounter();
+    if (MW2_DEVELOPMENT_LOGS && stats) t1 = SDL_GetPerformanceCounter();
     if (g_win && g_win_tex && SDL_WaitAndAcquireGPUSwapchainTexture(cb, g_win, &sc, &sw, &sh) && sc) {
         const rtex *t = &g_tex[g_win_tex];
         if (g_backend == RB_GPU_VULKAN && t->fmt == SDL_GetGPUSwapchainTextureFormat(g_dev, g_win) && (Uint32)t->w == sw && (Uint32)t->h == sh) {
@@ -1166,7 +1167,7 @@ void rb_present(void)
         }
         g_tex[g_win_tex].used = g_serial;
     }
-    if (stats) {
+    if (MW2_DEVELOPMENT_LOGS && stats) {
         SDL_GPUFence *f;
         t2 = SDL_GetPerformanceCounter();
         f = SDL_SubmitGPUCommandBufferAndAcquireFence(cb);

@@ -20,6 +20,7 @@
  * MW2_MAPVIEW_LIST=1 / MW2_MAPVIEW_HELP=1 (the mission list / the help shown), MW2_MAPVIEW_CYCLE=n (the next n missions
  * loaded and drawn in turn first).
  */
+#include "development.h"
 #include "sdlcompat.h"
 #include <math.h>
 #include <stdio.h>
@@ -1097,8 +1098,8 @@ int main(int argc, char **argv)
         g_dpi = ww > 0 ? (float)g_w / (float)ww : 1.0f;
         if (g_dpi < 1.0f) g_dpi = 1.0f;
     }
-    if (getenv("MW2_MAPVIEW_CYCLE")) {   /* tests: every mission loaded in turn and drawn once (map and 3D), back to the first */
-        int c, nc = atoi(getenv("MW2_MAPVIEW_CYCLE"));
+    if (mw2_development_env("MW2_MAPVIEW_CYCLE")) {   /* tests: every mission loaded in turn and drawn once (map and 3D), back to the first */
+        int c, nc = atoi(mw2_development_env("MW2_MAPVIEW_CYCLE"));
         for (c = 0; c < nc; c++) { load_mission((g_cur + 1) % g_mn); g_top = c & 1; draw_frame(); rb_present(); }
         g_top = 0;
     }
@@ -1125,7 +1126,7 @@ int main(int argc, char **argv)
     while (running) {
         SDL_Event e;
         static int frame;
-        if (getenv("MW2_MAPVIEW_FRAMES")) {   /* tests: n frames of the window's loop; MW2_MAPVIEW_EVENTS="frame:k<keycode>|c<x>,<y>|d<dx>,<dy>;..."
+        if (mw2_development_env("MW2_MAPVIEW_FRAMES")) {   /* tests: n frames of the window's loop; MW2_MAPVIEW_EVENTS="frame:k<keycode>|c<x>,<y>|d<dx>,<dy>;..."
                                                * pushes a key press, a click or a drag at that frame; the last frame -> MW2_MAPVIEW_OUT */
             const char *ev = getenv("MW2_MAPVIEW_EVENTS");
             while (ev && *ev) {
@@ -1149,7 +1150,7 @@ int main(int argc, char **argv)
                 ev = strchr(c, ';');
                 if (ev) ev++;
             }
-            if (++frame > atoi(getenv("MW2_MAPVIEW_FRAMES"))) {
+            if (++frame > atoi(mw2_development_env("MW2_MAPVIEW_FRAMES"))) {
                 if (getenv("MW2_MAPVIEW_OUT")) { draw_frame(); write_shot(getenv("MW2_MAPVIEW_OUT")); }
                 printf("mapview: loop end - mission %s, %s view, yaw %.1f pitch %.1f, centre %.0f,%.0f, selection %d/%d, list %d\n", g_cur >= 0 ? g_ms[g_cur].scene : "-",
                        g_top ? "map" : "3D", (double)g_yaw, (double)g_pitch, (double)(g_top ? g_top_c[0] : g_eye[0]), (double)(g_top ? g_top_c[1] : g_eye[2]), g_sel_kind, g_sel, g_list);

@@ -168,6 +168,7 @@ typedef struct {
     float         y, vy;            /* height (cm, absolute) and vertical speed (cm/tick) */
     float         ground;           /* terrain height under the unit (cm), set by the sim each step */
     float         landed_vy;        /* the vertical speed (cm/tick, < 0) it touched down with this step from a fall or jump, else 0 */
+    int           wreck_stopped;    /* settled, or frozen by a refused airborne move */
     int           blocked;          /* pressing against terrain (cleared by a free move): the contact count / impact-sound latch */
     int           jet_forward;      /* horizontal jet thrust on (input +0x20) */
     int           jet_on;           /* combat_jets this step: the jets fired with fuel left after the burn (0x1001a180: input

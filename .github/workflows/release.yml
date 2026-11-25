@@ -4,6 +4,9 @@ on:
   push:
     tags: ['v*']
 
+env:
+  MW2_RELEASE: '1'
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -189,6 +192,7 @@ jobs:
       - name: Build
         run: |
           cmake -S platform/carbon -B build-carbon \
+            -DMW2_RELEASE=ON \
             -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/powerpc-apple-macos/cmake/retrocarbon.toolchain.cmake
           cmake --build build-carbon -j$(nproc)
           ls -l build-carbon

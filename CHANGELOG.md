@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.62 (2026-11-25)
+
+- **DOS scenery animation.** Spinning objects use whole game ticks and the original fixed-point rotation.
+  Their starting countdowns come from scene allocation order, and their normalizations draw from the
+  same counter as mech joints.
+- **DOS AI.** Neutral units can acquire hostile targets under the DOS targeting rules. AI rule transitions
+  clear the saved state when they commit, so mission scripts can change the unit's orders afterward.
+- **DOS autopilot.** Steering to a nav point uses the original fixed-point bearing calculation.
+- **Airborne wrecks.** Player and AI wrecks keep their airborne momentum and stop at the last reachable
+  position when a wall or another unit blocks their move.
+- **Titanium loadouts.** The MEK reader accepts the eight-byte padding on stock Titanium designs and
+  preserves it when writing a loadout.
+- **Release builds.** Development traces and diagnostic dumps are disabled in packaged builds.
+
+Instructor contact timing and trajectories in TNJ1 and TNJ6 still differ from DOS.
+
 ## v1.1.61 (2026-11-24)
 
 - **DOS animation timing.** Animation tracks advance in whole game ticks and carry their remaining movement

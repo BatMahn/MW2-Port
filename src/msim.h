@@ -95,6 +95,8 @@ typedef struct {
     msim_shot    shots[MSIM_MAX_SHOTS];
     int          shot_count;
     unsigned     dos_anim_phase;   /* DOS local-matrix normalization period */
+    struct msim_spin_seed *dos_spin_seeds;
+    int          dos_spin_count;
     unsigned     dos_player_anim_phase;   /* phase at the player skeleton allocation */
     uint8_t      dos_shot_kinds[MSIM_DOS_MAX_SHOTS];
     int          dos_shot_slots;
@@ -459,6 +461,8 @@ extern int msim_dos_int;
 float msim_servo(float cur, float tgt, float T, float ticks);
 float msim_dos_len(float x, float y, float z);
 float msim_leg_demand(float input, float spd, int player, float gain, int airborne, int autopilot, float prev);   /* DOS 0x27cd4 */
+/* Update an airborne wreck with no drive or thrust. Horizontal velocities are cm/s. */
+void msim_wreck_step(msim *s, int actor, int32_t origin[3], float vx, float vz, float dt, int dos_ticks);
 /* DOS ground approach, directional thrust, and whole-centimetre movement. */
 combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks);
 void msim_dos_walk(combat_unit *u, float heading, float drive, float top, int freev, int jet_dir,

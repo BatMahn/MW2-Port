@@ -1,4 +1,5 @@
 /* glr.c - see glr.h. Draws through the render backend (rb.h); its shaders are shaders/world.vert / world.frag. */
+#include "development.h"
 #include "glr.h"
 #include "dos_matrix.h"
 #include "rb.h"
@@ -466,8 +467,8 @@ static void dos_normal_corners(const wtb_object *o, const wtb_poly *q, int *a, i
 static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256][3],
                      texture *const slots[GLR_SLOTS], int camo, int clan, int bounds)
 {
-    const int ti_world_normals = getenv("MW2_TEST_TI_WORLDN") != NULL;   /* TEST ONLY: turn them as the 3D editions do */
-    const int test_lit8 = getenv("MW2_TEST_LIT_8") != NULL;   /* TEST ONLY: colour type 8 lit (the port before) */
+    const int ti_world_normals = mw2_development_env("MW2_TEST_TI_WORLDN") != NULL;   /* TEST ONLY: turn them as the 3D editions do */
+    const int test_lit8 = mw2_development_env("MW2_TEST_LIT_8") != NULL;   /* TEST ONLY: colour type 8 lit (the port before) */
     glr_layer *L = &r->layer[li];
     size_t cap = 0, n = 0, *count, *pos;
     float *buf = NULL, *sph = NULL, *tic = NULL, *tipn = NULL, psph[4] = {0, 0, 0, 0}, mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
@@ -531,7 +532,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
              * bit 0x800) -> class 2; other objects (type 0 rocks, buildings) keep their textures */
             int notex_cls = (li == 1 && part->objtype == 0) || (part->objtype & 0x300) || (part->objtype & 0xf0) == 0x50 ? 1
                           : (part->objtype & 0x800) ? 2 : 0;
-            if (pass == 1) { part_sphere(part, psph); if (li == 0 && sky_tree(m, pi)) psph[3] = 0; if (getenv("MW2_DEBUG_SPH")) fprintf(stderr, "sph li%d %s %x %d %.0f %.0f %.0f %.0f\n", li, part->model_name, part->objtype, part->parent_obj, (double)psph[0], (double)psph[1], (double)psph[2], (double)psph[3]); }   /* tests */
+            if (pass == 1) { part_sphere(part, psph); if (li == 0 && sky_tree(m, pi)) psph[3] = 0; if (mw2_development_env("MW2_DEBUG_SPH")) fprintf(stderr, "sph li%d %s %x %d %.0f %.0f %.0f %.0f\n", li, part->model_name, part->objtype, part->parent_obj, (double)psph[0], (double)psph[1], (double)psph[2], (double)psph[3]); }   /* tests */
             for (k = 0; k < o->poly_count; k++) {
                 const wtb_poly *q = &o->polys[k];
                 float face[3], e1[3], e2[3], poly_col[3], ti_vmin;
@@ -1221,7 +1222,7 @@ static void ti_colours(glr *r, int li, const glr_view *v, const float view[16], 
         if (lo < 0 || tp->first < lo) lo = tp->first;
         if (e > hi) hi = e;
     }
-    if (getenv("MW2_DEBUG_TISHADE")) {   /* (tests) */
+    if (mw2_development_env("MW2_DEBUG_TISHADE")) {   /* (tests) */
         static int last[2] = {-1, -1};
         int n_off = 0;
         for (i = 0; i < L->tip_n; i++) n_off += L->tip[i].kind == 1 && (L->tip[i].cls & notex) != 0;
@@ -1798,7 +1799,7 @@ static void tex_cache_decide(glr *r, const glr_view *v, const float view[16], co
     for (s = 0; s < GLR_SLOTS; s++)
         if (ap[s] >= 0 && r->tex_src[s] && !r->tex_src[s]->upfmt) {
             ((texture *)r->tex_src[s])->upfmt = ap[s] ? 2 : 1;
-            if (getenv("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, r->tex_src[s]->cel, ap[s] ? "4444" : "1555", key[s]);   /* TEST hook */
+            if (mw2_development_env("MW2_STATE_DUMP")) printf("TEXCACHE slot=%#x cel=%d fmt=%s depth=%.0f\n", 0x100 + s, r->tex_src[s]->cel, ap[s] ? "4444" : "1555", key[s]);   /* TEST hook */
         }
 }
 
@@ -2178,7 +2179,7 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
              * Jade Falcon mission 3). The Titanium engine itself has no working depth test (above) and draws in its
              * depth sort's order, the ground before the objects on it */
             if (r->ti_slots) rb_depth_write(0);
-            if (!getenv("MW2_TEST_NO_GROUND")) glr_draw_arrays(r, 30, 6);   /* (TEST ONLY: MW2_TEST_NO_GROUND) */
+            if (!mw2_development_env("MW2_TEST_NO_GROUND")) glr_draw_arrays(r, 30, 6);   /* (TEST ONLY: MW2_TEST_NO_GROUND) */
             if (r->ti_slots) rb_depth_write(1);
             r->D.u_tilit = 0;
             r->D.u_mga_lod = 0;

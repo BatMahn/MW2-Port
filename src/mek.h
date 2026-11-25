@@ -60,6 +60,7 @@ typedef struct {
     char     config_name[51];
     uint16_t unknown16;      /* 0x16, kept for an exact round trip */
     uint8_t  config_raw[50]; /* the name field as stored (bytes after the NUL included) */
+    uint8_t  config_padding; /* Titanium records may end in eight zero bytes */
 } mek_def;
 
 typedef struct {

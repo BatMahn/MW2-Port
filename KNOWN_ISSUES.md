@@ -1,9 +1,14 @@
 # Known issues
 
-What is still open in the port as of 2026-11-09. Technical detail, engine addresses and evidence for each item are in
-[ASSUMPTIONS.md](ASSUMPTIONS.md) under "Open items". None of these blocks play.
+Open issues in the port. Technical details and evidence are in [ASSUMPTIONS.md](ASSUMPTIONS.md) and
+[the DOS parity audit](docs/AUDIT_DOS.md).
 
 ## Open
+- **DOS training and poses**. Instructor contact trajectories in TNJ1 and TNJ6 still differ from DOS.
+  The full mission update order for normalization across scenery, mechs and effects needs more tracing.
+- **Titanium simulation**. The Titanium and Rendition looks use the base edition's simulation and
+  weapon data. Native Windows combat timing remains unverified. A direct load of the Titanium archive
+  still has objective sweep failures in BRONSCN1, GOUDSCN1 and MAROSCN1.
 - **Classic Mac build (ALPHA)** - new, and has had almost no testing on a real PowerPC Mac: crashes, sound / music
   (QuickTime's synthesizer is untested) and display problems are expected. docs/CARBON.md lists what still needs
   checking on real hardware.

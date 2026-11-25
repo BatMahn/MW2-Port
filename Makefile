@@ -1,6 +1,9 @@
 # MechWarrior 2 port - foundation modules (Linux / macOS / Windows via MinGW-w64)
 CC      ?= cc
 CFLAGS  ?= -std=c99 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wconversion
+ifeq ($(MW2_RELEASE),1)
+  CFLAGS += -DMW2_RELEASE
+endif
 LDLIBS  = -lpthread -lm
 UNAME_S := $(shell uname -s)
 # SDL3 (3.2.0 or newer) through pkg-config's sdl3 module. SDL3_DIR=<prefix> uses only <prefix>/lib/pkgconfig (an SDL3

@@ -1,4 +1,5 @@
 /* combat.c - see combat.h (what is from the game and what is assumed is listed there). */
+#include "development.h"
 #include "combat.h"
 
 #include <math.h>
@@ -97,7 +98,7 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     u->dos_shade_divisor = 1;
     u->lock_target = -2;
     if (mek_load(a, loadout, &d) != 0) return -1;   /* the archive, else a user design MEK\\<name>.MEK */
-    if (getenv("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s: %d items, %d ammo bins, '%s'\n", loadout, d.item_count, d.link_count, d.config_name);
+    if (mw2_development_env("MW2_DEBUG_LOADOUT")) fprintf(stderr, "loadout %s: %d items, %d ammo bins, '%s'\n", loadout, d.item_count, d.link_count, d.config_name);
     /* engine 0x10041410: the MEK locations copied as they are (armour, rear, structure made floats; the item
      * list and its count +0x24 kept) */
     for (l = 0; l < MEK_LOC_COUNT; l++) {
@@ -429,7 +430,7 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
                     /* the bin explodes: rounds x per-round damage (bin +10 = table +0x30) into this location's structure */
                     const float blast = (float)bn->rounds * combat_weapon_damage(cw->weapon);
                     t->internal[i] -= blast;
-                    if (getenv("MW2_DAMAGE_LOG"))   /* TEST ONLY */
+                    if (mw2_development_env("MW2_DAMAGE_LOG"))   /* TEST ONLY */
                         fprintf(stderr, "damage ammo %s %s loc %d %.3f\n", t->human ? "player" : "ai", t->loadout, loc, (double)blast);
                     t->ammo_blown = 1;
                     t->ammo_boom_loc = loc;   /* 0x100167b0: explosion 7 at the location's node (msim) */
@@ -558,7 +559,7 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
     int i, r, n;
     float *arm;
     static int dlog = -1;
-    if (dlog < 0) dlog = getenv("MW2_DAMAGE_LOG") != NULL;
+    if (dlog < 0) dlog = mw2_development_env("MW2_DAMAGE_LOG") != NULL;
     if (dlog && combat_damage_live && !t->invulnerable && dmg > 1e-7f)   /* TEST ONLY: every damage, by source ("wreck": a destroyed unit) */
         fprintf(stderr, "damage %s %s %s loc %d%s %.3f\n", combat_damage_src, t->destroyed ? "wreck" : t->human ? "player" : "ai", t->loadout, loc, rear ? "r" : "", (double)dmg);
     /* engine 0x100171d0: nothing for an invulnerable player, damage of 1e-7 or less, or a location outside 1-8 - and
@@ -949,7 +950,7 @@ void combat_land(combat_unit *u, float vy, unsigned *rng)
      * Damage on, the landing speed kept for the sound (0x10019e54..0x10019ee0), stood on the ground */
     if (vy < -16.154f && !u->no_collision_damage && !u->destroyed) {
         float dmg = (vy + 16.154f) * -1.5476f;
-        if (getenv("MW2_FALL_TRACE")) fprintf(stderr, "fall: landed at %.2f cm/tick, %.1f damage a leg\n", (double)vy, (double)dmg);   /* TEST ONLY */
+        if (mw2_development_env("MW2_FALL_TRACE")) fprintf(stderr, "fall: landed at %.2f cm/tick, %.1f damage a leg\n", (double)vy, (double)dmg);   /* TEST ONLY */
         combat_damage_src = "fall";
         apply_damage_at(u, dmg, 0, 8, rng);
         apply_damage_at(u, dmg, 0, 7, rng);

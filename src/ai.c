@@ -1,4 +1,5 @@
 /* ai.c - see ai.h. */
+#include "development.h"
 #include "ai.h"
 #include "dos_matrix.h"
 
@@ -390,7 +391,7 @@ static int choose_manoeuvre(ai_mind *m, const ai_view *v)
 
 static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
 {
-    if (getenv("MW2_AI_MAN_TRACE")) fprintf(stderr, "aiman %p %d\n", (void *)m, man);   /* TEST ONLY: each manoeuvre start */
+    if (mw2_development_env("MW2_AI_MAN_TRACE")) fprintf(stderr, "aiman %p %d\n", (void *)m, man);   /* TEST ONLY: each manoeuvre start */
     m->man = man;
     m->man_ticks = 0;
     m->man_phase_ticks = 0;
@@ -826,7 +827,9 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt, int 
                 m->entered = 1; m->entered_from = m->state;                 /* 0x10013e00: exit + entry, even into the same state */
                 if (r->cond == 3 && m->to_navref) m->nav_ok = 0;            /* 0x10014f60: the nav reached is released */
                 if (r->cond == 7) m->c7_fired = 1;                          /* ref2 0x25: the condition's pick */
-                if (r->next_state != m->state && program_allows(lib, m, r->next_state)) {
+                int allowed = program_allows(lib, m, r->next_state);
+                if (ai_dos_int && allowed) m->counter = 0;   /* DOS 0x21750 -> 0x232c0: clear the saved slot */
+                if (r->next_state != m->state && allowed) {
                     int from = m->state;
                     m->state = r->next_state;
                     if (m->state == AI_TARGET || m->state == AI_ATTACK) m->target = 1;

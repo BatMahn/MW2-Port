@@ -247,10 +247,11 @@ typedef struct world3d_paths world3d_paths;
  * NULL if the mission has none. */
 world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *world);
 int  world3d_paths_tasks(const world3d_paths *p);
+void world3d_paths_dos_seed(world3d_paths *p, const char *record, int node, unsigned period, int32_t yaw);
 /* Run the tasks at time `now_ticks` (1/182 s since the mission start) and place the carried parts. Parts whose tasks
  * have all ended stay where they are and lose `moving` (fixed world objects again: the caller rebuilds its static mesh and
  * collision); returns how many did. */
-int  world3d_paths_step(world3d_paths *p, mech3d *world, float now_ticks);
+int  world3d_paths_step(world3d_paths *p, mech3d *world, float now_ticks, unsigned *dos_phase);
 /* World part `intact` was destroyed: its tasks (and its descendants') end; when it was carried, world part `destroyed`
  * (-1 none) and its children are placed at its current world transform. Returns 1 if anything was moved. */
 int  world3d_paths_destroyed(world3d_paths *p, mech3d *world, int intact, int destroyed);

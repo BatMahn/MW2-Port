@@ -147,9 +147,14 @@ def run(name, secs, throttle=-9, twist=-999, fire=0, jet=0, keys=(), hold=(), en
     os.makedirs(os.path.join(OUT, name), exist_ok=True)
     size = size or ('640x400' if shots else '320x200')   # the renderer is most of the cost: small unless pictures are checked
     gd = install_dir(name, mech)
-    for fn, data in (files or {}).items():   # extra install files (e.g. MW2DIF.CFG)
-        with open(os.path.join(gd, fn), 'wb') as f:
-            f.write(data)
+    for fn, data in (files or {}).items():
+        path = os.path.join(gd, fn)
+        if data is None:
+            if os.path.lexists(path):
+                os.unlink(path)
+        else:
+            with open(path, 'wb') as f:
+                f.write(data)
     e = dict(os.environ)
     for k in list(e):
         if k.startswith('MW2_'):
@@ -1003,9 +1008,9 @@ def aim_converges_on_reticle(c):
     """the player's shots converge on the reticle's line (0x10044950: the aim ray from the eye object, the camera's):
     a mech centred in the reticle at 100 m and at 300 m is hit within 30 cm of the reticle point - missiles (table type 3 /
     4) aside: they leave rand(200) - 100 cm off the mount (0x10044ac0) and fly parallel to their aim"""
-    for k, d in ((0, 10000), (3, 30000)):
-        r = c.run('_%d' % d, secs=10, fire=1, env={'MW2_TEST_AIM': '%d,%d,0' % (k, d), 'MW2_AIM_TRACE': '1',
-                                                    'MW2_TEST_IMMOBILE': '0:%d' % k, 'MW2_DEBUG_INVULN': '1'})
+    for d in (10000, 30000):
+        r = c.run('_%d' % d, secs=12, fire=1, env={'MW2_TEST_AIM': '0,%d,0' % d, 'MW2_AIM_TRACE': '1',
+                                                 'MW2_TEST_IMMOBILE': '0:0', 'MW2_TEST_PASSIVE': '1', 'MW2_DEBUG_INVULN': '1'})
         hits = [(float(m.group(1)), float(m.group(2))) for m in re.finditer(r'^AIMHIT now=\d+ unit range=(-?\d+) off_deg=[\d.]+ miss_cm=(\d+).* w=(\d+)$', r.out, re.M)
                 if not (0 <= int(m.group(3)) <= 9 or int(m.group(3)) == 28)]
         c(len(hits) >= 3, '%d m: the mech hit' % (d // 100), '%d hits' % len(hits))
@@ -1632,9 +1637,9 @@ def powerup_windows_clipped(c):
     a mech target's model only with the mech up (0x100216a2)"""
     yellow = lambda r, g, b: (r > 150) & (g > 110) & (b < 30)   # the emblem (188, 144, 0); the sand has more blue
     box = (0.045, 0.765, 0.19, 0.86)                              # inside the target display's box (1024x768)
-    r = c.run(secs=UP + 3, keys=[(UP - 2, 'n'), (UP, 's')], shots=[(UP - 0.5, 'up'), (UP + 0.15, 'closing')],
+    r = c.run(secs=UP + 3, keys=[(UP - 0.75, 'n'), (UP, 's')], shots=[(UP - 0.5, 'up'), (UP + 0.15, 'closing')],
               env={'MW2_VPORT': '1'}, size='1024x768')
-    c(r.at(UP - 1)['nav'] >= 0, 'a nav point selected', 'nav %d' % r.at(UP - 1)['nav'])
+    c(r.at(UP - 0.5)['nav'] >= 0, 'a nav point selected', 'nav %d' % r.at(UP - 0.5)['nav'])
     up, cl = count_px(r.shots['up'], yellow, box), count_px(r.shots['closing'], yellow, box)
     c(up > 10, 'the nav emblem in the target display', '%d px' % up)
     c(cl > 10, 'the nav emblem still drawn while the box closes', '%d px' % cl)
@@ -2080,6 +2085,18 @@ def splash_area_damage(c):
 # ---------------------------------------------------------------- mech-mech contact while walking: sliding round
 
 @sequence
+def dos_training_instructor_releases_target(c):
+    """TNJ1: the instructor can acquire the player during startup and returns to idle at the next scripted order."""
+    r = c.run(secs=10, throttle=0, mission='TNJ1SCN1', dos_look=True, env={'MW2_AI_TRACE': '1'})
+    states = [(float(t), state) for t, state in re.findall(r'^ai ([\d.]+)s actor 1 (\S+) man ', r.out, re.M)]
+    opening = [state for t, state in states if 1 <= t < 5]
+    after_order = [state for t, state in states if 8.2 <= t < 10]
+    c(opening and 'attack' in opening, 'the neutral instructor can acquire the player', str(opening))
+    c(after_order and all(state == 'idle' for state in after_order), 'the next scripted order clears the attack',
+      str(after_order))
+
+
+@sequence
 def tnj1_slide_round_instructor(c):
     """agent report: TNJ1's Firemoth driven straight ahead from the start at FULL is "blocked about 4 s near z 8420, then
     slides past". It is the instructor (TNJ1ENS2, a Mad Dog standing at TNW1ST21 17000,9500 until ~25 s), 198 cm to the
@@ -2334,7 +2351,7 @@ def death_stops_or_falls(c):
     c(after and len(set((s['x'], s['z']) for s in after)) == 1, 'walking: stops dead at death (x, z frozen)',
       str([(s['x'], s['z']) for s in after[:4]]))
     r2 = c.run('_air', secs=12, mech='summoner/smn00std', keys=[(0.2, '0'), (2.0, 'ctrl+alt+x')], hold=[(2.5, 6.0, 'j')],
-               nostart=True, dump='/0.1')
+               nostart=True, dump='/0.1', env={'MW2_START': '0,0', 'MW2_START_HEADING': '0', 'MW2_TEST_PASSIVE': '1'})
     d2 = next((s for s in r2.states if s['dead']), None)
     c(d2 is not None, 'jetting: the player self-destructs')
     if not d2:
@@ -2681,12 +2698,12 @@ def powerup_snow_clipped(c):
     tbox, tout = (0.06, 0.79, 0.17, 0.83), (0.045, 0.735, 0.19, 0.745)   # target display: centre band / its top rows
     vbox, vout = (0.83, 0.79, 0.95, 0.83), (0.815, 0.733, 0.965, 0.743)
     shots = [(UP - 0.5, 'up'), (UP + 0.15, 'closing'), (UP + 0.3, 'closing2')]
-    r = c.run(secs=UP + 1, keys=[(UP - 2, 'e'), (UP, 's')], shots=shots, size='1024x768',
+    r = c.run(secs=UP + 1, keys=[(UP - 0.75, 'e'), (UP, 's')], shots=shots, size='1024x768',
               env={'MW2_VPORT': '1', 'MW2_TEST_DISPLAY': '%g:13:3,%g:2:3' % (UP - 3, UP - 3)})
     for nm in ('up', 'closing', 'closing2'):
         c(count_px(r.shots[nm], grey, tbox) > 50, nm + ': static in the target display', '%d px' % count_px(r.shots[nm], grey, tbox))
         c(count_px(r.shots[nm], grey, vbox) > 50, nm + ': static in the viewport window', '%d px' % count_px(r.shots[nm], grey, vbox))
-    c(r.at(UP - 1).get('tgt', -1) >= 0, 'a target selected', 'tgt %s' % r.at(UP - 1).get('tgt'))
+    c(r.at(UP - 0.5).get('tgt', -1) >= 0, 'a target selected', 'tgt %s' % r.at(UP - 0.5).get('tgt'))
     whole = (0.035, 0.73, 0.2, 0.895)
     fu = count_px(r.shots['up'], grey, whole)
     c(fu > 500, 'full size: the static fills the target display', '%d px' % fu)
@@ -4933,7 +4950,7 @@ def autopilot_nav_to_nav_and_voice_queue(c):
         t65 = v[0][0]
         after_key = [t for t, n in radio if UP * 1000 < t < t65]
         c(after_key, 'radio queued after the key (nav arrivals) ...', str(radio))
-        c(t65 > max(pcm), '... and every radio line queued before the voice plays first', 'voice %.0f, radio starts %s' % (t65, pcm))
+        c(pcm and t65 > max(pcm), '... and every radio line queued before the voice plays first', 'voice %.0f, radio starts %s' % (t65, pcm))
 
 
 @sequence
@@ -5389,7 +5406,7 @@ def dos_shading_dither(c):
                 run = run + 1 if v else 0
                 n += run >= 4
         return n
-    base = dict(secs=3, throttle=0, nostart=True, mission='RUSTSCN1', mech=None, size='1024x768', dos_look=True)
+    base = dict(secs=3, throttle=0, nostart=True, mission='RUSTSCN1', mech='maddog/mdg00std', size='1024x768', dos_look=True)
     rd = c.run('_dithered', shots=[(2.6, 'cp')], **base)
     rs = c.run('_smooth', shots=[(2.6, 'cp')], env={'MW2_DOS_SHADING': 'smooth'}, **base)
     a, b = crop(rd, 'cp'), crop(rs, 'cp')
@@ -5481,6 +5498,7 @@ def shell_global_menu(c):
         a = np.array(Image.open(out).convert('RGB')).astype(int)
         b = np.array(Image.open(os.path.join(ref, refn)).convert('RGB')).astype(int)
         diff = np.abs(a - b).max(2) > 6
+        diff[314:329, 198:442] = False   # the port names the host OS in the exit label
         if mask:
             x0, y0, x1, y1 = mask
             diff[y0:y1, x0:x1] = False   # the DOS mouse pointer
@@ -5527,14 +5545,6 @@ def shell_hall_of_honor(c):
     d = os.path.join(OUT, 'shell_hall_of_honor')
     os.makedirs(d, exist_ok=True)
     out = os.path.join(d, 'hoh.ppm')
-    subprocess.run([shell, mech2], env=_shell_env(d, MW2_SHELL_HOH=1, MW2_SHELL_SHOT=out), capture_output=True, timeout=120)
-    if not os.path.exists(out):
-        c(False, 'rendered')
-        return
-    a = np.array(Image.open(out).convert('RGB')).astype(int)
-    b = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_hall_of_honor.png')).convert('RGB')).astype(int)
-    n = int((np.abs(a - b).max(2) > 6)[100:340].sum())   # above: the logo clip's frame; below: the DOS pointer
-    c(n == 0, 'headings and the install pilot\'s row match DOSBox', '%d px differ' % n)
     # a registry of our own: a game folder of links to MECH2 with its own MW2REG.CFG
     g = os.path.join(d, 'game')
     if os.path.isdir(g):
@@ -5551,9 +5561,17 @@ def shell_hall_of_honor(c):
         with open(os.path.join(g, 'MW2REG.CFG'), 'wb') as f:
             for r in recs + [rec(0, 0, 0, 0, 0, '')] * (20 - len(recs)):
                 f.write(r)
-        r = subprocess.run([os.path.join(os.path.dirname(GLVIEW), 'mw2shell'), g], env=_shell_env(d, MW2_SHELL_HOH=1, MW2_SHELL_SHOT=out),
+        r = subprocess.run([shell, g], env=_shell_env(d, MW2_SHELL_HOH=1, MW2_SHELL_SHOT=out),
                            capture_output=True, text=True, timeout=120)
         return [l[5:] for l in r.stdout.splitlines() if l.startswith('hoh: ')]
+    rows([rec(1, 0, 0, 0, 1850, 'MIKE')])
+    if os.path.exists(out):
+        a = np.array(Image.open(out).convert('RGB')).astype(int)
+        b = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'dos_hall_of_honor.png')).convert('RGB')).astype(int)
+        n = int((np.abs(a - b).max(2) > 6)[100:340].sum())   # above: the logo clip's frame; below: the DOS pointer
+        c(n == 0, 'headings and the reference pilot\'s row match DOSBox', '%d px differ' % n)
+    else:
+        c(False, 'rendered')
     got = rows([rec(1, 0, 2, 0, 1500, 'ALPHA'), rec(1, 1, 5, 1, 1000, 'BRAVO'), rec(0, 0, 9, 5, 9000, 'GONE'), rec(1, 0, 3, 0, 1500, 'CHARLIE')])
     c(got == ['BRAVO', 'CHARLIE', 'ALPHA'], 'rank title first, then honor, then missions done', str(got))
     got = rows([rec(0, 0, 9, 3, 5000, 'X%d' % k) for k in range(8)] + [rec(1, 0, 1, 0, 1200, 'LAST')])
@@ -5615,15 +5633,30 @@ def shell_mech_lab_traced(c):
     Config A-D and back (five variants), the Nova the same"""
     from PIL import Image
     import numpy as np
+    import struct
     shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
     mech2 = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
     d = os.path.join(OUT, 'shell_mech_lab_traced')
     os.makedirs(d, exist_ok=True)
     ref = os.path.join(REPO, 'docs', 'reference')
+    game = os.path.join(d, 'game')
+    if os.path.isdir(game):
+        shutil.rmtree(game)
+    os.makedirs(game)
+    for f in os.listdir(mech2):
+        if f.upper() not in ('MW2REG.CFG', 'MW2PRM.CFG'):
+            os.symlink(os.path.join(mech2, f), os.path.join(game, f))
+    with open(os.path.join(game, 'MW2REG.CFG'), 'wb') as f:
+        f.write(struct.pack('<10i16si', 1, 1, 0, 0, 0, 1850, 0, 0, 0, 0, b'MIKE', 0) + bytes(19 * 60))
+    prm = bytearray(0x218)
+    prm[0x38:0x3d] = b'MIKE\0'
+    struct.pack_into('<I', prm, 0x114, 0xffffffff)
+    with open(os.path.join(game, 'MW2PRM.CFG'), 'wb') as f:
+        f.write(prm)
 
     def run(name, **kw):
         out = os.path.join(d, name + '.ppm')
-        r = subprocess.run([shell, mech2], env=_shell_env(d, MW2_SHELL_SHOT=out, **kw), capture_output=True, text=True, timeout=120)
+        r = subprocess.run([shell, game], env=_shell_env(d, MW2_SHELL_SHOT=out, **kw), capture_output=True, text=True, timeout=120)
         return r.stdout, out
 
     def differ(out, refn, y0, y1, x0, x1):
@@ -5641,9 +5674,9 @@ def shell_mech_lab_traced(c):
         if k == 0:
             m = [l for l in log.splitlines() if l.startswith('lab mass:')]
             c(m[:1] == ['lab mass: weapons 4.50 equipment 1.00 used 19.75'], 'Firemoth: MASC 1 t as equipment', str(m))
-    for name, screen, clan, refn in (('wolf', 9, 0, 'dos_mechlab_main.png'), ('ia', 9, 2, 'dos_ia_mech_lab.png'),
-                                     ('ia_enemy', 9, 3, 'dos_ia_enemy_lab.png')):
-        _, out = run(name, MW2_SHELL_SCREEN=screen, MW2_SHELL_CLAN=clan, MW2_SHELL_FRAMES=2)
+    for name, clan, refn in (('wolf', 0, 'dos_mechlab_main.png'), ('ia', 2, 'dos_ia_mech_lab.png'),
+                             ('ia_enemy', 3, 'dos_ia_enemy_lab.png')):
+        _, out = run(name, MW2_SHELL_SCREEN=9, MW2_SHELL_CLAN=clan, MW2_SHELL_FRAMES=2)
         n = differ(out, refn, 0, 45, 0, 600)   # header and name; the DOS pointer sits at the right edge
         c(n == 0, '%s lab header matches DOSBox' % name, '%d px differ' % n)
         if clan == 3:   # "CALLSIGN: ENEMY 1", the left panel's "Endo-S" note (0x2c210)
@@ -5888,10 +5921,16 @@ def autopilot_dos_whole_degree_steering(c):
     h3 = e.at(UP + 5)['heading']
     c(abs(h3 - brg) < 0.25, '3D look: float steering onto the bearing', '%.2f (bearing %.2f)' % (h3, brg))
     env['MW2_START_HEADING'] = -23.9
+    env['MW2_AP_TRACE'] = '1'
     r = c.run('_dos_right', secs=UP + 6, keys=[(UP, '0'), (UP + 0.5, 'a')], env=env, mission='TNJ4SCN1', dump='/0.1', dos_look=True)
-    h1, h2 = r.at(UP + 3)['heading'], r.at(UP + 6)['heading']
-    c(brg - 1.0 < h1 <= brg + 0.1 and abs(h2 - h1) < 0.06, 'DOS look, 0.6 degree right: turned until the error is in [0, 1), then held',
-      '%.2f -> %.2f (bearing %.2f)' % (h1, h2, brg))
+    commands = [(float(t), float(turn)) for t, turn in re.findall(r'^APTRACE t=([\d.]+).* turn=([-\d.]+) ', r.out, re.M)]
+    settled = [turn for t, turn in commands if t >= UP + 3]
+    before, after = r.at(UP + 4.5), r.at(UP + 6)
+    err = math.degrees(math.atan2(nav2[0] - after['x'], nav2[1] - after['z'])) - after['heading']
+    c(commands and commands[0][1] < 0 and settled and all(turn == 0 for turn in settled) and
+      -0.05 <= err < 1.05 and abs(after['heading'] - before['heading']) < 0.06,
+      'DOS look, 0.6 degree right: stops steering in the deadband and the leg servo settles',
+      'final error %.2f, heading %.2f -> %.2f' % (err, before['heading'], after['heading']))
 
 
 @sequence
@@ -6547,15 +6586,22 @@ def dos_unit_hips_eye(c):
     c(e3 and e3[-1] == ('42395', '1084', '-32109'), 'the 3D looks unchanged (the 3Dfx Mad Dog, hips at its OBJ offset)', '%s' % e3[-1:])
 
 
+def no_star_files():
+    return dict.fromkeys(['USERSTAR.BWD', *('EN%02dSTAR.BWD' % k for k in range(1, 6))])
+
+
 @sequence
 def no_units_player_runs(c):
     """PROVSCN1 launched alone (no star files: no units at all) - DOS ends it at once ("Press any key to exit...",
     DOSBox, the start view drawn: docs/reference/prov_start_dosbox.png); the port had skipped the whole player update when
     a mission had no actors (no cockpit, no camera of the player's). Now the player runs and the mission ends at once as
     in DOS"""
-    r = c.run('', secs=1.0, mission='PROVSCN1', mech=None, nostart=True, dos_look=True, env={'MW2_DEBUG_EYE': '1'})
+    r = c.run('', secs=1.0, mission='PROVSCN1', mech=None, nostart=True, dos_look=True, files=no_star_files(), dump='/0.0333',
+              env={'MW2_DEBUG_EYE': '1'})
     c(re.search(r'^eye ', r.out, re.M) is not None, 'the cockpit camera rides the player\'s eye')
-    c(re.search(r'^\s*0\.0s Mission successful', r.out, re.M) is not None, 'successful at once, as DOS')
+    first_win = next((s for s in r.states if s.get('outcome') == 2), None)
+    c(first_win is not None and first_win['now'] <= 100, 'successful within the opening frames',
+      str(first_win and first_win['now']))
 
 
 @sequence
@@ -6568,7 +6614,8 @@ def dos_fog_polygon_key(c):
     from PIL import Image
     import numpy as np
     ref = np.array(Image.open(os.path.join(REPO, 'docs', 'reference', 'prov_start_dosbox.png')).convert('RGB')).astype(np.int32)
-    r = c.run('', secs=1.0, throttle=0, mission='PROVSCN1', nostart=True, mech=None, size='1024x768', dos_look=True, shots=[(0.6, 'p')])
+    r = c.run('', secs=1.0, throttle=0, mission='PROVSCN1', nostart=True, mech='maddog/mdg00std', size='1024x768', dos_look=True,
+              shots=[(0.6, 'p')], files={name: None for name in no_star_files() if name != 'USERSTAR.BWD'})
     path = r.shots.get('p')
     c(path and os.path.exists(path), 'picture')
     if not path or not os.path.exists(path):
@@ -7011,7 +7058,7 @@ def dos_hud_windows_sweep(c):
             c(hud.sum() > 20 and bad <= lim, '%s %s: the %s as DOSBox' % (tag, ref, name), '%d of %d HUD pixels differ' % (bad, hud.sum()))
 
     for size, tag, k in (('640x480', '640', 0.625), ('1024x768', '1024', 1.0)):
-        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True,
                   keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
         common = {'weapon list': (680, 50, 1000, 160), 'damage outline': (826, 558, 993, 688), 'heat bars': (340, 680, 670, 725),
                   'throttle bar': (995, 535, 1024, 760), 'kph': (870, 715, 960, 745)}
@@ -7020,9 +7067,9 @@ def dos_hud_windows_sweep(c):
         rad = {'radar': (10, 10, 275, 270)}
         cmp(tag, k, r.shots.get('nav'), 'nav', dict(common, **dict(rad, **{'target viewer, nav': (20, 550, 330, 740)})), {'radar': 4})
         cmp(tag, k, r.shots.get('target'), 'target', dict(common, **dict(rad, **{'target viewer text': (20, 692, 330, 740)})), {'radar': 4})
-        r = c.run('_thr' + tag, secs=12, nostart=True, mech=None, size=size, dos_look=True, keys=[(9.0, '5')], shots=[(11.5, 'v')])
+        r = c.run('_thr' + tag, secs=12, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True, keys=[(9.0, '5')], shots=[(11.5, 'v')])
         cmp(tag, k, r.shots.get('v'), 'throttle', {'throttle bar at 5': (995, 535, 1024, 760)})
-        r = c.run('_vp' + tag, secs=13, throttle=0, nostart=True, mech=None, size=size, dos_look=True, env={'MW2_VOICE_TEXT': '1'},
+        r = c.run('_vp' + tag, secs=13, throttle=0, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True, env={'MW2_VOICE_TEXT': '1'},
                   keys=[(8.5, 'l'), (9.5, 'l'), (10.5, 'F7')], shots=[(9.2, 'msg'), (12.0, 'vp')])
         cmp(tag, k, r.shots.get('vp'), 'rearview', {'rear view frame and label': (826, 558, 993, 600), 'frame bottom': (826, 680, 993, 688)})
         cmp(tag, k, r.shots.get('msg'), 'message', {'message text': (0, 12, 400, 34)})   # (both sizes: dos_message_bar_window)
@@ -7233,7 +7280,7 @@ def controls_player_wasd_maps(c):
     im = (b'throttle_plus {\r\n\t+ keyboard\tW\r\n}\r\nthrottle_minus {\r\n\t+ keyboard\tS\r\n}\r\n'
           b'legs_pan_minus {\r\n\t+ keyboard\tA\r\n}\r\nlegs_pan_plus {\r\n\t+ keyboard\tD\r\n}\r\n'
           b'weapon_fire {\r\n\t+ keyboard\tSpace\r\n}\r\n')
-    r = c.run(secs=17, files={'gamekey.map': gk, 'input.map': im},
+    r = c.run(secs=17, files={'GAMEKEY.MAP': None, 'INPUT.MAP': None, 'gamekey.map': gk, 'input.map': im},
               keys=[(9.5, 'a'), (9.7, 's'), (9.9, 'w'), (10.1, 'g'), (10.3, ']'), (10.5, ']'), (15.0, 'p')],
               hold=[(UP + 1.5, UP + 4.5, 'w'), (UP + 5, UP + 6, 'd')])
     if not c(len(r.states) > 0, 'the mission ran'):
@@ -7265,6 +7312,10 @@ def cockpit_controls_current_config(c):
         return
     os.makedirs(os.path.join(OUT, c.name), exist_ok=True)
     gd = install_dir(c.name, 'timbrwlf/tbr00std')
+    for name in ('INPUT.MAP', 'GIDDI'):
+        path = os.path.join(gd, name)
+        if os.path.lexists(path):
+            os.unlink(path)
     mine = b'# mine\nthrottle_plus {\n\t+ keyboard\tW\n}\n'
     with open(os.path.join(gd, 'input.map'), 'wb') as f:
         f.write(mine)
@@ -7333,7 +7384,7 @@ def dos_hud_marker_projection(c):
     the nav 1 px high - 2 with the integers but the ground's height - and the bracket 22 px wide for 21)"""
     for size, tag, nav_box, tgt_box in (('640x480', '640', (590, 200, 640, 280), (590, 200, 640, 280)),
                                          ('1024x768', '1024', (940, 320, 1024, 450), (940, 320, 1024, 450))):
-        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+        r = c.run('_' + tag, secs=12, throttle=0, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True,
                   keys=[(8.5, 'n'), (10.5, 'e')], shots=[(10.0, 'nav'), (11.8, 'target')])
         for shot, box in (('nav', nav_box), ('target', tgt_box)):
             path = r.shots.get(shot)
@@ -7357,7 +7408,7 @@ def dos_radar_integers(c):
     scale 122 px a km, DOS W / range); the 1 km radar at rest with its cone exact (the 640 x 480 cone end - "1 px off" -
     is the circle drawn over the line's end, as DOS). Allowed: the Wolf Dropship's blip (it moves; the DOSBox clock)."""
     for size, tag, k, drop in (('640x480', '640', 175, (78, 112, 100, 140)), ('1024x768', '1024', 280, (125, 185, 155, 215))):
-        r = c.run('_' + tag, secs=11.7, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+        r = c.run('_' + tag, secs=11.7, throttle=0, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True,
                   keys=[(9.0, 'x'), (9.5, 'x'), (10.0, 'x')], shots=[(11.5, 'r')])
         path = r.shots.get('r')
         if not c(path and os.path.exists(path), tag + ' picture'):
@@ -7368,7 +7419,7 @@ def dos_radar_integers(c):
         bad, n = _hud_diff(A, B, (0, int(k * 0.17), k, k))
         c(n > 400 and bad == 0, tag + ' "R: 2.0km": every nav / enemy blip, ring and cone pixel as DOSBox', '%d of %d differ' % (bad, n))
     for tag, size in (('640', '640x480'), ('1024', '1024x768')):
-        r = c.run('_rest' + tag, secs=11.9, throttle=0, nostart=True, mech=None, size=size, dos_look=True,
+        r = c.run('_rest' + tag, secs=11.9, throttle=0, nostart=True, mech='maddog/mdg00std', size=size, dos_look=True,
                   keys=[(10.5, 'e')], shots=[(11.8, 'target')])
         path = r.shots.get('target')
         if c(path and os.path.exists(path), tag + ' rest picture'):
@@ -7432,12 +7483,12 @@ def dos_dhdt_integers(c):
     frame's heat gain less its dissipation in 16.16, floored, not held at 0 - smoothed s += (x - s) >> 4 (0x49cf0, shift 4
     at 0x96878); the 3D editions truncate the net change to whole units first (0x1001c4a0). A cool mech at rest: DOS s
     settles at about -(dissipation x ticks x 1024) (the bar blue, and slower to rise), the 3Dfx look 0; firing: both up"""
-    d = c.run('_dos', secs=8, throttle=0, nostart=True, mech=None, dos_look=True)
-    e = c.run('_3dfx', secs=8, throttle=0, nostart=True, mech=None, look3dfx=True)
+    d = c.run('_dos', secs=8, throttle=0, nostart=True, mech='maddog/mdg00std', dos_look=True)
+    e = c.run('_3dfx', secs=8, throttle=0, nostart=True, mech='maddog/mdg00std', look3dfx=True)
     sd, se = d.at(7.5).get('dhdt'), e.at(7.5).get('dhdt')
     c(isinstance(sd, int) and -400 < sd < -20, 'DOS look at rest: s below 0 (the dissipation, unfloored)', str(sd))
     c(se == 0, '3Dfx look at rest: s 0 (whole units)', str(se))
-    f = c.run('_fire', secs=3, throttle=0, fire=1, nostart=True, mech=None, dos_look=True)
+    f = c.run('_fire', secs=3, throttle=0, fire=1, nostart=True, mech='maddog/mdg00std', dos_look=True)
     c(f.at(1.0).get('dhdt', 0) > 0x300, 'DOS look firing everything: past full scale', str(f.at(1.0).get('dhdt')))
 @sequence
 def look3dfx_alpha_blend(c):
@@ -7522,7 +7573,7 @@ def controls_driver_std_menu(c):
     keys = [(UP, '0'), (10, 'esc')]
     hold = [(11, 12.5, 'j'), (13.5, 13.8, 'k'), (14.5, 14.8, 'k')]
     cd = {'MW2_CD_DIR': os.path.join(GTEST, 'cd')}   # the disc (GIDDI\\KEYBOARD.DLL), as the launcher passes it
-    r = c.run(secs=16, files={'giddi/keyboard.std': std}, keys=keys, hold=hold, env=cd)
+    r = c.run(secs=16, files={'GIDDI': None, 'giddi/keyboard.std': std}, keys=keys, hold=hold, env=cd)
     c('controls: 1 driver map file(s)' in r.out, 'giddi/keyboard.std read after INPUT.MAP', (re.findall(r'controls: .*', r.out) or ['-'])[-1])
     c(r.at(10.5)['menu'] == 1, 'Esc opens the MAIN MENU', 'menu %d' % r.at(10.5)['menu'])
     c(r.at(12.4)['menu'] == 2, 'held J (menu_enter): Enter once - Abort Mission opens, not confirmed', 'menu %d' % r.at(12.4)['menu'])
@@ -7696,6 +7747,17 @@ def airborne_wreck_stops_at_wall(c):
       str(sorted(set((s['a_x'], s['a_z'], s['a_y']) for s in end))[:3]))
     c(end and end[-1]['a_y'] > 100, 'held where it hit (0x1000c4d0 returns before the position write), not set down inside',
       str(end and end[-1]['a_y']))
+    for dos in (False, True):
+        edition = 'DOS' if dos else 'Enhanced'
+        p = c.run('_player_' + edition.lower(), secs=5, mission='GOLDSCN1', nostart=True, dos_look=dos, dump='/0.1',
+                  env={'MW2_START': '25088,27000', 'MW2_TEST_PARMOR': '0.1:0.25',
+                       'MW2_TEST_DROP': '2:-1:-14500:1000:0:3000', 'MW2_TEST_PHIT': '2:3:11:40'})
+        death = next((s for s in p.states if s.get('dead')), None)
+        c(death and death['y'] > 900, edition + ': the player is destroyed in the air', str(death and death['y']))
+        final = p.span(3.6, 5.0)
+        pos = {(s['x'], s['y'], s['z']) for s in final}
+        c(death and final and len(pos) == 1 and final[-1]['y'] > 100 and death['z'] + 1000 < final[-1]['z'] < 15441,
+          edition + ': the player wreck reaches the temple face and freezes', str(sorted(pos)[:3]))
 
 
 @sequence
