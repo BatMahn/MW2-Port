@@ -418,13 +418,18 @@ remembers the folder in the per-user settings file:
     game=/path/to/MW2-game
     resolution=desktop        # desktop (native fullscreen) | window | 2560x1440 ...
     aa=4                      # anti-aliasing: 0 2 4 8
-    render=native             # native | 320x200 | 640x480 | 1024x768 (the original's resolutions, scaled up in blocks)
+    render=native             # native | full-native | 320x200 | 640x480 | 1024x768
     renderer=enhanced         # enhanced | dos | 3dfx | ati | s3 | pvr | mga | rendition
     textures=original         # original | titanium (the old edition= is still read: edition=titanium becomes
                               # renderer=enhanced textures=titanium)
     menu_music=auto           # auto | mt32 | sc55 | gus (the menu music's device; auto: the first present, in that order)
     # optional overrides: install= cd= music= ultrasnd= mt32= sc55= models= textures= skygnd= skygnd_fog=
     #                     textures_kind=ati|3dfx  titanium= (the Titanium files' folder)
+
+With the DOS renderer on Metal, `render=native` draws at the display's backing resolution and uses
+GPU interpolation for Gouraud shading. It keeps the DOS palette and dithering, with small differences
+along polygon edges and in the dither pattern. Set `render=full-native` to reproduce the exact DOS
+spans at full resolution, or choose a fixed DOS resolution to get exact spans at 4:3.
 
 Resolution (with anti-aliasing), the display mode and the look are also in the game: the global menu (Esc / right
 button) -> COMBAT VARIABLES (RESOLUTION, DISPLAY, RENDERER, TEXTURES - RENDERER and TEXTURES head the DETAIL group). Controls follow your install's GAMEKEY.MAP / INPUT.MAP; set them up in the

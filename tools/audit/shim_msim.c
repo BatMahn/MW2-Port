@@ -3,7 +3,29 @@
 void shim_set_dos(int on) { msim_dos_int = on; }
 float shim_servo(float cur, float tgt, float T, float ticks) { return drive_servo(cur, tgt, T, ticks); }
 int32_t shim_dos_drive_servo(int32_t value, int32_t target, int ticks, int tau) { return dos_drive_servo(value, target, ticks, tau); }
+void shim_dos_drive_frame(int32_t current, int32_t target, int32_t speed, int32_t factor,
+                          int ticks, int reverse, int slow, int32_t out[2])
+{
+    const double scale = 65536.0 / 182.0;
+    float throttle = current / 1024.0f, drive = (float)(speed / scale), velocity = 0;
+    msim_drive_step(&throttle, &drive, &velocity, target / 1024.0f, reverse ? -0.5f : 1.0f,
+                    (float)(factor * 1024.0 / scale), 1, slow, (float)ticks);
+    out[0] = (int32_t)lroundf(throttle * 1024.0f);
+    out[1] = (int32_t)lround(drive * scale);
+}
 float shim_oct_len(float x, float y, float z) { return oct_len(x, y, z); }
+
+unsigned shim_dos_startup(int distance, unsigned *index)
+{
+    msim s = {0};
+    const float pos[3] = {0, 0, (float)distance};
+    dos_random_init(&s);
+    s.dos_random_index = *index;
+    unsigned delay = startup_ticks(&s);
+    startup_sound(&s, 0xf7, pos);
+    *index = s.dos_random_index;
+    return delay;
+}
 
 void shim_dos_random(const unsigned *limits, unsigned *out, int count)
 {
@@ -20,6 +42,63 @@ int shim_dos_warning_roll(unsigned *index, int weapon, int level)
     int react = dos_warning_roll(&s, weapon, level);
     *index = s.dos_random_index;
     return react;
+}
+
+static void record_selection_sound(void *user, int sound, const float pos[3])
+{
+    *(int *)user = pos ? -sound : sound;
+}
+
+int shim_dos_selection_effects(unsigned *index, int weapon, int skill, int target, int *sound)
+{
+    msim s = {.shot_user = sound, .on_sound = record_selection_sound};
+    dos_random_init(&s);
+    s.dos_random_index = *index;
+    *sound = 0;
+    int locked = dos_weapon_selection_effects(&s, weapon, skill, target);
+    *index = s.dos_random_index;
+    return locked;
+}
+
+int shim_dos_lock_window(int weapon, int32_t x, int32_t y, int32_t z, int32_t yaw, int32_t pitch)
+{
+    return dos_lock_in_window(weapon, x, y, z, yaw, pitch);
+}
+
+void shim_dos_sound(const int32_t input[5], unsigned *index, int out[3])
+{
+    msim s = {0};
+    dos_random_init(&s);
+    s.dos_random_index = *index;
+    out[0] = msim_dos_sound_at(&s, input[0], input[1], input[2], input[3], input[4],
+                               1, &out[1], &out[2]);
+    *index = s.dos_random_index;
+}
+
+int shim_dos_sound_pitch(unsigned *index)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    s.dos_random_index = *index;
+    int rate = msim_dos_sound_pitch(&s);
+    *index = s.dos_random_index;
+    return rate;
+}
+
+int shim_dos_contact_state(int state, int idle_target)
+{
+    msim s = {.player_radius = 500};
+    world_actor actor = {0};
+    combat_unit target = {.offline = idle_target};
+    s.actor_count = 1;
+    s.actors = &actor;
+    s.units = &target;
+    s.player_unit.offline = state == 0 || state == 1;
+    s.player_unit.shutdown = state == 3;
+    s.player_unit.destroyed = state == 4 || state == 5;
+    s.player_unit.intact_out = state == 5;
+    float p[3] = {0, 550, 100}, normal[3], centre[3], velocity[3], radius;
+    return msim_unit_contact(&s, -1, p, p, normal, centre, &radius, velocity) == 0;
 }
 
 void shim_dos_anim_frames(const int32_t *keys, int count, const int32_t *frames,
@@ -367,7 +446,7 @@ int shim_dos_projectile_terrain(int barrier)
     s->shots[0] = (msim_shot){.y = 400, .vz = 200, .dos_vel = {0, 0, 200 * 65536},
                                .life = 90, .owner = -1, .weapon = 22, .homing = -2};
     s->shot_count = 1;
-    combat_step(s, 6.0f / 182.0f, 6);
+    projectile_step(s, 6.0f, 6);
     int alive = s->shot_count;
     free(s);
     return alive;
@@ -416,8 +495,7 @@ int shim_dos_projectile_frame(int ticks, int life, const int32_t pos[3],
         .ax = (float)acc[0] / 65536.0f, .ay = (float)acc[1] / 65536.0f, .az = (float)acc[2] / 65536.0f,
         .life = (float)life, .homing = -2
     };
-    /* Use a fractional dt as in a native frame. Projectile flight must use only the whole ticks. */
-    combat_step(s, (ticks + 0.25f) / 182.0f, ticks);
+    projectile_step(s, ticks + 0.25f, ticks);
     const msim_shot *sh = &s->shots[0];
     out[0] = (int32_t)sh->x; out[1] = (int32_t)sh->y; out[2] = (int32_t)sh->z;
     memcpy(out + 3, sh->dos_vel, sizeof sh->dos_vel);
@@ -457,7 +535,7 @@ int shim_ai_volley(float dt, int ticks, int online, int rounds, int elapsed, int
     unit.weapons[0].homing = -2;
     unit.weapons[0].ammo = -1;
     msim_set_dos(1);
-    combat_step(s, dt, ticks);
+    dos_ai_weapon_step(s, 0, dt, ticks, !online);
     launched = (int)s->shot_serial;
     *lock = mind.lock;
     free(s);
@@ -560,4 +638,59 @@ int32_t shim_dos_shot_face(const float *v, int n, const float *nrm, const float 
     dos_shot_segment segment = dos_shot_segment_make(p0, dv, long_step);
     int32_t normal_y;
     return dos_shot_face(&segment, &face, out, &normal_y);
+}
+
+void shim_dos_gaussian(int32_t *out, int count)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    for (int i = 0; i < count; i++) out[i] = dos_gauss(&s);
+}
+
+void shim_dos_debris_launch(unsigned index, int32_t gravity, int32_t *out)
+{
+    msim s = {0};
+    msim_debris d = {0};
+    dos_random_init(&s);
+    s.dos_gaussian_index = index;
+    s.planet.gravity_g = (float)gravity / 65536.0f;
+    debris_start_motion(&s, &d, 0, NULL);
+    memcpy(out, d.dos_velocity, sizeof d.dos_velocity);
+    memcpy(out + 3, d.dos_spin, sizeof d.dos_spin);
+    out[6] = (int32_t)s.dos_gaussian_index;
+}
+
+void shim_dos_debris(const int32_t *in, int32_t *out)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    s.dos_random_index = (unsigned)in[10];
+    s.planet.gravity_g = (float)in[11] / 65536.0f;
+    msim_debris d = {.dos_bottom = in[9]};
+    for (int i = 0; i < 3; i++) {
+        d.p[i] = (float)in[i];
+        d.dos_velocity[i] = in[3 + i];
+        d.dos_spin[i] = in[6 + i];
+    }
+    out[6] = dos_debris_step(&s, &d, in[12], out + 7);
+    out[10] = (int32_t)s.dos_random_index;
+    for (int i = 0; i < 3; i++) {
+        out[i] = (int32_t)d.p[i];
+        out[3 + i] = d.dos_velocity[i];
+    }
+}
+
+unsigned shim_dos_damage_rolls(unsigned index, int location, int damage, int armor)
+{
+    msim s = {0};
+    dos_random_init(&s);
+    s.dos_random_index = index;
+    combat_unit u = {.dos_roll = ms_roll, .dos_roll_context = &s};
+    combat_damage_live = 1;
+    for (int i = 0; i < 8; i++) {
+        u.armor[i] = (float)armor;
+        u.internal[i] = 100;
+    }
+    combat_damage_at(&u, (float)damage, location, &s.rng);
+    return s.dos_random_index;
 }

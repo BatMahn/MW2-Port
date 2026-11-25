@@ -21,6 +21,11 @@ int  combat_auto_eject(void) { return g_auto_eject; }
 
 static int rand_n(unsigned *s, int n) { return n > 0 ? (int)(rnd(s) % (unsigned)n) : 0; }   /* engine 0x1003d910: table[i] % n */
 
+static int damage_roll(const combat_unit *u, unsigned *fallback, int limit)
+{
+    return limit > 0 && u->dos_roll ? (int)u->dos_roll(u->dos_roll_context, (unsigned)limit) : rand_n(fallback, limit);
+}
+
 static float range_cm(int w) { return (float)sim_weapons[w].range; }   /* table +0x40 */
 
 static inline sim_weapon weapon_spec(int w)
@@ -279,7 +284,7 @@ void combat_tick(combat_unit *u, float dt, int dos_ticks)
         } else if (h > 100 && u->override) {
             if (!u->invulnerable && dos_ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
                 /* 0x250f0: one 15-bit draw modulo 500 times this frame's whole ticks. */
-                if (rnd(&u->rng) % (500ull * (unsigned)dos_ticks) == 0) {
+                if (damage_roll(u, &u->rng, 500 * dos_ticks) == 0) {
                     cook_off(u);
                     if (u->destroyed) u->down_in_update = 1;
                 }
@@ -482,7 +487,7 @@ static void crit_item(combat_unit *t, int loc, int idx, int silent)
         else if (eq >= 5300 && eq <= 5450) t->display_hits++;   /* cockpit displays: 0x1001e670(flag 0), each instrument 2 in 10 */
         else if (eq == 5700) t->display_hits5++;                /* 0x10016e33: 0x1001e670(flag 1), each instrument 5 in 10 */
         else if ((eq == 8000 || eq == 9000) && !silent) {      /* endo steel / ferro: another entry takes it, silently */
-            idx = rand_n(&t->rng, t->slot_count[i]);
+            idx = damage_roll(t, &t->rng, t->slot_count[i]);
             silent = 1;
             continue;
         }
@@ -568,7 +573,7 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
     if (!combat_damage_live || t->invulnerable || !(dmg > 1e-7f) || loc < 1 || loc > 8) return;
     /* a CT hit is spread: the 3D editions rand(3) -> 2 / 3 / 4 (0x10017264); DOS rand(2) -> 2 / 3 (MW2.EXE 0x263c8) -
      * DOSBox AQUASCN1 H T A L: one side torso and the CT take every hit, the other side torso none */
-    if (loc == 3) loc = 2 + rand_n(rng, combat_ct_split == 2 ? 2 : 3);
+    if (loc == 3) loc = 2 + damage_roll(t, rng, combat_ct_split == 2 ? 2 : 3);
     i = loc - 1;
     t->damage_taken += (int)dmg;
     if (t->loc_gone[i]) return;                              /* already gone: no transfer (nothing more can happen) */
@@ -588,11 +593,11 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
     if (t->internal[i] < 1e-7f) { destroy_location(t, loc); return; }
     /* critical hits: rand(5) rolls (re-drawn each pass); rand(100) < 20 with items in the list is one: 12 destroys the
      * location, else rand(count) picks the entry */
-    for (n = 0; n < rand_n(rng, 5); n++) {
-        r = rand_n(rng, 100);
+    for (n = 0; n < damage_roll(t, rng, 5); n++) {
+        r = damage_roll(t, rng, 100);
         if (r < 20 && t->slot_count[i] > 0) {
             if (r == 12) { destroy_location(t, loc); return; }
-            crit_item(t, loc, rand_n(rng, t->slot_count[i]), 0);
+            crit_item(t, loc, damage_roll(t, rng, t->slot_count[i]), 0);
             if (t->destroyed || t->loc_gone[i]) return;
         }
     }

@@ -360,8 +360,10 @@ retry:
         g_win_fmt = COLOR_FMT;
         goto retry;
     }
-    printf("gpu: %s (%s)\n", rb_backend_name(), g_devname);
-    fflush(stdout);
+    if (MW2_DEVELOPMENT_LOGS) {
+        printf("gpu: %s (%s)\n", rb_backend_name(), g_devname);
+        fflush(stdout);
+    }
     return 0;
 }
 

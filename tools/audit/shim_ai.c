@@ -3,6 +3,29 @@
 void shim_set_dos(int on) { ai_dos_int = on; }
 float shim_nav_turn(float err) { return ai_nav_turn(err); }
 
+struct ammo_rolls { unsigned values[2]; int used; };
+
+static unsigned ammo_roll(void *user, unsigned limit)
+{
+    struct ammo_rolls *r = user;
+    return r->values[r->used++ % 2] % limit;
+}
+
+void shim_dos_empty_weapons(int cls, int level, int jets, unsigned first, unsigned second, int out[3])
+{
+    struct ammo_rolls rolls = {{first, second}, 0};
+    ai_mind m = {.cls = cls, .state = AI_ATTACK, .man = 0, .prev_man = -1, .forced_man = -1,
+                 .man_limit = 900, .random_roll = ammo_roll, .random_context = &rolls};
+    const ai_view view = {.moving = 1, .out_of_weapons = 1, .pilot_level = level, .enemy_dist = 14000,
+                          .can_jump = jets, .jet_fuel = jets ? 100 : 0};
+    float range = 0, dist = 0, weave = 0;
+    int avoiding = 0;
+    attack_manoeuvre(&m, &view, 6, &range, &dist, &weave, &avoiding);
+    out[0] = m.forced_man;
+    out[1] = m.queue5;
+    out[2] = rolls.used;
+}
+
 void shim_dos_close(int previous, int distance, int ticks, int out[3])
 {
     ai_mind m = {.man = 2, .state = AI_ATTACK, .last_dist = (float)previous,

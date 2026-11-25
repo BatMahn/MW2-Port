@@ -203,7 +203,13 @@ static int anim_key_step(const anim_set *s, anim_player *p, int req, int gait, i
         int loop = 1, b;
         if (fl & 0x4)
             for (loop = 0, b = 0; b < 4 && (int8_t)s->key_bytes[f][b] != -1; b++) if ((int8_t)s->key_bytes[f][b] == req) { loop = 1; break; }
-        if (loop) { int j = f - 1; while (j > 0 && !(s->key_flags[j] & 0x2)) j--; next = j; }
+        if (loop) {
+            int j = f - 1;
+            /* DUMBANIM has no loop marker. DOS leaves the track between
+             * keys for one update and resumes through its initial key. */
+            while (j >= (dos ? 0 : 1) && !(s->key_flags[j] & 0x2)) j--;
+            next = j;
+        }
     }
     if ((!jumped && (fl & 0x400)) || next >= s->key_count) { p->left = 0; next = -1; }
     if (jumped) p->cur = target;
@@ -249,6 +255,7 @@ int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int r
         }
     }
     int ev = anim_key_step(s, p, req, gait, rate, (float)elapsed, 1);
+    p->dos_footstep |= (ev & ANIM_EV_STEP) != 0;
     if (entering_key && p->key >= 0) {
         for (int k = 0; k < s->track_count; k++)
             p->dos_pending[k] = (int32_t)((uint32_t)p->dos_pending[k] + (uint32_t)s->tracks[k].delta[p->key]);

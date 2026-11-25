@@ -275,8 +275,10 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
     glEnableClientState(GL_COLOR_ARRAY);
     client_active(0);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-    printf("gpu: OpenGL (%s)\n", g_devname);
-    fflush(stdout);
+    if (MW2_DEVELOPMENT_LOGS) {
+        printf("gpu: OpenGL (%s)\n", g_devname);
+        fflush(stdout);
+    }
     if (MW2_DEVELOPMENT_LOGS && g12_trace) fprintf(stderr, "gl12: extensions %s\n", ext ? ext : "");
     return 0;
 }

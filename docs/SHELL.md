@@ -52,17 +52,21 @@ changes apply immediately, and the levels are saved to MW2SND.CFG.
 
 | Screen | Playback checked against the executable and assets |
 |---|---|
-| Title | DOS loops 0x4a at target volume 0x1e. The Windows 95 title plays its edition's 0x68 introduction before starting the loop. |
-| Clan halls | Wolf loops 0x4f at 0x32. Jade Falcon plays the AJFBALL Smacker track. Opening the Archive plays 0x67 and the projector clip. Windows 95 adds the 0x69 training announcement for a new pilot. |
+| Title | DOS loops 0x4a with a fade from volume 5 to 0x1e (0x2a4ad). The Windows 95 title waits for playback of its 0x68 introduction to finish before starting the loop. |
+| Clan halls | Wolf loops 0x4f at 0x32. Jade Falcon plays the AJFBALL Smacker track. Its left door plays for Cadet Training, its right door plays for the Ready Room, and both open on return from the Register (DOS 0x1ddba, 0x1de6a, 0x1df82). The two opening clips carry identical audio, played once. Opening the Archive plays 0x67 and the projector clip. Windows 95 adds the 0x69 training announcement for a new pilot. Wolf starts it on entry and Jade Falcon starts it after the doors. |
 | Trials of Grievance and Register | 0x52 and 0x51 respectively at 0x1e. The trial announcement only starts from the title, and both samples stop on leaving. |
 | Cadet Training and Ready Room | Training loops 0x4c at 0x32 from entry, with the panel's separate Smacker track. Ready Room uses 0x64 at 0x32 with the holotable before entering the lab. |
 | Star Configuration and Mech Lab | 0x65 for formation, roster and variant buttons. 0x66 for the Lab and Star Configuration transitions. Chassis introductions use 0x53–0x63 at 0x28, with the previous chassis sound stopped. The lab initializes 0x4b without playing it. |
 | Customize | 0x50 at 0x28 when selecting a location on the armour or criticals diagram. |
-| Archive | 0x67 at 0x32 on opening a long entry. Ordinary page changes use the current room audio. |
+| Archive | 0x67 at 0x32 on opening a long entry. Model entries also loop 0x4d at volume 5 (0x3d7f0). Leaving the entry stops its loop. |
 | In-mission menu | The DOS engine uses SNDS 0xdb for selection movement and 0xe1 to open a page. Both use the camera-relative mixer. The camera listener sequence checks their sample IDs, levels and pans. |
 
-The title's DOS fade timing, the Windows Jade Falcon announcement's door-clip timing and the
-Archive's embedded-media sound object (0x4d) still need playback comparisons.
+DOSBox at 45,000 cycles advanced the title fade about every 18–19 ms and reached full volume
+roughly 460 ms after starting. The port uses that playback time for the original volume steps.
+The DOS shell audio regression checks the initial gain, model cues in both clans, and the
+opening and closing door sounds before Cadet Training starts.
+With the Windows 95 database, the title ambience started 2.581 s after the introduction began.
+The introduction sample lasts 2.572 s.
 
 ## Music (XMIDI) and the Gravis UltraSound
 - DATABASE entries 33-72 are 40 LZSS-packed XMIDI songs in five arrangements of eight, one per
@@ -348,7 +352,8 @@ Cadet Training (screen 14, FUN_0003d980): 0x7f23c (7; background slot 13 / 20): 
 COMPUTER, MECH HANDLING, WEAPONS USAGE, HUNTING, INSPECTION, TRIAL at (450, 13 + 25 k) -> tnw1-6 / tnj1-6; clips
 awotrnwn (453,0) once, instructor awotrnwa / awotrnwb alternating at (72,224).
 Archive (screen 5, FUN_00026b50): ARCHWO.MW2 / ARCHJF.MW2: u32 count (70), u32 offsets[count + 1], pages of tagged
-fields 00 01 title, 00 04 <target> 00 <name> (links), 00 02 text (\aNN: the next word links to link NN), 00 ff end.
+fields 00 01 title, 00 04 <target> 00 <name> (links), 00 02 text (\aNN: the next word links to link NN),
+00 03 <entry> 00 (model), 00 ff end.
 Note: the registry record is 60 bytes (one runtime field after the name).
 
 ## Combat Variables (global menu entry 2) and the port's display settings

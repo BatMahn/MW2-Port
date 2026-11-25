@@ -48,6 +48,7 @@ found 35 mismatches in v1.1.48 and none in v1.1.49. The geometry test records cr
 | leg_turn_demand | 0x27c87..0x27d70 | msim_leg_demand | **fixed** (v1.1.39) |
 | servo_step | 0x49b80 | drive_servo | PASS |
 | dos_drive_servo | 0x49b80 | DOS drive speed servo, including signed sub-threshold values | PASS |
+| dos_drive_input_order | 0x27ecf, 0x49b80 | Previous throttle feeds the drive target before movement steps both servos | PASS |
 | servo_setup | 0x49b40 (T = chop(s x 182)) | servo T constants | PASS |
 | turret_twist | 0x2edc3..0x2ee2a + 0x49b80 | msim_twist_round | PASS |
 | collision_damage | 0x20890 / 0x20a50 -> 0x20930 | collide | PASS |
@@ -522,27 +523,116 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   including handoffs between two units and a missing recipient.
 
 
+- The DOS Gaussian table (0x49fe0 and 0x4a0b0), initial debris velocity and spin (0x2b3f0),
+  and airborne and landing updates (0x2b930) have executable comparisons. The body pass runs
+  in physics-slot order. A detached part starts from its world orientation at the break.
+- Damage uses the shared DOS uniform stream. The executable comparison checks draw order for
+  centre-torso hits and penetrations. The fire decision reads horizontal range (0x2a43d) and
+  checks the torso's forward hemisphere before tracing line of fire (0x2bf20).
+- In Bronze Anvil, native gunships enter manoeuvre 12 while attacking the moving convoy.
+  The first gunship takes the high helicopter listed first in BRONALY1. The port had chosen a
+  lower, closer helicopter and calculated pitch from the ground. The regression checks the
+  target assignment, changing pitch from flight altitude, and the start of circling.
+
+### Missile lock and weapon selection
+
+- The DOS player and AI lock check shares the original whole-centimetre squared range and
+  16.16 bearing and elevation calculations (0x52ea0 and 0x2ab60). Executable comparisons cover
+  each guided weapon, both range boundaries, and one increment to either side of the 16-degree cone.
+- After a successful weapon selection, the executable checks the guided flag, rolls for an
+  immediate lock when the pilot's range byte is at most four, then plays ENEMYFIR for a player
+  target (0x2ea63–0x2eae8). The comparison checks the lock bit, warning, and random cursor.
+  The caller replaces the temporary pitch additions for weapon IDs 0 and 4 at 0x2e971.
+- DOS AI sets the trigger during the decision (0x2e860). The controller dispatches weapons
+  during the same update (0x27812 then 0x27836, and 0x2ed2e then 0x2ed44). The port follows that
+  order, including ongoing volleys whose target has disappeared. Native frame snapshots show unit
+  movement in the first callback pass (0x15d84 → 0x24810), projectile flight at 0x15d8e, and the
+  controller in the second callback pass (0x15d9d → 0x24860). The port follows this order and
+  evaluates objectives after combat. Shots launched during the controller pass first move on the
+  following update.
+  When an AI fires, the eye and mounts are resolved from the updated root and servos with the
+  previous animation key still active. The rendered pose advances later in the animation pass.
+
+### Live route, contact, and sound comparisons
+
+- Captured DOS frame schedules in Bronze Anvil cover circling and pursuit for both gunships at
+  their recorded 30 m and 45 m flight heights. The one-track CHPRANIM sequences have zero pose
+  deltas and carry the `0x10` key flag that selects the 91-tick drive servo (0x1b0d5 and 0x27fdf).
+  With those keys running, the first pass reduced the horizontal differences to 5.69 m and
+  3.12 m. The current controller starts the player first and interleaves one order assignment
+  per leader visit with the remaining startup draws. With movement using the previous controller
+  inputs, the maximum differences are 1 cm and 5 cm over 327 combined samples. The original
+  only permits a level-one class-1 mech to charge after running out of weapons (0x2c72f and
+  0x2c56c). Aircraft and vehicles now take the native retreat branch after the same random draws.
+- The DOS drive servo uses the previous throttle value (0x27ecf), then movement updates the
+  speed and throttle servos (0x26a51 and 0x26a5c). Gait selection also reads the previous throttle,
+  and steering reads the previous speed (0x27ce3). Power-up retains the steering input while
+  clearing the leg servo demand. Active movement starts on the update after the startup transition.
+  The drive comparison matches 3,000 consecutive native frame steps across seven nonzero tick
+  intervals. With this order, TNJ6's player and instructor match all 543 horizontal positions on
+  the captured schedule. The controller's separate contact-state check (0x1fd0c) applies to both
+  player and AI movement. Powered-down targets remain in the scan.
+- The TNJ1 replay from the stock mission matches all 597 horizontal player positions. The
+  instructor's maximum horizontal difference is 1 cm. It begins startup on the second controller
+  visit, and the estimated boot interval accounts for time already on the mission clock.
+- In Silver Staff the Chemical Plant's class-7 scenery starts with the last model in each
+  object's detail chain (0x383bb). The world bounding sphere is valid from load. The selected
+  model's face vertices remain local until it enters the camera's view (0x3f500 and 0x3ce25).
+  Native movement queries through the plant returned clear while it was beyond the view range.
+  The port keeps those initial faces until the camera is in range, then retains the posed faces.
+  On the 359-frame replay the Gargoyle followed the route to within 1 cm and the Dire Wolf
+  matched every recorded horizontal position. A nearby player still hits the plant's posed wall.
+- An isolated replay of 78 recorded player contacts used the original attempted displacement
+  and the recorded target position on each frame. The port reproduced the selected contact
+  and final horizontal position to the centimetre in all 78 cases. The full-run divergence
+  remains with the state feeding the contact calculation or with cases outside that sample.
+- Native traces recorded positional sound draws between startup and live AI decisions.
+  The positional wrapper (0x40bc0 → 0x40c90) draws a pitch for in-range events before sample
+  allocation, even when allocation fails. The one-shot mixer (0x409b0) uses the configured
+  sample rate. Scenery loops use the drawn rate after acquiring a channel (0x41016).
+  The executable comparisons check gain, pan, propagation delay, rate selection, and the
+  shared random cursor. Startup cues follow the timer draw and advance the cursor only in range.
+  Footstep events survive from the previous animation task until the controller consumes them
+  after weapon dispatch (0x27b5d → 0x1f4f0). The player's gait cue uses the sequence then playing.
+  The load-time placement pass leaves DOS sound tasks unstarted. Scenery sound runs with the
+  world tasks before pooled debris.
+
+- The animation comparison ran 66,720 checks across all 38 original animation records. The
+  DUMBANIM tracks have a loop flag without a matching marker. The executable returns key `-1`
+  on that update (0x1b016–0x1b02b) and starts the track again on its next visit.
+- The Golden Spade turret's live aim uses the target and turret object centres (0x2a210).
+  DOS clears both servo demands while offline (0x2ee36 for turrets and 0x280af for mechs).
+  Across 77 paired online turret samples, yaw and pitch differed by at most 0.31 and 0.004 degrees
+  respectively. The projectile convergence ray still starts at the model's eye.
+- The stationary Aquiline Fire capture puts the first hit on the player's Mad Dog at tick 2887
+  (15.86 s). Replaying the same frame boundaries reproduces that tick. The sequence test uses
+  the captured schedule for the first hit and six fixed rates for weapon reach, armour distribution,
+  and time to destruction.
+- All 306 OpenGL sequences passed, including the DOS shell audio and volume preview checks.
+  The DOS objective sweep completed all 59 missions without fallbacks under AddressSanitizer and
+  UndefinedBehaviorSanitizer. All 62 executable comparison groups and four focused software
+  Vulkan sequences passed.
+
 ## Not checked
 
-- **Live manoeuvre execution.** Glide, flank, and circling have controlled comparisons. Their paths
-  through terrain and interleaved waypoints from several aircraft still need DOS traces.
+- **Live manoeuvre execution.** Bronze Anvil has a paired flight replay. The cause of its
+  remaining horizontal drift and the full paths through terrain in other missions remain open.
 - **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
-  Full playback comparisons across every mission, the flight of detached mech parts and world
-  fragments, and exact debris spawn timing and trajectories remain open.
-- **Complete contact trajectories.** The two training traces establish which side the player passes
-  on and how the instructor recoils. Frame-by-frame replay through terrain face selection, controller
-  decisions and differing frame schedules still needs comparison.
-- **Mission-wide random ordering.** Startup, AI, and missile offsets share the DOS table. Calls from
-  damage, effects, and other sound playback still need comparison against the live call order.
+  Full playback comparisons across every mission, the live flight of detached mech parts and world
+  fragments, and their spawn timing remain open. Debris landing was compared on flat ground.
+- **Scenery detail changes.** The Silver Staff replay covers scenery before its first camera-range
+  update. Side-of-view culling and switches between the nearer scenery models still need paired
+  comparisons.
+- **Simultaneous contacts.** Contact cases outside the recorded training replays still need
+  comparison.
+- **Mission-wide random ordering.** Startup, AI, damage, missile offsets and positional sounds
+  use the DOS table. The complete live order, especially for simultaneous effects, remains open.
 - **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
   start. The stock mission captures still lack a natural target handoff during an active volley.
-- **The weapon pick's follow-up** after 0x2ea63. Selection through 0x2ea63 has differential coverage for
-  range, heat, readiness, ammunition and the random roll. The pitch additions for weapon IDs 0 and 4
-  are overwritten at 0x2e971 in the caller before the torso controller reads the input.
 - **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's
   IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
   jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule
   until they get an audit of their own.
-- **Dropship and turret aim end to end** was not compared frame by frame against DOSBox. Its parts are tested: the
-  torso inputs (torso_inputs), the twist servo (turret_twist). The fire decision's interval (rand(range byte) x 0x16 ticks) was checked by reading. The eye position the
-  aim starts from (v1.1.40) was checked by reading only.
+- **Dropship aim and projectile convergence.** The Golden Spade capture covers live turret servo
+  inputs. The full dropship firing path and projectile convergence across other missions still
+  need paired captures.

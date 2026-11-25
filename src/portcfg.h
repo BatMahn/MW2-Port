@@ -24,8 +24,8 @@
  *                          default: the game folder's titanium/
  *   resolution=desktop | window | <w>x<h>     (desktop: native fullscreen, the default)
  *   aa=0 | 2 | 4 | 8
- *   render=native | 320x200 | 640x480 | 1024x768   (the sim's picture: the display's resolution, or one of the
- *                          original's RESOLUTION choices, drawn at that size and scaled up in blocks to 4:3)
+ *   render=native | full-native | 320x200 | 640x480 | 1024x768   (both native modes use the whole drawable.
+ *                          full-native uses exact DOS Gouraud spans on Metal. Fixed sizes present at 4:3)
  *   hud_layout=wide | original   (wide, the default: on a window wider than 4:3 the HUD's left-hand instruments - radar,
  *                          altitude tape, target display - sit at the window's left edge and the right-hand ones - weapon
  *                          list, damage display / viewport, throttle bar, speed - at its right edge, each as far from
@@ -76,6 +76,7 @@ typedef struct {
     int w, h;
     int aa;
     int render_w, render_h;   /* 0 = native */
+    int render_full_native;   /* native with exact DOS Gouraud spans */
     float speed;              /* game speed: 1.0 = real time (speed= in the file; default 0.85) */
     char game[PORTCFG_PATH], install[PORTCFG_PATH], cd[PORTCFG_PATH], music[PORTCFG_PATH], ultrasnd[PORTCFG_PATH], mt32[PORTCFG_PATH];
     char sc55[PORTCFG_PATH];         /* the Roland SC-55 ROM dumps (the game folder's sc55/) */

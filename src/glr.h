@@ -232,6 +232,8 @@ void glr_dos_view(const glr *r, uint32_t *zhw, int *w, int *h);
  * flat lit = ramp x 16 + level, textured = LUMA[level][texel] - with the level from the light, the ambient level and the
  * distance (MW2.EXE 0x38ae3, 0x3e086, 0x38ee0); luma: 16 x 256 (LUMA record), pal: the mission's PAL. */
 void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma);
+/* Use screen-linear vertex shades with the DOS palette. Set before uploading meshes. */
+void glr_set_dos_interpolated_gouraud(glr *r, int enabled);
 /* replace only the DOS palette (the time-of-day fades) */
 /* The 3D editions' palette fade (engine 0x1002ad50 -> DAT_1024e494, DAT_10160cf0): tint != NULL - every textured
  * fragment (objects, ground, sky, billboards, effects) times tint (slot 0xc INFRARED (0, 1, 8/255), slot 0x11 the red

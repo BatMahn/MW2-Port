@@ -81,7 +81,7 @@ static bool shell_poll(SDL_Event *e)
                 memset(e, 0, sizeof *e);
                 e->type = SDL_EVENT_MOUSE_BUTTON_DOWN; e->button.button = SDL_BUTTON_LEFT; e->button.down = true;
                 e->button.x = (float)x; e->button.y = (float)y;
-                fprintf(stderr, "PUSH %d ms: click %d,%d\n", ms, x, y);
+                if (MW2_DEVELOPMENT_LOGS) fprintf(stderr, "PUSH %d ms: click %d,%d\n", ms, x, y);
                 while (*q && *q != ';') q++;
                 if (*q) q++;
                 return true;
@@ -883,18 +883,14 @@ static shell_snd *shell_sound_load(int index)
     }
     return z->pcm && z->len > 0 && z->rate > 0 ? z : NULL;
 }
-static int shell_sound_ms(int index)   /* the sound's length in ms; -1: not in this DATABASE */
-{
-    shell_snd *z = shell_sound_load(index);
-    return z ? (int)((long)z->len * 1000L / z->rate) : -1;
-}
-static void shell_sound(int index, int vol)
+static void shell_sound_play(int index, int vol, int loop)
 {
     shell_snd *z;
     if (!g_sfx || !(z = shell_sound_load(index))) return;
     sfx_stop_pcm(g_sfx, z->pcm);
-    sfx_play_pcm(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f, 0);
+    sfx_play_pcm(g_sfx, z->pcm, z->len, z->rate, (float)vol / 127.0f, loop);
 }
+static void shell_sound(int index, int vol) { shell_sound_play(index, vol, 0); }
 static void shell_sound_stop(int index) { if (index > 0 && index <= 160 && g_sfx && g_snd[index - 1].pcm) sfx_stop_pcm(g_sfx, g_snd[index - 1].pcm); }
 static shell_snd *g_amb;
 static float g_amb_level;
@@ -917,6 +913,17 @@ static void play_ambient_vol(int entry, int vol)
 }
 
 static void play_ambient(int entry) { play_ambient_vol(entry, 0x1e); }
+
+/* DOS shell 0x2a4ad starts at volume 5 and advances one unit every 500 menu polls.
+ * That took 18–19 ms per step in DOSBox at 45,000 cycles with the title visible. */
+static void title_fade(Uint64 elapsed)
+{
+    unsigned level = 5 + (unsigned)((elapsed * 109) / 2000);
+    float gain = (float)(level < 30 ? level : 30) / 127.0f;
+    if (!g_amb || gain == g_amb_level) return;
+    g_amb_level = gain;
+    sfx_pcm_level(g_sfx, g_amb->pcm, gain, 0.0f);
+}
 
 /* the Mech Lab's chassis voices, in the lab's chassis order (0x8367c + 0x10; -1 none) */
 static const int LAB_VOICE[18] = {0x55, 0x59, 0x58, 0x5c, 0x5e, 0x5a, 0x57, 0x5d, 0x5f, 0x60, 0x56, 0x61, 0x5b, 0x62, 0x53, 0x54, -1, 0x63};
@@ -1264,7 +1271,7 @@ static void music_device_open(int pref, int startup)
         if (want && g_mt32) { mt32_close(g_mt32); g_mt32 = NULL; }
         g_use_builtin = 0;
         if (g_sfx && !g_mt32 && !g_bank && !g_sc55 && qtmidi_open() == 0) { g_use_builtin = 1; g_builtin.midi = qtmidi_msg; }
-        if (g_use_builtin) fprintf(stderr, "mw2: menu music QuickTime's synthesizer\n");
+        if (MW2_DEVELOPMENT_LOGS && g_use_builtin) fprintf(stderr, "mw2: menu music QuickTime's synthesizer\n");
     }
 #endif
     if (pref != PORTCFG_MM_AUTO && !g_mm_have[pref])
@@ -1273,12 +1280,14 @@ static void music_device_open(int pref, int startup)
                 pref == PORTCFG_MM_SC55 ? " (and the legacy build has no SC-55)" :
 #endif
                 "");
-    if (startup) fprintf(stderr, "mw2: audio %s (%s), ", g_sfx ? "on" : "OFF - no audio device", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none");
-    else fprintf(stderr, "mw2: ");
-    fprintf(stderr, "menu music %s%s%s%s%s%s\n", startup ? "" : "now ",
-            g_mt32 ? "Roland MT-32 (ROMs from " : g_sc55 ? "Roland " : g_bank ? "Gravis UltraSound patches (" : "OFF - put the MT-32 ROMs (MT32_CONTROL.ROM, MT32_PCM.ROM) in the game folder's mt32/",
-            g_sc55 ? g_mm_model : "", g_sc55 ? " (ROMs from " : "",
-            g_mt32 ? g_mm_mt32 : g_sc55 ? g_mm_sc55 : g_bank ? g_mm_gus : "", g_mt32 || g_bank || g_sc55 ? ")" : "");
+    if (MW2_DEVELOPMENT_LOGS) {
+        if (startup) fprintf(stderr, "mw2: audio %s (%s), ", g_sfx ? "on" : "OFF - no audio device", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none");
+        else fprintf(stderr, "mw2: ");
+        fprintf(stderr, "menu music %s%s%s%s%s%s\n", startup ? "" : "now ",
+                g_mt32 ? "Roland MT-32 (ROMs from " : g_sc55 ? "Roland " : g_bank ? "Gravis UltraSound patches (" : "OFF - put the MT-32 ROMs (MT32_CONTROL.ROM, MT32_PCM.ROM) in the game folder's mt32/",
+                g_sc55 ? g_mm_model : "", g_sc55 ? " (ROMs from " : "",
+                g_mt32 ? g_mm_mt32 : g_sc55 ? g_mm_sc55 : g_bank ? g_mm_gus : "", g_mt32 || g_bank || g_sc55 ? ")" : "");
+    }
 }
 /* a new menu_music= choice (Combat Variables, on leaving it): the song stopped, the device closed and the chosen one
  * opened, the song playing before started again on it (its number in the new device's set) */
@@ -4180,7 +4189,8 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         if (pc.mode == 0) snprintf(aa, sizeof aa, "DESKTOP");
         else if (pc.mode == 1) snprintf(aa, sizeof aa, "WINDOWED");
         else snprintf(aa, sizeof aa, "%dx%d", pc.w, pc.h);
-        if (pc.aa) snprintf(res, sizeof res, "NATIVE %dX AA", pc.aa); else snprintf(res, sizeof res, "NATIVE");
+        if (pc.aa) snprintf(res, sizeof res, "%s %dX AA", pc.render_full_native ? "EXACT" : "NATIVE", pc.aa);
+        else snprintf(res, sizeof res, "%s", pc.render_full_native ? "NATIVE EXACT" : "NATIVE");
         if (!headless || script) {
             while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
@@ -4216,7 +4226,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         else if (i == 7) {   /* RESOLUTION: NATIVE (no AA, 2X, 4X, 8X) -> 320x200 -> 640x480 -> 1024x768 */
                             if (!pc.render_w) {
                                 if (pc.aa < 8) pc.aa = pc.aa == 0 ? 2 : pc.aa * 2;
-                                else { pc.render_w = 320; pc.render_h = 200; }
+                                else { pc.render_w = 320; pc.render_h = 200; pc.render_full_native = 0; }
                             } else if (pc.render_w == 320) { pc.render_w = 640; pc.render_h = 480; }
                             else if (pc.render_w == 640) { pc.render_w = 1024; pc.render_h = 768; }
                             else { pc.render_w = pc.render_h = 0; pc.aa = 0; }
@@ -5265,20 +5275,30 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     load_bg(clan == 1 ? 18 : 11);
     while (next == -1) {
         static arch_tok tok[3000];
-        int nt = 0, text_bytes = 0, links[64], nl = 0, i, nlines = 1, npages, hover = -1, en[4], n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
+        int nt = 0, text_bytes = 0, media = 0, links[64], nl = 0, i, nlines = 1, npages, hover = -1, en[4], n = (int)(d[0] | d[1] << 8 | d[2] << 16 | (uint32_t)d[3] << 24);
         char title[64] = "";
         {   /* parse and lay out the page */
             uint32_t a = 0, b = 0;
             const int sp = text_width(&g_fthin, " ");
-            if (page >= 0 && page < n && 8 + page * 4 + 4 <= len) {
+            if (page >= 0 && page < n && 12 + (uint64_t)page * 4 <= (uint64_t)len) {
                 a = d[4 + page * 4] | d[5 + page * 4] << 8 | d[6 + page * 4] << 16 | (uint32_t)d[7 + page * 4] << 24;
                 b = d[8 + page * 4] | d[9 + page * 4] << 8 | d[10 + page * 4] << 16 | (uint32_t)d[11 + page * 4] << 24;
             }
             if (b > (uint32_t)len) b = (uint32_t)len;
-            while (a + 2 <= b) {
+            while (a < b && b - a >= 2) {
                 int tag = d[a + 1];
                 a += 2;
                 if (tag == 0xff) break;
+                if (tag == 3) {   /* Archive model entry, FUN_00027908 */
+                    if (b - a < 2) break;
+                    int entry = d[a];
+                    media = entry > 0 && entry <= n;
+                    a += 2;
+                    continue;
+                }
+                if (tag == 4 && b - a < 2) break;
+                uint32_t start = a + (tag == 4 ? 2u : 0u);
+                if (!memchr(d + start, 0, b - start)) break;
                 if (tag == 1) { snprintf(title, sizeof title, "%s", (const char *)d + a); a += (uint32_t)strlen((const char *)d + a) + 1; }
                 else if (tag == 4) { if (nl < 64) links[nl++] = d[a] - 1; a += 2; a += (uint32_t)strlen((const char *)d + a) + 1; }
                 else if (tag == 2) {
@@ -5286,7 +5306,8 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                     size_t L = strlen(t), q = 0;
                     int pending = -1, x = 0, line = 0;
                     while (q < L && nt < 3000) {
-                        if (t[q] == '\\' && q + 1 < L) {
+                        if (t[q] == '\\') {
+                            if (q + 1 == L) break;
                             char c = t[q + 1];
                             if (c == 'n') { x = 0; line++; q += 2; continue; }
                             if (c == 't') { if (!(x == 0 && line > 0 && line % ARCH_LINES == 0)) x = (x / ARCH_TAB + 1) * ARCH_TAB; q += 2; continue; }
@@ -5321,6 +5342,8 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
         }
         if (page != sound_page) {
             sound_page = page;
+            shell_sound_stop(0x4d);
+            if (media) shell_sound_play(0x4d, 5, 1);   /* 0x3d7f0 starts the model's looping sound object. */
             if (!headless && text_bytes >= 0x800) shell_sound(0x67, 0x32);   /* 0x27784 / 0x27e3b */
         }
         npages = (nlines + ARCH_LINES - 1) / ARCH_LINES;
@@ -5362,7 +5385,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
                 tc += used;
                 if (*tc == ';') tc++;
                 h = arch_hit(tok, nt, sub, links, nl, n, x, y);
-                printf("archive click: %d,%d -> %d\n", x, y, h);
+                if (MW2_DEVELOPMENT_LOGS) printf("archive click: %d,%d -> %d\n", x, y, h);
                 if (h >= 0) {
                     if (nh < 64) { hsub[nh] = sub; hist[nh++] = page; }
                     page = h; sub = 0;
@@ -5410,6 +5433,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             SDL_Delay(15);
         }
     }
+    shell_sound_stop(0x4d);
     free(d);
     return next;
 }
@@ -6408,7 +6432,7 @@ int main(int argc, char **argv)
                     );
         rd = win ? SDL_CreateRenderer(win, NULL) : NULL;
         if (rd) SDL_SetRenderVSync(rd, 1);
-        fprintf(stderr, "mw2: menus drawn with SDL's %s renderer\n", rd ? SDL_GetRendererName(rd) : "(no)");
+        if (MW2_DEVELOPMENT_LOGS) fprintf(stderr, "mw2: menus drawn with SDL's %s renderer\n", rd ? SDL_GetRendererName(rd) : "(no)");
         tx = rd ? SDL_CreateTexture(rd, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, W, H) : NULL;
         g_rd = rd; g_tx = tx;
         if (rd && !getenv("MW2_TEXT_SMOOTH")) {
@@ -6495,14 +6519,17 @@ int main(int argc, char **argv)
             static int cur = -99;
             if (screen != cur) { g_from_screen = cur == -99 && getenv("MW2_SHELL_FROM") ? atoi(getenv("MW2_SHELL_FROM")) : cur; cur = screen; }   /* tests: MW2_SHELL_FROM = the screen before the first */
         }
-        smk *ov = NULL, *xov[8] = {0};
+        smk *ov = NULL, *xov[8] = {0}, *doors[2] = {0};
         Uint64 xlast[8] = {0};
+        Uint64 door_last[2] = {0}, door_until = 0;
         const char *pending_video = NULL;
-        smk *holo = NULL;   /* the hall's holoprojector clip, played in place before the Archive (see the click) */
-        int holo_x = 0, holo_y = 0, holo_next = -1, holo_clan = clan;
+        smk *holo = NULL;   /* a hall clip played in place before changing rooms */
+        int holo_x = 0, holo_y = 0, holo_next = -1, holo_clan = clan, holo_frame = -1;
         Uint64 holo_last = 0;
         int next = -1, nclan = clan, f = 0, amb_entry = -1;
-        Uint64 amb_due = 0;
+        Uint64 title_started = 0;
+        int pilot_announcement = 0;
+        const shell_snd *title_intro = NULL;
         Uint64 last = SDL_GetTicks();
         apply_music(screen, clan);   /* main 0x36700 applies the screen's music first - the cinematic screens 15 / 16 stop it */
         if (screen == 16) {   /* the ending (mend / mend2), then the clan hall */
@@ -6629,22 +6656,51 @@ int main(int argc, char **argv)
         {   /* the main menu (Windows 95 MW2SHELL.DLL 0x10005200): "MechWarrior 2... choose your clan" (DATABASE 0x68, only in
              * that edition's DATABASE.MW2) at volume 0x78, and the 0x4a loop only once it has ended (the 0x404 handler
              * 0x10005342: 0x1002561e not playing); without 0x68 the loop starts at once, as the DOS shell's (0x2a410) */
-            int vms = sd && sd->id == 8 && !headless ? shell_sound_ms(0x68) : -1;
-            amb_due = 0;
-            if (vms >= 0) { play_ambient(-1); shell_sound(0x68, 0x78); amb_due = SDL_GetTicks() + (Uint64)vms; amb_entry = sd->ambient; }
-            else play_ambient_vol(sd ? sd->ambient : -1, sd && sd->id == 1 ? 0x32 : 0x1e);
+            const shell_snd *intro = sd && sd->id == 8 ? shell_sound_load(0x68) : NULL;
+            if (intro && !headless) {
+                play_ambient(-1);
+                shell_sound(0x68, 0x78);
+                title_intro = intro;
+                amb_entry = sd->ambient;
+            } else if (sd && sd->id == 8 && !intro) {
+                play_ambient_vol(sd->ambient, 5);
+                title_started = SDL_GetTicks() + 1;
+            } else play_ambient_vol(sd ? sd->ambient : -1, sd && sd->id == 1 ? 0x32 : 0x1e);
         }
         if (sd && sd->id == 1) { int q; for (q = 0; q < sd->nov && q < 8; q++) if (xov[q] && clip_sound_loop(xov[q], headless)) break; }   /* (the Falcon hall's ball) */
-        if (sd && sd->id == 1 && g_new_pilot && !headless) shell_sound(0x69, 0x7f);   /* the hall after the roster made a pilot
-                                         * (Windows 95 MW2SHELL.DLL 0x100047eb, flag 0x10086efc set at 0x10018723): "Report
-                                         * to cadet training" (DATABASE 0x69, that edition's only) at volume 0x7f. Wolf plays it
-                                         * at once (0x10004b25); Falcon once its door clips ajf8orl1 / ajf8orr1 end (0x10004b61),
-                                         * which the port does not show - at once too */
+        if (sd && sd->id == 1 && !headless) {
+            /* DOS 0x1ddba: left from training, right from the ready room, both from the roster. */
+            if (clan == 1) {
+                if (g_from_screen == 14 || g_from_screen == 12) doors[0] = open_smk("AJF8ORL1");
+                if (g_from_screen == 11 || g_from_screen == 12) doors[1] = open_smk("AJF8ORR1");
+                if (doors[0] || doors[1]) {
+                    Uint64 start = SDL_GetTicks();
+                    clip_sound(doors[0] ? doors[0] : doors[1], 0);   /* the two tracks are identical */
+                    for (int q = 0; q < 2; q++) if (doors[q]) {
+                        Uint64 end = start + (Uint64)ceil(smk_frame_ms(doors[q]) * smk_frames(doors[q]));
+                        if (end > door_until) door_until = end;
+                    }
+                }
+            }
+            /* Windows 95 0x10004b61 waits for the Falcon doors before the training line. */
+            if (g_new_pilot && door_until) pilot_announcement = 1;
+            else if (g_new_pilot) shell_sound(0x69, 0x7f);
+        }
         if (sd && sd->id == 1) g_new_pilot = 0;
         while (next == -1 && running) {
             SDL_Event e;
             int i, hover = -1;
-            if (amb_due && SDL_GetTicks() >= amb_due) { amb_due = 0; play_ambient(amb_entry); }
+            Uint64 audio_now = SDL_GetTicks();
+            if (title_intro && !sfx_pcm_playing(g_sfx, title_intro->pcm)) {
+                title_intro = NULL;
+                play_ambient(amb_entry);
+            }
+            if (title_started && audio_now >= title_started) title_fade(audio_now - title_started + 1);
+            if (door_until && audio_now >= door_until) {
+                for (int q = 0; q < 2; q++) { smk_close(doors[q]); doors[q] = NULL; }
+                door_until = 0;
+                if (pilot_announcement) { pilot_announcement = 0; shell_sound(0x69, 0x7f); }
+            }
             if (!headless) {
                 while (shell_poll(&e)) {
                     if (e.type == SDL_EVENT_QUIT) running = 0;
@@ -6664,7 +6720,18 @@ int main(int argc, char **argv)
                                         if (shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1) == 0) running = 0;
                                     }
                                     else {
-                                        if (holo) break;   /* (the clip is playing: no other click) */
+                                        if (holo || door_until) break;
+                                        int destination = sd->hs[i].next;
+                                        if (sd->id == 1 && clan == 1 && (destination == 14 || destination == 11)) {
+                                            /* DOS 0x1de6a / 0x1df82 plays the door before changing rooms. */
+                                            holo = open_smk(destination == 14 ? "AJF8TORL" : "AJF8TORR");
+                                            if (holo) {
+                                                holo_x = destination == 14 ? 0 : 404;
+                                                holo_y = 0; holo_next = destination; holo_clan = clan;
+                                                clip_sound(holo, 0);
+                                                break;
+                                            }
+                                        }
                                         if (sd->id == 1 && sd->hs[i].next == 5) shell_sound(0x67, 0x32);   /* the hall's holoprojector (FUN_0001dbe0 case 1, 0x9169c) */
                                         if (sd->id == 1 && sd->hs[i].next == 5 && sd->hs[i].video && !headless && (holo = open_smk(sd->hs[i].video))) {
                                             /* the holoprojector clip plays IN the hall, in the archive table's slot 1 at its place -
@@ -6705,12 +6772,21 @@ int main(int argc, char **argv)
                     if (xov[q]) blit_smk(xov[q], sd->ov[q].x, sd->ov[q].y);
                 }
             }
-            if (holo) {   /* the holoprojector clip, once through, then the Archive */
+            for (int q = 0; q < 2; q++) if (doors[q]) {
+                if (!door_last[q] || audio_now - door_last[q] >= (Uint64)smk_frame_ms(doors[q])) {
+                    smk_next(doors[q]);
+                    door_last[q] = audio_now;
+                }
+                blit_smk(doors[q], q == 0 ? 0 : 404, 0);
+            }
+            if (holo) {   /* play through the last frame before entering the room */
                 Uint64 now = SDL_GetTicks();
                 if (!holo_last || now - holo_last >= (Uint64)smk_frame_ms(holo)) {
-                    int fi = smk_next(holo);
+                    if (holo_frame >= smk_frames(holo) - 1 || (holo_frame = smk_next(holo)) < 0) {
+                        next = holo_next;
+                        nclan = holo_clan;
+                    }
                     holo_last = now;
-                    if (fi < 0 || fi >= smk_frames(holo) - 1) { next = holo_next; nclan = holo_clan; }
                 }
                 blit_smk(holo, holo_x, holo_y);
             }
@@ -6748,6 +6824,7 @@ int main(int argc, char **argv)
             }
         }
         smk_close(ov);
+        for (int q = 0; q < 2; q++) smk_close(doors[q]);
         if (holo) { smk_close(holo); holo = NULL; }
         if (sd && sd->id == 8) shell_sound_stop(0x68);   /* the title voice ends on exit */
         if (sd && sd->id == 1) {

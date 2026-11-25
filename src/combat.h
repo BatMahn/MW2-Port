@@ -121,6 +121,8 @@ typedef struct {
                                         mech with no jets gets three, a full tank and three times gravity's thrust */
     float         seq_ticks;         /* ticks since the sequence / shutdown began (engine c[0x23]) */
     unsigned      rng;
+    unsigned    (*dos_roll)(void *context, unsigned limit);
+    void         *dos_roll_context;
     int           ammo_blown;        /* set when an overheat ammo explosion happened (for messages) */
     int           ammo_boom_loc;     /* the location (1-8) of the last bin explosion, 0 none: msim puts explosion 7 there
                                         (0x100167b0 -> 0x10045c30, a damaging effect type) and clears it */

@@ -792,8 +792,8 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
                     snprintf(ac->loadout, sizeof ac->loadout, "%s", g.loadout);
                     snprintf(ac->name, sizeof ac->name, "%s", g.name);
                     snprintf(ac->pilot, sizeof ac->pilot, "%s", g.pilot);
-                    ac->have_anim = piece.anim_id && anim_load_id(a, piece.anim_id, &ac->anim) == 0 &&
-                                    ac->anim.track_count >= 3;   /* vehicles/turrets: stub sets */
+                    if (!piece.anim_id || anim_load_id(a, piece.anim_id, &ac->anim) != 0) ac->anim.key_count = 0;
+                    ac->have_anim = ac->anim.key_count > 0 && ac->anim.track_count >= 3;
                     mech3d_pose(&ac->mech, NULL, 0);
                     {   /* the unit's class: GP chunk +2 of the skeleton record (engine 0x1003e740) */
                         prj_record sr;
@@ -939,16 +939,26 @@ void mech3d_dos_rotate(int32_t r[9], unsigned *left, unsigned *phase, int32_t pi
     memcpy(r, result.r, sizeof result.r);
 }
 
-void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
+void mech3d_dos_anim_init(mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
 {
     const dos_matrix identity = dos_matrix_rotation(0, 0, 0);
     for (int i = 0; i < m->skel_count; i++) {
         unsigned period = dos_next_normalization(phase);
+        m->dos_skel_period[i] = (uint8_t)period;
         int track = anim ? dos_rotation_track(m, anim, m->skel_index[i]) : -1;
         if (track < 0) continue;
         player->dos_rot_left[track] = period;
         memcpy(player->dos_rot[track], identity.r, sizeof identity.r);
     }
+}
+
+unsigned mech3d_dos_part_countdown(const mech3d *m, const anim_set *anim, int node)
+{
+    int track = anim && m->pose_dos ? dos_rotation_track(m, anim, node) : -1;
+    if (track >= 0 && m->pose_dos->dos_rot_left[track]) return m->pose_dos->dos_rot_left[track];
+    for (int i = 0; i < m->skel_count; i++)
+        if (m->skel_index[i] == node) return m->dos_skel_period[i];
+    return 0;
 }
 
 void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
@@ -1522,6 +1532,7 @@ struct world3d_paths {
     int       ntask;
     int      *part_rec, *part_node;   /* per world part: the record / OBJ node it hangs on when carried, -1 */
     int       nparts;
+    int       dos_started;
 };
 
 static void wp_yaw(wp_xf *x, float deg)
@@ -2074,6 +2085,14 @@ int world3d_paths_step(world3d_paths *P, mech3d *world, float now, unsigned *dos
 {
     int i, q, ended = 0, settled = 0;
     if (!P || !world) return 0;
+    if (dos_phase && !P->dos_started) {
+        /* The load-time placement pass isn't a DOS sound-task invocation. */
+        for (i = 0; i < P->ntask; i++) if (P->tasks[i].type == 4) {
+            P->tasks[i].runs = 0;
+            P->tasks[i].due = now;
+        }
+        P->dos_started = 1;
+    }
     for (i = 0; i < P->ntask; i++) {
         wp_task *t = &P->tasks[i];
         if (t->ended) { ended |= t->ended == 1; t->ended = 2; continue; }   /* 1: ended since the last step */

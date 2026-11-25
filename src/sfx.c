@@ -563,6 +563,17 @@ void sfx_stop_pcm(sfx *s, const unsigned char *pcm)
     SDL_UnlockAudioStream(s->stream);
 }
 
+int sfx_pcm_playing(sfx *s, const unsigned char *pcm)
+{
+    int playing = 0;
+    if (!s || !pcm) return 0;
+    SDL_LockAudioStream(s->stream);
+    for (int k = 0; k < SFX_VOICES; k++)
+        if (s->v[k].c == &s->v[k].own && s->v[k].own.data == pcm) playing = 1;
+    SDL_UnlockAudioStream(s->stream);
+    return playing;
+}
+
 void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan)
 {
     int k;

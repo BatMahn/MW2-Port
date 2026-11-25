@@ -744,7 +744,8 @@ static int attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R,
         else {
             unsigned r2 = ai_rand(m, 2);
             m->forced_man = r2 == 0 ? -2 : 6;
-            if (v->pilot_level >= 2) m->forced_man = -2;   /* +0x19e bit 0x20: level 1 mechs only charge */
+            /* DOS 0x2c72f sets the charge permission only for class 1 and pilot level 1. */
+            if (v->pilot_level >= 2 || (ai_dos_int && m->cls != 1)) m->forced_man = -2;
         }
     }
     if (ai_dos_int) { if (m->cls == 1 && v->contact && !m->reverse && !m->jump_man && m->man != 10) done = 1; }   /* DOS 0x2c587 -> 0x2e820: class 1 only */

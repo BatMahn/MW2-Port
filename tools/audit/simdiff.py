@@ -287,6 +287,40 @@ def missile_lock_range(rep, rnd, n):
                       (y, z, flags, timer, expected, (port, port_timer.value)))
 
 @test
+def dos_lock_window(rep, rnd, n):
+    """Compare range and azimuth/elevation boundaries of DOS 0x52ea0."""
+    e = emu()
+    unit, obj, slot = e.alloc(0x170), e.alloc(0x200), e.alloc(104)
+    bearing, slant, horizontal, elevation = (e.alloc(4) for _ in range(4))
+    e.w32(unit, obj)
+    e.w32(unit + 0x54, slot)
+    e.w32(obj + 0xdc, 0x201)
+    shim = lib('msim').shim_dos_lock_window
+    for weapon in (0, 1, 2, 3, 7, 8, 9, 28):
+        e.w32(slot + 4, weapon)
+        spec = 0x9ee58 + weapon * 88
+        lo, hi = e.rs32(spec + 0x3c), e.rs32(spec + 0x40)
+        cases = [(1, 0, z) for z in (lo, hi)] + [(0, 0, z) for z in (lo - 1, lo, lo + 1, hi - 1, hi, hi + 1)]
+        cases += [(65536, 0, lo), (65536, 0, hi)]
+        cases += [tuple(rnd.randint(-hi, hi) for _ in range(3)) for _ in range(n)]
+        cases += [(3000, 1200, -hi // 2), (-3000, -1500, -hi // 2), (0, hi // 2, 0)]
+        for x, y, z in cases:
+            e.call(0x2ab60, eax=x, edx=y, ebx=z, ecx=bearing, stack=(slant, horizontal, elevation))
+            az, el = e.rs32(bearing), e.rs32(elevation)
+            for ofs, val in ((0xc8, x), (0xcc, y), (0xd0, z), (0xd4, az), (0xd8, el)):
+                e.w32(obj + ofs, val)
+            for edge in (0, (16 << 16) - 1, 16 << 16, (16 << 16) + 1):
+                for yaw, pitch in ((az + edge, el), (az - edge, el), (az, el + edge), (az, el - edge)):
+                    e.w32(obj + 0x60, yaw)
+                    e.w32(unit + 0x1c, -pitch)
+                    e.w16(unit + 0x10c, 0)
+                    e.call(0x52ea0, eax=unit)
+                    expected = bool(e.r16(unit + 0x10c) & 0x8000)
+                    result = bool(shim(weapon, x, y, z, yaw, pitch))
+                    rep.check(expected == result, 'weapon %d delta %s aim %s: DOS %s port %s' %
+                              (weapon, (x, y, z), (yaw, pitch), expected, result))
+
+@test
 def ai_weapon_pick(rep, rnd, n):
     """DOS 0x2e980..0x2ea63 through the real range, heat, slot and step checks, for stock AI weapon groups."""
     L = lib('combat')
@@ -590,20 +624,28 @@ def dos_animation_frames(rep, rnd, n):
             for asset in sorted(Path(fixture).iterdir()):
                 data = asset.read_bytes()
                 count, keys = struct.unpack_from('<ii', data)
-                if keys != 32:
-                    continue
+                if not 1 <= keys <= 64 or not 1 <= count:
+                    raise ValueError('invalid animation dimensions in %s' % asset.name)
                 stride = 8 + 4*keys
                 flags = list(struct.iter_unpack('<II', data[8 + count*stride:8 + count*stride + 8*keys]))
                 record_count += 1
+                first_track = None
+                moving = False
                 for index in range(count):
                     offset = 8 + index*stride
                     _, kind = struct.unpack_from('<ii', data, offset)
                     ds = struct.unpack_from(f'<{keys}i', data, offset + 8)
+                    track_case = (kind, ds, flags, True)
+                    if first_track is None:
+                        first_track = track_case
                     if any(ds):
-                        yield kind, ds, flags, True
+                        moving = True
+                        yield track_case
+                if not moving:
+                    yield first_track
             if record_count == 0:
                 raise ValueError('MW2_ANIM_RECORD_DIR contains no gait records')
-            rep.notes.append('replayed moving tracks in %d DOS gait records' % record_count)
+            rep.notes.append('replayed gait and vehicle task tracks in all %d DOS animation records' % record_count)
 
     def as_array(values):
         return (ctypes.c_int32 * len(values))(*values)
@@ -1079,6 +1121,198 @@ def dos_random_stream(rep, rnd, n):
 
 
 @test
+def dos_contact_controller_state(rep, rnd, n):
+    """The movement contact scan runs only for the online or wreck controller states."""
+    e = emu()
+    unit, ctrl, other, hit = (e.alloc(0x200) for _ in range(4))
+    position = tuple(e.alloc(4) for _ in range(3))
+    e.w32(ctrl, unit)
+    reached = []
+
+    def overlap(em):
+        reached.append(True)
+        em.w32(em.arg(0), other)
+        return 1
+
+    e.stub(0x200d0, overlap, pops=4)
+    shim = lib('msim').shim_dos_contact_state
+    for state in range(6):
+        reached.clear()
+        e.w32(ctrl + 0xa0, state)
+        e.call(0x1fca0, eax=ctrl, edx=hit + 4, ebx=hit, ecx=100, stack=(0, 0, *position))
+        for idle_target in (0, 1):
+            actual = bool(shim(state, idle_target))
+            rep.check(bool(reached) == actual,
+                      'controller %d, target idle %d: DOS scan %s, port hit %s' %
+                      (state, idle_target, bool(reached), actual))
+
+@test
+def dos_positional_sound_draws(rep, rnd, n):
+    """The one-shot pitch draw precedes sample allocation and the loop uses the returned rate."""
+    e = emu()
+    e.call(0x49fe0, eax=0)
+    listener = e.alloc(16)
+    e.w32(0x9701c, listener)
+    e.w32(0x957ac, 0x168)
+    played = []
+    # 0x40c90 draws the pitch even when the mixer cannot allocate a channel.
+    def play(em):
+        played.append((em.arg(0), em.reg('edx'), em.reg('eax')))
+        return -1
+    e.stub(0x409b0, play, pops=24)
+    shim = lib('msim')
+    index = ctypes.c_uint()
+    examples = [(0, 0, z) for z in (0, 1, 49899, 49900, 49999, 50000, 50001)]
+    examples += [(0, y, 0) for y in (-25000, -1, 1, 25000)]
+    examples += [tuple(rnd.randint(-55000, 55000) for _ in range(3)) for _ in range(n * 12)]
+    for x, y, z in examples:
+        yaw, half = rnd.randint(-180 << 16, 180 << 16), rnd.randrange(2)
+        e.w32(listener + 12, yaw)
+        played.clear()
+        e.call(0x40bc0, eax=x, edx=y, ebx=z, ecx=0xdb, stack=(half,))
+        out = (ctypes.c_int * 3)()
+        shim.shim_dos_sound((ctypes.c_int32 * 5)(x, y, z, yaw, half), ctypes.byref(index), out)
+        native_index = e.r32(0x9e8f4)
+        native = (played[0][0], e.call(0x40d10, eax=played[0][1]), played[0][2]) if played else (0, 0, 0)
+        port = tuple(out)
+        rep.check(native == port and native_index == index.value,
+                  'position %s half %d: DOS volume/pan/delay %s cursor %d port %s cursor %d' %
+                  ((x, y, z), half, native, native_index, port, index.value))
+        native_rate = e.call(0x40d50)
+        port_rate = shim.shim_dos_sound_pitch(ctypes.byref(index))
+        rep.check((native_rate, e.r32(0x9e8f4)) == (port_rate, index.value),
+                  'rate %d vs %d after position %s' % (native_rate, port_rate, (x, y, z)))
+
+@test
+def dos_startup_sound_order(rep, rnd, n):
+    """The startup timer draw is followed by a pitch draw only within hearing range."""
+    e = emu()
+    e.call(0x49fe0, eax=0)
+    control, unit, listener = e.alloc(0x170), e.alloc(0x180), e.alloc(16)
+    e.w32(control, unit)
+    e.w32(0x9701c, listener)
+    e.w32(0x957ac, 0x168)
+    e.stub(0x409b0, lambda em: -1, pops=24)
+    port = lib('msim').shim_dos_startup
+    port.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint)]
+    index = ctypes.c_uint()
+    distances = [0, 49999, 50000, 50001] * n
+    for tick, distance in enumerate(distances, 171):
+        e.w32(NOW, tick)
+        e.run(0x2817c, 0x281aa, esi=control)
+        delay = e.r32(control + 0x8c) - tick + 1
+        e.call(0x40cf0, eax=0, edx=0, ebx=distance, ecx=0xf7, stack=(0,))
+        ours = port(distance, ctypes.byref(index))
+        cursor = e.r32(0x9e8f4)
+        rep.check((ours, index.value) == (delay, cursor),
+                  'range %d: original delay/cursor %s, port %s' % (distance, (delay, cursor), (ours, index.value)))
+
+@test
+def dos_debris_random_and_motion(rep, rnd, n):
+    """The separate Gaussian cursor and the debris body's rounded air and landing updates."""
+    e = mw2emu.Emu()
+    L = lib('msim')
+    e.call(0x49fe0, eax=0)
+    gaussian = (ctypes.c_int32 * 270)()
+    L.shim_dos_gaussian(gaussian, len(gaussian))
+    for i, got in enumerate(gaussian):
+        want = s32(e.call(0x4a0b0))
+        rep.check(want == got, 'Gaussian draw %d: DOS %d port %d' % (i, want, got))
+    node = e.alloc(128)
+    body = 0xfc60c
+    for _ in range(n * 4):
+        index = rnd.randrange(127)
+        gravity = rnd.randrange(16384, 131072)
+        e.w32(0x9e8f8, index)
+        e.w32(0x957b4, (((gravity * 0x794 + 32768) >> 16) << 16) // 0x794)
+        e.w32(body + 1, node)
+        e.call(0x2b3f0, eax=0)
+        want = [e.rs32(body + 5 + 4*i) for i in range(6)] + [e.r32(0x9e8f8)]
+        out = (ctypes.c_int32 * 7)()
+        L.shim_dos_debris_launch(index, gravity, out)
+        rep.check(list(out) == want, 'launch %d at gravity %d: DOS %s port %s' % (index, gravity, want, list(out)))
+    initial = []
+    applied = []
+    def position(em):
+        for reg, value in zip(('edx', 'ebx', 'ecx'), initial):
+            em.w32(em.reg(reg), value)
+    def translation(em):
+        applied[:3] = [s32(em.reg(r)) for r in ('edx', 'ebx', 'ecx')]
+    def rotation(em):
+        applied[3:] = [s32(em.reg(r)) for r in ('edx', 'ebx', 'ecx')]
+    e.stub(0x1df00, position)
+    e.stub(0x1dfc0, translation)
+    e.stub(0x1e140, rotation, pops=4)
+    e.stub(0x1c120, ret=0)
+    e.stub(0x1e1b0)
+    e.stub(0x1e240)
+    e.stub(0x1e480)
+    for _ in range(n * 14):
+        radius = rnd.randrange(10, 190, 2)
+        e.stub(0x38770, ret=radius)
+        gravity, ticks = rnd.choice([32768, 65536, 78643]), rnd.choice([1, 5, 6, 7, 20])
+        e.w32(0x957b0, (gravity * 0x794 + 32768) >> 16)
+        e.w32(0x95820, ticks)
+        index = rnd.randrange(127)
+        e.w32(0x9e8f4, index)
+        initial[:] = [1000, radius // 2 + rnd.randint(0, 125), 1500]
+        velocity = [rnd.randint(-7 * 65536, 7 * 65536) for _ in range(3)]
+        spin = [rnd.randint(-100000, 100000) for _ in range(3)]
+        e.w32(body + 1, node)
+        for i, value in enumerate(velocity + spin):
+            e.w32(body + 5 + i * 4, value)
+        e.w32(body + 29, -e.r32(0x957b0))
+        applied.clear()
+        e.call(0x2b930, eax=0)
+        if len(applied) != 6:
+            raise RuntimeError('debris routine did not run')
+        active = bool(e.r32(body + 1))
+        want = [initial[j] + applied[j] for j in range(3)]
+        want += [e.rs32(body + 5 + 4*j) for j in range(3)]
+        want += [int(active), *applied[3:], e.r32(0x9e8f4)]
+        inputs = (ctypes.c_int32 * 13)(*initial, *velocity, *spin, radius // 2, index, gravity, ticks)
+        out = (ctypes.c_int32 * 11)()
+        L.shim_dos_debris(inputs, out)
+        got = list(out)
+        if not active:
+            got[3:6] = [0, 0, 0]
+        rep.check(want == got, 'debris input %s: DOS %s port %s' % (list(inputs), want, got))
+
+
+@test
+def dos_damage_random_order(rep, rnd, n):
+    """Hits on intact armor and penetrations consume the executable's shared draws in order."""
+    e = mw2emu.Emu()
+    e.call(0x49fe0, eax=0)
+    obj, control, locations = e.alloc(0x100), e.alloc(0x200), e.alloc(8 * 40)
+    e.w32(control, obj)
+    e.w32(control + 0x58, locations)
+    e.w32(obj + 4, 1)
+    e.w32(PLAYER, 0)
+    e.w32(0x9ee48, -1)
+    e.w32(0x982dc, 0)
+    e.stub(0x25740)
+    e.stub(0x1e7e0)
+    L = lib('msim')
+    for _ in range(n * 18):
+        armor, damage = rnd.randrange(1, 20), rnd.randrange(1, 20)
+        location = rnd.choice(range(1, 9))
+        index = rnd.randrange(127)
+        e.w32(0x9e8f4, index)
+        for j in range(8):
+            rec = locations + 40*j
+            e.w32(rec, armor * 65536)
+            e.w32(rec + 8, 100 * 65536)
+            e.w16(rec + 0x24, 0)
+            e.w16(rec + 0x26, 0)
+        e.call(0x26270, eax=control, edx=damage * 65536, ebx=location)
+        want = e.r32(0x9e8f4)
+        got = L.shim_dos_damage_rolls(index, location, damage, armor)
+        rep.check(want == got, 'location %d armor %d damage %d draw %d: DOS %d port %d' %
+                  (location, armor, damage, index, want, got))
+
+
+@test
 def dos_shared_rotations(rep, rnd, n):
     """Mech joints, multiple tasks on one scenery node, and a debris slot share one normalization counter."""
     e = mw2emu.Emu()
@@ -1141,6 +1375,34 @@ def dos_volley_warning_order(rep, rnd, n):
                   'weapon %d level %d target %#x: DOS %s draw %d port %d draw %d' %
                   (w, lv, ref, decision, e.r32(0x9e8f4), react, i.value))
 
+
+@test
+def dos_weapon_selection_effects(rep, rnd, n):
+    """Follow a successful selection into the forced-lock roll and ENEMYFIR cue."""
+    e = emu()
+    e.call(0x49fe0, eax=0)
+    obj, ctrl, inputs = (e.alloc(0x200) for _ in range(3))
+    e.w32(obj + 0x4c, inputs)
+    e.w32(PLAYER, 5)
+    sounded = []
+    e.stub(SND, lambda em: sounded.append(em.reg('eax')) or 0, pops=4)
+    shim = lib('msim').shim_dos_selection_effects
+    index, sound = ctypes.c_uint(), ctypes.c_int()
+    for _ in range(n * 25):
+        weapon = rnd.randrange(31)
+        skill = rnd.randrange(7)
+        ref, target = rnd.choice(((0x205, -1), (0x201, 0), (0x405, -3), (0x105, -3), (0, -2)))
+        prior_lock = rnd.choice((0, 0x80))
+        e.w8(obj + 0x154, max(1, skill) + 1)
+        e.w16(obj + 0x14a, ref)
+        e.w16(ctrl + 0x10c, prior_lock)
+        sounded.clear()
+        e.run(0x2ea63, 0x2eae8, ebx=ctrl, ecx=obj, esi=1, edi=weapon)
+        locked = shim(ctypes.byref(index), weapon, skill, target, ctypes.byref(sound))
+        observed = e.r16(ctrl + 0x10c), sounded, e.r32(0x9e8f4)
+        expected = prior_lock | (locked << 7), [sound.value] if sound.value else [], index.value
+        rep.check(observed == expected, 'weapon %d skill %d target %#x: DOS %s port %s' %
+                  (weapon, skill, ref, observed, expected))
 
 @test
 def dos_motion_plane(rep, rnd, n):
@@ -1291,6 +1553,36 @@ def dos_face_response(rep, rnd, n):
                   'direction %s normal %s, DOS %s %s port %s %s' %
                   (direction, normal, want_vel, want_move, list(got_vel), list(got_move)))
 
+
+@test
+def dos_drive_input_order(rep, rnd, n):
+    """The drive target reads the previous throttle before either servo advances."""
+    e = mw2emu.Emu()
+    ctl, unit = e.alloc(0x160), e.alloc(0x90)
+    e.w32(ctl, unit)
+    shim = lib('msim').shim_dos_drive_frame
+    got = (ctypes.c_int32 * 2)()
+    for _ in range(n):
+        throttle, speed, now = 0, 0, 1000
+        factor = rnd.choice((301, 585, 674, 1055, 1337))
+        for i in range(100):
+            target = (1017, 791, 0, 339)[i // 25]
+            ticks = rnd.choice((0, 1, 5, 6, 7, 10, 18, 29))
+            reverse, slow = i >= 75, i >= 45
+            tau = 91 if slow else 36
+            e.w32(ctl + 0x88, factor)
+            e.w32(unit + 0x84, 2 if reverse else 0)
+            for ofs, raw in ((0x24, (now, 0, speed, tau)), (0x44, (now, target+1024, throttle+1024, 36))):
+                for k, value in enumerate(raw):
+                    e.w32(ctl + ofs + 4*k, value)
+            e.run(0x27ecf, 0x27f0e, esi=ctl, edi=1)
+            e.w32(NOW, now + ticks)
+            speed_after = e.call(0x49b80, eax=ctl+0x24)
+            throttle_after = e.call(0x49b80, eax=ctl+0x44) - 1024
+            shim(throttle, target, speed, factor, ticks, reverse, slow, got)
+            rep.check((throttle_after, speed_after) == tuple(got),
+                      'tick %d: DOS %s port %s' % (now, (throttle_after, speed_after), tuple(got)))
+            throttle, speed, now = throttle_after, speed_after, now + ticks
 
 @test
 def dos_drive_servo(rep, rnd, n):
@@ -1635,6 +1927,40 @@ def manoeuvre_flank(rep, rnd, n):
         L.shim_dos_flank(7, 0, x, z, target, 512, blocked, out)
         rep.check(done == out[0], 'waypoint %d,%d range %d: DOS done %d port %d' % (x, z, level, done, out[0]))
 
+
+@test
+def dos_empty_weapons_manoeuvre(rep, rnd, n):
+    """Aircraft and vehicles with empty weapons fall back to retreat instead of a mech charge."""
+    e = mw2emu.Emu()
+    unit, ctrl, inputs = e.alloc(0x240), e.alloc(0x220), e.alloc(0x60)
+    e.w32(unit + 0x20, ctrl)
+    e.w32(unit + 0x4c, inputs)
+    e.w32(ctrl, unit)
+    e.w32(ctrl + 0x88, 1)
+    e.stub(0x2e240, ret=1)
+    shim = lib('ai').shim_dos_empty_weapons
+    out = (ctypes.c_int * 3)()
+    frame = mw2emu.STACK_TOP - 0x800
+    e.w32(frame - 8, ctrl)
+    for cls in (1, 2, 4, 5, 8):
+        for level in range(1, 5):
+            for jets, first, second in ((0, 0, 1), (0, 3, 1), (0, 3, 0), (1, 3, 1)):
+                e.w32(unit, cls)
+                e.w8(unit + 0x155, level)
+                e.call(0x2c5f0, eax=unit)  # sets the class and pilot level flags
+                e.w8(unit + 0x16c, 0)
+                e.w8(unit + 0x16d, 0xff)
+                e.w16(unit + 0x146, 3)
+                e.w32(unit + 0x17e, 0)
+                e.w32(ctrl + 0xc0, 100 if jets else 0)
+                e.w32(ctrl + 0xec, jets)
+                rolls = [first, second]
+                e.stub(RAND, lambda em: rolls.pop(0) % em.reg('eax'))
+                e.run(0x2c4d0, 0x2c587, esi=unit, ebp=frame)
+                native = [e.rs32(unit + 0x16e), e.r32(unit + 0x17e), 2 - len(rolls)]
+                shim(cls, level, jets, first, second, out)
+                rep.check(native == list(out), 'class %d level %d jets %d rolls %s: DOS %s port %s' %
+                          (cls, level, jets, (first, second), native, list(out)))
 
 @test
 def manoeuvre_circle(rep, rnd, n):

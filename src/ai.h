@@ -158,6 +158,7 @@ typedef struct {
     int   jet_side;          /* manoeuvre 11: lateral jets (input +0x1e) */
     float speed;             /* actual ground speed, cm/s (signed; the velocity c[0x3d..0x3f], see msim_drive_step) */
     float thr_servo;         /* current throttle c[0x13] as a fraction of full (servo +0x44, T 36.2 ticks) */
+    float dos_gait_throttle; /* throttle read by the controller before the movement tasks update it */
     float spd_servo;         /* servoed drive speed c[0xb], cm/s (servo +0x24 toward c[10]) */
     int   cls;               /* DOS: the unit class the manoeuvre record is taken by (1 mechs; ai_set_class) */
     int   tons1;             /* DOS: a 1-ton unit (an Elemental): the jumper record */

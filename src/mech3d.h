@@ -83,6 +83,7 @@ typedef struct {
     int          skel_count;
     int16_t      skel_index[MECH3D_MAX_NODES], skel_parent[MECH3D_MAX_NODES];
     int32_t      skel_offset[MECH3D_MAX_NODES][3];
+    uint8_t      dos_skel_period[MECH3D_MAX_NODES];
     int          bind_count;     /* TSK "node;70,flags,track" */
     int16_t      bind_node[MECH3D_MAX_BINDS], bind_track[MECH3D_MAX_BINDS];
     int          anim_id;        /* ANIM resource id from the record's ANIM chunk, 0 if none */
@@ -155,7 +156,8 @@ struct anim_set_s;
 void mech3d_pose(mech3d *m, const anim_set *anim, float t);
 /* Seed the local rotations once when the model joins the mission. */
 void mech3d_dos_rotate(int32_t r[9], unsigned *left, unsigned *phase, int32_t pitch, int32_t yaw, int32_t roll);
-void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
+void mech3d_dos_anim_init(mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
+unsigned mech3d_dos_part_countdown(const mech3d *m, const anim_set *anim, int node);
 /* Apply this frame's DOS angular track deltas to the persistent local transforms. */
 void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
 void mech3d_pose_like(mech3d *m, const mech3d *base);

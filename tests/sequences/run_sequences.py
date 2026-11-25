@@ -1589,7 +1589,10 @@ def ai_self_destruct(c):
         c(1.8 <= t1 - t0 <= 2.2, 'state 7: destroyed 0x16a ticks after input +0x43', '%.1f s' % (t1 - t0))
         c(r.at(t1 + 1.5)['enemies_dead'] == r.before(t0)['enemies_dead'] + 1, 'one more enemy down (a wreck)')
     c('Self-destruct sequence' not in r.out, 'no message for an AI unit')
-    r2 = c.run('_dos', secs=26, env=env, edition='dos')
+    # Exercise the DOS controller's charge completion even when another unit
+    # takes the next shared random draw. The executable audit checks the choice.
+    dos = {'MW2_TEST_DISARM': '8:2:1', 'MW2_TEST_MAN': '8:2:6', 'MW2_TEST_AIM': '2,1500,0'}
+    r2 = c.run('_dos', secs=12, env=dos, edition='dos')
     d0, d1 = times(r2)
     c(d0 is not None and d1 is not None and abs(d1 - d0) < 0.05, 'DOS: destroyed at once', '%s / %s' % (d0, d1))
 
@@ -2114,6 +2117,14 @@ def training_slide(c, mission, instructor, fps, dos=True, hold=False):
 def tnj1_slide_round_instructor(c):
     """TNJ1: the Firemoth slides left and the instructor recoils as in the DOSBox contact trace."""
     tnj1_slide(c, 30)
+    with open(os.path.join(HERE, 'tnj1_dos_frame_ticks.txt')) as f:
+        frame_ticks = f.read()
+    replay = c.run(suffix='_dos_schedule', secs=14, keys=[(1750.25 / 182, '0')], mission='TNJ1SCN1',
+                   dos_look=True, dump='/0.001', env={'MW2_TEST_FRAME_TICKS': frame_ticks, 'MW2_WATCH_ACTOR': '1'})
+    # Both positions were captured at the end of movement (0x275b0), after the first contacts.
+    state = next((s for s in replay.states if s['now'] * 182 // 1000 == 2411), {})
+    xy = tuple(state.get(key) for key in ('x', 'z', 'w_x', 'w_z'))
+    c(xy == (16680, 8734, 16952, 9757), 'the recorded DOS slide and recoil positions match to the centimetre', str(xy))
 
 
 def tnj1_slide(c, fps):
@@ -2128,7 +2139,9 @@ def tnj1_slide(c, fps):
     c(11.3 < first['t'] < 11.9 and 4.5 <= duration <= 8.0,
       '%s fps: repeated contacts while passing the instructor' % fps, '%.2f..%.2f' % (first['t'], last['t']))
     distances = [math.hypot(state['x'] - state['a_x'], state['z'] - state['a_z']) for state in contacts]
-    c(min(distances) >= 900 and max(distances) <= 1140,
+    # The DOSBox trace reaches 1150.5 cm after a contact. The two units move in
+    # sequence, and the final positions can exceed the nominal contact radius.
+    c(min(distances) >= 900 and max(distances) <= 1155,
       '%s fps: each rebound ends near the moving instructor’s contact surface' % fps,
       '%.0f..%.0f cm' % (min(distances), max(distances)))
     c(last['x'] < first['x'] - 350 and last['a_z'] > first['a_z'] + 450,
@@ -2215,6 +2228,15 @@ def aqua_time_to_death(c):
     timer before the frame's ticks (~54 of an interval-60 laser's 60 at 30 fps): the ER ML reaches ~358 m, not 509 m
     (DOS: ~380 m at its 8-22 fps). Port, the timer kept (seeds 1-24): 24.3-76.5 s, median 43 (was 32); 4 of 24 by 30 s
     (DOSBox 2 of 20; 12 runs 29.4-77.5 s, median 45)"""
+    # The first player damage call (0x26270) in the stationary DOS run was at tick 2887.
+    # Reuse its frame boundaries (0x275b0) because the cadence changes weapon selection and projectile travel.
+    with open(os.path.join(HERE, 'aqua_dos_frame_ticks.txt')) as f:
+        frame_ticks = f.read()
+    recorded = c.run(suffix='_dos_schedule', secs=18, throttle=0, twist=0, mission='AQUASCN1', dos_look=True,
+                     mech='maddog/mdg00std', env={'MW2_AI_AIM_TRACE': '1', 'MW2_TEST_FRAME_TICKS': frame_ticks})
+    first_hit = next((float(l.split()[1]) for l in recorded.out.splitlines() if l.startswith('plhit ')), None)
+    c(first_hit is not None and abs(first_hit - 2887 / 182) <= 0.02,
+      'first player hit within 0.02 s of the recorded DOS hit', str(first_hit))
     ttd, uac, reach = [], [], []
     # The DOS stream starts at the same index each mission. Frame cadence changes when each unit draws from it.
     for fps in (12, 14, 16, 18, 24, 30):
@@ -2241,8 +2263,6 @@ def aqua_time_to_death(c):
         reach.append(-max([d for t, d in ml if t < 23.0] or [0.0]))   # negative: the farthest shot before 23 s
         if fps != 18:
             continue
-        hits = [float(l.split()[1]) for l in r.out.splitlines() if l.startswith('plhit ')]
-        c(hits and 11.0 <= hits[0] <= 17.0, 'first hit at ~13 s from ~650 m (DOSBox ~13.5 s)', '%s' % hits[:3])
         pre = r.before((dead[0] if dead else 90.0) - 1.0)
         arm = [float(x) for x in str(pre.get('parmor', '')).split(',') if x]
         full = [float(x) for x in str(r.at(1.0).get('parmor', '')).split(',') if x]
@@ -5130,9 +5150,18 @@ def ai_probe_dos_broad_phase(c):
     eh = [x.get('w_hd') for x in e.span(16.0, 27.0)]
     c(dh and all(-99.0 < h < -94.0 for h in dh), 'DOS look: straight on at ~-97 (no early turn)', '%s..%s' % (min(dh), max(dh)) if dh else '')
     c(eh and min(eh) < -110.0, '3D look: turns left round the object', 'min %s' % (min(eh) if eh else None))
-    end = d.at(26.5)
-    c(end.get('w_x', 0) < -4000 and 300 < end.get('w_z', 0) < 1500, 'DOS look: past it on its line (DOSBox x -18 m / z 9 m at ~23-25 s)',
+    end = d.at(27.0)
+    c(end.get('w_x', 0) < -1800 and 300 < end.get('w_z', 0) < 1500, 'DOS look: crosses the recorded point past the obstacle by 27 s',
       '%s,%s' % (end.get('w_x'), end.get('w_z')))
+    with open(os.path.join(HERE, 'silv_dos_frame_ticks.txt')) as f:
+        frame_ticks = f.read()
+    replay = c.run('_dos_schedule', secs=25, throttle=0, twist=0, mission='SILVSCN1', dos_look=True,
+                   mech='maddog/mdg00std', dump='/0.001',
+                   env={'MW2_TEST_FRAME_TICKS': frame_ticks, 'MW2_WATCH_ACTOR': '3'})
+    state = next((s for s in replay.states if s['now'] * 182 // 1000 == 4421), {})
+    x, z = state.get('w_x', 0), state.get('w_z', 0)
+    c(abs(x + 17992) <= 2 and abs(z + 620) <= 2, 'the Gargoyle follows the recorded route past the out-of-view plant',
+      str((x, z)))
 
 
 @sequence
@@ -7901,6 +7930,50 @@ def ai_out_of_weapons_replaces_forced(c):
         c(v.index(6) > 0 and v[v.index(6) - 1] == 8, 'the forced 0 replaced at once: 8 (running) -> 6, no 0 between', str(v[:8]))
 
 @sequence
+def dos_native_gouraud(c):
+    """The Metal policy draws DOS at full resolution and preserves exact fixed modes and other renderers."""
+    import numpy as np
+
+    def picture(label, dos=True, **overrides):
+        run = c.run('_' + label, secs=0.8, dos_look=dos, size='1600x900',
+                    env={'MW2_TEST_SKY_STILL': '1', **overrides})
+        path = run.shots['final']
+        c(os.path.isfile(path), '%s frame captured' % label)
+        if os.path.isfile(path):
+            w, h, pixels = ppm(path)
+            c((w, h) == (1600, 900), '%s uses the full output' % label, '%dx%d' % (w, h))
+            if (w, h) == (1600, 900):
+                return np.frombuffer(pixels, dtype=np.uint8).reshape(-1, 3)
+        return None
+
+    def compare_frames(a, b, label, different=False):
+        if a is not None and b is not None:
+            changed = np.count_nonzero(np.any(a != b, axis=1))
+            if different:
+                error = np.mean(np.abs(a.astype(np.int16) - b))
+                c(changed > 32 and error < 3, label, '%d changed pixels, mean error %.3f' % (changed, error))
+            else:
+                c(changed <= 32, label, '%d changed pixels' % changed)
+
+    config = os.path.join(OUT, c.name, 'exact.cfg')
+    os.makedirs(os.path.dirname(config), exist_ok=True)
+    with open(config, 'w') as f:
+        f.write('render=full-native\nhud_layout=original\n')
+    policy = {'MW2_TEST_DOS_NATIVE_INTERPOLATION': '1'}
+    fast = picture('native', **policy)
+    exact = picture('exact', MW2_CONFIG=config, **policy)
+    reference = picture('reference')
+    compare_frames(fast, exact, 'GPU interpolation preserves the scene with different pixel shading', different=True)
+    compare_frames(exact, reference, 'full-native retains the exact DOS shading')
+
+    fixed = {'MW2_RENDER': '640x480'}
+    compare_frames(picture('fixed', **policy, **fixed), picture('fixed_reference', **fixed),
+                   'the fixed DOS mode keeps its exact letterboxed frame')
+    compare_frames(picture('enhanced', dos=False, **policy), picture('enhanced_reference', dos=False),
+                   'enhanced rendering is identical with the DOS policy enabled')
+
+
+@sequence
 def dos_cockpit_strut_seams(c):
     """DOS look: a cockpit polygon crossing the near plane is drawn as GL clips it (the vertex shader leaves it unexpanded)
     and its fragments must not be cut to the DOS span - the shader had taken "as many corners after clipping as before"
@@ -8279,6 +8352,91 @@ def shell_volume_previews(c):
     with open(config, 'rb') as f:
         gains = struct.unpack_from('<III', f.read(), 4)
     c(gains == (16384, 8192, 40960), 'the new levels survive closing the menu', str(gains))
+
+
+@sequence
+def dos_shell_audio(c):
+    """DOS title and Archive loops start at volume 5. The Falcon hall plays both door transitions."""
+    shell = os.path.join(os.path.dirname(GLVIEW), 'mw2shell')
+    if not os.path.exists(shell):
+        c.note('mw2shell not built: skipped')
+        return
+    disc = os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2')
+    work = os.path.join(OUT, c.name)
+    game = os.path.join(work, 'dos')
+    os.makedirs(game, exist_ok=True)
+    for name in ('DATABASE.MW2', 'MW2.PRJ', 'ARCHWO.MW2', 'ARCHJF.MW2'):
+        target = os.path.join(game, name)
+        if not os.path.exists(target):
+            os.symlink(os.path.join(disc, name), target)
+    audio = bytearray(60)
+    struct.pack_into('<III', audio, 4, 65536, 65536, 65536)
+    with open(os.path.join(game, 'MW2SND.CFG'), 'wb') as f:
+        f.write(audio)
+
+    def play(name, screen, **kwargs):
+        env = _shell_env(work, MW2_SHELL_SCREEN=screen, MW2_SHELL_FRAMES=3, MW2_SFX_LOG=1,
+                         MW2_SHELL_SHOT=os.path.join(work, name + '.ppm'), **kwargs)
+        run = subprocess.run([shell, game], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30 * TSCALE)
+        log = run.stdout.decode('latin-1')
+        c(run.returncode == 0, name + ' opens', log[-500:])
+        return re.findall(r'SFXLOG -1.000 pcm (\d+) vol (\d+\.\d+)', log)
+
+    title = play('title', 8)
+    c(('38861', '0.04') in title, 'DOS title ambience starts at volume 5', str(title))
+    for clan in (0, 1):
+        model = play('model-%d' % clan, 5, MW2_SHELL_CLAN=clan, MW2_ARCH_PAGE='33,0',
+                     MW2_ARCH_FROM='0,0', MW2_ARCH_BACK=1)
+        c(model.count(('8960', '0.04')) == 1, 'model starts once before returning to the index', str(model))
+        index = play('index-%d' % clan, 5, MW2_SHELL_CLAN=clan, MW2_ARCH_PAGE='0,0')
+        c(all(sample != '8960' for sample, _ in index), 'index leaves the model loop silent', str(index))
+
+    smk = os.path.join(game, 'SMK')
+    if not os.path.exists(smk):
+        os.symlink(os.path.join(disc, 'SMK'), smk)
+    env = _shell_env(work, MW2_NO_INTRO=1, MW2_SFX_LOG=1, MW2_SHELL_NOREG=1, MW2_SHELL_SCREEN=1,
+                     MW2_SHELL_CLAN=1, MW2_SHELL_FROM=12, MW2_SHELL_PUSH='900:110,220')
+    env.pop('MW2_SHELL_SHOT', None)
+    with subprocess.Popen([shell, game], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+        try:
+            output, _ = proc.communicate(timeout=4 * TSCALE)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+    samples = [int(s) for s in re.findall(rb'SFXLOG -1.000 pcm (\d+) vol', output)]
+    door_and_training = [s for s in samples if s in (13296, 50880)]
+    c(door_and_training == [13296, 13296, 50880],
+      'opening and closing each play once, then Cadet Training ambience starts', str(samples))
+
+
+@sequence
+def dos_turret_aim_from_centres(c):
+    """The Golden Spade turret aims from the object centre at the stationary Mad Dog."""
+    run = c.run(secs=10, throttle=0, mission='GOLDSCN1', dos_look=True, mech='maddog/mdg00std',
+                env={'MW2_AI_TRACE': '7'})
+    demands = [float(pitch) for tick, pitch in re.findall(
+        r'^ai ([\d.]+)s actor 7 target .*?pitch [-\d.]+->([-\d.]+)', run.out, re.M)
+        if 7.5 <= float(tick) <= 9.5]
+    c(demands and all(0.45 <= pitch <= 0.6 for pitch in demands),
+      'stationary target produces the original 0.53-degree pitch demand', str(demands))
+
+
+@sequence
+def bronze_anvil_aircraft_tracks_convoy(c):
+    """The first gunship targets the lead moving helicopter and starts its DOS circling manoeuvre."""
+    run = c.run(secs=16, throttle=0, twist=0, mission='BRONSCN1', dos_look=True, mech='maddog/mdg00std',
+                env={'MW2_AI_TRACE': '4', 'MW2_DEBUG_NODE_TASKS': '1', 'MW2_TEST_FPS': '12', 'MW2_WATCH_ACTOR': '4'})
+    assigned = re.findall(r'node task [\d.]+ table 5 kind 0x\w+ actor 4 .*? at (-?\d+),(-?\d+),(-?\d+)', run.out)
+    c(assigned and 4900 <= int(assigned[0][1]) <= 5700,
+      'the first target is the high helicopter in the original record order', str(assigned[:2]))
+    p = re.findall(r'ai ([\d.]+)s actor 4 target .*?pitch [-\d.]+->([-\d.]+)', run.out)
+    early = [float(value) for time, value in p if 0.5 <= float(time) <= 5.0]
+    c(early and 0.7 < early[0] < 1.8 and early[-1] > early[0] + 0.5,
+      'pitch follows the moving helicopter from the gunship’s flight height', str(early))
+    c(re.search(r'ai [\d.]+s actor 4 attack man 12 ', run.out) is not None,
+      'the gunship starts circling while the convoy moves')
+    c(any(state.get('w_on') == 1 and state.get('w_seq') == 0 for state in run.span(7.0, 16.0)),
+      'the gunship plays CHPRANIM, whose keys set the DOS drive servo rate')
 
 
 def main():

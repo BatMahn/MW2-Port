@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0 (2026-11-25)
+
+This release brings the DOS mission simulation closer to the original executable, fixes menu audio transitions, and changes how the DOS renderer handles native resolution on macOS.
+
+- **DOS AI and collisions.** Only level-one mech pilots can choose a charge when their weapons run out. DOS movement checks unit contacts for online movers and falling wrecks, while powered-down units can still be hit by other movers.
+- **DOS scenery collision.** Distant scenery starts with its original unposed collision model until the camera comes in range. Silver Staff's Gargoyle and Dire Wolf now pass the out-of-view Chemical Plant on their recorded patrol routes.
+- **DOS positional audio.** In-range sounds, including startup cues, advance the shared mission random table. Footsteps and gait sounds play during the controller update after weapon dispatch. Scenery loops skip their initialization and draw playback rates from the same table.
+- **DOS missile locks and combat order.** Units move, existing projectiles advance, then controllers select weapons, issue warnings, and launch new volleys. Objectives evaluate the updated battlefield after combat.
+- **DOS startup and movement.** Controllers start the player first and initialize AI startup timers on the next frame. AI movement uses the previous controller inputs, so TNJ1's instructor takes its opening step on the correct frame. Drives and gait selection read the previous throttle, while AI steering reads the previous speed. The gunships' animation keys switch to the original drive servo rate.
+- **DOS mission animation.** Tracks with a loop point but no loop marker leave the current key for one update before restarting. The DUMBANIM vehicle tracks now follow the original sequence.
+- **macOS DOS renderer.** Metal draws at full backing resolution by default and uses GPU interpolation for DOS Gouraud polygons, retaining their palette and dithering. The fixed DOS resolutions and `render=full-native` use the original scanline calculations.
+- **DOS damage and wrecks.** Armour-hit spread and critical checks use the mission's original random stream. Wreck explosions and debris launch use the separate DOS Gaussian table.
+- **DOS debris.** Chunks and detached parts update in shared physics-pool order with fixed-point launch, gravity and bounce. Detached parts keep the world orientation they had when they broke free.
+- **DOS AI fire decisions.** Aircraft aim from their flight altitude and take moving convoy targets in mission order. Turrets and dropships use object centres for aim inputs and clear those inputs while offline. AI shots use the eye and mounts after movement. Weapon selection uses the original horizontal range and the line-of-fire check uses the torso's forward arc.
+- **Menu audio.** DOS title ambience fades in and Archive model pages start and stop their looping cue. Jade Falcon door animations and sounds play on the original room transitions. The Windows 95 title waits for its voice clip to finish, and the new-pilot training announcement follows the hall doors.
+- **Release builds.** Routine renderer, controller-map, and audio startup messages are limited to development builds.
+
+Linux validation covered 306 OpenGL sequences, four software Vulkan sequences, all 59 DOS mission objectives under sanitizers, and 66,720 comparisons across all 38 original animation records. Mac-specific testing was outside this pass. The remaining parity checks are listed in `docs/AUDIT_DOS.md`.
+
 ## v1.1.63 (2026-11-25)
 
 - **DOS startup and AI.** Mech startup and AI decisions share the original 127-entry random sequence.

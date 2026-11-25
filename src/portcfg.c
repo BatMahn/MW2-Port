@@ -98,6 +98,7 @@ int portcfg_load(const char *unused, portcfg *c)
             if (sp >= 0.5f && sp <= 1.5f) c->speed = sp;
         } else if (strcmp(line, "render") == 0) {
             int rw = 0, rh = 0;
+            c->render_full_native = strcmp(v, "full-native") == 0;
             if (sscanf(v, "%dx%d", &rw, &rh) == 2 && ((rw == 320 && rh == 200) || (rw == 640 && rh == 480) || (rw == 1024 && rh == 768))) { c->render_w = rw; c->render_h = rh; }
             else c->render_w = c->render_h = 0;
         } else if (strcmp(line, "aa") == 0) {
@@ -152,7 +153,8 @@ int portcfg_save(const char *unused, const portcfg *c)
     else if (c->mode == 1) fprintf(f, "resolution=window\n");
     else fprintf(f, "resolution=%dx%d\n", c->w, c->h);
     fprintf(f, "aa=%d\n", c->aa);
-    if (c->render_w) fprintf(f, "render=%dx%d\n", c->render_w, c->render_h); else fprintf(f, "render=native\n");
+    if (c->render_w) fprintf(f, "render=%dx%d\n", c->render_w, c->render_h);
+    else fprintf(f, "render=%s\n", c->render_full_native ? "full-native" : "native");
     fprintf(f, "speed=%.2f\n", (double)(c->speed > 0 ? c->speed : 0.85f));
     fprintf(f, "renderer=%s\n", PORTCFG_ED_NAME[c->renderer >= 0 && c->renderer < PORTCFG_ED_COUNT ? c->renderer : 0]);
     fprintf(f, "textures_kind=%s\n", c->textures_ati ? "ati" : "3dfx");

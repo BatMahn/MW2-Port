@@ -1,5 +1,6 @@
 /* cdaudio.c - see cdaudio.h. */
 #include "cdaudio.h"
+#include "development.h"
 
 #include "../third_party/miniaudio.h"
 #ifdef MW2_CLASSIC_MAC
@@ -389,7 +390,7 @@ static int cdaudio_open_drive(cdaudio **out, const char *dev, const cdaudio_opti
     cd->drive_thread_ok = pthread_create(&cd->drive_thread, NULL, drive_thread_fn, cd) == 0;
 #endif
     if (!cd->drive_thread_ok) { cdaudio_close(cd); return -1; }
-    fprintf(stderr, "cdaudio: playing the CD in drive %s (tracks %d-%d)\n", cddrive_name(drv), toc.first, toc.last);
+    if (MW2_DEVELOPMENT_LOGS) fprintf(stderr, "cdaudio: playing the CD in drive %s (tracks %d-%d)\n", cddrive_name(drv), toc.first, toc.last);
     if (opt && opt->verbose)
         for (n = cd->first; n <= cd->last; n++) {
             uint32_t msf = cda_hsg_to_msf(cd->tracks[n].start);

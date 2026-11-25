@@ -77,6 +77,7 @@ int  sfx_decode_sflx(const unsigned char *rec, size_t len, unsigned char **out);
 void sfx_play_pcm_voice(sfx *s, const unsigned char *pcm, int len, float volume);
 /* stop every voice playing this buffer (sfx_play_pcm) */
 void sfx_stop_pcm(sfx *s, const unsigned char *pcm);
+int sfx_pcm_playing(sfx *s, const unsigned char *pcm);
 /* set the volume (EFFECTS-scaled) and pan of every voice playing this buffer (a positional loop) */
 void sfx_pcm_level(sfx *s, const unsigned char *pcm, float volume, float pan);
 /* set the playback rate (Hz) of every voice playing this buffer (AIL_set_sample_playback_rate) */

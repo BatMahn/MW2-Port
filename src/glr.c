@@ -98,6 +98,7 @@ struct glr {
     float  center[3], radius;
     /* the DOS edition */
     int    dos;
+    int    dos_interpolated_gouraud;
     int    prog;                            /* RB_PROG_WORLD, or RB_PROG_WORLD_DOS for the DOS look (glr_use_variant) */
     rb_tex dos_tex;                         /* 256 x 17: rows 0-15 the LUMA table (as indices), row 16 the palette (RGB) */
     rb_tex dos_damage_tex[16];
@@ -955,7 +956,10 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                          * textured one: minus its texture switch class (notex_class) */
                         f[11] = batch >= GLR_SLOTS && !part->tint && !(r->dos && !model->extended) ? (float)((ti_flat && tk4 ? v->a & 0xff : pidx) + 1) : batch < GLR_SLOTS ? (float)-notex_cls : 0.0f;
                         if (tk2) f[11] = (float)-k2cls;   /* (v_ticm 3: drawn only with its class's textures off) */
-                        if (r->dos && !model->extended && tk4 && batch == GLR_SLOTS) f[11] = (float)(pfirst + 1);   /* DOS Gouraud: its fan's first vertex + 1 (dos_gouraud) */
+                        /* A zero fan selector uses the GPU's screen-linear vertex shades and the DOS palette dither.
+                         * The exact mode reconstructs the fan's integer spans and dither phase in the fragment shader. */
+                        if (r->dos && !r->dos_interpolated_gouraud && !model->extended && tk4 && batch == GLR_SLOTS)
+                            f[11] = (float)(pfirst + 1);
                         if (tik == 1 && batch >= GLR_TI && batch < GLR_TB) f[11] = (float)-k2cls;   /* (textured kinds 5-7: their switch class) */
                         if (batch < GLR_SLOTS && model->extended && !ti) {
                             /* the ATi Rage edition's path per colour type (ATi MW2.DLL dispatcher 0x100281f0 -> 0x1002dcb0, as
@@ -1536,6 +1540,11 @@ void glr_set_dos(glr *r, const uint8_t pal[256][3], const uint8_t *luma)
     glr_set_dos_palette(r, pal);
     rb_tex_filter(r->dos_tex, RB_NEAREST, RB_NEAREST);
     rb_tex_wrap(r->dos_tex, RB_CLAMP_TO_EDGE, RB_CLAMP_TO_EDGE);
+}
+
+void glr_set_dos_interpolated_gouraud(glr *r, int enabled)
+{
+    r->dos_interpolated_gouraud = enabled;
 }
 
 static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, int primary);

@@ -31,7 +31,10 @@ typedef struct {
     int32_t until;           /* ticks */
     int     moving;
     int     dos_chunk;       /* pooled chunk index + 1, or zero for unpooled debris */
+    int     dos_body;        /* index in the shared physics pool */
+    unsigned dos_rot_left;
     int32_t dos_rot[9];
+    int32_t dos_velocity[3], dos_spin[3], dos_bottom;
 } msim_debris;
 
 typedef struct {
@@ -97,9 +100,14 @@ typedef struct {
     unsigned     rng;
     uint16_t     dos_random[127]; /* Watcom draws, seeded once and reused by DOS rand (0x4a070). */
     unsigned     dos_random_index;
+    int          dos_boot_ticks;  /* startup time before the first supplied simulation frame */
+    int32_t      dos_gaussian[128];
+    unsigned     dos_gaussian_index;
     msim_shot    shots[MSIM_MAX_SHOTS];
     int          shot_count;
     unsigned     dos_chunk_left[MSIM_DOS_CHUNK_COUNT];
+    int          dos_chunk_kind[MSIM_DOS_CHUNK_COUNT];
+    int32_t      dos_chunk_rot[MSIM_DOS_CHUNK_COUNT][9], dos_chunk_radius[2];
     int          dos_chunk_count;
     unsigned     dos_anim_phase;   /* DOS local-matrix normalization period */
     struct msim_spin_seed *dos_spin_seeds;
@@ -109,6 +117,10 @@ typedef struct {
     const mech3d *dos_player_model;
     const anim_set *dos_player_anim_set;
     anim_player *dos_player_anim;   /* player gait prepared by the front end for this frame */
+    int          dos_player_anim_seq, dos_player_gait, dos_player_anim_rate, dos_player_anim_held;
+    int          dos_player_anim_event;
+    void       (*on_dos_player_gait)(void);  /* player gait sounds during the controller pass */
+    void       (*on_dos_world_sound)(void);  /* scenery sound tasks before pooled debris */
     unsigned     dos_player_anim_phase;   /* phase at the player skeleton allocation */
     uint8_t      dos_shot_kinds[MSIM_DOS_MAX_SHOTS];
     int          dos_shot_slots;
@@ -352,6 +364,10 @@ static inline int msim_dos_frame_ticks(int32_t now, int32_t dt_ms)
     return (int)((((int64_t)now + dt_ms) * 182 / 1000) - ((int64_t)now * 182 / 1000));
 }
 void msim_step(msim *s, int32_t dt_ms);
+/* DOS 0x40bc0: obtain the positional sample's volume, pan and delay and account for its pitch draw. */
+int msim_dos_sound_at(msim *s, int32_t x, int32_t y, int32_t z, int32_t listener,
+                      int half, int account_pitch, int *pan, int *delay);
+int msim_dos_sound_pitch(msim *s);
 /* STARTUP_MECH on a shut-down player (engine 0x1001b011: state 3 -> 0 when flag 4 is clear or overridden, "Powering
  * up..."): the mech is up again and the start-up runs - online 0x43e + rand(0x16a) ticks later (0x1001ab71). Returns 0
  * (nothing done) while a heat shutdown is still pending and not overridden. */
@@ -434,7 +450,7 @@ int  msim_dos_unit_impact(msim *s, int self, const float start[3], float height,
                           const float centre[3], const float normal[3], float combined_radius,
                           const float vel[3], const float other[3], float end[3], float bounce[3]);
 /* the representation actor k is drawn and collided at (0-3; see col_repr) and its collision model, posed as the unit */
-void msim_camera_lods(msim *s, const float eye[3], float scale);
+void msim_camera_lods(msim *s, const float eye[3], float scale, float view_far);
 int  msim_unit_repr(const msim *s, int k);
 const mech3d *msim_unit_hull(const msim *s, int k);
 /* A move (x0, z0) -> (*x, *z) refused by msim_can_step_hr (engine 0x1000b5e0 on a world hit, then 0x10019310's second
