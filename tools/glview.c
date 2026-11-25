@@ -5537,6 +5537,9 @@ static void wt_on(float x, float z, float y)   /* the type 0 box tops / type 5 p
  * - once a move was refused in 3D - the impact's vertical velocity, which then stands after combat_jets */
 static float g_pl_dy_frame, g_pl_dy_done, g_pl_vy3, g_pl_dt;
 static int g_pl_imp3, g_pl_land3;
+static int g_pl_motion_ticks, g_pl_motion_jet;
+static float g_pl_motion_heading;
+static combat_motion g_pl_lift;
 /* one move of the player's locomotion: the drive (throttle -> speed), the move by the mean velocity, mech contact and
  * the terrain / object impact (engine 0x10019310, 0x1000b5e0); 1 when it touched a mech or was refused */
 static int pl_move(float dt, float top)
@@ -5550,23 +5553,33 @@ static int pl_move(float dt, float top)
      * Firemoth, FULL then BSP: 153 kph held 1.7 s, then 133 / 114 / 93 / 61 / 39 at 0.07 / 0.18 / 0.28 / 0.35 s and
      * backwards; the port had flipped the drive at the key - stopped and backing within 1 s) */
     msim_drive_step(&g_thr_srv, &g_spd_srv, &g_pl_speed, fabsf(g_throttle_eff), g_pl_ap.cur == 2 ? -0.5f : 1.0f, top,
-                    !(g_sim_ok && (g_sim.player_unit.shutdown || g_sim.player_unit.immobile)), g_drive_slow, dt * 182.0f);
+                    !(g_sim_ok && (g_sim.player_unit.shutdown || g_sim.player_unit.immobile)), g_drive_slow, msim_dos_int ? (float)g_pl_motion_ticks : dt * 182.0f);
     if (g_pl_free) g_pl_speed = speed0;   /* airborne / jetting: the servos run, the velocity is held (0x10019310) */
     {   /* locomotion on the terrain (engine 0x10019310): steep or out-of-window steps refused */
         /* the move is the frame's mean velocity x dt - the engine's (v + a dt / 2) dt (0x10019310 local_40) */
         float nx, nz, along = 0.5f * (speed0 + g_pl_speed), across = g_pl_across;
-        if (g_pl_across != 0.0f) {   /* a mech contact's or wall impact's velocity across the heading (below), on the ground: x (1 - ticks / 45),
-                                      * zero under 0.0625 cm/tick (0x10019310, 0x102473b4 / 0x102473d0); airborne or jetting it is
-                                      * held with the rest of the one velocity vector (no approach in the air, 0x10019310 0x78 == 0) -
-                                      * the port had dropped it in the air, so an airborne impact's slide along the face was lost */
-            float k = g_pl_free ? 0.0f : dt * 182.0f / 45.0f;
-            g_pl_across *= k < 1.0f ? 1.0f - k : 0.0f;
-            across = 0.5f * (across + g_pl_across);
-            if (fabsf(g_pl_across) < 0.0625f * 182.0f) g_pl_across = 0;
+        if (msim_dos_int) {
+            int32_t move[2];
+            msim_dos_walk(&g_sim.player_unit, g_pl_motion_heading, g_spd_srv, g_pl_walk, g_pl_free,
+                          g_pl_motion_jet, g_pl_motion_ticks, move);
+            msim_dos_project_velocity(&g_sim.player_unit, g_pl.heading, &g_pl_speed, &g_pl_across);
+            across = g_pl_across;
+            nx = (float)g_pl.origin[0] + (float)move[0];
+            nz = (float)g_pl.origin[2] + (float)move[1];
+        } else {
+            if (g_pl_across != 0.0f) {   /* a mech contact's or wall impact's velocity across the heading (below), on the ground: x (1 - ticks / 45),
+                                          * zero under 0.0625 cm/tick (0x10019310, 0x102473b4 / 0x102473d0); airborne or jetting it is
+                                          * held with the rest of the one velocity vector (no approach in the air, 0x10019310 0x78 == 0) -
+                                          * the port had dropped it in the air, so an airborne impact's slide along the face was lost */
+                float k = g_pl_free ? 0.0f : dt * 182.0f / 45.0f;
+                g_pl_across *= k < 1.0f ? 1.0f - k : 0.0f;
+                across = 0.5f * (across + g_pl_across);
+                if (fabsf(g_pl_across) < 0.0625f * 182.0f) g_pl_across = 0;
+            }
+            nx = (float)g_pl.origin[0] + (sinf(h) * along + cosf(h) * across) * dt + g_pl_frac[0];
+            nz = (float)g_pl.origin[2] + (cosf(h) * along - sinf(h) * across) * dt + g_pl_frac[1];
         }
-        nx = (float)g_pl.origin[0] + (sinf(h) * along + cosf(h) * across) * dt + g_pl_frac[0];
-        nz = (float)g_pl.origin[2] + (cosf(h) * along - sinf(h) * across) * dt + g_pl_frac[1];
-        float fx = g_pl_frac[0], fz = g_pl_frac[1];   /* the sub-cm rest of the last move, used once */
+        float fx = msim_dos_int ? 0.0f : g_pl_frac[0], fz = msim_dos_int ? 0.0f : g_pl_frac[1];   /* the sub-cm rest of the last move, used once */
         g_pl_frac[0] = g_pl_frac[1] = 0;
         {   /* mech-mech contact in 3D, as the AI's (msim.c; engine 0x1000ba20 spheres, 0x1000c160 / 0x1000c1f0):
              * landing on top of a mech (normal y above 0.7071, feet within 10 m of the terrain) sets the player
@@ -5577,8 +5590,16 @@ static int pl_move(float dt, float top)
              * is set on the contact sphere and bounces off along the normal at half that speed (at least 1 cm/tick) */
             float ticks = dt * 182.0f, air = g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f, vy = air ? g_sim.player_unit.vy : 0.0f;
             float ch = g_sim.player_centre_h, x0 = (float)g_pl.origin[0], z0 = (float)g_pl.origin[2];
-            float p0[3] = {x0, g_sim.player_unit.y + ch, z0}, p1[3] = {nx, g_sim.player_unit.y + ch + vy * ticks, nz};
+            float p0[3] = {x0, g_sim.player_unit.y + ch, z0};
+            float p1[3] = {nx, g_sim.player_unit.y + ch + (msim_dos_int ? g_pl_lift.dy : vy * ticks), nz};
             float n[3], c[3], rr = 0, ov[3], sv[3] = {(sinf(h) * g_pl_speed + cosf(h) * g_pl_across) / 182.0f, vy, (cosf(h) * g_pl_speed - sinf(h) * g_pl_across) / 182.0f};
+            if (msim_dos_int) {
+                sv[0] = g_sim.player_unit.dos_vel[0] / 65536.0f;
+                sv[1] = g_pl_lift.vy;
+                sv[2] = g_sim.player_unit.dos_vel[1] / 65536.0f;
+                memcpy(g_sim.player_unit.dos_attempted, sv, sizeof sv);
+                g_sim.player_unit.dos_contact_unit = 0;
+            }
             int hit = g_sim_ok ? msim_unit_contact(&g_sim, -1, p0, p1, n, c, &rr, ov) : -2, pushout = 0;
             g_sim.player_vel[0] = sv[0]; g_sim.player_vel[1] = sv[1]; g_sim.player_vel[2] = sv[2];
             /* set down inside the sphere of the mech it landed on (contact < -2): the move ends inside it, whatever
@@ -5586,17 +5607,32 @@ static int pl_move(float dt, float top)
             if (hit == -2 && g_sim_ok && g_pl_contact < -2 && msim_unit_inside(&g_sim, -1, -g_pl_contact - 3, p1, n, c, &rr, ov)) { hit = -g_pl_contact - 3; pushout = 1; }
             if (hit >= 0) {
                 /* the second try (0x10019a61): refused by rounding, the velocity doubled (msim_contact_retest) */
-                const float vx2 = msim_contact_retest(p0, p1, c, rr) ? 2.0f : 1.0f;
+                const float vx2 = !msim_dos_int && msim_contact_retest(p0, p1, c, rr) ? 2.0f : 1.0f;
                 touched = 1;
                 /* the engine's speeds (0x1000ba20 copies the other's z velocity over its own): damage at
                  * |(dvx, dvy)|, bounce at half |(dvx, dvy, the other's vz)|, at least 1 cm/tick */
                 float dvx = sv[0] - ov[0], dvy = sv[1] - ov[1], sp = msim_dos_int ? msim_dos_len(dvx, dvy, 0.0f) : sqrtf(dvx * dvx + dvy * dvy), bs = 0.5f * sqrtf(dvx * dvx + dvy * dvy + ov[2] * ov[2]);
                 float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);
                 float gnd = msim_ground(&g_sim, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
-                if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
+                if (msim_dos_int) {
+                    float end[3], bounce[3];
+                    int retry_hit = msim_dos_unit_impact(&g_sim, -1, p0, ch, g_sim.player_radius, hit,
+                                                         c, n, rr, sv, ov, end, bounce);
+                    g_pl.origin[0] = (int32_t)end[0];
+                    g_pl.origin[2] = (int32_t)end[2];
+                    g_pl_dy_done = end[1] - p0[1];
+                    g_pl_vy3 = bounce[1];
+                    g_pl_imp3 = 1;
+                    g_pl_land3 = !retry_hit && n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f;
+                    g_sim.player_unit.dos_vel[0] = (int32_t)lrintf(bounce[0] * 65536.0f);
+                    g_sim.player_unit.dos_vel[1] = (int32_t)lrintf(bounce[2] * 65536.0f);
+                    msim_dos_project_velocity(&g_sim.player_unit, g_pl.heading, &g_pl_speed, &g_pl_across);
+                }
+                if (g_pl_land3 || (!msim_dos_int && n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f)) {   /* landed on it (0x10019c4e) */
                     /* the engine: projected onto the sphere (0x1000ba20), the feet taken as 1 cm under the terrain
                      * there (local_5c = -1): stood on the terrain at that point, inside the sphere, vy 0, the
                      * velocity n x max(1, dv / 2); the next frame's move pushes it out (above) */
+                    if (msim_dos_int) { g_pl_contact = -hit - 3; return 1; }
                     float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
                     (void)hl;
                     if (bs < 1.0f) bs = 1.0f;
@@ -5617,6 +5653,7 @@ static int pl_move(float dt, float top)
                         }
                         g_pl_contact = hit;
                     }
+                    if (msim_dos_int) return 1;
                     {   /* bounced off / pushed out along the normal, walking or airborne alike (0x1000ba20: the
                          * end of the move projected onto the r1 + r2 sphere, the velocity n x max(1, dv / 2)) -
                          * pressing on, each frame's move slides round the other mech, so how long it takes depends
@@ -5676,11 +5713,12 @@ static int pl_move(float dt, float top)
             {
                 /* the attempted velocity is the frame's END velocity: 0x10019310 adds the acceleration before the move
                  * (param_1[0x40..0x42] = v + a t), whose |v| and reflection the impact takes - vy + a t = 2 dy / t - vy */
-                float tf = g_pl_dt * 182.0f, dyi = dy_sub, vyi = dy_sub == 0.0f ? 0.0f : g_pl_imp3 ? g_pl_vy3 :
+                float tf = g_pl_dt * 182.0f, dyi = dy_sub, vyi = msim_dos_int ? g_pl_lift.vy :
+                                                           dy_sub == 0.0f ? 0.0f : g_pl_imp3 ? g_pl_vy3 :
                                                            tf > 0.0f ? 2.0f * g_pl_dy_frame / tf - g_sim.player_unit.vy : g_sim.player_unit.vy;
                 imp = msim_world_impact3(&g_sim, x0, z0, &bx, &bz, g_sim.player_unit.y + g_pl_dy_done, &dyi, g_sim.player_centre_h,
-                                         g_sim.player_radius, g_pl.heading, &g_pl_speed, &g_pl_across, &vyi);
-                if (dy_sub != 0.0f) { g_pl_imp3 = 1; g_pl_vy3 = vyi; g_pl_land3 = imp & 2; }   /* airborne: the 3D impact's (walking stays level) */
+                                         g_sim.player_radius, g_pl.heading, &g_pl_speed, &g_pl_across, &vyi, g_sim.player_unit.dos_vel);
+                if (msim_dos_int || dy_sub != 0.0f) { g_pl_imp3 = 1; g_pl_vy3 = vyi; g_pl_land3 = imp & 2; }   /* airborne: the 3D impact's (walking stays level) */
                 g_pl_dy_done += dyi;
             }
             msim_block_normal(wn);   /* the hit's normal (the second try's when refused): the engine's DAT_1024b420.. */
@@ -5714,6 +5752,10 @@ static int pl_move(float dt, float top)
 static void pl_locomote(float dt, float top)
 {
     const float step = 1.0f / 30.0f;
+    if (msim_dos_int) {
+        if (g_pl_motion_ticks > 0) pl_move(dt, top);
+        return;
+    }
     if (g_pl_contact_hold <= 0) {   /* free: one move */
         g_pl_contact_acc = 0;
         if (pl_move(dt, top)) g_pl_contact_hold = CONTACT_HOLD;
@@ -6077,7 +6119,14 @@ static void test_dump(const char *tag)
     }
     {   /* the player's carried pose offset (anim_player_step): the largest track's, and its track */
         int q, qm = -1; float om = 0;
-        for (q = 0; q < ANIM_MAX_TRACKS; q++) if (fabsf(g_pl_ap.off[q]) > om) { om = fabsf(g_pl_ap.off[q]); qm = q; }
+        for (q = 0; q < g_pl_anim.track_count; q++) {
+            float off = g_pl_ap.off[q];
+            if (msim_dos_int) {
+                float scale = g_pl_anim.tracks[q].type > 2 ? 65536.0f : 1.0f;
+                off = g_pl_ap.dos_value[q] / scale - anim_value(&g_pl_anim, q, g_pl_t);
+            }
+            if (fabsf(off) > om) { om = fabsf(off); qm = q; }
+        }
         printf(" poff=%.2f poff_tr=%d pseq=%d", (double)om, qm, g_pl_ap.cur);
     }
     if (getenv("MW2_WATCH_ACTOR") && g_sim_ok && g_sim.anim_pl) {   /* TEST ONLY: an actor's walk animation (idle_mech_rests) */
@@ -7711,6 +7760,7 @@ int main(int argc, char **argv)
                     g_pl.heading = heading_before; g_throttle = 0; g_throttle_eff = 0;
                     g_pl.twist = g_twist_srv; g_pitch = g_pitch_srv;
                 }
+                int dos_turn_input = 0;
                 if (msim_dos_int) {   /* the DOS look: the leg turn SERVO. The turns above make the demand c[0xe] (deg/s); the heading
                      * turns by the servo's value c[0xf] (MW2.EXE 0x27561: object +0x60 += +0x3c x ticks / 182), servo +0x34 easing
                      * toward the demand with T = chop(0.3 x 182) = 54 ticks (0x2675c): a turn builds up and runs on ~0.3 s after the
@@ -7725,9 +7775,10 @@ int main(int argc, char **argv)
                         else { dem = 0; leg_srv = 0; g_pl.twist = 0; g_feet_to_torso = 0; }
                     }
                     if (offline || g_pl_reset_legs) { dem = 0; if (g_pl_reset_legs) leg_srv = 0; g_pl_reset_legs = 0; }
-                    leg_srv = msim_servo(leg_srv, dem, 54.0f, dt * 182.0f);
-                    g_pl.heading = heading_before + leg_srv * dt;
-                    if (g_feet_to_torso && !offline) g_pl.twist -= leg_srv * dt;
+                    dos_turn_input = dem != 0.0f;
+                    g_pl.heading = heading_before;
+                    float step = msim_dos_leg_step(&leg_srv, dem, &g_pl.heading, dos_ticks);
+                    if (g_feet_to_torso && !offline) g_pl.twist -= step;
                     if (fabsf(leg_srv) >= 1e-4f) g_pl_legs_turn = 1;
                 }
                 if (getenv("MW2_POW_TRACE")) {   /* tests: power state, speed, torso, heading every 0.25 s */
@@ -7744,15 +7795,30 @@ int main(int argc, char **argv)
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     if (g_sim_ok) {   /* the no-lift flag (0x100196cc..0x10019711: |+0xc| >= 1e-7 or a directional jet held) */
                         int dj = H("jumpjet_fire_left") || H("jumpjet_fire_right") || H("jumpjet_fire_forward") || H("jumpjet_fire_backward");
-                        g_sim.player_unit.jet_forward = jet && (g_pl_legs_turn || dj);
+                        g_sim.player_unit.jet_forward = jet && ((msim_dos_int ? dos_turn_input : g_pl_legs_turn) || dj);
                     }
-                    g_pl_dy_frame = g_sim_ok ? combat_jets_dy(&g_sim.player_unit, jet, dt) : 0.0f;
+                    int thrust = g_sim_ok && jet && g_sim.player_unit.jets > 0 &&
+                                 !g_sim.player_unit.no_jump && g_sim.player_unit.jet_fuel > 0;
+                    if (g_sim_ok && msim_dos_int)
+                        g_pl_lift = msim_dos_lift(&g_sim.player_unit, &g_sim.planet, thrust, dos_ticks);
+                    g_pl_dy_frame = msim_dos_int ? g_pl_lift.dy : g_sim_ok ? combat_jets_dy(&g_sim.player_unit, jet, dt) : 0.0f;
                     /* engine 0x10019310 (DOS 0x26990): the velocity approaches heading x c[0xb] only on the ground with the
                      * jets not firing (input +0x1d and fuel c[0x30] > 0); airborne or jetting it is left alone - momentum,
                      * whatever the throttle - except for the directional jets' thrust and drag (the jets block below) */
                     g_pl_jet_fire = g_sim_ok && combat_jets_firing(&g_sim.player_unit, jet, dt);
-                    g_pl_free = g_sim_ok && (g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f ||
+                    g_pl_free = g_sim_ok && (msim_dos_int ? g_sim.player_unit.y > g_sim.player_unit.ground || thrust :
+                                             g_sim.player_unit.y > g_sim.player_unit.ground + 1.0f ||
                                              (jet && g_sim.player_unit.jets > 0 && g_sim.player_unit.jet_fuel > 0));
+                    g_pl_motion_ticks = dos_ticks;
+                    g_pl_motion_heading = heading_before;
+                    g_pl_motion_jet = 0;
+                    if (g_pl_free && jet && !dos_turn_input && g_sim.player_unit.jet_fuel > 0 &&
+                        g_sim.player_unit.jets > 0 && !g_sim.player_unit.no_jump) {
+                        if (H("jumpjet_fire_left")) g_pl_motion_jet = 1;
+                        else if (H("jumpjet_fire_right")) g_pl_motion_jet = 2;
+                        else if (H("jumpjet_fire_forward")) g_pl_motion_jet = 3;
+                        else if (H("jumpjet_fire_backward")) g_pl_motion_jet = 4;
+                    }
                     g_pl_dy_done = 0; g_pl_vy3 = 0; g_pl_imp3 = 0; g_pl_land3 = 0; g_pl_dt = dt;
                 }
                 pl_locomote(dt, top);
@@ -7766,7 +7832,15 @@ int main(int argc, char **argv)
                     int r0 = g_pl.anim_rate > 0 ? g_pl.anim_rate : 70;
                     int gait = 0, seq = -1, ev;
                     static int gs_st = -2;   /* the gait sound state (DAT_10207f00[unit], below) */
-                    if (!g_pl_ap_ok) { anim_player_init(&g_pl_ap, r0); g_pl_ap_ok = 1; gs_st = -2; }   /* a new mission: standing, nothing playing (0x1000b5a0) */
+                    if (!g_pl_ap_ok) {
+                        anim_player_init(&g_pl_ap, r0);
+                        if (msim_dos_int) {
+                            unsigned phase = g_sim.dos_player_anim_phase;
+                            mech3d_dos_anim_init(&g_pl, &g_pl_anim, &g_pl_ap, &phase);
+                        }
+                        g_pl_ap_ok = 1;
+                        gs_st = -2;
+                    }
                     if (frac > 1.0f / 32.0f) {
                         gait = frac < 0.25f ? 1 : frac < 0.75f ? 2 : 3;
                         seq = gait == 3 ? 1 : 0;
@@ -7784,7 +7858,9 @@ int main(int argc, char **argv)
                      * DOSBox HEIDSCN1 Nova at walk, J held 1 s: the legs held from the first jet frame to touch-down */
                     g_pl_anim_held = g_sim_ok && (g_pl_jet_fire || g_sim.player_unit.y + g_pl_dy_frame - g_sim.player_unit.ground > g_sim.player_centre_h);
                     if (g_pl_anim_held) anim_player_hold(&g_pl_ap);
-                    ev = anim_player_step(&g_pl_anim, &g_pl_ap, seq, gait, r0, dt * 182.0f);
+                    ev = anim_player_step(&g_pl_anim, &g_pl_ap, seq, gait, r0,
+                                          msim_dos_int ? (float)dos_ticks : dt * 182.0f, msim_dos_int);
+                    if (msim_dos_int) mech3d_dos_anim_step(&g_pl, &g_pl_anim, &g_pl_ap, &g_sim.dos_anim_phase);
                     g_pl_t = g_pl_ap.t;
                     if (seq < 0) seq = 0;
                     if (getenv("MW2_STEP_TRACE")) { static int lq = -9; if (lq != g_pl_ap.cur) { lq = g_pl_ap.cur; fprintf(stderr, "seq %d key %d\n", g_pl_ap.cur, g_pl_ap.key); } }
@@ -7836,7 +7912,9 @@ int main(int argc, char **argv)
                         if (snd2 > 0 && g_sfx && !g_sim.player_unit.destroyed) { float p3[3]; snd_player_pos(p3); snd_at(snd2, p3, 1, snd_cockpit()); }   /* 0x1000b567 (0x1000b370: camera - mech, mirrored): halved in the cockpit (edx DAT_1024e678) */
                     }
                 }
-                g_pl.pose_off = getenv("MW2_NO_POSE_OFF") ? NULL : g_pl_ap.off;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
+                const anim_player *ap = getenv("MW2_NO_POSE_OFF") ? NULL : &g_pl_ap;
+                g_pl.pose_off = ap && !msim_dos_int ? ap->off : NULL;
+                g_pl.pose_dos = msim_dos_int ? ap : NULL;
                 /* the torso object turned by half the servo's pitch (0x10019310: the player's torso pitch = value >> 1,
                  * SetObjRotation(torso, pitch, twist, 0)) - the eye and the cockpit frame ride on it, so the frame
                  * stays put in the view, which takes the same half */
@@ -7845,7 +7923,9 @@ int main(int argc, char **argv)
                 mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);   /* g_pl_t: the absolute key time (anim_player) */
                 if (g_plpit_ok) {
                     memcpy(g_plpit.origin, g_pl.origin, sizeof g_pl.origin);
-                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.tilt = g_pl.tilt; g_plpit.pitch = g_pl.pitch; g_plpit.pose_off = g_pl_ap.off;
+                    g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.tilt = g_pl.tilt; g_plpit.pitch = g_pl.pitch;
+                    g_plpit.pose_off = g_pl.pose_off;
+                    g_plpit.pose_dos = g_pl.pose_dos;
                     mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
                 }
                 if (g_sim_ok) {   /* the mounts as drawn (walk animation, torso twist) for the shots and jet flames */
@@ -7855,6 +7935,7 @@ int main(int argc, char **argv)
                     g_sim.pl_shown.pose_anim = g_pl.pose_anim;
                     g_sim.pl_shown.pose_t = g_pl.pose_t;
                     g_sim.pl_shown.pose_off = g_pl.pose_off;
+                    g_sim.pl_shown.pose_dos = g_pl.pose_dos;
                     g_sim.pl_shown_ok = 1;
                 }
             } else if (g_pl_ok && g_pilot && g_sim_ok) {
@@ -7905,7 +7986,7 @@ int main(int argc, char **argv)
                 {
                     const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                     int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
-                    {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
+                    if (!msim_dos_int) {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
                          * the jets): while jetting, the FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
                          * along it - forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile.
                          * The engine has ONE velocity vector (+0xf4 / +0xfc): the thrust and the drag act on all of it, the
@@ -7969,8 +8050,14 @@ int main(int argc, char **argv)
                     }
                     {
                         float y3 = g_sim.player_unit.y + g_pl_dy_done;
-                        combat_jets(&g_sim.player_unit, jet, dt, &g_sim.rng);
-                        if (g_pl_imp3 && g_pl_land3) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);   /* harmless: landed (0x10019c4e) */
+                        combat_motion impact = {g_pl_dy_done, g_pl_vy3, dos_ticks};
+                        combat_jets_motion(&g_sim.player_unit, jet, dt, &g_sim.rng,
+                                           msim_dos_int && !g_sim.player_unit.destroyed ?
+                                           (g_pl_imp3 ? &impact : &g_pl_lift) : NULL);
+                        if (msim_dos_int && !g_sim.player_unit.destroyed) {
+                            if (g_pl_land3 && g_sim.player_unit.y > g_sim.player_unit.ground)
+                                combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);
+                        } else if (g_pl_imp3 && g_pl_land3) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);   /* harmless: landed (0x10019c4e) */
                         else if (g_pl_imp3) {   /* a move refused in 3D (pl_move): where the impact left it, the reflected vertical velocity */
                             g_sim.player_unit.y = y3; g_sim.player_unit.vy = g_pl_vy3; g_sim.player_unit.landed_vy = 0;
                             if (g_sim.player_unit.y <= g_sim.player_unit.ground) combat_land(&g_sim.player_unit, g_pl_vy3, &g_sim.rng);

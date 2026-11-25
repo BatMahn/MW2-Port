@@ -128,13 +128,21 @@ static int target_blocks_charge(void *context, float bearing)
     return 0;
 }
 
-void shim_dos_flank(int face, int x, int z, int target, int throttle, int blocked, int out[3])
+void shim_dos_flank_point(int32_t x, int32_t z, int32_t yaw, int slot, int dist, int32_t out[2])
+{
+    float fx, fz;
+    slot_point((float)x, (float)z, yaw / 65536.0f, slot, (float)dist, &fx, &fz);
+    out[0] = (int32_t)fx;
+    out[1] = (int32_t)fz;
+}
+
+void shim_dos_flank(int man, int face, int x, int z, int target, int throttle, int blocked, int out[3])
 {
     ai_mind m;
     ai_init(&m, -1);
     m.progs[0] = -1;
     m.state = AI_ATTACK;
-    m.man = 1;
+    m.man = man;
     m.man_limit = 900;
     m.next_fire = 1000;
     m.throttle = (float)throttle / 1024.0f;
@@ -148,7 +156,7 @@ void shim_dos_flank(int face, int x, int z, int target, int throttle, int blocke
                        .pilot_level = 4, .dos_avoid = blocked ? blocked_approach : NULL,
                        .avoid_context = &m};
     ai_step(NULL, &m, &v, 6.0f / 182.0f, 6);
-    out[0] = m.flank_face;
+    out[0] = man == 7 ? m.man < 0 : m.flank_face;
     out[1] = (int)lrintf(m.turn * 65536.0f);
     out[2] = (int)lrintf(m.throttle * 1024.0f);
 }
@@ -177,6 +185,35 @@ void shim_dos_circle(int x, int z, int until_retarget, int ticks, int blocked, i
     out[1] = (int)m.flank_retarget;
     out[2] = (int)lrintf(m.turn * 65536.0f);
     out[3] = (int)lrintf(m.throttle * 1024.0f);
+}
+
+void shim_dos_circle_replay(const int32_t *frames, int count, int32_t *out)
+{
+    ai_mind m;
+    ai_init(&m, -1);
+    ai_set_class(&m, 5, 80);
+    m.progs[0] = -1;
+    m.state = AI_ATTACK;
+    m.next_fire = 30000;
+    ai_view v = {.has_enemy = 1, .pilot_level = 4, .enemy_x = 50000, .enemy_z = 60000};
+    start_manoeuvre(&m, &v, 12);
+    for (int i = 0; i < count; i++) {
+        const int32_t *frame = frames + 5 * i;
+        v.self_x = (float)frame[0];
+        v.self_z = (float)frame[1];
+        v.enemy_x = (float)frame[2];
+        v.enemy_z = (float)frame[3];
+        v.enemy_dist = (float)dos_level_distance(frame[2] - frame[0], frame[3] - frame[1]);
+        ai_step(NULL, &m, &v, frame[4] / 182.0f, frame[4]);
+        int32_t *row = out + 35 * i;
+        row[0] = m.goal_pt;
+        row[1] = m.guard_n;
+        row[2] = (int32_t)m.flank_retarget;
+        for (int j = 0; j < m.guard_n; j++) {
+            row[3 + 2*j] = (int32_t)m.guard[j][0];
+            row[4 + 2*j] = (int32_t)m.guard[j][1];
+        }
+    }
 }
 
 void shim_dos_approach(int man, int previous, int distance, int bearing, int ticks,

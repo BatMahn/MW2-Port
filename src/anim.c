@@ -27,7 +27,8 @@ int anim_parse(const uint8_t *d, size_t len, anim_set *s)
         tr->type = rd32s(d + o + 4);
         tr->pose[0] = 0;
         for (k = 0; k < s->key_count; k++) {
-            float v = (float)rd32s(d + o + 8 + (size_t)k * 4);
+            tr->delta[k] = rd32s(d + o + 8 + (size_t)k * 4);
+            float v = (float)tr->delta[k];
             if (tr->type > 2) v /= 65536.0f;
             acc += v;
             tr->pose[k + 1] = acc;
@@ -155,7 +156,7 @@ void anim_player_hold(anim_player *p)
 {
     p->on = 0;   /* +0x80 bit 0 (DOS 0x26990 / 0x27785 the same, & 0xfe) */
 }
-int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks)
+static int anim_key_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks, int dos)
 {
     int f, next, trans = 0, target = -1, jumped = 0, ev = 0;
     uint32_t fl;
@@ -165,8 +166,13 @@ int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int r
         p->dur = anim_key_time(gait, rate);
         return 0;
     }
-    if (p->key == -1) { carry(s, p, (int)p->t, 0); p->key = 0; p->left = 0; p->len = 0; p->cur = 0; }   /* from the first key (sequence 0) */
-    else p->left -= ticks;
+    if (p->key == -1) {
+        if (!dos) carry(s, p, (int)p->t, 0);
+        p->key = 0;   /* from the first key (sequence 0) */
+        p->left = 0;
+        p->len = 0;
+        p->cur = 0;
+    } else p->left -= ticks;
     if (p->left > 0) {
         p->t = (float)p->key + (p->len > 0 ? 1.0f - p->left / p->len : 1.0f);
         return 0;
@@ -202,7 +208,7 @@ int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int r
     if ((!jumped && (fl & 0x400)) || next >= s->key_count) { p->left = 0; next = -1; }
     if (jumped) p->cur = target;
     if (next != -1) {
-        carry(s, p, f + 1, next);
+        if (!dos) carry(s, p, f + 1, next);
         p->key = next;
         p->len = p->left;
         p->t = (float)next;
@@ -213,6 +219,39 @@ int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int r
         p->key = -1;
         p->t = (float)(f + 1);   /* the sequence's last key reached: the standing pose */
         if (req == -1) { p->cur = -1; p->on = 0; }
+    }
+    return ev;
+}
+
+/* 0x1ad36 consumes an integer share of the remaining delta. The remainder
+ * stays with the track, even when an overdue frame enters the next key. */
+static int32_t dos_anim_slice(int32_t pending, int ticks, int left)
+{
+    if (left <= 0) return pending;
+    int32_t product = (int32_t)((uint32_t)pending * (uint32_t)ticks);
+    int32_t step = product / left;
+    if ((pending < 0 && step < pending) || (pending >= 0 && step > pending)) return pending;
+    return step;
+}
+
+int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks, int dos)
+{
+    if (!dos) return anim_key_step(s, p, req, gait, rate, ticks, 0);
+    const int elapsed = (int)ticks, left = (int)p->left, playing = p->on;
+    const int entering_key = playing && (p->key < 0 || elapsed >= left);
+    p->dos_applied = playing;
+    if (playing) {
+        for (int k = 0; k < s->track_count; k++) {
+            int32_t step = dos_anim_slice(p->dos_pending[k], elapsed, left);
+            p->dos_step[k] = step;
+            p->dos_value[k] = (int32_t)((uint32_t)p->dos_value[k] + (uint32_t)step);
+            p->dos_pending[k] = (int32_t)((uint32_t)p->dos_pending[k] - (uint32_t)step);
+        }
+    }
+    int ev = anim_key_step(s, p, req, gait, rate, (float)elapsed, 1);
+    if (entering_key && p->key >= 0) {
+        for (int k = 0; k < s->track_count; k++)
+            p->dos_pending[k] = (int32_t)((uint32_t)p->dos_pending[k] + (uint32_t)s->tracks[k].delta[p->key]);
     }
     return ev;
 }

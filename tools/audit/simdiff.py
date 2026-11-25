@@ -7,9 +7,11 @@ DOS edition mode (tools/audit/build.sh builds the shims into SIMDIFF_BUILD, defa
 
 Each test drives both sides with the same random / edge inputs and prints PASS / FAIL with the first differences.
 Modelled on the GBL port's tools/audit/simdiff.py; MW2.EXE's controller offsets are mostly GBL's minus 4."""
-import ctypes, os, random, sys, math
+import ctypes, os, random, sys, math, struct
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mw2emu
+from unicorn import UC_HOOK_CODE
 from unicorn.x86_const import UC_X86_REG_FPCW
 s32 = mw2emu.s32
 
@@ -552,6 +554,153 @@ def dos_collision_lods(rep, rnd, n):
 
 
 @test
+def dos_animation_frames(rep, rnd, n):
+    """Follow the original track player and its changing node pose, including matrix normalization."""
+    e = mw2emu.Emu()
+    L = lib('msim')
+    ptr = ctypes.POINTER(ctypes.c_int32)
+    L.shim_dos_anim_frames.argtypes = [ptr, ctypes.c_int, ptr, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ptr]
+    holder, task, unit, root, node, track, deltas, keys = (e.alloc(sz) for sz in (4, 40, 0x180, 128, 128, 20, 256, 512))
+    e.w32(root + 4, node)
+    e.w32(node, root)
+    e.w32(holder, task)
+    e.w32(track + 12, deltas)
+    e.w32(track + 16, keys)
+    e.stub(0x17300)
+    e.stub(0x17490, ret=holder)
+    def move(_uc, _addr, _size, _data):
+        applied[0] = s32(applied[0] + e.reg(('edx', 'ebx', 'ecx')[axis]))
+
+    callbacks = [e.uc.hook_add(UC_HOOK_CODE, move, begin=addr, end=addr)
+                 for addr in (0x1dfc0, 0x1e140)]
+    # Loop walk or branch to run. A run stop returns through a walk transition marker.
+    sample_flags = [
+        (1, 0), (2, 0), (0x810, 0), (0x240, 1 << 8), (0x804, 0xffff_ff00), (0x400, 0),
+        (1, 1), (0x200, 0), (0x112, 0), (0x808, 0),
+    ]
+
+    def cases():
+        for _ in range(n):
+            kind = rnd.randrange(6)
+            limit = 25000000 if kind >= 3 else 800
+            yield kind, [rnd.randint(-limit, limit) for _ in sample_flags], sample_flags, False
+        fixture = os.getenv('MW2_ANIM_RECORD_DIR')
+        if fixture:
+            record_count = 0
+            for asset in sorted(Path(fixture).iterdir()):
+                data = asset.read_bytes()
+                count, keys = struct.unpack_from('<ii', data)
+                if keys != 32:
+                    continue
+                stride = 8 + 4*keys
+                flags = list(struct.iter_unpack('<II', data[8 + count*stride:8 + count*stride + 8*keys]))
+                record_count += 1
+                for index in range(count):
+                    offset = 8 + index*stride
+                    _, kind = struct.unpack_from('<ii', data, offset)
+                    ds = struct.unpack_from(f'<{keys}i', data, offset + 8)
+                    if any(ds):
+                        yield kind, ds, flags, True
+            if record_count == 0:
+                raise ValueError('MW2_ANIM_RECORD_DIR contains no gait records')
+            rep.notes.append('replayed moving tracks in %d DOS gait records' % record_count)
+
+    def as_array(values):
+        return (ctypes.c_int32 * len(values))(*values)
+
+    for type_id, ds, flags, asset in cases():
+        rate, now = rnd.choice([37, 45, 70]), 10000
+        axis = type_id % 3
+        e.w32(track + 8, type_id)
+        timeline = []
+        for k in range(240):
+            req = 0 if k < 35 or 130 <= k < 210 else 1 if k < 110 or k >= 210 else -1
+            if asset:
+                req = (0, 1, -1, 2, 0, 2, 1, -1)[k // 30]
+            gait = 0 if req < 0 else 3 if req == 1 else rnd.choice([1, 2])
+            timeline.append((req, gait, rnd.choice([0, 5, 6, 7, 13, 39, 95]), int(rnd.randrange(10) == 0)))
+        out = (ctypes.c_int32 * (22 * len(timeline)))()
+        phase = rnd.randint(64, 191)
+        native = as_array([v for d, (flags_word, attrs) in zip(ds, flags) for v in (d, flags_word, s32(attrs))])
+        L.shim_dos_anim_frames(native, len(ds), as_array([v for frame in timeline for v in frame]),
+                              len(timeline), rate, type_id, phase, out)
+        e.w32(root + 4, 0)
+        e.w32(0x95ae4, phase)
+        e.call(0x1de60, eax=root, edx=node)
+        e.write(task, bytes(40))
+        for off, v in [(0, track), (4, node), (8, unit), (12, rate), (24, now), (28, 1), (32, -1), (36, 1)]:
+            e.w32(task + off, v)
+        for off, v in [(128, 0), (132, -1), (148, rate)]:
+            e.w32(unit + off, v)
+        e.w32(track + 4, len(ds))
+        for j, (delta, (flags_word, attrs)) in enumerate(zip(ds, flags)):
+            e.w32(deltas + j * 4, delta)
+            e.w32(keys + j * 8, flags_word)
+            e.w32(keys + j * 8 + 4, attrs)
+        applied = [0]
+        for j, (req, gait, elapsed, hold) in enumerate(timeline):
+            now += elapsed
+            e.w32(unit + 128, e.r32(unit + 128) & (0 if hold else 1))
+            e.w32(unit + 136, req)
+            e.w32(unit + 140, gait)
+            heading = (j % 37 - 18) * 21 * 16384
+            e.call(0x3b88b, stack=(root + 12, 0, heading, 0, -10000 + 82*j, 400, 28000 - 49*j))
+            e.call(0x1aad0, eax=1, ebx=now)
+            e.call(0x1e400, eax=root)
+            fl = e.r32(unit + 128)
+            ev = int(bool(fl & 8)) | (2 * int(bool(fl & 2)))
+            expected = [fl & 1, e.rs32(task + 32), e.rs32(unit + 132), e.rs32(task + 16),
+                        e.rs32(unit + 148), applied[0], e.rs32(task + 20), ev]
+            expected.extend(e.rs32(node + 60 + 4*k) for k in range(12))
+            expected.extend((e.r32(node + 120) if type_id >= 3 else 0, e.r32(0x95ae4)))
+            got = list(out[22 * j:22 * j + 22])
+            rep.check(expected == got, 'track %d step %d req %d gait %d elapsed %d hold %d: DOS %s port %s' %
+                      (type_id, j, req, gait, elapsed, hold, expected, got))
+    for callback in callbacks:
+        e.uc.hook_del(callback)
+
+
+@test
+def dos_skeletal_pose(rep, rnd, n):
+    """Run a three-piece pose through the DOS node hierarchy and compare its final collision point."""
+    e = emu()
+    L = lib('msim')
+    v3, v4, v9, v39 = (ctypes.c_int32 * k for k in (3, 4, 9, 39))
+    L.shim_dos_skeleton.argtypes = [ctypes.c_int32, v4, v3, v9, v3, ctypes.c_int, ctypes.c_int, ctypes.c_int, v39]
+    carrier, body, torso, gun = (e.alloc(128) for _ in range(4))
+    point_addr = e.alloc(12)
+    out = v39()
+    for parent, child in [(carrier, body), (body, torso), (torso, gun)]:
+        e.w32(parent + 4, child)
+        e.w32(child, parent)
+    for _ in range(n * 12):
+        # The samples fit the float interface without losing 16.16 angle bits.
+        angle = lambda: rnd.choice([0, 45 * 65536, -90 * 65536, rnd.randint(-46080, 46080) * 256])
+        heading, angles = angle(), [angle() for _ in range(4)]
+        origin = [rnd.randint(-150000, 150000) for _ in range(3)]
+        offsets = [[rnd.randint(-1200, 1200) for _ in range(3)] for _ in range(3)]
+        point = [rnd.randint(-650, 650) for _ in range(3)]
+        translation, quarter = rnd.randint(-100, 100) * 4, rnd.randrange(5)
+        gun_offset = offsets[2].copy()
+        gun_offset[1] += translation * quarter // 4
+        e.call(0x3b88b, stack=(carrier + 12, 0, heading, 0, *origin))
+        e.call(0x3b88b, stack=(body + 12, 0, 0, angles[3] * quarter // 4, *offsets[0]))
+        e.call(0x3b88b, stack=(torso + 12, angles[0], angles[1], 0, *offsets[1]))
+        e.call(0x3b88b, stack=(gun + 12, angles[2], 0, 0, *gun_offset))
+        e.call(0x1e400, eax=carrier)
+        expected = [e.rs32(node + 60 + j * 4) for node in (body, torso, gun) for j in range(12)]
+        for j, v in enumerate(point):
+            e.w32(point_addr + 4 * j, v)
+        e.call(0x3aefc, eax=gun + 60, edx=point_addr, ecx=point_addr + 4, stack=(point_addr + 8,))
+        expected.extend(e.rs32(point_addr + 4 * j) for j in range(3))
+        for live_sample in (0, 1):
+            L.shim_dos_skeleton(heading, v4(*angles), v3(*origin), v9(*(v for row in offsets for v in row)),
+                                v3(*point), translation, quarter, live_sample, out)
+            rep.check(expected == list(out), 'heading %d angles %s key %d/4 live sample %d: DOS %s port %s' %
+                      (heading, angles, quarter, live_sample, expected, list(out)))
+
+
+@test
 def dos_obstacle_probe(rep, rnd, n):
     """DOS 0x2df30 starts a side probe off-centre while aiming at a point relative to the hull."""
     e = emu()
@@ -564,12 +713,9 @@ def dos_obstacle_probe(rep, rnd, n):
     e.stub(0x1e540, ret=matrix)
     for _ in range(n * 12):
         origin = [rnd.randint(-200000, 200000) for _ in range(3)]
-        heading = rnd.choice([0, 45, 90, 180, -90, rnd.uniform(-180, 180)])
-        sn, cs = math.sin(math.radians(heading)), math.cos(math.radians(heading))
-        for j, value in enumerate([cs, 0, sn, 0, 1, 0, -sn, 0, cs]):
-            e.w32(matrix + 4 * j, round(value * (1 << 29)))
+        heading = ctypes.c_float(rnd.choice([0, 45, 90, 180, -90, rnd.uniform(-180, 180)])).value
+        e.call(0x3b88b, stack=(matrix, 0, round(heading * 65536), 0, *origin))
         for j, value in enumerate(origin):
-            e.w32(matrix + 0x24 + 4 * j, value)
             e.w32(unit + 0x50 + 4 * j, value)
         step, side = rnd.randrange(4), rnd.choice([-1, 1])
         length, lateral = rnd.randint(1499, 15000), rnd.choice([0, rnd.randint(50, 1000)])
@@ -577,7 +723,7 @@ def dos_obstacle_probe(rep, rnd, n):
         e.call(0x2df30, eax=unit, edx=segment, ebx=side, ecx=step, stack=(length, int(lateral > 0)))
         original = [e.rs32(segment + 4 * j) for j in range(6)]
         L.shim_dos_probe_points(v3(*origin), heading, step, side, length, lateral, out)
-        rep.check(max(abs(a - b) for a, b in zip(out, original)) <= 1,
+        rep.check(list(out) == original,
                   'probe %d side %d length %d lateral %d: DOS %s port %s' %
                   (step, side, length, lateral, original, list(out)))
 
@@ -875,6 +1021,197 @@ def servo_step(rep, rnd, n):
         rep.check(worst == 0, 'T %d: worst |dos - port| %.8f' % (T, worst))
 
 @test
+def dos_leg_heading(rep, rnd, n):
+    """Compare a multi-frame leg servo and the signed whole-tick heading increment."""
+    e = emu()
+    L = lib('msim')
+    fp = ctypes.POINTER(ctypes.c_float)
+    L.msim_dos_leg_step.argtypes = [fp, ctypes.c_float, fp, ctypes.c_int]
+    L.msim_dos_leg_step.restype = ctypes.c_float
+    control, unit = e.alloc(0x100), e.alloc(0xa0)
+    frame = mw2emu.STACK_TOP - 0x800
+    e.w32(frame + 126, control)
+    e.w32(control, unit)
+    for _ in range(n):
+        now = 10000
+        initial = rnd.randrange(-180 * 65536, 180 * 65536)
+        e.w32(unit + 0x60, initial)
+        e.w32(control + 52, now)
+        e.w32(control + 60, 0)
+        e.w32(control + 64, 54)
+        angle, servo = ctypes.c_float(initial / 65536), ctypes.c_float()
+        for i in range(90):
+            if i % 10 == 0:
+                target = rnd.randint(-180 * 65536, 180 * 65536)
+                e.w32(control + 56, target)
+            ticks = rnd.choice([0, 1, 3, 6, 7, 11, 20, 54, 90])
+            now += ticks
+            e.w32(NOW, now)
+            e.w32(TICKS, ticks)
+            e.call(0x49b80, eax=control + 52)
+            e.run(0x27558, 0x27592)
+            orig_angle = e.rs32(unit + 0x60)
+            if orig_angle > 180 * 65536:
+                orig_angle -= 360 * 65536
+            if orig_angle < -180 * 65536:
+                orig_angle += 360 * 65536
+            L.msim_dos_leg_step(ctypes.byref(servo), target / 65536, ctypes.byref(angle), ticks)
+            want = (e.rs32(control + 60), orig_angle)
+            got = (round(servo.value * 65536), round(angle.value * 65536))
+            rep.check(want == got, 'frame %d %d ticks, target %d: DOS %s port %s' % (i, ticks, target, want, got))
+
+
+@test
+def dos_motion_plane(rep, rnd, n):
+    """Compare the original world-space approach, jet drag, and signed position integrator."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 2
+    L.shim_dos_motion_plane.argtypes = [vec] + [ctypes.c_int32] * 7 + [vec]
+    unit, control, keys = (e.alloc(sz) for sz in (0x200, 0x120, 0x60))
+    frame = mw2emu.STACK_TOP - 0x800
+    e.w32(frame + 126, control)
+    e.w32(control, unit)
+    e.w32(control + 160, 2)
+    e.w32(unit + 76, keys)
+    e.w32(0x957b0, 1940)
+    e.w32(0x961e4, 100000)
+    for _ in range(n * 16):
+        angle = rnd.randint(-180 * 65536, 180 * 65536)
+        ticks = rnd.choice([0, 1, 3, 6, 7, 13, 45, 46, 96])
+        drive = rnd.choice([-32, 31, 0, rnd.randint(-20 * 65536, 20 * 65536)])
+        top, thrust = rnd.randint(225, 1000), rnd.randint(1400, 12000)
+        freev, direction = rnd.randrange(2), rnd.randrange(5)
+        if not freev: direction = 0
+        vx, vz = [rnd.choice([-4096, -1, 0, 4095, rnd.randint(-36 * 65536, 36 * 65536)]) for _ in range(2)]
+        parent = e.alloc(48)
+        e.call(0x3b88b, stack=(parent, 0, angle, 0, 0, 0, 0))
+        for off, value in ((184, e.rs32(parent + 32) >> 13), (188, e.rs32(parent + 8) >> 13),
+                           (120, int(not freev))):
+            e.w32(unit + off, value)
+        for off, value in ((44, drive), (136, top), (236, thrust), (192, 500 if direction else 0),
+                           (244, vx), (248, 0), (252, vz)):
+            e.w32(control + off, value)
+        e.write(keys, bytes(0x60))
+        if direction:
+            e.w8(keys + 29, 1)
+            e.w8(keys + 29 + direction, 1)
+        for off, value in ((26, 0), (74, 0), (30, 0), (46, vx), (50, 0), (54, vz), (118, 0), (122, -1940)):
+            e.w32(frame + off, value)
+        e.w32(TICKS, ticks)
+        e.run(0x26ba2 if freev else 0x26ada, 0x2701c, esi=0)
+        expected = [e.rs32(frame + off) for off in (46, 54, 26, 30)]
+        vel, move = vec(vx, vz), vec()
+        L.shim_dos_motion_plane(vel, drive, angle, thrust, top, freev, direction, ticks, move)
+        rep.check(expected == [*vel, *move],
+                  'angle %d ticks %d airborne %d dir %d v %s: DOS %s port %s' %
+                  (angle, ticks, freev, direction, (vx, vz), expected, [*vel, *move]))
+
+
+@test
+def dos_motion_lift(rep, rnd, n):
+    """Compare vertical integration for walking, falling, lifting and directional thrust."""
+    e = emu()
+    L = lib('msim')
+    L.shim_dos_motion_lift.argtypes = [ctypes.POINTER(ctypes.c_int32)] + [ctypes.c_int32] * 6
+    L.shim_dos_motion_lift.restype = ctypes.c_int32
+    unit, control, keys = (e.alloc(sz) for sz in (0x200, 0x120, 0x60))
+    frame = mw2emu.STACK_TOP - 0x800
+    e.w32(frame + 126, control)
+    e.w32(control, unit)
+    e.w32(control + 136, 630)
+    e.w32(control + 160, 2)
+    e.w32(unit + 76, keys)
+    for _ in range(n * 16):
+        grounded, mode = rnd.randrange(2), rnd.randrange(3)
+        ticks = rnd.choice([0, 1, 3, 6, 7, 13, 45, 46, 96])
+        gravity, thrust = rnd.randint(800, 3500), rnd.randint(1400, 12000)
+        damping = rnd.randint(85000, 140000)
+        vy = 0 if grounded else rnd.choice([0, -1, 1, rnd.randint(-18 * 65536, 18 * 65536)])
+        e.w32(0x957b0, gravity)
+        e.w32(0x961e4, damping)
+        e.w32(unit + 120, grounded)
+        e.w32(control + 192, 500)
+        e.w32(control + 236, thrust)
+        e.w32(control + 248, vy)
+        e.write(keys, bytes(0x60))
+        if mode:
+            e.w8(keys + 29, 1)
+        if mode == 2:
+            e.w8(keys + 32, 1)
+        for off, value in ((26, 0), (74, 0), (30, 0), (46, 0), (50, vy), (54, 0), (118, 0), (122, -gravity)):
+            e.w32(frame + off, value)
+        e.w32(TICKS, ticks)
+        e.run(0x26ba2 if mode or not grounded else 0x26ada, 0x2701c, esi=0)
+        expected = (e.rs32(frame + 50), e.rs32(frame + 74))
+        vel = ctypes.c_int32(vy)
+        move = L.shim_dos_motion_lift(ctypes.byref(vel), gravity, thrust, damping, grounded, mode, ticks)
+        rep.check(expected == (vel.value, move),
+                  'ground %d mode %d ticks %d v %d: DOS %s port %s' %
+                  (grounded, mode, ticks, vy, expected, (vel.value, move)))
+
+
+@test
+def dos_unit_bounce(rep, rnd, n):
+    """Compare the DOS contact projection and bounce with the original unit response."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    result = ctypes.c_int32 * 6
+    L.shim_dos_unit_bounce.argtypes = [vec, vec, ctypes.c_int32, vec, vec, result]
+    control, other, centre, end = (e.alloc(sz) for sz in (0x120, 0x120, 12, 12))
+    frame = mw2emu.STACK_TOP - 0x800
+    e.w32(frame - 8, centre)
+    for k, off in enumerate((24, 20, 28)):
+        e.w32(frame - off, end + 4*k)
+    for _ in range(n * 8):
+        pos = [rnd.randint(-360000, 360000) for _ in range(3)]
+        normal = [rnd.randint(-65536, 65536) for _ in range(3)]
+        velocities = [[rnd.randint(-900000, 900000) for _ in range(3)] for _ in range(2)]
+        radius = rnd.randint(580, 1300)
+        e.w32(frame - 16, radius)
+        for k in range(3):
+            e.w32(0x95ad4 + 4*k, normal[k])
+            e.w32(centre + 4*k, pos[k])
+            e.w32(control + 256 + 4*k, velocities[0][k])
+            e.w32(other + 256 + 4*k, velocities[1][k])
+        e.run(0x2043a, 0x20540, esi=control, edi=other)
+        expected = [e.rs32(end + 4*k) for k in range(3)] + [e.rs32(control + 244 + 4*k) for k in range(3)]
+        got = result()
+        L.shim_dos_unit_bounce(vec(*pos), vec(*normal), radius, vec(*velocities[0]), vec(*velocities[1]), got)
+        rep.check(list(got) == expected, 'radius %d normal %s: DOS %s port %s' %
+                  (radius, normal, expected, list(got)))
+
+
+@test
+def dos_face_response(rep, rnd, n):
+    """Compare the fixed-point terrain face reflection and residual displacement."""
+    e = emu()
+    L = lib('msim')
+    vec = ctypes.c_int32 * 3
+    L.shim_dos_face_response.argtypes = [vec, vec, vec, ctypes.c_int, vec]
+    control = e.alloc(0x120)
+    frame = mw2emu.STACK_TOP - 0x800
+    for _ in range(n * 12):
+        direction, normal = ([rnd.randint(-65536, 65536) for _ in range(3)] for _ in range(2))
+        velocity = [rnd.randint(-35 * 65536, 35 * 65536) for _ in range(3)]
+        remaining = rnd.randint(1, 1200)
+        for k in range(3):
+            e.w32(frame - 22 + 4*k, direction[k])
+            e.w32(0x95ad4 + 4*k, normal[k])
+            e.w32(control + 256 + 4*k, velocity[k])
+        e.run(0x1fee6, 0x1ffee, esi=control)
+        e.run(0x20013, 0x20052, ecx=remaining)
+        got_vel, got_move = vec(*velocity), vec()
+        L.shim_dos_face_response(vec(*direction), vec(*normal), got_vel, remaining, got_move)
+        want_vel = [e.rs32(control + v) for v in (244, 248, 252)]
+        want_move = [e.rs32(frame + v) for v in (106, 94, 102)]
+        rep.check(want_vel == list(got_vel) and want_move == list(got_move),
+                  'direction %s normal %s, DOS %s %s port %s %s' %
+                  (direction, normal, want_vel, want_move, list(got_vel), list(got_move)))
+
+
+@test
 def dos_drive_servo(rep, rnd, n):
     """DOS drive servo's exact residual, including the sign of a stopped mech's speed readout."""
     L = lib('msim')
@@ -899,6 +1236,16 @@ def dos_drive_servo(rep, rnd, n):
             rep.check(dos == port, '%d -> %d over %d / %d ticks: DOS %d port %d' %
                       (value, target, ticks, tau, dos, port))
             value = dos
+    e = emu()
+    sv = e.alloc(16)
+    for value in (-180 * 65536, 180 * 65536):
+        target, tau, ticks = -value, 54, 183
+        for offset, v in enumerate((0, target, value, tau)):
+            e.w32(sv + 4*offset, v)
+        e.w32(NOW, ticks)
+        dos = e.call(0x49b80, eax=sv)
+        port = L.shim_dos_drive_servo(value, target, ticks, tau)
+        rep.check(dos == port, 'low-word multiply %d -> %d: DOS %d port %d' % (value, target, dos, port))
 
 @test
 def servo_setup(rep, rnd, n):
@@ -1123,12 +1470,37 @@ def manoeuvre_approach(rep, rnd, n):
 
 
 @test
+def dos_flank_waypoints(rep, rnd, n):
+    """Use the original 0x2d070 to place a waypoint on each side of a turning target."""
+    e = emu()
+    L = lib('ai')
+    out = (ctypes.c_int32 * 2)()
+    L.shim_dos_flank_point.argtypes = [ctypes.c_int32] * 5 + [type(out)]
+    unit, matrix, x, y, z = e.alloc(0x100), e.alloc(48), *(e.alloc(4) for _ in range(3))
+    e.w32(0xf8a40, unit)
+    e.stub(0x1e540, ret=matrix)
+    for _ in range(n):
+        origin = [rnd.randint(-250000, 250000) for _ in range(3)]
+        yaw = rnd.randint(-46080, 46080) * 256
+        e.call(0x3b88b, stack=(matrix, 0, yaw, 0, *origin))
+        for slot in range(16):
+            dist = rnd.choice([10000, 15000, rnd.randint(1, 15000)])
+            e.w32(x, 0)
+            e.w32(z, 0)
+            e.call(0x2d070, eax=0x200, edx=slot, ebx=x, ecx=z, stack=(y, dist))
+            L.shim_dos_flank_point(origin[0], origin[2], yaw, slot, dist, out)
+            original = [e.rs32(x), e.rs32(z)]
+            rep.check(original == list(out), 'heading %d slot %d distance %d: DOS %s port %s' %
+                      (yaw, slot, dist, original, list(out)))
+
+
+@test
 def manoeuvre_flank(rep, rnd, n):
     """Compare DOS waypoint approach and target-facing controls on both sides of the transition."""
     e = emu()
     L = lib('ai')
     out = (ctypes.c_int * 3)()
-    L.shim_dos_flank.argtypes = [ctypes.c_int] * 6 + [type(out)]
+    L.shim_dos_flank.argtypes = [ctypes.c_int] * 7 + [type(out)]
     unit, control, inputs = e.alloc(0x210), e.alloc(0x200), e.alloc(0x60)
     e.w32(unit + 0x20, control)
     e.w32(unit + 0x4c, inputs)
@@ -1165,10 +1537,22 @@ def manoeuvre_flank(rep, rnd, n):
         e.w32(inputs + 0xc, 15 * 65536)
         e.call(0x2d290, eax=unit)
         original = [e.rs32(unit + 0x17e), e.rs32(inputs + 0xc), e.rs32(inputs + 8)]
-        L.shim_dos_flank(face, x, z, target, throttle, blocked, out)
+        L.shim_dos_flank(1, face, x, z, target, throttle, blocked, out)
         rep.check(original[0] == out[0] and abs(original[1] - out[1]) <= 4 and original[2] == out[2],
                   'phase %d waypoint %d,%d range %d bearing %.2f target %d throttle %d blocked %d: DOS %s port %s' %
                   (face, x, z, level, yaw / 65536, target, throttle, blocked, original, list(out)))
+
+
+    for _ in range(n * 12):
+        turn = rnd.uniform(-math.pi, math.pi)
+        radius = rnd.choice([2999, 3000, 3000.5, 3001, 3002])
+        x, z = round(radius * math.sin(turn)), round(radius * math.cos(turn))
+        e.call(0x2ab60, eax=x, ebx=z, edx=0, ecx=yaw_ptr, stack=(slant, level_ptr, pitch))
+        level, yaw = e.rs32(level_ptr), e.rs32(yaw_ptr)
+        target, blocked = 0, rnd.randrange(2)
+        done = e.call(0x2d550, eax=unit)
+        L.shim_dos_flank(7, 0, x, z, target, 512, blocked, out)
+        rep.check(done == out[0], 'waypoint %d,%d range %d: DOS done %d port %d' % (x, z, level, done, out[0]))
 
 
 @test
@@ -1226,6 +1610,70 @@ def manoeuvre_circle(rep, rnd, n):
         rep.check(dos[:2] == list(out[:2]) and abs(dos[2] - out[2]) <= 4 and dos[3] == out[3],
                   'waypoint %d,%d distance %d bearing %.2f blocked %d step %d due %d: DOS %s port %s' %
                   (x, z, level, yaw / 65536, blocked, ticks, due, dos, list(out)))
+
+
+@test
+def manoeuvre_circle_replay(rep, rnd, n):
+    """Use the original nav add, remove, and selection routines as the aircraft's target moves."""
+    e = emu()
+    L = lib('ai')
+    ptr = ctypes.POINTER(ctypes.c_int32)
+    L.shim_dos_circle_replay.argtypes = [ptr, ctypes.c_int, ptr]
+    nav, nav_count, units, unit_count = 0xf8b30, 0x96288, 0xf8a40, 0x961c8
+    unit, target, control, inputs = (e.alloc(sz) for sz in (0x210, 0x210, 0x200, 0x60))
+    for i, obj in enumerate((unit, target), 1):
+        e.w32(units + 4*i, obj)
+        e.w32(obj + 4, i)
+        e.w32(obj + 8, 3)
+    e.w32(unit_count, 3)
+    e.w32(unit + 0x20, control)
+    e.w32(unit + 0x4c, inputs)
+    e.stub(0x2db80)
+    e.stub(0x2e860)
+    e.stub(0x2e300)
+
+    def set_range(em):
+        ref = em.reg('edx') & 0xffff
+        xz = target + 80 if ref == 0x202 else nav + 84*(ref & 255) + 24
+        dx, dz = sorted((abs(em.rs32(xz) - x), abs(em.rs32(xz + 8) - z)), reverse=True)
+        em.w32(unit + 0xc0, dx + dz // 4)
+        return 1
+
+    e.stub(0x22850, set_range)
+    for _ in range(n):
+        offset = 10000
+        now = offset
+        e.w32(nav_count, 1)  # mission nav at index zero
+        e.w16(unit + 328, 0x202)
+        e.w16(unit + 330, 0x202)
+        e.w32(unit + 374, offset)
+        e.w32(target + 80, 50000)
+        e.w32(target + 88, 60000)
+        e.call(0x23420, eax=unit)
+        frames, expected = [], []
+        for i in range(36):
+            goal = nav + 84*(e.r16(unit + 328) & 255)
+            x = e.rs32(goal + 24) + rnd.choice([2999, 3000, 3001, 7000])
+            z = e.rs32(goal + 32)
+            tx = rnd.choice([x + 14999, x + 15000, x + 15001, x + 22000])
+            tz = z
+            ticks = rnd.choice([0, 7, 30, 420])
+            frames.extend((x, z, tx, tz, ticks))
+            e.w32(unit + 80, x)
+            e.w32(unit + 88, z)
+            e.w32(target + 80, tx)
+            e.w32(target + 88, tz)
+            now += ticks
+            e.w32(NOW, now)
+            e.call(0x2d990, eax=unit)
+            points = [e.rs32(nav + 84*j + axis) for j in range(1, e.r32(nav_count)) for axis in (24, 32)]
+            expected.append([(e.r16(unit + 328) & 255) - 1, e.r32(nav_count) - 1,
+                             e.rs32(unit + 374) - now, *points])
+        out = (ctypes.c_int32 * (35 * len(expected)))()
+        L.shim_dos_circle_replay((ctypes.c_int32 * len(frames))(*frames), len(expected), out)
+        for i, row in enumerate(expected):
+            got = list(out[35*i:35*i+len(row)])
+            rep.check(row == got, 'step %d frame %s: DOS %s port %s' % (i, frames[5*i:5*i+5], row, got))
 
 
 @test

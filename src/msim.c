@@ -3,7 +3,7 @@
 static unsigned rnd_ms(unsigned *x);
 #include "fx.h"
 #include "datapath.h"
-#include "dos_trig.h"
+#include "dos_matrix.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -331,6 +331,71 @@ static void dos_shot_pool_load(msim *s, prj_archive *a)
     prj_record_free(&r);
 }
 
+static void dos_init_actor_anim(msim *s, int actor)
+{
+    const world_actor *ac = &s->actors[actor];
+    anim_player *player = s->anim_pl ? &s->anim_pl[actor] : NULL;
+    mech3d_dos_anim_init(&ac->mech, player && ac->have_anim ? &ac->anim : NULL, player, &s->dos_anim_phase);
+}
+
+/* INCL recurses in place in DOS. GPS copies a unit skeleton at that point,
+ * interleaved with allocations for scenery and the projectile/effect pool. */
+static void dos_init_anim_record(msim *s, const bwd_mission *mission, int index,
+                                 unsigned char *seen, unsigned char *spawned, int *player_seen)
+{
+    if (seen[index]) return;
+    seen[index] = 1;
+    const bwd_record *record = &mission->records[index];
+    int pool = strcasecmp(record->name, "MW2_SHT1") == 0;
+    for (int k = 0; k < record->chunk_count; k++) {
+        const bwd_chunk *chunk = &record->chunks[k];
+        uint16_t id;
+        char name[11];
+        bwd_obj obj;
+        bwd_gps gps;
+        if (bwd_incl(chunk, &id, name) == 0) {
+            for (int i = 0; i < mission->record_count; i++) {
+                if (strcasecmp(mission->records[i].name, name) != 0) continue;
+                dos_init_anim_record(s, mission, i, seen, spawned, player_seen);
+                break;
+            }
+        } else if (bwd_obj_decode(chunk, &obj) == 0 && (pool || obj.parent != -2)) {
+            s->dos_anim_phase = 64 + ((s->dos_anim_phase + 7) & 127);
+        } else if (bwd_gps_decode(chunk, &gps) == 0) {
+            if (gps.is_player) {
+                if (*player_seen || !s->pl_mech_ok) continue;
+                *player_seen = 1;
+                s->dos_player_anim_phase = s->dos_anim_phase;
+                mech3d_dos_anim_init(&s->pl_mech, NULL, NULL, &s->dos_anim_phase);
+                continue;
+            }
+            for (int i = 0; i < s->actor_count; i++) {
+                const world_actor *ac = &s->actors[i];
+                if (spawned[i] || strcasecmp(ac->group, record->name) || strcasecmp(ac->name, gps.name)) continue;
+                spawned[i] = 1;
+                dos_init_actor_anim(s, i);
+                break;
+            }
+        }
+    }
+}
+
+static void dos_init_anim_order(msim *s, const bwd_mission *mission)
+{
+    size_t records = (size_t)mission->record_count, actors = (size_t)s->actor_count;
+    unsigned char *seen = calloc(records + actors + 1, 1);
+    unsigned char *spawned = seen ? seen + records : NULL;
+    int player_seen = 0;
+    if (seen && records) dos_init_anim_record(s, mission, 0, seen, spawned, &player_seen);
+    if (!player_seen && s->pl_mech_ok) {
+        s->dos_player_anim_phase = s->dos_anim_phase;
+        mech3d_dos_anim_init(&s->pl_mech, NULL, NULL, &s->dos_anim_phase);
+    }
+    for (int i = 0; i < s->actor_count; i++)
+        if (!spawned || !spawned[i]) dos_init_actor_anim(s, i);
+    free(seen);
+}
+
 int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count)
 {
     int player_table;
@@ -339,6 +404,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     int i, k;
     const char *pl_rec;
     memset(s, 0, sizeof *s);
+    s->dos_anim_phase = 100;
     s->dos_end = s->sd_at_once = msim_dos_int;
     snprintf(s->scene, sizeof s->scene, "%s", scene);
     s->actors = actors;
@@ -569,7 +635,8 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     s->ai_lock = calloc((size_t)(count ? count : 1), sizeof *s->ai_lock);
     s->provoked = calloc((size_t)(count ? count : 1), sizeof *s->provoked);
     s->anim_pl = calloc((size_t)(count ? count : 1), sizeof *s->anim_pl);
-    for (i = 0; s->anim_pl && i < count; i++) anim_player_init(&s->anim_pl[i], actors[i].mech.anim_rate > 0 ? actors[i].mech.anim_rate : 70);
+    for (i = 0; s->anim_pl && i < count; i++)
+        anim_player_init(&s->anim_pl[i], actors[i].mech.anim_rate > 0 ? actors[i].mech.anim_rate : 70);
     s->bump_with = calloc((size_t)(count ? count : 1), sizeof *s->bump_with);
     s->aim = calloc((size_t)(count ? count : 1), sizeof *s->aim);
     memset(&s->player_aim, 0, sizeof s->player_aim);
@@ -666,6 +733,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     /* nav points: every NAVP in the mission tree, keyed by its record name */
     if (bwd_mission_load(a, scene, &m) == 0) {
         s->music_track = m.music_track;
+        if (msim_dos_int) dos_init_anim_order(s, &m);
         for (i = 0; i < m.record_count; i++)   /* the player's star: STAR (24-byte entries per table, +0 the slot offset) */
             for (k = 0; k < m.records[i].chunk_count; k++) {
                 const bwd_chunk *sc = &m.records[i].chunks[k];
@@ -2152,9 +2220,12 @@ void msim_step(msim *s, int32_t dt_ms)
                                                                                    * left, right, forward, back */
             if (!firing || m->turn != 0.0f) jdir = 0;
             s->units[i].jet_forward = firing && (m->turn != 0.0f || jdir);
-            float dy_frame = fixed_unit(ac) ? 0.0f : combat_jets_dy(&s->units[i], m->jet, dt), dy_done = 0.0f, vy3 = 0.0f;
+            combat_motion lift = {0};
+            if (msim_dos_int && !fixed_unit(ac)) lift = msim_dos_lift(&s->units[i], &s->planet, firing, dos_ticks);
+            float dy_frame = msim_dos_int ? lift.dy : fixed_unit(ac) ? 0.0f : combat_jets_dy(&s->units[i], m->jet, dt);
+            float dy_done = 0.0f, vy3 = 0.0f;
             int imp3 = 0, land3 = 0;
-            int cm = s->contact_acc && s->contact_hold && s->contact_hold[i] > 0;
+            int cm = !msim_dos_int && s->contact_acc && s->contact_hold && s->contact_hold[i] > 0;
             if (cm) s->contact_acc[i] += dt;
             else if (s->contact_acc) s->contact_acc[i] = 0;
             for (;;) {
@@ -2170,11 +2241,13 @@ void msim_step(msim *s, int32_t dt_ms)
                  * run, a turn does not swing it - and only the directional jets' thrust and drag act, on all of it (the
                  * player's rule, glview: "Jet terminal speed", "Airborne velocity held"). The port had restarted every
                  * grounded frame from the walking speed, so an AI unit's ground thrust never built up */
-                int air = s->units[i].y > s->units[i].ground + 1.0f, freev = air || firing;
+                int air = s->units[i].y > s->units[i].ground + (msim_dos_int ? 0.0f : 1.0f), freev = air || firing;
                 float v0 = m->speed, a0 = s->across ? s->across[i] : 0.0f, hd0 = ac->mech.heading;
+                int32_t dos_move[2] = {0};
                 int revp = ac->unit_class == 4 ? m->reverse : (s->anim_pl && ac->have_anim && s->anim_pl[i].cur == 2);
                 msim_drive_step(&m->thr_servo, &m->spd_servo, &m->speed, m->throttle, revp ? -0.5f : 1.0f, top,
-                                !(s->units[i].shutdown || s->units[i].immobile), m->drive_slow, sdt * 182.0f);
+                                !(s->units[i].shutdown || s->units[i].immobile), m->drive_slow,
+                                msim_dos_int ? (float)dos_ticks : sdt * 182.0f);
                 if (freev) m->speed = v0;
                 kmh = fabsf(m->spd_servo) * 0.036f;
                 rate = m->turn / 1024.0f * 90.0f * cosf((kmh < 80.0f ? kmh : 80.0f) * 3.14159265f / 180.0f);   /* by c[0xb] x 6.516 (0x1001a180) */
@@ -2196,16 +2269,16 @@ void msim_step(msim *s, int32_t dt_ms)
                         rate = msim_leg_demand(m->turn, m->spd_servo, 0, s->units[i].speed_gain, airborne, 0, 0.0f);
                         if (s->units[i].immobile) rate = 0.0f;
                     }
-                    m->leg_srv = drive_servo(m->leg_srv, rate, 54.0f, sdt * 182.0f);
-                    rate = m->leg_srv;
-                }
-                ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
-                if (freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
+                    msim_dos_walk(&s->units[i], hd0, m->spd_servo, ac->speed, freev, jdir, dos_ticks, dos_move);
+                    msim_dos_leg_step(&m->leg_srv, rate, &ac->mech.heading, dos_ticks);
+                    msim_dos_project_velocity(&s->units[i], ac->mech.heading, &m->speed, s->across ? &s->across[i] : NULL);
+                } else ac->mech.heading = wrap180(ac->mech.heading + rate * sdt);
+                if (!msim_dos_int && freev && s->across && ac->mech.heading != hd0) {   /* held: the world vector stays as the heading turns */
                     float d = (ac->mech.heading - hd0) * 3.14159265f / 180.0f, cd = cosf(d), sd = sinf(d);
                     m->speed = v0 * cd + a0 * sd; s->across[i] = a0 * cd - v0 * sd;
                 }
                 s->units[i].throttle_frac = fabsf(m->thr_servo) > 1.0f ? 1.0f : fabsf(m->thr_servo);   /* walking heat: c[0x13] - 1/64 (0x1001aac8) */
-                {   /* the directional jets (0x10019310 / DOS 0x26ba2): v += ticks x (T dir + drag(v)), the drag f = k S + B of
+                if (!msim_dos_int) {   /* the directional jets (0x10019310 / DOS 0x26ba2): v += ticks x (T dir + drag(v)), the drag f = k S + B of
                      * the whole velocity at the start of the step (msim_jet_drag, S the DOS (4 max + min) >> 2 of its x / z):
                      * terminal L = 2.5 x the top speed; world components under 0.0625 cm/tick snap to 0 */
                     float dv = 0;
@@ -2232,18 +2305,24 @@ void msim_step(msim *s, int32_t dt_ms)
                 h = ac->mech.heading * 3.14159265f / 180.0f;
                 {
                     float acr = 0.0f, nx, nz;
-                    if (s->across && s->across[i] != 0.0f) {   /* the velocity across the heading (a contact / impact, the side
-                                                                 * jets): x (1 - ticks / 45) on the ground with the jets not
-                                                                 * firing, held otherwise; zero under 0.0625 cm/tick (0x10019310,
-                                                                 * 0x102473b4 / 0x102473d0), the move by the mean */
-                        float kq = sdt * 182.0f / 45.0f, a1 = s->across[i];
-                        if (!freev) s->across[i] *= kq < 1.0f ? 1.0f - kq : 0.0f;
-                        acr = 0.5f * (a1 + s->across[i]);
-                        if (fabsf(s->across[i]) < 0.0625f * 182.0f) s->across[i] = 0;
+                    if (msim_dos_int) {
+                        acr = s->across ? s->across[i] : 0.0f;
+                        nx = (float)ac->mech.origin[0] + (float)dos_move[0];
+                        nz = (float)ac->mech.origin[2] + (float)dos_move[1];
+                    } else {
+                        if (s->across && s->across[i] != 0.0f) {   /* the velocity across the heading (a contact / impact, the side
+                                                                     * jets): x (1 - ticks / 45) on the ground with the jets not
+                                                                     * firing, held otherwise; zero under 0.0625 cm/tick (0x10019310,
+                                                                     * 0x102473b4 / 0x102473d0), the move by the mean */
+                            float kq = sdt * 182.0f / 45.0f, a1 = s->across[i];
+                            if (!freev) s->across[i] *= kq < 1.0f ? 1.0f - kq : 0.0f;
+                            acr = 0.5f * (a1 + s->across[i]);
+                            if (fabsf(s->across[i]) < 0.0625f * 182.0f) s->across[i] = 0;
+                        }
+                        nx = (float)ac->mech.origin[0] + (sinf(h) * spd + cosf(h) * acr) * sdt;
+                        nz = (float)ac->mech.origin[2] + (cosf(h) * spd - sinf(h) * acr) * sdt;
                     }
-                    nx = (float)ac->mech.origin[0] + (sinf(h) * spd + cosf(h) * acr) * sdt;
-                    nz = (float)ac->mech.origin[2] + (cosf(h) * spd - sinf(h) * acr) * sdt;
-                    if (s->contact_frac) {   /* the sub-cm rest of the last contact projection */
+                    if (!msim_dos_int && s->contact_frac) {   /* the sub-cm rest of the last contact projection */
                         nx += s->contact_frac[i][0]; nz += s->contact_frac[i][1];
                         s->contact_frac[i][0] = s->contact_frac[i][1] = 0;
                     }
@@ -2259,8 +2338,16 @@ void msim_step(msim *s, int32_t dt_ms)
                         float x0 = (float)ac->mech.origin[0], z0 = (float)ac->mech.origin[2], ticks = sdt * 182.0f;
                         float ch = s->centre_h ? s->centre_h[i] : 550.0f, air = s->units[i].y > s->units[i].ground + 1.0f;
                         float vy = air ? s->units[i].vy : 0.0f;
-                        float p0[3] = {x0, s->units[i].y + ch, z0}, p1[3] = {nx, s->units[i].y + ch + vy * ticks, nz};
+                        float p0[3] = {x0, s->units[i].y + ch, z0};
+                        float p1[3] = {nx, s->units[i].y + ch + (msim_dos_int ? dy_frame : vy * ticks), nz};
                         float n[3], c[3], rr = 0, ov[3], sv[3] = {sinf(h) * spd / 182.0f, vy, cosf(h) * spd / 182.0f};
+                        if (msim_dos_int) {
+                            sv[0] = s->units[i].dos_vel[0] / 65536.0f;
+                            sv[1] = lift.vy;
+                            sv[2] = s->units[i].dos_vel[1] / 65536.0f;
+                            memcpy(s->units[i].dos_attempted, sv, sizeof sv);
+                            s->units[i].dos_contact_unit = 0;
+                        }
                         int hit = msim_unit_contact(s, i, p0, p1, n, c, &rr, ov), pushout = 0;
                         /* set down inside the sphere of the unit it landed on (bump_with < 0): this frame's move ends inside it
                          * whatever its direction - the engine's push-out (0x1000ba20 tests only that the end is inside) */
@@ -2271,7 +2358,7 @@ void msim_step(msim *s, int32_t dt_ms)
                             /* the second try (0x10019a61, DOS 0x27109): the move to the end projected onto the sphere, tested
                              * again - refused by rounding (msim_contact_retest), the velocity is doubled (0x102473d4, DOS
                              * 0x2713b) and the projected end kept (the same object: a unit's id output is 0 both times) */
-                            const float vx2 = msim_contact_retest(p0, p1, c, rr) ? 2.0f : 1.0f;
+                            const float vx2 = !msim_dos_int && msim_contact_retest(p0, p1, c, rr) ? 2.0f : 1.0f;
                             touched = 1;
                             /* the engine's speeds (0x1000ba20): it copies the other's z velocity over its own (+0x108) before
                              * 0x1000c160 takes the difference, so the damage speed is |(dvx, dvy)|; the bounce is half of
@@ -2281,11 +2368,26 @@ void msim_step(msim *s, int32_t dt_ms)
                             float py = c[1] + n[1] * rr - ch, hl = sqrtf(n[0] * n[0] + n[2] * n[2]);   /* projected onto its sphere */
                             float gnd = msim_ground(s, c[0] + n[0] * rr, c[2] + n[2] * rr, py + ch);   /* 0x10010080 at the centre */
                             if (getenv("MW2_CONTACT_TRACE")) fprintf(stderr, "contact %.2fs actor %d -> %d n %.2f %.2f %.2f dv %.2f feet %.0f above %.0f air %d\n", s->now / 1000.0, i, hit, n[0], n[1], n[2], dv, py, py - gnd, (int)air);
-                            if (n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f) {   /* landed on it (0x10019c4e) */
+                            if (msim_dos_int) {
+                                float end[3], bounce[3];
+                                int retry_hit = msim_dos_unit_impact(s, i, p0, ch, s->radius[i], hit, c, n, rr, sv, ov, end, bounce);
+                                ac->mech.origin[0] = (int32_t)end[0];
+                                ac->mech.origin[2] = (int32_t)end[2];
+                                dy_done = end[1] - p0[1];
+                                vy3 = bounce[1];
+                                imp3 = 1;
+                                land3 = !retry_hit && n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f;
+                                s->units[i].dos_vel[0] = (int32_t)lrintf(bounce[0] * 65536.0f);
+                                s->units[i].dos_vel[1] = (int32_t)lrintf(bounce[2] * 65536.0f);
+                                msim_dos_project_velocity(&s->units[i], ac->mech.heading, &m->speed, s->across ? &s->across[i] : NULL);
+                                if (s->air_speed) s->air_speed[i] = m->speed;
+                            }
+                            if (land3 || (!msim_dos_int && n[1] > 0.70710677f && py - gnd < 1000.0f && py - gnd > -10000.0f)) {   /* landed on it (0x10019c4e) */
                                 /* the engine: the position projected onto the sphere (0x1000ba20), the feet taken as 1 cm under
                                  * the terrain there (local_5c = -1) - so it stands on the terrain at that point, inside the
                                  * sphere - vy 0, the velocity n x max(1, dv / 2) across the ground, the contact count cleared;
                                  * the next frame's move pushes it out (above) */
+                                if (msim_dos_int) { if (s->bump_with) s->bump_with[i] = -(hit + 2); break; }
                                 float gx = c[0] + n[0] * rr, gz = c[2] + n[2] * rr;
                                 if (bs < 1.0f) bs = 1.0f;
                                 bs *= vx2;
@@ -2303,6 +2405,7 @@ void msim_step(msim *s, int32_t dt_ms)
                                     if (s->on_sound && dv > 0.5f) { float p3[3] = {(x0 + c[0]) * 0.5f, s->units[i].y, (z0 + c[2]) * 0.5f}; s->on_sound(s->shot_user, -1, p3); }
                                     s->bump_with[i] = hit + 2;
                                 }
+                                if (msim_dos_int) break;
                                 {   /* bounced off / pushed out: to the sphere's surface, moving away along the normal (walking too) */
                                     if (bs < 1.0f) bs = 1.0f;
                                     bs *= vx2;
@@ -2348,10 +2451,11 @@ void msim_step(msim *s, int32_t dt_ms)
                         }
                         float sacr = s->across ? s->across[i] : 0.0f;
                         /* the attempted velocity is the frame's end one (0x10019310: v + a t before the move) */
-                        float dyi = dy_sub, vyi = dy_sub == 0.0f ? 0.0f : imp3 ? vy3 : dt > 0.0f ? 2.0f * dy_frame / (dt * 182.0f) - s->units[i].vy : s->units[i].vy;
+                        float dyi = dy_sub, vyi = msim_dos_int ? lift.vy :
+                            dy_sub == 0.0f ? 0.0f : imp3 ? vy3 : dt > 0.0f ? 2.0f * dy_frame / (dt * 182.0f) - s->units[i].vy : s->units[i].vy;
                         int imp = msim_world_impact3(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], &bx, &bz, s->units[i].y + dy_done, &dyi, s->centre_h[i], s->radius[i],
-                                                     ac->mech.heading, &m->speed, &sacr, &vyi);
-                        if (dy_sub != 0.0f) { imp3 = 1; vy3 = vyi; land3 = imp & 2; }   /* an airborne move: the 3D impact's (walking stays level) */
+                                                     ac->mech.heading, &m->speed, &sacr, &vyi, s->units[i].dos_vel);
+                        if (msim_dos_int || dy_sub != 0.0f) { imp3 = 1; vy3 = vyi; land3 = imp & 2; }   /* an airborne move: the 3D impact's (walking stays level) */
                         if (s->air_speed) s->air_speed[i] = m->speed;   /* one velocity (+0xf4..0xfc): the airborne momentum is the reflected one too */
                         dy_done += dyi;
                         if (s->across) s->across[i] = sacr;
@@ -2391,8 +2495,11 @@ void msim_step(msim *s, int32_t dt_ms)
                  * code not traced): the jets on while over 2 m up and falling faster than 10 cm/tick */
                 if ((!msim_dos_int || m->man != 9) && !s->units[i].destroyed && !s->units[i].shutdown &&
                     v.jets_installed && s->units[i].jet_fuel > 0 && s->units[i].y - s->units[i].ground > 200.0f && s->units[i].vy < -10.0f && !getenv("MW2_NO_FALL_BRAKE")) m->jet = 1;   /* (tests: MW2_NO_FALL_BRAKE) */
-                combat_jets(&s->units[i], m->jet, dt, &s->rng);           /* jump jets / falling, on the terrain */
-                if (imp3 && land3)   /* a harmless impact (a ground-like face, the feet in the window) lands it: 0x10019c4e sets
+                combat_motion impact = {dy_done, vy3, dos_ticks};
+                combat_jets_motion(&s->units[i], m->jet, dt, &s->rng, msim_dos_int ? (imp3 ? &impact : &lift) : NULL);
+                if (msim_dos_int) {
+                    if (land3 && s->units[i].y > s->units[i].ground) combat_land(&s->units[i], vy3, &s->rng);
+                } else if (imp3 && land3)   /* a harmless impact (a ground-like face, the feet in the window) lands it: 0x10019c4e sets
                                       * the feet's height over the ground to -1, so 0x10019e41 stands it on the ground with the
                                       * touch-down's sound and fall damage at the impact's vertical speed, vy 0 */
                     combat_land(&s->units[i], vy3, &s->rng);
@@ -2454,7 +2561,9 @@ void msim_step(msim *s, int32_t dt_ms)
                 if (s->anim_pl[i].cur == 2 && gait > 2) gait = 2;
                 if (m->reverse) req = 2;
             }
-            ev = anim_player_step(&ac->anim, &s->anim_pl[i], req, gait, rate, dt * 182.0f);
+            ev = anim_player_step(&ac->anim, &s->anim_pl[i], req, gait, rate,
+                                  msim_dos_int ? (float)dos_ticks : dt * 182.0f, msim_dos_int);
+            if (msim_dos_int) mech3d_dos_anim_step(&ac->mech, &ac->anim, &s->anim_pl[i], &s->dos_anim_phase);
             if ((ev & ANIM_EV_STEP) && !s->units[i].destroyed && s->on_sound) {   /* footsteps: a key flagged 0x800 -> 0x103 at the mech (0x1000b3a0) */
                 float p3[3] = {(float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2]};
                 s->on_sound(s->shot_user, 0x103, p3);
@@ -2465,7 +2574,9 @@ void msim_step(msim *s, int32_t dt_ms)
         }
         if (getenv("MW2_ANIM_TRACE") && i == atoi(getenv("MW2_ANIM_TRACE")))   /* tests: one actor every step */
             fprintf(stderr, "anim %.2fs actor %d held %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, held, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
-        ac->mech.pose_off = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? s->anim_pl[i].off : NULL;   /* the carried offset (anim_player_step; TEST: MW2_NO_POSE_OFF) */
+        const anim_player *ap = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? &s->anim_pl[i] : NULL;
+        ac->mech.pose_off = ap && !msim_dos_int ? ap->off : NULL;
+        ac->mech.pose_dos = msim_dos_int ? ap : NULL;
         mech3d_pose(&ac->mech, &ac->anim, ac->t);
     }
     if (!msim_dos_int || !s->cam_ok) {
@@ -3471,6 +3582,7 @@ static void combat_step(msim *s, float dt, int dos_ticks)
                 anim = (const anim_set *)s->pl_shown.pose_anim;
                 pose_time = s->pl_shown.pose_t;
                 s->pl_mech.pose_off = s->pl_shown.pose_off;
+                s->pl_mech.pose_dos = s->pl_shown.pose_dos;
             }
         }
         mech3d_pose(&s->pl_mech, anim, pose_time);
@@ -5191,15 +5303,31 @@ static float dos_thr_servo(float cur, float tgt, float ticks)
 /* DOS 0x49b80. The division toward zero leaves the last few 16.16 units in the servo when it settles. */
 static int32_t dos_drive_servo(int32_t value, int32_t target, int elapsed, int tau)
 {
-    int64_t diff = (int64_t)target - value;
-    if (elapsed >= tau) return target;
-    return value + (int32_t)(diff * elapsed / tau);
+    int32_t diff = (int32_t)((uint32_t)target - (uint32_t)value);
+    int32_t step = (int32_t)((uint32_t)diff * (uint32_t)elapsed) / tau;
+    if ((diff < 0 && step <= diff) || (diff >= 0 && step >= diff)) return target;
+    return (int32_t)((uint32_t)value + (uint32_t)step);
 }
 
 float msim_dos_aim_servo(float cur, float demand, int tau, int ticks)
 {
     int32_t value = (int32_t)lrintf(cur * 65536.0f), target = (int32_t)lrintf(demand * 65536.0f);
     return (float)dos_drive_servo(value, target, ticks, tau) / 65536.0f;
+}
+
+/* DOS 0x2675c / 0x49b80 update the turn servo. 0x27561 then integrates
+ * the new value with a signed, whole-tick division toward zero. */
+float msim_dos_leg_step(float *servo, float demand, float *heading, int ticks)
+{
+    int32_t rate = (int32_t)lrintf(*servo * 65536.0f);
+    rate = dos_drive_servo(rate, (int32_t)lrintf(demand * 65536.0f), ticks, 54);
+    int32_t step = (int32_t)((uint32_t)rate * (uint32_t)ticks) / 182;
+    int32_t angle = ((int32_t)lrintf(*heading * 65536.0f) + step) % (360 * 65536);
+    if (angle > 180 * 65536) angle -= 360 * 65536;
+    if (angle < -180 * 65536) angle += 360 * 65536;
+    *servo = rate / 65536.0f;
+    *heading = angle / 65536.0f;
+    return step / 65536.0f;
 }
 
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks)
@@ -5248,21 +5376,107 @@ float msim_throttle_preset(int n) { return (float)(n * 113) / 1024.0f; }
  * ~L as in the floats, but k is a few units (Nova on ORAN: k = 3 for the floats' 3.85, B = +33 for -1.6), which slows
  * the middle of the climb: DOSBox ORANSCN1 Nova, backward jets from rest, 144 / 207 / 267 kph at 0.92 / 1.42 / 1.92 s -
  * the integers give 149 / 215 / 267, the floats 154 / 223 / 277 */
+static void dos_jet_drag_q16(int32_t thrust, int32_t top, int32_t *k, int32_t *b)
+{
+    int64_t limit = (int64_t)top * 0x1400 / 2;
+    *k = *b = 0;
+    if (thrust < 1 || limit < 1) return;
+    int32_t square = dos_projectile_mul((int32_t)limit, (int32_t)limit);
+    int64_t den = square - (limit * 3) / 4;
+    if (den == 0) return;
+    int64_t t = thrust - ((int64_t)thrust * 65536 / limit) / 3;
+    *k = (int32_t)(t * 65536 / den);
+    *b = (int32_t)(((int64_t)thrust - dos_projectile_mul(*k, square)) * 65536 / limit);
+}
+
 void msim_jet_drag(float thrust, float top_cm_s, float *k, float *B)
 {
-    int64_t T = lrintf(thrust * 65536.0f), c22 = lrintf(top_cm_s * 64.0f / 182.0f), L = c22 * 0x1400 / 2, L2, TL, u58, den, ki, u12;
-    *k = *B = 0;
-    if (T < 1 || L < 1) return;
-    L2 = ((L * L) >> 16) + (((L * L) >> 15) & 1);
-    TL = (T << 16) / L;
-    u58 = T - TL / 3;
-    den = L2 - ((L * 3) >> 2);
-    if (den == 0) return;
-    ki = (u58 << 16) / den;
-    u12 = T - (((ki * L2) >> 16) + (((ki * L2) >> 15) & 1));
-    *k = (float)ki / 65536.0f;
-    *B = (float)((u12 * 65536) / L) / 65536.0f;
+    int32_t kq, bq;
+    dos_jet_drag_q16((int32_t)lrintf(thrust * 65536.0f), (int32_t)lrintf(top_cm_s * 64.0f / 182.0f), &kq, &bq);
+    *k = kq / 65536.0f;
+    *B = bq / 65536.0f;
 }
+
+/* DOS 0x26f98: add acceleration, then shift the signed displacement down
+ * to centimetres. The horizontal dead zone is applied after the move. */
+static int32_t dos_motion_axis(int32_t *velocity, int32_t accel, int ticks)
+{
+    int64_t dv = (int64_t)accel * ticks;
+    int32_t move = (int32_t)(((int64_t)*velocity + (dv >> 1)) * ticks >> 16);
+    *velocity += (int32_t)dv;
+    return move;
+}
+
+/* 0x26d01 .. 0x26f8a: a vertical jet damps upward motion only. A turn
+ * or a directional jet spends fuel without providing lift. */
+static int32_t dos_motion_lift(int32_t *velocity, int32_t gravity, int32_t thrust,
+                               int32_t damping, int grounded, int mode, int ticks)
+{
+    int32_t accel = -gravity;
+    if (mode == 1) {
+        accel += thrust;
+        if (*velocity > 0 && damping > 0)
+            accel += dos_projectile_mul((gravity - thrust) * 3640, *velocity) / damping;
+    } else if (*velocity == 0 ? (grounded || mode == 2) : (*velocity < 0 && mode == 2)) accel = 0;
+    return dos_motion_axis(velocity, accel, ticks);
+}
+
+combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks)
+{
+    int32_t speed = (int32_t)lrintf(u->vy * 65536.0f);
+    int mode = jet ? (u->jet_forward ? 2 : 1) : 0;
+    int32_t move = dos_motion_lift(&speed, dos_gravity(planet->gravity_g),
+                                  (int32_t)lrintf(u->jet_ddy * 65536.0f),
+                                  (int32_t)lrintf(planet->jet_damping), u->y <= u->ground, mode, ticks);
+    return (combat_motion){(float)move, speed / 65536.0f, ticks};
+}
+
+static void dos_motion_plane(int32_t velocity[2], int32_t drive, int32_t sa, int32_t ca, int32_t thrust,
+                             int32_t top, int freev, int jet_dir, int ticks, int32_t move[2])
+{
+    int32_t accel[2] = {0};
+    if (!freev) {
+        if (drive > -32 && drive < 32) drive = 0;
+        int divide = ticks > 45 ? ticks : 45;
+        accel[0] = (dos_projectile_mul(drive, sa) - velocity[0]) / divide;
+        accel[1] = (dos_projectile_mul(drive, ca) - velocity[1]) / divide;
+    } else if (jet_dir) {
+        int32_t k, b, x = abs(velocity[0]), z = abs(velocity[1]);
+        int32_t speed = x > z ? x + (z >> 2) : z + (x >> 2);
+        dos_jet_drag_q16(thrust, top, &k, &b);
+        int32_t tx = dos_projectile_mul(thrust, sa), tz = dos_projectile_mul(thrust, ca);
+        accel[0] = jet_dir == 1 ? -tz : jet_dir == 2 ? tz : jet_dir == 3 ? tx : -tx;
+        accel[1] = jet_dir == 1 ? tx : jet_dir == 2 ? -tx : jet_dir == 3 ? tz : -tz;
+        if (speed > 0) {
+            int32_t drag = dos_projectile_mul(dos_projectile_mul(k, speed) + b, speed);
+            for (int axis = 0; axis < 2; axis++)
+                accel[axis] -= (int32_t)((int64_t)drag * velocity[axis] / speed);
+        }
+    }
+    for (int axis = 0; axis < 2; axis++) {
+        move[axis] = dos_motion_axis(&velocity[axis], accel[axis], ticks);
+        if (velocity[axis] > -4096 && velocity[axis] < 4096) velocity[axis] = 0;
+    }
+}
+
+void msim_dos_walk(combat_unit *u, float heading, float drive, float top, int freev, int jet_dir,
+                   int ticks, int32_t move[2])
+{
+    const double scale = 65536.0 / 182.0;
+    int32_t yaw = (int32_t)lrintf(heading * 65536.0f);
+    dos_motion_plane(u->dos_vel, (int32_t)lrint(drive * scale), dos_sin(yaw) >> 13, dos_cos(yaw) >> 13,
+                     (int32_t)lrintf(u->jet_ddy * 65536.0f), (int32_t)lrintf(top * 64.0f / 182.0f),
+                     freev, jet_dir, ticks, move);
+}
+
+void msim_dos_project_velocity(const combat_unit *u, float heading, float *along, float *across)
+{
+    const float scale = 182.0f / 65536.0f;
+    float h = heading * 3.14159265f / 180.0f, sn = sinf(h), cs = cosf(h);
+    *along = (sn * u->dos_vel[0] + cs * u->dos_vel[1]) * scale;
+    if (across) *across = (cs * u->dos_vel[0] - sn * u->dos_vel[1]) * scale;
+}
+
 float msim_ground(const msim *s, float x, float z, float y) { return msim_ground_n(s, x, z, y, NULL); }
 float msim_draw_y(const msim *s, int i)
 {
@@ -5433,7 +5647,7 @@ static int unit_sphere(const msim *s, int k, float q[3], float *r2, float ov[3])
     if (k < 0) {
         if (s->player_unit.destroyed) return 0;
         q[0] = s->player[0]; q[1] = s->player_unit.y + s->player_centre_h; q[2] = s->player[2]; *r2 = s->player_radius;
-        ov[0] = s->player_vel[0]; ov[1] = s->player_vel[1]; ov[2] = s->player_vel[2];
+        memcpy(ov, msim_dos_int ? s->player_unit.dos_attempted : s->player_vel, 3 * sizeof *ov);
     } else {
         int air;
         float sp, hh;
@@ -5444,17 +5658,32 @@ static int unit_sphere(const msim *s, int k, float q[3], float *r2, float ov[3])
         sp = (air && s->air_speed ? s->air_speed[k] : s->minds ? s->minds[k].speed : 0.0f) / 182.0f;
         hh = s->actors[k].mech.heading * 3.14159265f / 180.0f;
         ov[0] = sinf(hh) * sp; ov[1] = air ? s->units[k].vy : 0.0f; ov[2] = cosf(hh) * sp;
+        if (msim_dos_int) memcpy(ov, s->units[k].dos_attempted, 3 * sizeof *ov);
     }
     return 1;
 }
-/* the normal from q to p (unit), the engine's (0, 0, 1) for coincident centres (0x1000ba20). (DOS, MW2.EXE 0x200d0, takes
- * every length here - the contact distance, this normal's divisor, the bounce and damage speeds, the wall-impact speed
- * 0x1fca0 and the sphere push 0x20570 - as the approximation max + (mid + min) / 4; modelled alone, without DOS's whole-cm
- * positions, it made TNJ1's slide 10.5 s against DOSBox's 8 s (the true length: 8 s), so every edition keeps the 3D
- * editions' true length, 0x10030330) */
+static int32_t approx_len3_dos(int32_t a, int32_t b, int32_t c)
+{
+    int32_t x = a < 0 ? -a : a, y = b < 0 ? -b : b, z = c < 0 ? -c : c, t;
+    if (x < y) { t = x; x = y; y = t; }
+    if (x < z) { t = x; x = z; z = t; }
+    return (x * 4 + y + z) >> 2;
+}
+
+/* 0x200d0 measures contact in whole centimetres with the octagonal
+ * length estimate, both when finding a hit and when projecting out of it. */
+static int32_t dos_contact_delta(const float p[3], const float q[3], int32_t d[3])
+{
+    for (int k = 0; k < 3; k++) d[k] = (int32_t)lrintf(p[k]) - (int32_t)lrintf(q[k]);
+    return approx_len3_dos(d[0], d[1], d[2]);
+}
+
 static void contact_normal(const float p[3], const float q[3], float d, float n[3])
 {
-    if (d > 1e-3f) { n[0] = (p[0] - q[0]) / d; n[1] = (p[1] - q[1]) / d; n[2] = (p[2] - q[2]) / d; }
+    if (msim_dos_int && d > 0.0f) {
+        int32_t delta[3], len = dos_contact_delta(p, q, delta);
+        for (int k = 0; k < 3; k++) n[k] = (int32_t)((int64_t)delta[k] * 65536 / len) / 65536.0f;
+    } else if (d > 1e-3f) { n[0] = (p[0] - q[0]) / d; n[1] = (p[1] - q[1]) / d; n[2] = (p[2] - q[2]) / d; }
     else { n[0] = 0; n[1] = 0; n[2] = 1.0f; }
 }
 int msim_unit_contact(const msim *s, int self, const float p0[3], const float p1[3], float n[3], float c[3], float *rr, float ov[3])
@@ -5467,11 +5696,20 @@ int msim_unit_contact(const msim *s, int self, const float p0[3], const float p1
         rs = r1 + r2;
         d1 = sqrtf((p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]));
         d0 = sqrtf((p0[0] - q[0]) * (p0[0] - q[0]) + (p0[1] - q[1]) * (p0[1] - q[1]) + (p0[2] - q[2]) * (p0[2] - q[2]));
-        if (d1 < rs && d1 < d0 && d1 < best) {
+        if (msim_dos_int) {
+            int32_t delta[3];
+            d1 = (float)dos_contact_delta(p1, q, delta);
+        }
+        /* 0x20141: a unit already touched by an earlier mover responds
+         * on its turn even if the attempted endpoint is outside that sphere. */
+        int reciprocal = msim_dos_int && k < self &&
+                         (k < 0 ? s->player_unit.dos_contact_unit : s->units[k].dos_contact_unit) == self + 2;
+        if (reciprocal || (d1 < rs && (msim_dos_int || (d1 < d0 && d1 < best)))) {
             best = d1; hit = k; *rr = rs;
             c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
             contact_normal(p1, q, d1, n);
             ov[0] = v[0]; ov[1] = v[1]; ov[2] = v[2];
+            if (msim_dos_int) break;
         }
     }
     return hit;
@@ -5481,6 +5719,10 @@ int msim_unit_inside(const msim *s, int self, int other, const float p1[3], floa
     float r1 = self >= 0 ? (s->radius ? s->radius[self] : 450.0f) : s->player_radius, q[3], r2, d;
     if (other == self || other < -1 || other >= s->actor_count || !unit_sphere(s, other, q, &r2, ov)) return 0;
     d = sqrtf((p1[0] - q[0]) * (p1[0] - q[0]) + (p1[1] - q[1]) * (p1[1] - q[1]) + (p1[2] - q[2]) * (p1[2] - q[2]));
+    if (msim_dos_int) {
+        int32_t delta[3];
+        d = (float)dos_contact_delta(p1, q, delta);
+    }
     if (d >= r1 + r2) return 0;   /* 0x1000ba20: dist >= r1 + r2 -> no contact */
     *rr = r1 + r2; c[0] = q[0]; c[1] = q[1]; c[2] = q[2];
     contact_normal(p1, q, d, n);
@@ -5495,13 +5737,49 @@ static long double approx_len3(float a, float b, float c)
     if (x < y) { t = x; x = y; y = t; }
     return ((long double)x * 4.0L + (long double)z + (long double)y) * 0.25L;
 }
-static int32_t approx_len3_dos(int32_t a, int32_t b, int32_t c)
+
+
+/* 0x2043a: round the projected position to centimetres and use the
+ * other mech's z speed in the bounce magnitude (0x20499). */
+static void dos_unit_bounce(const float centre[3], const float normal[3], float radius,
+                            const float vel[3], const float other[3], float end[3], float bounced[3])
 {
-    int32_t x = a < 0 ? -a : a, y = b < 0 ? -b : b, z = c < 0 ? -c : c, t;
-    if (x < y) { t = x; x = y; y = t; }
-    if (x < z) { t = x; x = z; z = t; }
-    return (x * 4 + y + z) >> 2;
+    int32_t nx[3];
+    for (int k = 0; k < 3; k++) nx[k] = (int32_t)lrintf(normal[k] * 65536.0f);
+    int32_t dx = (int32_t)lrintf(vel[0] * 65536.0f) - (int32_t)lrintf(other[0] * 65536.0f);
+    int32_t dy = (int32_t)lrintf(vel[1] * 65536.0f) - (int32_t)lrintf(other[1] * 65536.0f);
+    int32_t speed = approx_len3_dos(dx, dy, (int32_t)lrintf(other[2] * 65536.0f)) >> 1;
+    if (speed < 65536) speed = 65536;
+    for (int k = 0; k < 3; k++) {
+        end[k] = (float)((int32_t)lrintf(centre[k]) + dos_projectile_mul(nx[k], (int32_t)radius));
+        bounced[k] = dos_projectile_mul(nx[k], speed) / 65536.0f;
+    }
 }
+
+/* DOS 0x27109 tests the projected end against the same collision list.
+ * A second unit hit keeps the projected end. A world hit restores the start. */
+int msim_dos_unit_impact(msim *s, int self, const float start[3], float height, float radius, int hit,
+                         const float centre[3], const float normal[3], float combined_radius,
+                         const float vel[3], const float other[3], float end[3], float bounce[3])
+{
+    float n[3], q[3], v[3], rr;
+    combat_unit *mover = self < 0 ? &s->player_unit : &s->units[self];
+    dos_unit_bounce(centre, normal, combined_radius, vel, other, end, bounce);
+    mover->dos_contact_unit = hit + 2;
+    mover->dos_attempted[2] = other[2];
+    int retry = msim_unit_contact(s, self, start, end, n, q, &rr, v);
+    if (retry == -2) {
+        if (msim_can_move(s, start[0], start[2], end[0], end[2], start[1] - height, end[1] - start[1], height, radius))
+            return 0;
+        memcpy(end, start, 3 * sizeof *end);
+    } else {
+        mover->dos_contact_unit = retry + 2;
+        mover->dos_attempted[2] = v[2];
+    }
+    for (int k = 0; k < 3; k++) bounce[k] *= 2.0f;
+    return 1;
+}
+
 int msim_contact_retest(const float p0[3], const float p1[3], const float q[3], float rr)
 {
     int k;
@@ -5539,11 +5817,26 @@ int msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, flo
 {
     float dy = 0.0f, vy = 0.0f;
     (void)n_in;
-    return msim_world_impact3(s, x0, z0, x, z, y, &dy, H, R, heading_deg, speed, across, &vy);
+    return msim_world_impact3(s, x0, z0, x, z, y, &dy, H, R, heading_deg, speed, across, &vy, NULL);
+}
+
+/* DOS 0x1fee6 .. 0x2007d. A face hit uses the length estimate both for
+ * the incoming segment and for the attempted end velocity. */
+static void dos_face_response(const int32_t dir[3], const int32_t normal[3],
+                              int32_t velocity[3], int32_t untravelled, int32_t rebound[3])
+{
+    int32_t twice_dot = 0;
+    for (int i = 0; i < 3; i++) twice_dot += dos_projectile_mul(normal[i] * 2, dir[i]);
+    int32_t quarter = -approx_len3_dos(velocity[0], velocity[1], velocity[2]) >> 2;
+    for (int i = 0; i < 3; i++) {
+        int32_t axis = dir[i] - dos_projectile_mul(normal[i], twice_dot);
+        velocity[i] = dos_projectile_mul(axis, quarter);
+        rebound[i] = untravelled > 0 ? dos_projectile_mul(axis, untravelled) >> 2 : 0;
+    }
 }
 
 int msim_world_impact3(const msim *s, float x0, float z0, float *x, float *z, float y, float *dy, float H, float R,
-                       float heading_deg, float *speed, float *across, float *vy)
+                       float heading_deg, float *speed, float *across, float *vy, int32_t dos_vel[2])
 {
     /* engine 0x1000b5e0, the world hit (0x10010530): the move's segment (centre to centre, extended R ahead) ends at the
      * hit; the touching point is that hit less R along the move - behind the start when the hit is nearer than R
@@ -5572,10 +5865,32 @@ int msim_world_impact3(const msim *s, float x0, float z0, float *x, float *z, fl
     hh = heading_deg * 3.14159265f / 180.0f;
     v = (across ? sqrtf(*speed * *speed + *across * *across) : fabsf(*speed)) / 182.0f;   /* |the attempted velocity|, cm/tick */
     v = sqrtf(v * v + *vy * *vy);
+    int32_t raw[3] = {0};
+    if (msim_dos_int) {
+        float sn = sinf(hh), cs = cosf(hh), side = across ? *across : 0.0f;
+        raw[0] = dos_vel ? dos_vel[0] : (int32_t)lrintf((sn * *speed + cs * side) * (65536.0f / 182.0f));
+        raw[1] = (int32_t)lrintf(*vy * 65536.0f);
+        raw[2] = dos_vel ? dos_vel[1] : (int32_t)lrintf((cs * *speed - sn * side) * (65536.0f / 182.0f));
+        v = approx_len3_dos(raw[0], raw[1], raw[2]) / 65536.0f;
+    }
     if (kind == 2) {
         float m = v * 0.25f, kk = m > 8.0f ? -0.5f : 0.5f;
-        bx = g_push[0]; by = *dy == 0.0f ? y : g_push[1] - H; bz = g_push[2];   /* walking: level (as before) */
+        bx = g_push[0]; by = *dy == 0.0f ? y : g_push[1] - H; bz = g_push[2];
         for (k = 0; k < 3; k++) vel[k] = n[k] * m * kk;
+    } else if (msim_dos_int) {
+        int32_t dir[3] = {(int32_t)lrintf(dx), (int32_t)lrintf(*dy), (int32_t)lrintf(dz)};
+        int32_t length = dos_normalize(dir);
+        int32_t normal[3], rebound[3];
+        const float start[3] = {x0, y, z0};
+        float pos[3];
+        int32_t touch = (int32_t)lrintf(g_hit_t) - (int32_t)ext;
+        for (int i = 0; i < 3; i++) normal[i] = (int32_t)lrintf(n[i] * 65536.0f);
+        dos_face_response(dir, normal, raw, length - touch, rebound);
+        for (int i = 0; i < 3; i++) {
+            pos[i] = (float)((int32_t)lrintf(start[i]) + dos_projectile_mul(dir[i], touch) + rebound[i]);
+            vel[i] = raw[i] / 65536.0f;
+        }
+        bx = pos[0]; by = pos[1]; bz = pos[2];
     } else {
         float ux = dx / len, uy = *dy / len, uz = dz / len, dn = ux * n[0] + uy * n[1] + uz * n[2], r[3], tch = g_hit_t - ext, u = len - tch;
         r[0] = ux - 2.0f * dn * n[0]; r[1] = uy - 2.0f * dn * n[1]; r[2] = uz - 2.0f * dn * n[2];
@@ -5590,6 +5905,10 @@ int msim_world_impact3(const msim *s, float x0, float z0, float *x, float *z, fl
         for (k = 0; k < 3; k++) vel[k] *= 2.0f;
         if (g_block_id != id1) { bx = x0; by = y; bz = z0; ret |= 1; }
     } else memcpy(g_block_n, n, sizeof n);
+    if (msim_dos_int && dos_vel) {
+        dos_vel[0] = (int32_t)lrintf(vel[0] * 65536.0f);
+        dos_vel[1] = (int32_t)lrintf(vel[2] * 65536.0f);
+    }
     *x = bx; *z = bz; *dy = by - y; *vy = vel[1];
     *speed = (vel[0] * sinf(hh) + vel[2] * cosf(hh)) * 182.0f;
     if (across) *across = (vel[0] * cosf(hh) - vel[2] * sinf(hh)) * 182.0f;
@@ -5647,10 +5966,27 @@ int msim_can_move(const msim *s, float x0, float z0, float x, float z, float y, 
         return refuse(n);
     }
     if (!(dl > 0.0f)) return 1;
-    ext = (1.0f - fabsf(dy / dl)) * R + fabsf(dy / dl) * H;
-    p1[0] += dx / dl * ext; p1[1] += dy / dl * ext; p1[2] += dz / dl * ext;
+    if (msim_dos_int) {
+        int32_t dir[3] = {(int32_t)lrintf(dx), (int32_t)lrintf(dy), (int32_t)lrintf(dz)};
+        int32_t length = dos_normalize(dir);
+        if (!length) return 1;
+        int32_t tilt = abs(dir[1]);
+        int32_t reach = dos_projectile_mul((int32_t)lrintf(H), tilt) +
+                        dos_projectile_mul((int32_t)lrintf(R), 65536 - tilt);
+        ext = (float)reach;
+        for (int i = 0; i < 3; i++) p1[i] = p0[i] + (float)dos_projectile_mul(dir[i], length + reach);
+    } else {
+        ext = (1.0f - fabsf(dy / dl)) * R + fabsf(dy / dl) * H;
+        p1[0] += dx / dl * ext; p1[1] += dy / dl * ext; p1[2] += dz / dl * ext;
+    }
     g_hit_ext = ext;
     if (clist_seg(s, p0, p1, CLIST_MOVE, &t, n, &ci)) {
+        if (msim_dos_int) {
+            float rx = p1[0] - p0[0], ry = p1[1] - p0[1], rz = p1[2] - p0[2];
+            float ray_length = sqrtf(rx * rx + ry * ry + rz * rz);
+            float f = ray_length > 0.0f ? t / ray_length : 0.0f;
+            t = (float)approx_len3_dos((int32_t)lrintf(rx * f), (int32_t)lrintf(ry * f), (int32_t)lrintf(rz * f));
+        }
         g_hit_kind = 1; g_hit_t = t; g_block_id = tt->co[ci].part; g_block_what = s->world->parts[g_block_id].model_name;
         { float box[6]; cobj_now(s, &tt->co[ci], box, g_hit_at); }
         return refuse(n);
@@ -6065,15 +6401,14 @@ static void dos_probe_points(const float centre[3], float heading, int step, int
                              int lateral, float from[3], float to[3])
 {
     static const int xdiv[] = {0, 2, 1, 1}, zdiv[] = {1, 1, 1, 2};
-    const float yaw = heading * 3.14159265f / 180.0f, sn = sinf(yaw), cs = cosf(yaw);
-    const float rotation[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
-    int32_t origin[3], a[3], b[3];
-    for (int j = 0; j < 3; j++) origin[j] = (int32_t)lroundf(centre[j]);
+    dos_matrix pose = dos_matrix_rotation(0, (int32_t)lrint((double)heading * 65536.0), 0);
+    int32_t a[3], b[3];
+    for (int j = 0; j < 3; j++) pose.p[j] = (int32_t)lroundf(centre[j]);
     const int sign = side < 0 ? -1 : 1;
     const int32_t local_from[3] = {sign * lateral, 0, 0};
     const int32_t local_to[3] = {step == 0 ? 0 : sign * (length / xdiv[step]), 0, length / zdiv[step]};
-    mech3d_dos_transform_point(rotation, origin, local_from, a);
-    mech3d_dos_transform_point(rotation, origin, local_to, b);
+    dos_matrix_point(&pose, local_from, a);
+    dos_matrix_point(&pose, local_to, b);
     for (int j = 0; j < 3; j++) { from[j] = (float)a[j]; to[j] = (float)b[j]; }
 }
 

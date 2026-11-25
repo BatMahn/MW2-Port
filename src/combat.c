@@ -119,6 +119,8 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     u->tons = (int)d.tonnage;   /* controller +0xe4 (MEK +0x00): the head-hit ratio in 0x1000c1f0 */
     u->jets = (int)d.jump_mp;
     u->jet_ddy = d.walk_mp ? (float)d.jump_mp / (float)d.walk_mp * 0.1184f : 0;
+    if (combat_dos && d.walk_mp > 0)
+        u->jet_ddy = (float)(((int64_t)(d.jump_mp * 65536 / d.walk_mp) * 7760 + 32768) >> 16) / 65536.0f;
     u->jet_fuel = u->jets > 0 ? combat_jet_fuel_max : 0;
     /* engine 0x10041410: the first 10 items are the weapons; for each, in order, every ammo link naming it becomes a
      * bin (at most 25) of per_volley x ammo_per_ton rounds, and the weapon's count is the sum (-1: no ammunition) */
@@ -863,10 +865,10 @@ void combat_jets_forward(combat_unit *u, int on, float dt, float *hvel)
     if (jets_held(u, on) && u->jet_fuel > 0) *hvel += u->jet_ddy * dt * COMBAT_TICKS_PER_S;
 }
 
-int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
+int combat_jets_motion(combat_unit *u, int jetting, float dt, unsigned *rng, const combat_motion *motion)
 {
     const float g = 0.0296f * g_planet.gravity_g;
-    float ticks = dt * COMBAT_TICKS_PER_S, a;
+    float ticks = motion ? (float)motion->ticks : dt * COMBAT_TICKS_PER_S, a;
     /* engine 0x1001a58a: with the input held (and the mech up) the tank only drains - to 0, never refilling while
      * held; it refills a quarter tick per tick only with the input released; thrust (and jet heat) only while the
      * tank holds fuel after this frame's burn. A tank at -2 (no jets: gyro / last jet lost) does neither */
@@ -880,7 +882,10 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
         if (held) {
             if (!u->infinite_jets) u->jet_fuel -= ticks;   /* Win95 0x10026f30: the cheat skips the burn */
             if (u->jet_fuel <= 0) u->jet_fuel = 0;
-        } else if (combat_jet_refill_dos) {   /* DOS 0x27c57..0x27c7d, one step per 30 fps frame */
+        } else if (motion) {   /* 0x27c57: the signed whole-tick quarter, capped on the next update */
+            if (u->jet_fuel < combat_jet_fuel_max) u->jet_fuel += (float)(motion->ticks / 4);
+            else u->jet_fuel = combat_jet_fuel_max;
+        } else if (combat_jet_refill_dos) {   /* standalone callers that have no DOS frame clock */
             int n;
             u->jet_refill_acc += dt * 30.0f;
             n = (int)u->jet_refill_acc;
@@ -904,12 +909,17 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
      * (asked at its centre height, 0x10010080: the highest surface within 10 m of the centre, else the highest below) -
      * walked up a slope it is set on it; off anything lower, a downhill step too, it is airborne (+0x78 clear, 0x10019dde)
      * and falls at the planet's gravity until its feet reach the ground: no snap-down */
-    if (!jet && fabsf(u->vy) < 1e-7f && u->y <= u->ground) { u->y = u->ground; u->vy = 0; return 0; }
-    a = -g;
-    if (jet) a = u->jet_ddy - g + (u->vy > 1e-7f ? (g - u->jet_ddy) / g_planet.jet_damping * u->vy * 3620.0f : 0);
-    if (jet && u->jet_forward) a = u->vy > 1e-7f ? -g : 0;   /* forward thrust: no lift, level glide */
-    u->y += (0.5f * a * ticks + u->vy) * ticks;
-    u->vy += a * ticks;
+    if (motion) {
+        u->y += motion->dy;
+        u->vy = motion->vy;
+    } else {
+        if (!jet && fabsf(u->vy) < 1e-7f && u->y <= u->ground) { u->y = u->ground; u->vy = 0; return 0; }
+        a = -g;
+        if (jet) a = u->jet_ddy - g + (u->vy > 1e-7f ? (g - u->jet_ddy) / g_planet.jet_damping * u->vy * 3620.0f : 0);
+        if (jet && u->jet_forward) a = u->vy > 1e-7f ? -g : 0;   /* forward thrust: no lift, level glide */
+        u->y += (0.5f * a * ticks + u->vy) * ticks;
+        u->vy += a * ticks;
+    }
     if (u->y <= u->ground) {
         if (u->vy < -16.154f && !u->no_collision_damage && !u->destroyed) {   /* fall damage to both legs (0x10019310: only with
                                                                           * Collision Damage on, DAT_1024ac6c + 3; a wreck lands
@@ -926,6 +936,11 @@ int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
         return 0;
     }
     return 1;
+}
+
+int combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng)
+{
+    return combat_jets_motion(u, jetting, dt, rng, NULL);
 }
 
 void combat_land(combat_unit *u, float vy, unsigned *rng)

@@ -3,6 +3,7 @@
 #include "bwd.h"
 #include "anim.h"
 #include "mek.h"
+#include "dos_matrix.h"
 #include <ctype.h>
 
 #include <stdio.h>
@@ -885,75 +886,181 @@ static void mat3_axis(float *m, int axis, float deg)
     else { m[0] = c; m[1] = -s; m[3] = s; m[4] = c; }
 }
 
+static int32_t dos_pose_angle(float degrees)
+{
+    return (int32_t)lrint((double)degrees * 65536.0);
+}
+
+/* 0x3ad00 normalizes the rows first, then the columns. The helper at
+ * 0x5c3c2 truncates each component to an integer before the next vector. */
+static void dos_anim_normalize(int32_t r[9])
+{
+    for (int stride = 1; stride <= 3; stride += 2) {
+        for (int start = 0; start < 3; start++) {
+            int32_t *v = r + (stride == 1 ? start * 3 : start);
+            long double x = v[0], y = v[stride], z = v[2 * stride];
+            long double length = sqrtl(x * x + y * y + z * z);
+            if (length == 0) continue;
+            long double scale = 536870912.0L / length;
+            v[0] = (int32_t)(x * scale);
+            v[stride] = (int32_t)(y * scale);
+            v[2 * stride] = (int32_t)(z * scale);
+        }
+    }
+}
+
+static int dos_rotation_track(const mech3d *m, const anim_set *anim, int node)
+{
+    for (int k = 0; k < m->bind_count; k++) {
+        int tr = m->bind_track[k];
+        if (m->bind_node[k] == node && tr >= 0 && tr < anim->track_count && anim->tracks[tr].type >= 3) return tr;
+    }
+    return -1;
+}
+
+static unsigned dos_next_normalization(unsigned *phase)
+{
+    unsigned next = *phase ? *phase : 100;
+    *phase = 64 + ((next + 7) & 127);   /* DOS global 0x95ae4 */
+    return next;
+}
+
+void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
+{
+    const dos_matrix identity = dos_matrix_rotation(0, 0, 0);
+    for (int i = 0; i < m->skel_count; i++) {
+        unsigned period = dos_next_normalization(phase);
+        int track = anim ? dos_rotation_track(m, anim, m->skel_index[i]) : -1;
+        if (track < 0) continue;
+        player->dos_rot_left[track] = period;
+        memcpy(player->dos_rot[track], identity.r, sizeof identity.r);
+    }
+}
+
+void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, anim_player *player, unsigned *phase)
+{
+    if (!player->dos_applied) return;
+    for (int k = 0; k < m->bind_count; k++) {
+        int tr = m->bind_track[k], node = m->bind_node[k];
+        if (tr < 0 || tr >= anim->track_count || anim->tracks[tr].type < 3 ||
+            node == m->twist_node || node == m->pitch_node) continue;
+        int slot = dos_rotation_track(m, anim, node);
+        int type = anim->tracks[tr].type;
+        int32_t step = player->dos_step[tr];
+        if (!player->dos_rot_left[slot]) continue;
+        dos_matrix old = {0};
+        memcpy(old.r, player->dos_rot[slot], sizeof old.r);
+        dos_matrix delta = dos_matrix_rotation(type == 3 ? step : 0, type == 4 ? step : 0, type >= 5 ? step : 0);
+        dos_matrix local = dos_matrix_compose(&old, &delta);   /* 0x1e140 -> 0x1e0b0 */
+        if (--player->dos_rot_left[slot] == 0) {
+            player->dos_rot_left[slot] = dos_next_normalization(phase);
+            dos_anim_normalize(local.r);
+        }
+        memcpy(player->dos_rot[slot], local.r, sizeof local.r);
+    }
+}
+
 static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
-                        float wrot[MECH3D_MAX_NODES][9], float wpos[MECH3D_MAX_NODES][3], int done[MECH3D_MAX_NODES])
+                        float wrot[MECH3D_MAX_NODES][9], float wpos[MECH3D_MAX_NODES][3],
+                        int done[MECH3D_MAX_NODES], dos_matrix *fixed_out)
 {
     float hr[9];
-    int i, k, pass;
+    dos_matrix scratch[MECH3D_MAX_NODES], root;
+    dos_matrix *world = fixed_out ? fixed_out : scratch;
+    const int fixed = mech3d_dos_hips;
+    const int dos_hips = fixed && m->bind_count > 0 && m->centre_h > 0;
     static const float I[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-    const int dos_hips = mech3d_dos_hips && m->bind_count > 0 && m->centre_h > 0;   /* an animated unit (a mech) */
-
-    mat3_axis(hr, 1, m->heading);
+    if (fixed) {
+        root = dos_matrix_rotation(0, dos_pose_angle(m->heading), 0);
+        memcpy(root.p, m->origin, sizeof root.p);
+        if (dos_hips) root.p[1] += m->centre_h;
+    } else mat3_axis(hr, 1, m->heading);
     memset(done, 0, MECH3D_MAX_NODES * sizeof *done);
-    /* resolve parents first: repeat until every node is placed (tree depth is small) */
-    for (pass = 0; pass < MECH3D_MAX_NODES; pass++) {
+    /* Resolve parents first, including records whose nodes appear out of order. */
+    for (int pass = 0; pass < MECH3D_MAX_NODES; pass++) {
         int progress = 0;
-        for (i = 0; i < m->skel_count; i++) {
+        for (int i = 0; i < m->skel_count; i++) {
             float lrot[9], lpos[3], tmp[9];
+            dos_matrix local;
             int pi = -1;
             if (done[i]) continue;
             if (m->skel_parent[i] >= 0 && m->skel_parent[i] != m->skel_index[i]) {
-                for (k = 0; k < m->skel_count; k++) if (m->skel_index[k] == m->skel_parent[i]) pi = k;
+                for (int k = 0; k < m->skel_count; k++) if (m->skel_index[k] == m->skel_parent[i]) pi = k;
                 if (pi >= 0 && !done[pi]) continue;
             }
-            memcpy(lrot, I, sizeof I);
-            for (k = 0; k < 3; k++) lpos[k] = (float)m->skel_offset[i][k];
+            const int torso = m->twist_node >= 0 && m->skel_index[i] == m->twist_node;
+            const int weapon = m->pitch_node >= 0 && m->skel_index[i] == m->pitch_node;
+            for (int k = 0; k < 3; k++) lpos[k] = (float)m->skel_offset[i][k];
             if (dos_hips && pi >= 0 && (m->skel_parent[pi] < 0 || m->skel_parent[pi] == m->skel_index[pi]))
-                lpos[0] = lpos[1] = lpos[2] = 0;   /* the DOS hips: no OBJ offset (mech3d_dos_hips) */
-            if (m->twist_node >= 0 && m->skel_index[i] == m->twist_node && m->twist != 0) {
-                mat3_axis(tmp, 1, m->twist);
-                mat3_mul(lrot, lrot, tmp);
-            }
-            if (m->twist_node >= 0 && m->skel_index[i] == m->twist_node && m->tilt != 0) {   /* then the pitch (+ forward, down) */
-                mat3_axis(tmp, 0, m->tilt);
-                mat3_mul(lrot, lrot, tmp);
-            }
-            if (m->pitch_node >= 0 && m->skel_index[i] == m->pitch_node && m->pitch != 0) {   /* the pitch object */
-                mat3_axis(tmp, 0, m->pitch);
-                mat3_mul(lrot, lrot, tmp);
-            }
-            if (anim)
-                for (k = 0; k < m->bind_count; k++) {
-                    int tr = m->bind_track[k];
-                    float v;
-                    if (m->bind_node[k] != m->skel_index[i] || tr < 0 || tr >= anim->track_count) continue;
-                    v = anim_value(anim, tr, t) + (m->pose_off && tr < ANIM_MAX_TRACKS ? m->pose_off[tr] : 0.0f);
-                    /* the torso (the record's first THNG node = the twist node, every mech) gets its whole local rotation
-                     * from the controller each frame (0x1001a180 -> 0x1000f990 -> 0x1002f070 / 0x1000f8f0: pitch, twist,
-                     * roll 0), so the walk's rotation keys on it (0x1000dec0 -> 0x1000f9d0, small relative turns) never
-                     * add up: no torso sway (Gargoyle +-4 deg yaw, Battlemaster / Hellbringer / Summoner +-2.6, Firemoth
-                     * pitch). Its translation keys stay */
-                    if (anim->tracks[tr].type > 2 && (m->skel_index[i] == m->twist_node || m->skel_index[i] == m->pitch_node)) continue;   /* (the
-                     * pitch object's whole rotation too: 0x10019310 -> SetObjRotation(pitch object, angle, 0, 0) every frame) */
-                    if (anim->tracks[tr].type <= 2) lpos[anim->tracks[tr].type] += v;
-                    else { mat3_axis(tmp, anim->tracks[tr].type - 3, v); mat3_mul(lrot, lrot, tmp); }
-                }
-            if (pi < 0) {
-                /* root: mech heading and world origin */
-                mat3_mul(wrot[i], hr, lrot);
-                for (k = 0; k < 3; k++)
-                    wpos[i][k] = hr[k * 3] * lpos[0] + hr[k * 3 + 1] * lpos[1] + hr[k * 3 + 2] * lpos[2] + (float)m->origin[k];
-                if (dos_hips) {   /* the DOS root object: feet + the centre, whole units */
-                    wpos[i][1] += (float)m->centre_h;
-                    for (k = 0; k < 3; k++) wpos[i][k] = floorf(wpos[i][k] + 0.5f);
+                lpos[0] = lpos[1] = lpos[2] = 0;
+            if (fixed) {
+                local = dos_matrix_rotation(torso ? dos_pose_angle(m->tilt) : 0,
+                                            torso ? dos_pose_angle(m->twist) : 0, 0);
+                if (weapon && m->pitch != 0) {
+                    dos_matrix pitch = dos_matrix_rotation(dos_pose_angle(m->pitch), 0, 0);
+                    local = dos_matrix_compose(&local, &pitch);
                 }
             } else {
-                mat3_mul(wrot[i], wrot[pi], lrot);
-                for (k = 0; k < 3; k++)
-                    wpos[i][k] = wpos[pi][k] + wrot[pi][k * 3] * lpos[0] + wrot[pi][k * 3 + 1] * lpos[1] + wrot[pi][k * 3 + 2] * lpos[2];
-                /* DOS: every object's world position is whole units - the parent's plus its turned local offset, rounded
-                 * (0x3b20c: >> 29 rounded) - so the eye and the parts sit where the original's integers put them */
-                if (dos_hips) for (k = 0; k < 3; k++) wpos[i][k] = wpos[pi][k] + floorf(wrot[pi][k * 3] * lpos[0] + wrot[pi][k * 3 + 1] * lpos[1] + wrot[pi][k * 3 + 2] * lpos[2] + 0.5f);
+                memcpy(lrot, I, sizeof I);
+                if (torso && m->twist != 0) {
+                    mat3_axis(tmp, 1, m->twist);
+                    mat3_mul(lrot, lrot, tmp);
+                }
+                if (torso && m->tilt != 0) {
+                    mat3_axis(tmp, 0, m->tilt);
+                    mat3_mul(lrot, lrot, tmp);
+                }
+                if (weapon && m->pitch != 0) {
+                    mat3_axis(tmp, 0, m->pitch);
+                    mat3_mul(lrot, lrot, tmp);
+                }
+            }
+            if (anim) {
+                for (int k = 0; k < m->bind_count; k++) {
+                    int tr = m->bind_track[k];
+                    if (m->bind_node[k] != m->skel_index[i] || tr < 0 || tr >= anim->track_count) continue;
+                    int type = anim->tracks[tr].type;
+                    /* The controller replaces torso and weapon rotations but keeps translation keys. */
+                    if (type > 2 && (torso || weapon)) continue;
+                    float v = 0;
+                    if (!m->pose_dos)
+                        v = anim_value(anim, tr, t) + (m->pose_off ? m->pose_off[tr] : 0.0f);
+                    else if (type <= 2 || !fixed)
+                        v = type <= 2 ? (float)m->pose_dos->dos_value[tr] : m->pose_dos->dos_value[tr] / 65536.0f;
+                    if (type <= 2) lpos[type] += v;
+                    else if (fixed) {
+                        if (m->pose_dos) {
+                            int slot = dos_rotation_track(m, anim, m->skel_index[i]);
+                            if (m->pose_dos->dos_rot_left[slot]) {
+                                memcpy(local.r, m->pose_dos->dos_rot[slot], sizeof local.r);
+                                continue;
+                            }
+                        }
+                        int32_t angle = m->pose_dos ? m->pose_dos->dos_value[tr] : dos_pose_angle(v);
+                        dos_matrix axis = dos_matrix_rotation(type == 3 ? angle : 0,
+                                                              type == 4 ? angle : 0, type >= 5 ? angle : 0);
+                        local = dos_matrix_compose(&local, &axis);
+                    } else {
+                        mat3_axis(tmp, type - 3, v);
+                        mat3_mul(lrot, lrot, tmp);
+                    }
+                }
+            }
+            if (fixed) {
+                for (int k = 0; k < 3; k++) local.p[k] = (int32_t)floorf(lpos[k] + 0.5f);
+                world[i] = dos_matrix_compose(pi < 0 ? &root : &world[pi], &local);
+                for (int k = 0; k < 9; k++) wrot[i][k] = world[i].r[k] / 536870912.0f;
+                for (int k = 0; k < 3; k++) wpos[i][k] = (float)world[i].p[k];
+            } else {
+                const float *parent_rot = pi < 0 ? hr : wrot[pi];
+                mat3_mul(wrot[i], parent_rot, lrot);
+                for (int k = 0; k < 3; k++) {
+                    float parent_pos = pi < 0 ? (float)m->origin[k] : wpos[pi][k];
+                    float offset = parent_rot[k * 3] * lpos[0] + parent_rot[k * 3 + 1] * lpos[1] + parent_rot[k * 3 + 2] * lpos[2];
+                    wpos[i][k] = pi < 0 ? offset + parent_pos :
+                                 parent_pos + parent_rot[k * 3] * lpos[0] +
+                                 parent_rot[k * 3 + 1] * lpos[1] + parent_rot[k * 3 + 2] * lpos[2];
+                }
             }
             done[i] = 1;
             progress = 1;
@@ -962,8 +1069,6 @@ static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
     }
 }
 
-static void solve_nodes(const mech3d *m, const anim_set *anim, float t,
-                        float wrot[MECH3D_MAX_NODES][9], float wpos[MECH3D_MAX_NODES][3], int done[MECH3D_MAX_NODES]);
 static void mounts_local(mech3d *m)
 {
     mech3d tmp = *m;
@@ -971,7 +1076,7 @@ static void mounts_local(mech3d *m)
     int done[MECH3D_MAX_NODES], k, q;
     tmp.origin[0] = tmp.origin[1] = tmp.origin[2] = 0;
     tmp.heading = 0; tmp.twist = 0;
-    solve_nodes(&tmp, NULL, 0, wrot, wpos, done);
+    solve_nodes(&tmp, NULL, 0, wrot, wpos, done, NULL);
     m->mount_local_ok = 0;
     for (k = 0; k < m->skel_count; k++)
         for (q = 0; q < 8; q++)
@@ -1005,7 +1110,7 @@ int mech3d_group_point(const mech3d *m, int group, const float origin[3], float 
     }
     tmp.origin[0] = tmp.origin[1] = tmp.origin[2] = 0;
     tmp.heading = 0;
-    solve_nodes(&tmp, (const anim_set *)m->pose_anim, m->pose_t, wrot, wpos, done);
+    solve_nodes(&tmp, (const anim_set *)m->pose_anim, m->pose_t, wrot, wpos, done, NULL);
     for (k = 0; k < m->skel_count; k++) {
         const float *l = lw, *R = wrot[k];
         if (m->skel_index[k] != node || !done[k]) continue;
@@ -1060,7 +1165,8 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
 {
     float wrot[MECH3D_MAX_NODES][9], wpos[MECH3D_MAX_NODES][3];
     int done[MECH3D_MAX_NODES], i, k;
-    solve_nodes(m, anim, t, wrot, wpos, done);
+    dos_matrix fixed[MECH3D_MAX_NODES];
+    solve_nodes(m, anim, t, wrot, wpos, done, fixed);
     m->pose_anim = anim; m->pose_t = t;
     m->eye_ok = 0;
     m->mount_ok = 0;
@@ -1088,6 +1194,8 @@ void mech3d_pose(mech3d *m, const anim_set *anim, float t)
                 p->pos[2] = (int32_t)lrintf(wpos[k][2]);
                 memcpy(p->rot, wrot[k], sizeof p->rot);
                 p->has_rot = 1;
+                p->has_dos_rot = mech3d_dos_hips;
+                if (p->has_dos_rot) memcpy(p->dos_rot, fixed[k].r, sizeof p->dos_rot);
                 break;
             }
     }
@@ -1101,6 +1209,7 @@ void mech3d_pose_like(mech3d *m, const mech3d *base)
     m->tilt = base->tilt;
     m->pitch = base->pitch;
     m->pose_off = base->pose_off;
+    m->pose_dos = base->pose_dos;
     mech3d_pose(m, (const anim_set *)base->pose_anim, base->pose_t);
 }
 
@@ -1112,10 +1221,12 @@ float mech3d_stride(const mech3d *m, const anim_set *anim, int first, int count)
     int da[MECH3D_MAX_NODES], db[MECH3D_MAX_NODES], k, i, keys = 0;
     tmp.origin[0] = tmp.origin[1] = tmp.origin[2] = 0;
     tmp.heading = 0;
+    tmp.pose_dos = NULL;
+    tmp.pose_off = NULL;
     for (k = first; k < first + count; k++) {
         int low = -1;
-        solve_nodes(&tmp, anim, (float)k, wrot, a, da);
-        solve_nodes(&tmp, anim, (float)k + 1.0f, wrot, b, db);
+        solve_nodes(&tmp, anim, (float)k, wrot, a, da, NULL);
+        solve_nodes(&tmp, anim, (float)k + 1.0f, wrot, b, db, NULL);
         for (i = 0; i < tmp.skel_count; i++) {
             int bound = 0, j;
             for (j = 0; j < tmp.bind_count; j++) if (tmp.bind_node[j] == tmp.skel_index[i]) bound = 1;
@@ -1296,17 +1407,6 @@ void mech3d_dos_model_sphere(const wtb_object *o, int32_t sphere[4])
     sphere[3] = (int32_t)sqrt(radius2);
 }
 
-/* DOS 0x3aefc sums the 3.29 products before rounding each output coordinate. */
-void mech3d_dos_transform_point(const float rotation[9], const int32_t origin[3], const int32_t point[3], int32_t out[3])
-{
-    for (int i = 0; i < 3; i++) {
-        int64_t sum = 0;
-        for (int j = 0; j < 3; j++)
-            sum += llround((double)rotation[i * 3 + j] * 536870912.0) * point[j];
-        out[i] = origin[i] + (int32_t)((sum + (1 << 28)) >> 29);
-    }
-}
-
 int mech3d_dos_hull_sphere(const mech3d *m, int part, unsigned gone_mask, float sphere[4])
 {
     const mech3d_part *p = &m->parts[part];
@@ -1314,12 +1414,12 @@ int mech3d_dos_hull_sphere(const mech3d *m, int part, unsigned gone_mask, float 
     const int32_t *local = p->dos_sphere;
     if (local[3] <= 0) return 0;
     int32_t centre[3];
-    if (p->has_rot) mech3d_dos_transform_point(p->rot, p->pos, local, centre);
-    else {
-        const float yaw = p->yaw * 3.14159265f / 180.0f, sn = sinf(yaw), cs = cosf(yaw);
-        const float rotation[9] = {cs, 0, sn, 0, 1, 0, -sn, 0, cs};
-        mech3d_dos_transform_point(rotation, p->pos, local, centre);
-    }
+    dos_matrix mtx;
+    if (!p->has_rot) mtx = dos_matrix_rotation(0, dos_pose_angle(p->yaw), 0);
+    else if (p->has_dos_rot) memcpy(mtx.r, p->dos_rot, sizeof mtx.r);
+    else for (int i = 0; i < 9; i++) mtx.r[i] = (int32_t)llround((double)p->rot[i] * 536870912.0);
+    memcpy(mtx.p, p->pos, sizeof mtx.p);
+    dos_matrix_point(&mtx, local, centre);
     for (int i = 0; i < 3; i++) sphere[i] = (float)centre[i];
     sphere[3] = (float)local[3];
     return 1;

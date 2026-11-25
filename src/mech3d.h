@@ -14,12 +14,16 @@
 #include "prj.h"
 #include "wtb.h"
 
+struct anim_player;
+
 typedef struct {
     char      model_name[17];
     int32_t   pos[3];        /* world position of the part's origin */
     float     yaw;           /* rotation about the vertical axis, degrees (world objects) */
     int       has_rot;       /* 1: rot[] (row-major 3x3, game coords) replaces yaw */
     float     rot[9];
+    int       has_dos_rot;   /* exact skeletal rotation for the DOS collision sphere */
+    int32_t   dos_rot[9];
     int       node;          /* skeleton node this part hangs on (-1 for world objects) */
     int       group;         /* damage location 1-8 from the record's OBJL chunks (0 = none):
                                 1 head, 2 RT, 3 CT, 4 LT, 5 RA, 6 LA, 7 RL, 8 LL (engine 0x100171d0; TW1_RARM is group 5) */
@@ -92,6 +96,7 @@ typedef struct {
     float        pitch;          /* its local pitch, degrees, + down (0x10019310: the aim's pitch less the torso's half) */
     const void  *pose_anim;      /* the last mech3d_pose arguments (an anim_set *), for a level of detail posed alike */
     float        pose_t;
+    const struct anim_player *pose_dos;   /* live animation state shared with the other LODs */
     const float *pose_off;       /* per ANIM track, added to the table's value (anim_player off: the carried offset), or NULL */
     int          eye_node;       /* EYEO chunk: the skeleton node of the pilot's eye (-1 if none) */
     float        eye_pos[3];     /* its world position after mech3d_pose */
@@ -148,6 +153,10 @@ struct anim_set_s;
  * position/rotation (rest pose if anim is NULL). */
 #include "anim.h"
 void mech3d_pose(mech3d *m, const anim_set *anim, float t);
+/* Seed the local rotations once when the model joins the mission. */
+void mech3d_dos_anim_init(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
+/* Apply this frame's DOS angular track deltas to the persistent local transforms. */
+void mech3d_dos_anim_step(const mech3d *m, const anim_set *anim, struct anim_player *player, unsigned *phase);
 void mech3d_pose_like(mech3d *m, const mech3d *base);
 /* Relative chance of each damage location (index 0-7 = location 1-8) being struck by a
  * shot aimed at the mech: each OBJL group's front-view area in the rest pose. */
@@ -162,7 +171,6 @@ int  mech3d_head_point(const mech3d *m, float out[3]);
  * hit with the segment fraction in *t and the piece's location (OBJL group, 0 = none: no damage) in *loc, else 0. */
 int  mech3d_hull_hit(mech3d *m, const float o[3], const float d[3], unsigned gone_mask, float *t, int *loc);
 void mech3d_dos_model_sphere(const wtb_object *o, int32_t sphere[4]);
-void mech3d_dos_transform_point(const float rotation[9], const int32_t origin[3], const int32_t point[3], int32_t out[3]);
 int  mech3d_dos_hull_sphere(const mech3d *m, int part, unsigned gone_mask, float sphere[4]);
 /* Average forward body travel per key over keys [first, first+count): how far
  * the planted (lowest bound) foot moves backwards. Used to time the animation

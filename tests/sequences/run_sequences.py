@@ -4748,20 +4748,27 @@ def directional_jets_steer_in_flight(c):
     before, turning, after = (r.at(t) for t in (2.4, 3.1, 3.8))
     c(turning['y'] > turning['gnd'] + 200 and abs(turning['heading'] - before['heading']) > 35,
       'the mech rotates while the directional jets are firing in the air')
-    c(abs(turning['x'] - before['x']) > 100 and abs(after['x'] - turning['x']) > 150,
-      'directional thrust redirects travel during the turn')
+    c(abs(turning['x'] - before['x']) <= 10 and abs(turning['z'] - before['z']) > 150,
+      'turn input suppresses thrust and preserves world-space momentum')
+    c(abs(after['x'] - turning['x']) > 150,
+      'directional thrust resumes when turn input ends, while the legs are still rotating')
 
 
 @sequence
 def jet_refill_dos_rule(c):
-    """the refill with the jets released (DOS 0x27c63 / 3Dfx 0x1001a5ad): c[0x30] += the frame's whole ticks >> 2. The
-    DOS look at the agreed 30 fps: 182 / 30 = 6.07 ticks a frame -> 1 a frame, 30 a second; the 3D looks unchanged at
-    ticks / 4 = 45.5 a second. Summoner, J held 2 s, then the refill over 4 s"""
+    """DOS 0x27c63 refills one quarter of the frame's whole ticks, rounded down.
+    This gives one fuel tick per frame at 30 fps and zero per frame at 120 fps.
+    The Enhanced edition refills a continuous quarter of the elapsed ticks."""
     for ed, per_s in (('enhanced', 45.5), ('dos', 30.0)):
         r = c.run('_' + ed, secs=UP + 9, mech='summoner/smn00std', edition=ed, hold=[(UP, UP + 2, 'j')], dump='/0.5')
         a, b = r.at(UP + 4)['fuel'], r.at(UP + 8)['fuel']
         k = (b - a) / 4.0
         c(abs(k - per_s) < 1.0, '%s: refills %.1f a second' % (ed, per_s), '%.1f -> %.1f: %.2f/s' % (a, b, k))
+    r = c.run('_dos_120', secs=4, mech='summoner/smn00std', edition='dos', nostart=True,
+              env={'MW2_TEST_FPS': 120}, hold=[(0.5, 1.5, 'j')], dump='/0.25')
+    a, b = r.at(2).get('fuel', -1), r.at(3.75).get('fuel', -1)
+    c(0 <= a < 1820 and a == b, 'DOS at 120 fps: frames shorter than four ticks refill zero fuel',
+      '%d -> %d' % (a, b))
 
 
 @sequence

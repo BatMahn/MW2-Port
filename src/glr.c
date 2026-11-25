@@ -1,6 +1,6 @@
 /* glr.c - see glr.h. Draws through the render backend (rb.h); its shaders are shaders/world.vert / world.frag. */
 #include "glr.h"
-#include "dos_trig.h"
+#include "dos_matrix.h"
 #include "rb.h"
 #include "rb_shaders.h"
 
@@ -1562,30 +1562,16 @@ void glr_draw_rect(glr *r, const glr_view *v, int x0, int y0, int w, int h) { dr
  * +0x6c). 0x3ece0 scales the x and y rows by the zoom mantissas (round16, DAT_0014fe40 / 44). DOSBox (dosbox-debug,
  * YELLSCN1 at heading 158 + 5 / 65536, the NAVP's 16.16): x row (-0.927, 0, -0.375) x 0x8000, y row 0xffff, z row
  * (0.375, 0, -0.927) - all to the bit. The port's camera has no roll. rows[3][3] in DOS units (game x, y, z) */
-static int64_t dos_r29(int64_t v) { return (v >> 29) + ((v >> 28) & 1); }
 int32_t glr_dos_sin(int32_t a) { return dos_sin(a); }
 int32_t glr_dos_cos(int32_t a) { return dos_cos(a); }
 int32_t glr_dos_atan2(int32_t a, int32_t b) { return dos_atan2(a, b); }
 static void dos_cam_rows(float yaw_deg, float pitch_deg, int64_t rows[3][3])
 {
-    int32_t a = (int32_t)lrint(-(double)pitch_deg * 65536.0), b = (int32_t)lrint((double)yaw_deg * 65536.0), m[9];
-    int i;
-    for (i = 0; i < 9; i++) m[i] = (i % 4 == 0) ? 0x20000000 : 0;   /* 0x3b4c1 */
-    if (a == 0) { m[8] = m[0] = dos_cos(b); m[2] = dos_sin(b); m[6] = -m[2]; }
-    else if (b == 0) { m[8] = m[4] = dos_cos(a); m[7] = dos_sin(a); m[5] = -m[7]; }
-    else {   /* mode 0, roll 0: cC = 1, sC = 0 */
-        int64_t cA = dos_cos(a), cB = dos_cos(b), cC = 0x20000000, sA = dos_sin(a), sB = dos_sin(b), sC = 0;
-        m[0] = (int32_t)(dos_r29(cC * cB) + dos_r29(dos_r29(sC * sA) * sB));
-        m[3] = (int32_t)dos_r29(cA * sC);
-        m[6] = (int32_t)(dos_r29(dos_r29(cB * sC) * sA) - dos_r29(cC * sB));
-        m[2] = (int32_t)dos_r29(cA * sB);
-        m[5] = (int32_t)-sA;
-        m[8] = (int32_t)dos_r29(cA * cB);
-        m[1] = (int32_t)dos_r29((int64_t)m[5] * m[6] - (int64_t)m[3] * m[8]);   /* 0x3b078(m, 1) */
-        m[4] = (int32_t)dos_r29((int64_t)m[8] * m[0] - (int64_t)m[6] * m[2]);
-        m[7] = (int32_t)dos_r29((int64_t)m[2] * m[3] - (int64_t)m[0] * m[5]);
-    }
-    for (i = 0; i < 3; i++) { rows[i][0] = m[i]; rows[i][1] = m[3 + i]; rows[i][2] = m[6 + i]; }   /* the transpose */
+    int32_t pitch = (int32_t)lrint(-(double)pitch_deg * 65536.0);
+    int32_t yaw = (int32_t)lrint((double)yaw_deg * 65536.0);
+    dos_matrix m = dos_matrix_rotation(pitch, yaw, 0);
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) rows[r][c] = m.r[c * 3 + r];   /* the transpose */
 }
 static int64_t dos_round16(int64_t v) { return (v >> 16) + ((v >> 15) & 1); }
 

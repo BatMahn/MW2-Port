@@ -5,6 +5,133 @@ float shim_servo(float cur, float tgt, float T, float ticks) { return drive_serv
 int32_t shim_dos_drive_servo(int32_t value, int32_t target, int ticks, int tau) { return dos_drive_servo(value, target, ticks, tau); }
 float shim_oct_len(float x, float y, float z) { return oct_len(x, y, z); }
 
+void shim_dos_anim_frames(const int32_t *keys, int count, const int32_t *frames,
+                          int frame_count, int rate, int kind, unsigned phase, int32_t *out)
+{
+    anim_set *anim = calloc(1, sizeof *anim);
+    if (!anim) return;
+    anim->key_count = count;
+    anim->track_count = 1;
+    anim->tracks[0].type = kind;
+    for (int k = 0; k < count; k++) {
+        uint32_t bytes = (uint32_t)keys[k * 3 + 2];
+        anim->tracks[0].delta[k] = keys[k * 3];
+        anim->key_flags[k] = (uint32_t)keys[k * 3 + 1];
+        for (int j = 0; j < 4; j++) anim->key_bytes[k][j] = (uint8_t)(bytes >> (8 * j));
+    }
+    anim_player p;
+    anim_player_init(&p, rate);
+    mech3d_part part = {.node = 0};
+    mech3d model = {.parts = &part, .part_count = 1, .skel_count = 1, .skel_parent = {-1},
+                    .bind_count = 1, .twist_node = -1, .pitch_node = -1, .pose_dos = &p};
+    int previous_mode = mech3d_dos_hips;
+    mech3d_dos_hips = 1;
+    mech3d_dos_anim_init(&model, anim, &p, &phase);
+    for (int k = 0; k < frame_count; k++) {
+        const int32_t *frame = frames + 4 * k;
+        if (frame[3]) anim_player_hold(&p);
+        int ev = anim_player_step(anim, &p, frame[0], frame[1], rate, (float)frame[2], 1);
+        mech3d_dos_anim_step(&model, anim, &p, &phase);
+        model.heading = (float)(k % 37 - 18) * 5.25f;
+        model.origin[0] = -10000 + 82 * k;
+        model.origin[1] = 400;
+        model.origin[2] = 28000 - 49 * k;
+        mech3d_pose(&model, anim, p.t);
+        int32_t *row = out + 22 * k;
+        row[0] = p.on;
+        row[1] = p.key;
+        row[2] = p.cur;
+        row[3] = (int32_t)p.left;
+        row[4] = p.dur;
+        row[5] = p.dos_value[0];
+        row[6] = p.dos_pending[0];
+        row[7] = ev;
+        memcpy(row + 8, part.dos_rot, sizeof part.dos_rot);
+        memcpy(row + 17, part.pos, sizeof part.pos);
+        row[20] = (int32_t)p.dos_rot_left[0];
+        row[21] = (int32_t)phase;
+    }
+    mech3d_dos_hips = previous_mode;
+    free(anim);
+}
+
+void shim_dos_motion_plane(int32_t velocity[2], int32_t drive, int32_t angle, int32_t thrust, int32_t top,
+                           int freev, int jet_dir, int ticks, int32_t move[2])
+{
+    dos_motion_plane(velocity, drive, dos_sin(angle) >> 13, dos_cos(angle) >> 13,
+                     thrust, top, freev, jet_dir, ticks, move);
+}
+
+void shim_dos_face_response(const int32_t *direction, const int32_t *normal, int32_t *velocity,
+                            int travel, int32_t *rebound)
+{
+    dos_face_response(direction, normal, velocity, travel, rebound);
+}
+
+int32_t shim_dos_motion_lift(int32_t *velocity, int32_t gravity, int32_t thrust,
+                            int32_t damping, int grounded, int mode, int ticks)
+{
+    return dos_motion_lift(velocity, gravity, thrust, damping, grounded, mode, ticks);
+}
+
+void shim_dos_unit_bounce(const int32_t *centre, const int32_t *normal, int32_t radius,
+                          const int32_t *vel, const int32_t *other, int32_t *out)
+{
+    float c[3], n[3], v[3], ov[3], end[3], bounce[3];
+    for (int k = 0; k < 3; k++) {
+        c[k] = (float)centre[k];
+        n[k] = normal[k] / 65536.0f;
+        v[k] = vel[k] / 65536.0f;
+        ov[k] = other[k] / 65536.0f;
+    }
+    dos_unit_bounce(c, n, (float)radius, v, ov, end, bounce);
+    for (int k = 0; k < 3; k++) {
+        out[k] = (int32_t)end[k];
+        out[k + 3] = (int32_t)lrintf(bounce[k] * 65536.0f);
+    }
+}
+
+void shim_dos_skeleton(int32_t heading, const int32_t angles[4], const int32_t origin[3],
+                       const int32_t offsets[9], const int32_t point[3], int translation,
+                       int quarter, int live_sample, int32_t out[39])
+{
+    mech3d_part parts[3] = {{.node = 0}, {.node = 1}, {.node = 2}};
+    mech3d model = {.parts = parts, .part_count = 3, .skel_count = 3, .twist_node = 1, .pitch_node = 2,
+                    .skel_index = {2, 0, 1}, .skel_parent = {1, -1, 0},
+                    .bind_count = 2, .bind_node = {0, 2}, .bind_track = {0, 1}};
+    anim_set *anim = calloc(1, sizeof *anim);
+    if (!anim) return;
+    anim->key_count = 1;
+    anim->track_count = 2;
+    anim->tracks[0].type = 5;
+    anim->tracks[0].pose[1] = angles[3] / 65536.0f;
+    anim->tracks[1].type = 1;
+    anim->tracks[1].pose[1] = (float)translation;
+    memcpy(model.origin, origin, sizeof model.origin);
+    memcpy(model.skel_offset[0], offsets + 6, sizeof model.skel_offset[0]);
+    memcpy(model.skel_offset[1], offsets, sizeof model.skel_offset[1]);
+    memcpy(model.skel_offset[2], offsets + 3, sizeof model.skel_offset[2]);
+    anim_player sample = {.dos_value = {angles[3] * quarter / 4, translation * quarter / 4}};
+    if (live_sample) model.pose_dos = &sample;
+    model.heading = heading / 65536.0f;
+    model.tilt = angles[0] / 65536.0f;
+    model.twist = angles[1] / 65536.0f;
+    model.pitch = angles[2] / 65536.0f;
+    int previous_mode = mech3d_dos_hips;
+    mech3d_dos_hips = 1;
+    mech3d_pose(&model, anim, quarter * 0.25f);
+    mech3d_dos_hips = previous_mode;
+    for (int j = 0; j < 3; j++) {
+        memcpy(out + 12 * j, parts[j].dos_rot, sizeof parts[j].dos_rot);
+        memcpy(out + 12 * j + 9, parts[j].pos, sizeof parts[j].pos);
+    }
+    dos_matrix last;
+    memcpy(last.r, parts[2].dos_rot, sizeof last.r);
+    memcpy(last.p, parts[2].pos, sizeof last.p);
+    dos_matrix_point(&last, point, out + 36);
+    free(anim);
+}
+
 void shim_dos_hull_bounds(const int32_t *xyz, int count, int32_t sphere[4])
 {
     wtb_vertex vertices[64];

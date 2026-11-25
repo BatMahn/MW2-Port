@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.1.61 (2026-11-24)
+
+- **DOS animation timing.** Animation tracks advance in whole game ticks and carry their remaining movement
+  into the next key. Player and AI mechs build each local rotation from the previous frame's matrix and
+  periodically normalize it as in DOS. The starting countdowns follow the mission's BWD include order,
+  including scenery and pooled nodes allocated between units.
+- **DOS skeletal poses.** Torso and weapon rotations and parent transforms use the original fixed-point matrix
+  math. Collision spheres use the resulting matrix directly.
+- **DOS obstacle and flank coordinates.** Probe endpoints and flank waypoints use the original fixed-point
+  transform and whole-centimetre rounding.
+- **DOS aircraft and flank AI.** Aircraft refresh their circling route around the selected waypoint after
+  pruning old points. Flanking units use the DOS navigation distance to decide when they have arrived.
+- **DOS leg turns.** The leg-turn servo and heading increment use whole ticks and the original integer
+  arithmetic for the player and AI.
+- **DOS movement and jump jets.** Walking and flight carry a single fixed-point world velocity through turns.
+  Displacement uses whole centimetres. A turn input suspends directional thrust, which resumes when the input
+  ends. Jet lift, fuel, and heat use whole game ticks.
+- **DOS impacts.** Terrain face rebounds use the original reflection and remaining-distance calculations.
+  Mech contacts use the original integer distance, push-out, and bounce calculations. A mech struck by an
+  earlier unit can respond during its own update.
+
+Training instructor contact timing in TNJ1 and TNJ6 still differs from DOS.
+
 ## v1.1.60 (2026-11-24)
 
 - **AI targeting.** Mechs use their attacker's position immediately when switching targets in response to an attack.

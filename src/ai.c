@@ -1,6 +1,6 @@
 /* ai.c - see ai.h. */
 #include "ai.h"
-#include "dos_trig.h"
+#include "dos_matrix.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -210,10 +210,11 @@ void ai_set_class(ai_mind *m, int unit_class, int tons) { m->cls = unit_class; m
  * deletions shift the table, as msim's guard_drop) - kept in ai_mind.guard */
 static void own_drop(ai_mind *m)
 {
-    int r, w = 0;
-    for (r = 1; r < m->guard_n; r += 2, w++) { m->guard[w][0] = m->guard[r][0]; m->guard[w][1] = m->guard[r][1]; }
-    m->guard_n = w;
-    m->goal_pt /= 2;
+    for (int k = 0; k < m->guard_n; k++) {
+        m->guard_n--;
+        memmove(m->guard + k, m->guard + k + 1, (size_t)(m->guard_n - k) * sizeof m->guard[0]);
+        if (m->goal_pt > k) m->goal_pt--;
+    }
 }
 static void own_goal(ai_mind *m, int i)
 {
@@ -235,12 +236,15 @@ static void slot_point(float cx, float cz, float h, int k, float d, float *x, fl
 {
     static const int DX[16] = {0, 2, 1, 1, 1, 1, 1, 2, 0, -2, -1, -1, -1, -1, -1, -2};
     static const int DZ[16] = {1, 1, 1, 2, 0, -2, -1, -1, -1, -1, -1, -2, 0, 2, 1, 1};
-    float a = h * 3.14159265f / 180.0f, lx, lz;
-    int di = (int)d;
-    lx = DX[k & 15] ? (float)(di / DX[k & 15]) : 0.0f;
-    lz = DZ[k & 15] ? (float)(di / DZ[k & 15]) : 0.0f;
-    *x = cx + cosf(a) * lx + sinf(a) * lz;
-    *z = cz - sinf(a) * lx + cosf(a) * lz;
+    int di = (int)d, slot = k & 15;
+    const int32_t offset[3] = {DX[slot] ? di / DX[slot] : 0, 0, DZ[slot] ? di / DZ[slot] : 0};
+    dos_matrix stance = dos_matrix_rotation(0, (int32_t)lrint((double)h * 65536.0), 0);
+    stance.p[0] = (int32_t)lroundf(cx);
+    stance.p[2] = (int32_t)lroundf(cz);
+    int32_t point[3];
+    dos_matrix_point(&stance, offset, point);
+    *x = (float)point[0];
+    *z = (float)point[2];
 }
 /* DOS MW2.EXE 0x2e6f0: manoeuvre 1's slot (8-way; x 2 the 16-way +0x17a) from the unit's bearing off the target's facing:
  * the sector rel / 45 in 16.16 + 0x8000 >> 16 (half up; 8 -> 0); in front (0) rand(2) != 0 -> 2, else 6, the other when
@@ -279,11 +283,12 @@ static void patrol_sweep_dos(ai_mind *m, float thr, float ticks)
         m->sweep_ticks = iv;
     }
 }
-static void own_square(ai_mind *m, const ai_view *v)   /* 0x23420: x - r, z - r, x + r, z + r (r: a unit 100 m) */
+static void own_square(ai_mind *m, float x, float z, float radius)   /* DOS 0x23420 */
 {
-    static const float D[4][2] = {{-10000.0f, 0}, {0, -10000.0f}, {10000.0f, 0}, {0, 10000.0f}};
-    int k;
-    for (k = 0; k < 4 && m->guard_n < 16; k++) { m->guard[m->guard_n][0] = v->enemy_x + D[k][0]; m->guard[m->guard_n][1] = v->enemy_z + D[k][1]; m->guard_n++; }
+    own_add(m, x - radius, z);
+    own_add(m, x, z - radius);
+    own_add(m, x + radius, z);
+    own_add(m, x, z + radius);
     own_goal(m, -1);
 }
 
@@ -434,7 +439,11 @@ static void start_manoeuvre(ai_mind *m, const ai_view *v, int man)
             own_goal(m, -1);
             return;
         }
-        case 12: m->man_limit = 18200.0f; m->flank_retarget = 0; own_square(m, v); return;   /* 0x2ce7d -> 0x23420 (the points made before stay) */
+        case 12:
+            m->man_limit = 18200.0f;
+            m->flank_retarget = 0;
+            own_square(m, v->enemy_x, v->enemy_z, v->target_not_unit ? 25000.0f : 10000.0f);
+            return;
         default: break;   /* 3, 5, 7, 9 as below */
         }
     }
@@ -692,7 +701,9 @@ static int attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R,
         float fx = m->flank_x - v->self_x, fz = m->flank_z - v->self_z;
         *R = 3000.0f;
         *dist = -1.0f;
-        if (sqrtf(fx * fx + fz * fz) <= 3000.0f) done = 1;
+        float range = ai_dos_int ? (float)dos_level_distance((int32_t)lroundf(fx), (int32_t)lroundf(fz))
+                                : sqrtf(fx * fx + fz * fz);
+        if (range <= 3000.0f) done = 1;   /* DOS 0x2d5ab uses the navigation distance */
         break;
     }
     case 8:  *R = -1.0f; if (v->contact) done = 1; break;   /* 0x1001fc00: full reverse, ends on contact (+0xa4) */
@@ -700,11 +711,14 @@ static int attack_manoeuvre(ai_mind *m, const ai_view *v, float ticks, float *R,
     case 11: *R = 0; m->jet = 1; break;                      /* 0x1001fe10: sidestep on the jets, 362 ticks */
     case 12:
         if (ai_dos_int) {   /* DOS MW2.EXE 0x2d990: every 0x5b0 ticks (+0x176) with the target beyond 150 m (+0xc0 > 0x3a98) the own
-                             * points are dropped (0x233b0) and four made round it where it is now (0x23420); within 30 m of the goal
-                             * the next own point - an aircraft circles its target 100 m out. Ends on its time limit 0x4718 */
+                             * points are dropped (0x233b0). The new square uses the nav reference in +0x148 after
+                             * compaction (0x23420), with its 30 m radius. The enemy range comes from +0x14a. */
             m->flank_retarget -= ticks;
             if (m->flank_retarget < 0) {
-                if (d > 15000.0f) { own_drop(m); own_square(m, v); }
+                if (d > 15000.0f && m->guard_n > 0) {
+                    own_drop(m);
+                    own_square(m, m->guard[m->goal_pt][0], m->guard[m->goal_pt][1], 3000.0f);
+                }
                 m->flank_retarget = 1456.0f;
             }
             *R = 3000.0f;

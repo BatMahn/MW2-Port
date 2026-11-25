@@ -162,6 +162,9 @@ typedef struct {
     float         jet_ddy;          /* thrust, cm/tick^2: jump MP / walk MP x 0.1184 (c[0x3b]) */
     float         jet_fuel;         /* ticks, max combat_jet_fuel_max (c[0x30]); burns 1/tick, recharges 1/4 per tick */
     float         jet_refill_acc;   /* DOS refill (combat_jet_refill_dos): the 30 fps frames not yet taken, in frames */
+    int32_t       dos_vel[2];       /* world X and Z, 16.16 cm per tick */
+    float         dos_attempted[3]; /* world velocity before movement contacts, cm per tick */
+    int           dos_contact_unit; /* last tested unit contact, unit index + 2 */
     float         y, vy;            /* height (cm, absolute) and vertical speed (cm/tick) */
     float         ground;           /* terrain height under the unit (cm), set by the sim each step */
     float         landed_vy;        /* the vertical speed (cm/tick, < 0) it touched down with this step from a fall or jump, else 0 */
@@ -280,7 +283,9 @@ void combat_override(combat_unit *u);
 int  combat_jets(combat_unit *u, int jetting, float dt, unsigned *rng);
 /* the vertical displacement (cm) combat_jets would make this frame - for the 3D move test (engine 0x10019310 ->
  * 0x1000b5e0); nothing is changed */
+typedef struct { float dy, vy; int ticks; } combat_motion;
 float combat_jets_dy(const combat_unit *u, int jetting, float dt);
+int combat_jets_motion(combat_unit *u, int jetting, float dt, unsigned *rng, const combat_motion *motion);
 /* would combat_jets fire the jets this step (input held, jets fitted and working, fuel left after the step's burn)? */
 int   combat_jets_firing(const combat_unit *u, int jetting, float dt);
 /* a touch-down at vertical speed vy (cm/tick) as combat_jets lands: fall damage beyond 16.154 cm/tick (Collision Damage on),

@@ -366,13 +366,96 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   passed with both OpenGL and Vulkan. Aquiline Fire uses a DOSBox timing window because its firing
   sequence varies with the random seed and frame timing.
 
+### Skeletal transforms and flank coordinates
+
+- DOS node update 0x1e400 composes parent and child transforms through 0x3b3c5. The port uses the
+  original mode-0 rotation construction (0x3b522), three-product matrix rounding (0x3b20c), and
+  whole-centimetre point transform (0x3aefc). The collision sphere reads the resulting matrix before
+  conversion to floating point for drawing.
+- The skeletal comparison runs the original node update on a three-piece chain. The samples include
+  fractional animation poses, mixed yaw and pitch at the torso, gun elevation, and a downstream
+  collision point. It supplies the sampled keys to DOS, so the result covers composition from the
+  sample through the hierarchy.
+- Obstacle probe endpoints (0x2df30) and all 16 flank waypoint slots (0x2d070) match the original
+  with the corresponding input yaw matrix. The waypoint test varies the target's origin, heading,
+  and offset distance.
+- All 43 differential groups passed on seeds 47 and 149. The 59 DOS and 54 Enhanced mission sweeps
+  passed without fallbacks, and the DOS sweep also passed with address and undefined-behavior sanitizers.
+  OpenGL passed 277 of 300 sequences with the same 23 baseline failures. Three Vulkan smoke tests passed.
+
+### Animation track timing and live matrices
+
+- The DOS track player (0x1aad0) applies a signed integer share of the remaining key delta each frame.
+  A transition adds the next key’s delta to any remainder. A held frame drops its elapsed ticks.
+- Rotating tracks multiply the previous local matrix by that frame’s rotation (0x1e140 and 0x1e0b0).
+  The countdown seeded at node creation (0x1de60) controls normalization of the rows and columns
+  (0x3ad00). Collision and rendering use the same accumulated transform through LOD changes.
+- The frame comparison executes the original track player, node initialization, normalization and world
+  transform. It uses the same initial phase and a moving root on both sides. Setting
+  `MW2_ANIM_RECORD_DIR` to a directory of raw ANIM payloads extracted with `prjtool extract MW2.PRJ ANIM <name> <output>`
+  also replays each moving track in the 23 DOS gait records, including walk, run, reverse and holds.
+  All 63,120 recorded-data frame comparisons matched.
+- Instrumented DOSBox runs of YELLSCN1 captured the Mad Dog's animated node updates at 640x480
+  and 1024x768. Given the captured starting matrices, countdowns and angular deltas, the port
+  matched all 4,626 local and world updates across 514 animation frames, including 31
+  normalizations. Replaying the game's tick spacing and gait requests also matched the master
+  track's key, sequence, pending delta and timers on all 486 live frames in the 640x480 run.
+  A HEIDSCN1 Nova replay also held animation key 15 with 33 ticks left during 20 airborne frames
+  and resumed from that key on landing.
+
+### Aircraft routes and leg turns
+
+- Circling aircraft refresh the route after 1,456 ticks if the target is beyond 150 m (0x2d990).
+  DOS compacts the existing navigation table (0x233b0) and uses the resulting current waypoint's
+  position and 30 m radius for the new square (0x23420). The replay executes the original table
+  insertion, removal and selection across route changes. Flank arrival uses the same navigation
+  distance as steering (0x2d550).
+- The leg servo uses the original integer update (0x49b80, T = 54 ticks) followed by the
+  16.16 heading increment (0x27561). The replay compares both after rounds of changing turn demand
+  and frame spacing.
+- All 46 differential groups passed on seeds 47 and 149. The 59 DOS and 54 Enhanced mission sweeps
+  completed without fallbacks, with the DOS sweep also passing under AddressSanitizer and
+  UndefinedBehaviorSanitizer. OpenGL passed 277 of 300 sequences with the same 23 baseline failures.
+  Three Vulkan smoke tests passed.
+
+### Mission allocation order and movement
+
+- DOS processes BWD includes in place. Its scene node allocation can precede the player in training
+  and fall between unit spawns on Golden Spade. Replaying allocation and animation binding from
+  DOSBox matched all 240 distinct animated node countdowns across 23 units in HEIDSCN1, YELLSCN1,
+  TNJ1SCN1 and GOLDSCN1. The next shared phase after scene loading also matched in all four.
+- Movement integrates signed 16.16 world velocity in fixed game ticks and rounds each displacement
+  down to whole centimetres before updating heading (0x26ada–0x275b0). Using the captured controller
+  state, pre-contact velocity and displacement matched in 3,099 walking and coasting frames from
+  HEIDSCN1 and YELLSCN1, with 245 heading changes committed after integration. The Nova's jump jet
+  replay matched 49 lift updates and 79 updates with a directional jet or turn. A turn suppressed
+  thrust until the command cleared, even as the leg servo continued turning. Fuel burn, refill and
+  jet heat use the frame's actual tick count (0x27be8–0x27c7d).
+- Differential tests run the original machine code for horizontal and vertical integration and for
+  terrain and unit responses. Live DOS inputs reproduced 297 terrain face rebound velocities and
+  218 residual displacements (0x1fee6 and 0x20013) and 36 unit projections and rebounds from training
+  (0x2043a). These comparisons feed in the original collision inputs. The port's full contact path
+  also tests the projected position a second time and handles contacts reported by earlier movers
+  (0x20141 and 0x27109).
+- All 50 differential groups passed on seeds 47 and 149. The mission sweeps completed all 59 DOS
+  and 54 Enhanced scenes under AddressSanitizer and UndefinedBehaviorSanitizer with zero fallbacks.
+  Four Vulkan smoke sequences passed. OpenGL passed 273 of 300 sequences. The 27 failures include
+  the previous 23 and four training contact checks: the TNJ1 slide at 30 fps, the TNJ1 frame-rate
+  comparison, the TNJ6 slide, and the contact retest comparison between editions.
+
 ## Not checked
 
-- **Live manoeuvre execution.** Glide, flank, and circling inputs have controlled comparisons. Their paths through
-  live terrain, including rebuilding patrol points around a moving target, still need DOS traces.
-- **Full hull poses.** Bounds, representation changes, and hit ordering have executable comparisons.
-  The port still derives the animation hierarchy from its pose solver. The original's fixed-point matrix
-  composition and full per-frame pose changes need direct coverage.
+- **Live manoeuvre execution.** Glide, flank, and circling have controlled comparisons. Their paths
+  through terrain and interleaved waypoints from several aircraft still need DOS traces.
+- **Complete mission poses.** Initial countdowns match the four captured missions. Runtime normalization
+  by scenery tasks and effects can advance the original shared phase. Full-mission phase synchronization
+  still needs a trace that follows those updates as well as unit animation.
+- **Complete contact trajectories.** Fixed-point movement and the sampled bounce calculations match the
+  original given the same input states. These checks leave open independent replay through terrain
+  face selection, unit controller decisions and differing frame schedules. In the TNJ1SCN1 capture
+  the instructor began flank movement (0x2d290) before the player's first contact, while the port's
+  instructor stayed idle in the same opening. That changes the contact centre before the first
+  rebound. TNJ6SCN1 now gets past the instructor, with contact duration still differing.
 - **Live AI warning timing.** The recipient now comes from the AI's tracked target. A live trace is still
   needed across a target handoff during an active volley.
 - **The weapon pick's follow-up** after 0x2ea63. Selection through 0x2ea63 has differential coverage for

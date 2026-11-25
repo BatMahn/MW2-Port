@@ -29,6 +29,7 @@
 
 typedef struct {
     int     target, type;
+    int32_t delta[ANIM_MAX_KEYS];      /* raw centimetres or 16.16 degrees */
     float   pose[ANIM_MAX_KEYS + 1];   /* running total at the start of each key */
 } anim_track;
 
@@ -55,14 +56,19 @@ int   anim_loop_start(const anim_set *s, int first, int count);
 int   anim_loop_range(const anim_set *s, int first, int count, int *ls, int *le);
 
 /* The engine's key player (0x1000dec0) with the gait code's request (0x1000b3a0): see anim.c */
-typedef struct {
+typedef struct anim_player {
     int   on;          /* playing (object +0x80 bit 0) */
     int   key;         /* the key playing, -1 none (track +0x24) */
     int   cur;         /* the sequence playing (object +0x84), -1 none */
     int   dur;         /* the time the next key gets, ticks (object +0x94) */
     float left, len;   /* ticks left in the key playing (track +0x14), and its length */
     float t;           /* the pose: absolute key time for anim_value / mech3d_pose */
-    float off[ANIM_MAX_TRACKS];   /* the carried pose offset per track (the engine adds key deltas onto the node) */
+    float off[ANIM_MAX_TRACKS];   /* offset from the table sample at t */
+    int32_t dos_value[ANIM_MAX_TRACKS], dos_pending[ANIM_MAX_TRACKS];
+    int32_t dos_step[ANIM_MAX_TRACKS];
+    int dos_applied;             /* the DOS task ran its delta callbacks this frame */
+    int32_t dos_rot[ANIM_MAX_TRACKS][9];
+    unsigned dos_rot_left[ANIM_MAX_TRACKS];
 } anim_player;
 #define ANIM_EV_STEP 1   /* entered a key flagged 0x800 (a foot coming down: +0x80 bit 3) */
 #define ANIM_EV_SLOW 2   /* entered a key flagged 0x10 (+0x80 bit 1) */
@@ -72,6 +78,6 @@ void  anim_player_init(anim_player *p, int rate);
  * with fuel (0x1001a180 0x1001a688) clears object +0x80 bit 0 every frame: call before anim_player_step, which then only
  * sets it again and re-reads the key time (0x1000dec0, 0x1000e600) - the key and the pose hold, the frame's time is dropped */
 void  anim_player_hold(anim_player *p);
-int   anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks);
+int   anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int rate, float ticks, int dos);
 
 #endif

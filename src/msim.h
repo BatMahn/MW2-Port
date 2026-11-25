@@ -94,6 +94,8 @@ typedef struct {
     unsigned     rng;
     msim_shot    shots[MSIM_MAX_SHOTS];
     int          shot_count;
+    unsigned     dos_anim_phase;   /* DOS local-matrix normalization period */
+    unsigned     dos_player_anim_phase;   /* phase at the player skeleton allocation */
     uint8_t      dos_shot_kinds[MSIM_DOS_MAX_SHOTS];
     int          dos_shot_slots;
     mech3d       pl_mech;        /* the player's collision model (Timber Wolf) */
@@ -414,6 +416,9 @@ int  msim_unit_inside(const msim *s, int self, int other, const float p1[3], flo
  * whether it is "inside" (refused: the velocity doubled, 0x102473d4) is decided by rounding - the engine's own arithmetic
  * emulated here (3D floats ~50 %, DOS whole cm ~12 %, msim_dos_int). 1: refused. */
 int  msim_contact_retest(const float p0[3], const float p1[3], const float q[3], float rr);
+int  msim_dos_unit_impact(msim *s, int self, const float start[3], float height, float radius, int hit,
+                          const float centre[3], const float normal[3], float combined_radius,
+                          const float vel[3], const float other[3], float end[3], float bounce[3]);
 /* the representation actor k is drawn and collided at (0-3; see col_repr) and its collision model, posed as the unit */
 void msim_camera_lods(msim *s, const float eye[3], float scale);
 int  msim_unit_repr(const msim *s, int k);
@@ -433,7 +438,7 @@ int  msim_world_impact(const msim *s, float x0, float z0, float *x, float *z, fl
 /* the same for a 3D move (msim_can_move): *dy the move's vertical part in, the vertical move made out; *vy the vertical
  * velocity (cm/tick) in (its share of |velocity|), the reflected one out */
 int  msim_world_impact3(const msim *s, float x0, float z0, float *x, float *z, float y, float *dy, float H, float R,
-                        float heading_deg, float *speed, float *across, float *vy);
+                        float heading_deg, float *speed, float *across, float *vy, int32_t dos_vel[2]);
 /* Inside a type 1 obstacle's XZ box (walls, buildings: engine 0x1000d520, any height)? n = its face normal. */
 int  msim_wall_at(const msim *s, float x, float z, float n[3]);
 /* the last msim_world_impact's object takes the walking-impact damage (engine 0x1000c3c0 -> 0x10046c20) of a unit
@@ -454,8 +459,14 @@ extern int msim_dos_int;
 float msim_servo(float cur, float tgt, float T, float ticks);
 float msim_dos_len(float x, float y, float z);
 float msim_leg_demand(float input, float spd, int player, float gain, int airborne, int autopilot, float prev);   /* DOS 0x27cd4 */
+/* DOS ground approach, directional thrust, and whole-centimetre movement. */
+combat_motion msim_dos_lift(const combat_unit *u, const combat_planet *planet, int jet, int ticks);
+void msim_dos_walk(combat_unit *u, float heading, float drive, float top, int freev, int jet_dir,
+                   int ticks, int32_t move[2]);
+void msim_dos_project_velocity(const combat_unit *u, float heading, float *along, float *across);
 /* DOS 0x49b80: the angle servo uses 16.16 degrees and whole clock ticks. */
 float msim_dos_aim_servo(float cur, float demand, int tau, int ticks);
+float msim_dos_leg_step(float *servo, float demand, float *heading, int ticks);
 float msim_twist_round(float cur, float demand, int tau, int ticks);   /* DOS 0x2edd1: a turret's whole-turn twist */
 void msim_drive_step(float *thr, float *spd, float *vel, float thr_target, float rev, float top, int drive, int slow, float ticks);
 /* a mech's full-throttle speed c[0x22] / 64 (cm/s) on a planet of gravity_g, in DOS MW2.EXE's integer steps */
