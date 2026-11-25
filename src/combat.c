@@ -31,7 +31,7 @@ static float range_cm(int w) { return (float)sim_weapons[w].range; }   /* table 
 static inline sim_weapon weapon_spec(int w)
 {
     sim_weapon spec = sim_weapons[w];
-    if (combat_dos) {
+    if (combat_dos && w < 31) {
         const dos_weapon_values *dos = &dos_weapons[w];
         spec.refire = dos->refire;
         spec.interval = dos->interval;
@@ -131,14 +131,13 @@ int combat_init(combat_unit *u, prj_archive *a, const char *loadout)
     /* engine 0x10041410: the first 10 items are the weapons; for each, in order, every ammo link naming it becomes a
      * bin (at most 25) of per_volley x ammo_per_ton rounds, and the weapon's count is the sum (-1: no ammunition) */
     for (i = 0; i < d.item_count && u->weapon_count < COMBAT_MAX_WEAPONS; i++) {
-        const mek_weapon *w = mek_weapon_for(d.items[i].id);
+        uint32_t id = d.items[i].id;
+        unsigned wi = id / 100;
         combat_weapon *cw;
-        int wi, loc = MEK_CT;
-        if (!w) continue;
-        wi = (int)(w - mek_weapons);
-        if (wi < 0 || wi >= 31) continue;
+        int loc = MEK_CT;
+        if (id % 100 == 0 || wi >= COMBAT_WEAPON_COUNT) continue;
         sim_weapon sw = weapon_spec(wi);
-        if (sw.damage <= 0 || sw.per_volley <= 0) continue;
+        if ((sw.damage <= 0 && sw.target_heat <= 0) || sw.per_volley <= 0) continue;
         for (l = 0; l < MEK_LOC_COUNT; l++)
             for (k = 0; k < MEK_SLOTS; k++)
                 if (d.loc[l].slots[k] == d.items[i].id) { loc = l; l = MEK_LOC_COUNT; break; }
@@ -538,7 +537,7 @@ float combat_jet_fuel_max = 1810.0f;
  * 30 a second (ticks / 4 is 45.5). The front end sets it by edition */
 int combat_jet_refill_dos = 0;
 int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
-float combat_test_wheat[31];   /* TEST ONLY */
+float combat_test_wheat[COMBAT_WEAPON_COUNT];   /* TEST ONLY */
 int combat_dos = 0;   /* combat rules and weapon data for the DOS edition */
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 
@@ -793,11 +792,11 @@ int combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing)
 }
 
 int combat_next_projectile(combat_unit *u) { return combat_next_projectile_ex(u, NULL); }
-int combat_weapon_kind(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].type : -1; }
-int combat_weapon_has_object(int w) { return w >= 0 && w < 31 && !(sim_weapons[w].type == 7 && sim_weapons[w].visual < 0); }   /* +0x14: 0 only for the flamer (3D edition table) */
-float combat_weapon_damage(int w) { return (w >= 0 && w < 31) ? weapon_spec(w).damage : 0; }
-int combat_weapon_sound(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].sound : 0; }
-int combat_weapon_visual(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].visual : -1; }
+int combat_weapon_kind(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].type : -1; }
+int combat_weapon_has_object(int w) { return w >= 0 && w < COMBAT_WEAPON_COUNT && !(sim_weapons[w].type == 7 && sim_weapons[w].visual < 0); }   /* +0x14: 0 only for the flamer (3D edition table) */
+float combat_weapon_damage(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).damage : 0; }
+int combat_weapon_sound(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].sound : 0; }
+int combat_weapon_visual(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].visual : -1; }
 
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng)
 {
@@ -810,7 +809,7 @@ void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng)
 int combat_hit(combat_unit *t, int w, int loc, float rel_angle, unsigned *rng)
 {
     int rear;
-    if (t->destroyed || w < 0 || w >= 31) return 0;
+    if (t->destroyed || w < 0 || w >= COMBAT_WEAPON_COUNT) return 0;
     while (rel_angle > 180.0f) rel_angle -= 360.0f;
     while (rel_angle < -180.0f) rel_angle += 360.0f;
     rear = rel_angle > -90.0f && rel_angle < 90.0f;
@@ -855,10 +854,11 @@ int combat_has_masc(const combat_unit *u)
     return 0;
 }
 
-float combat_weapon_range(int w) { return (w >= 0 && w < 31) ? range_cm(w) : 0; }
-float combat_weapon_speed(int w) { return (w >= 0 && w < 31) ? (float)sim_weapons[w].speed : 0; }
-int   combat_weapon_life(int w) { return (w >= 0 && w < 31) ? weapon_spec(w).life : 0; }
-int   combat_weapon_drop(int w) { return (w >= 0 && w < 31) ? sim_weapons[w].drop : 0; }
+int combat_weapon_min_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].field3c : 0; }
+float combat_weapon_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? range_cm(w) : 0; }
+float combat_weapon_speed(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? (float)sim_weapons[w].speed : 0; }
+int   combat_weapon_life(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).life : 0; }
+int   combat_weapon_drop(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].drop : 0; }
 
 static int jets_held(const combat_unit *u, int jetting)
 {

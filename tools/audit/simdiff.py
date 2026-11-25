@@ -1147,6 +1147,57 @@ def dos_contact_controller_state(rep, rnd, n):
                       (state, idle_target, bool(reached), actual))
 
 @test
+def dos_simultaneous_unit_contacts(rep, rnd, n):
+    """Overlapping movement spheres resolve in DOS unit-list order, including reciprocal hits."""
+    # Keep the complete scan's translated blocks apart from the bounce subroutine test.
+    e = mw2emu.Emu()
+    objects = [e.alloc(0x100) for _ in range(3)]
+    units = [e.alloc(0x180) for _ in range(3)]
+    target = e.alloc(4)
+    attempted = [e.alloc(4) for _ in range(3)]
+    e.w32(0x961c8, 5)
+    for slot, (obj, unit) in enumerate(zip(objects, units), 2):
+        e.w32(0xf8a40 + slot*4, obj)
+        e.w32(obj + 4, slot)
+        e.w32(obj + 32, unit)
+        e.w32(unit, obj)
+    shim = lib('msim').shim_dos_contact_order
+    for _ in range(n * 8):
+        mover = rnd.randrange(3)
+        candidates = [i for i in range(3) if i != mover]
+        bodies = [[0, 550, 0, 0, 0, rnd.randint(100, 450),
+                   *[rnd.randint(-7*65536, 7*65536) for _ in range(3)]] for _ in range(3)]
+        bodies[candidates[0]][0] = rnd.choice((0, 300, 800))
+        bodies[candidates[1]][2] = rnd.choice((0, 50, 350))
+        if rnd.randrange(3) == 0:
+            bodies[candidates[0]][4] = mover + 2
+        if rnd.randrange(3) == 0:
+            bodies[candidates[0]][3] = 1
+        position = [rnd.randint(-80, 80), 550, rnd.randint(-80, 80)]
+        for body, obj, unit in zip(bodies, objects, units):
+            for k in range(3):
+                e.w32(obj + 80 + 4*k, body[k])
+                e.w32(unit + 256 + 4*k, body[6 + k])
+            e.w32(obj + 124, body[4])
+            e.w32(unit + 232, body[5])
+            e.w32(unit + 268, 0x100 if body[3] else 0)
+        for ptr, value in zip(attempted, position):
+            e.w32(ptr, value)
+        e.w32(target, 0)
+        hit = e.call(0x200d0, eax=units[mover], edx=attempted[0], ebx=attempted[1],
+                     ecx=attempted[2], stack=(target,))
+        native = [objects.index(e.r32(target)) + 2 if hit else 0]
+        if hit:
+            native += [e.rs32(ptr) for ptr in attempted]
+            native += [e.rs32(units[mover] + 244 + 4*k) for k in range(3)]
+        out = (ctypes.c_int32 * 7)()
+        shim(mover, (ctypes.c_int32 * 27)(*(value for body in bodies for value in body)),
+             (ctypes.c_int32 * 3)(*position), out)
+        rep.check(native == list(out)[:len(native)],
+                  'mover %d, bodies %s: DOS %s, port %s' % (mover, bodies, native, list(out)))
+
+
+@test
 def dos_positional_sound_draws(rep, rnd, n):
     """The one-shot pitch draw precedes sample allocation and the loop uses the returned rate."""
     e = emu()
@@ -1208,8 +1259,21 @@ def dos_startup_sound_order(rep, rnd, n):
                   'range %d: original delay/cursor %s, port %s' % (distance, (delay, cursor), (ours, index.value)))
 
 @test
+def dos_detached_part_uses_current_pose(rep, rnd, n):
+    """A limb detaches after the root has moved and turned in the same update."""
+    detach = lib('msim').shim_dos_detached_pose
+    for _ in range(n):
+        x, y, z = (rnd.randint(-20000, 20000) for _ in range(3))
+        out = (ctypes.c_int32 * 5)()
+        count = detach((ctypes.c_int32 * 3)(x, y, z), out)
+        rep.check(count == 1 and list(out[:3]) == [x + 200, y, z] and
+                  abs(out[3] - (1 << 29)) <= 2 and abs(out[4]) <= 2,
+                  'origin %s: %d parts, transform %s' % ((x, y, z), count, list(out)))
+
+
+@test
 def dos_debris_random_and_motion(rep, rnd, n):
-    """The separate Gaussian cursor and the debris body's rounded air and landing updates."""
+    """The separate Gaussian cursor and the debris body's flight and landings on flat and sloped terrain."""
     e = mw2emu.Emu()
     L = lib('msim')
     e.call(0x49fe0, eax=0)
@@ -1243,7 +1307,10 @@ def dos_debris_random_and_motion(rep, rnd, n):
     e.stub(0x1df00, position)
     e.stub(0x1dfc0, translation)
     e.stub(0x1e140, rotation, pops=4)
-    e.stub(0x1c120, ret=0)
+    def floor_at(x):
+        return 120 + slope * (x - 1000) // 2 if slope else 0
+
+    e.stub(0x1c120, lambda em: floor_at(s32(em.reg('eax'))))
     e.stub(0x1e1b0)
     e.stub(0x1e240)
     e.stub(0x1e480)
@@ -1255,7 +1322,9 @@ def dos_debris_random_and_motion(rep, rnd, n):
         e.w32(0x95820, ticks)
         index = rnd.randrange(127)
         e.w32(0x9e8f4, index)
-        initial[:] = [1000, radius // 2 + rnd.randint(0, 125), 1500]
+        slope = rnd.choice((0, 1, -1))
+        x = rnd.randrange(900, 1102, 2)
+        initial[:] = [x, floor_at(x) + radius // 2 + rnd.randint(0, 125), 1500]
         velocity = [rnd.randint(-7 * 65536, 7 * 65536) for _ in range(3)]
         spin = [rnd.randint(-100000, 100000) for _ in range(3)]
         e.w32(body + 1, node)
@@ -1270,7 +1339,7 @@ def dos_debris_random_and_motion(rep, rnd, n):
         want = [initial[j] + applied[j] for j in range(3)]
         want += [e.rs32(body + 5 + 4*j) for j in range(3)]
         want += [int(active), *applied[3:], e.r32(0x9e8f4)]
-        inputs = (ctypes.c_int32 * 13)(*initial, *velocity, *spin, radius // 2, index, gravity, ticks)
+        inputs = (ctypes.c_int32 * 14)(*initial, *velocity, *spin, radius // 2, index, gravity, ticks, slope)
         out = (ctypes.c_int32 * 11)()
         L.shim_dos_debris(inputs, out)
         got = list(out)

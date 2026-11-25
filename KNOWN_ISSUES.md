@@ -4,11 +4,15 @@ Open issues in the port. Technical details and evidence are in [ASSUMPTIONS.md](
 [the DOS parity audit](docs/AUDIT_DOS.md).
 
 ## Open
-- **DOS mission parity**. The live comparison still has gaps for aircraft manoeuvres, targeting
-  handoffs and detached debris. The DOS parity audit lists the remaining replay and weapon checks.
-- **Titanium simulation**. The Titanium and Rendition looks use the base edition's simulation and
-  weapon data. Native Windows combat timing remains unverified. A direct load of the Titanium archive
-  still has objective sweep failures in BRONSCN1, GOUDSCN1 and MAROSCN1.
+- **DOS mission parity**. Bronze Anvil's two gunships, simultaneous contact ordering and debris landing
+  on slopes have recorded checks. Live comparisons with the original DOS game still have gaps for
+  other aircraft routes, AI target handoffs and debris spawn timing. See the DOS parity audit.
+- **Titanium simulation**. The 161 raw scene entries include 151 verified objective completions.
+  All 54 base-game scenes pass. ZACK and Station Defense pass with the default Timber Wolf.
+  Apache and Cali pass with local AI opponents. Live network sessions still need verification.
+  The ten `MIS0SCN1` through `MIS9SCN1` templates require output from the original Mercenaries
+  mission generator. The port can load external mission geometry and reports missing generator files.
+  Native Windows combat timing still needs a live comparison.
 - **Classic Mac build (ALPHA)** - new, and has had almost no testing on a real PowerPC Mac: crashes, sound / music
   (QuickTime's synthesizer is untested) and display problems are expected. docs/CARBON.md lists what still needs
   checking on real hardware.

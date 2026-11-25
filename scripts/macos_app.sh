@@ -8,7 +8,7 @@
 # needs  xattr -dr com.apple.quarantine "MechWarrior 2.app"  once (README).
 set -e
 VERSION=${GITHUB_REF_NAME#v}   # the release tag in CI, or the version below
-[ -n "$VERSION" ] || VERSION=2.1
+[ -n "$VERSION" ] || VERSION=2.2
 
 # bundle APP BINARY BUNDLE_ID NAME
 bundle() {

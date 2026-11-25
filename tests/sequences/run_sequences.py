@@ -18,6 +18,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -901,6 +902,8 @@ def aquiline_wreck_light_and_debris(c):
     for look, options in looks:
         env = {'MW2_START': '-71830,-62590,0', 'MW2_START_HEADING': '0', 'MW2_DEBRIS_TRACE': '1',
                'MW2_TEST_BLD_KILL': '1:48', 'MW2_DEBUG_PARTPOS': 'S_1DUMMY'}
+        if look == 'dos':
+            env['MW2_DEBRIS_TRACE'] = '2'
         if look == 'titanium':
             env.update(MW2_CONFIG=titanium_cfg(c.name + '_titanium', tdir),
                        MW2_TEXTURES='titanium', MW2_SKYGND=os.path.join(tdir, 'SKYGND.PAR'))
@@ -908,6 +911,12 @@ def aquiline_wreck_light_and_debris(c):
         if look == 'dos':
             c('partpos AQUAARE2 S_1DUMMY' in r.out and re.search(r'S_1DUMMY .* hidden 1 moving 1', r.out),
               'the animated light loads and is hidden when the wreck is destroyed')
+            c(re.search(r'^debris 1\.0s: 0 pieces \(0 world\)', r.out, re.M),
+              'wreck fragments appear only after destruction')
+            flight = re.findall(r'^  piece 0 kind 3 at (-?\d+) (\d+) -?\d+ .* moving 1 ground (\d+)', r.out, re.M)
+            c(len(flight) >= 2 and int(flight[1][0]) - int(flight[0][0]) > 1000 and
+              int(flight[1][1]) > int(flight[0][1]) and int(flight[1][2]) > int(flight[0][2]) + 500,
+              'the first world fragment travels upward and over rising terrain', str(flight))
         c(re.search(r'debris [\d.]+s: 9 pieces \(5 world\), \d+ hidden world parts, 1 destroyed', r.out),
           look + ': the wreck throws five named fragments and four small chunks')
 
@@ -3107,6 +3116,24 @@ def dos_missile_warning_window(c):
         paths, _ = missile_paths(r)
         c(len(paths) >= 18, 'the LRM volley fires its missiles', '%d missiles' % len(paths))
         c(windows == [view], 'one warning uses the main camera at the start of the volley', str(windows))
+
+
+@sequence
+def dos_missile_warning_target_handoff(c):
+    """Cycling targets during an LRM volley preserves its lock and updates the next warning."""
+    select = [(0.15 + 0.25 * i, 0.25 + 0.25 * i, 'enter') for i in range(7)]
+    run = c.run(secs=13, throttle=0, nostart=True, dos_look=True, dump='/0.05',
+                env={'MW2_KILL_ACTOR': '0,9999', 'MW2_TEST_TARGET': '0', 'MW2_TEST_STANDOFF': 16000,
+                     'MW2_TEST_HOLD_ACTOR': '0', 'MW2_TEST_PASSIVE': '1', 'MW2_MISSILE_TRACE': '1'},
+                hold=select + [(4, 4.08, 'space'), (11, 11.08, 'space')], keys=[(4.35, 't')])
+    c(run.at(3.9)['tgt'] == 0 and run.at(3.9)['lock'] & 0x80 and run.at(4.45)['tgt'] == 2,
+      'the live target changes from the locked Nova during the volley')
+    warnings = re.findall(r'^mwarn unit (\d+) view (\d+)$', run.out, re.M)
+    c(warnings == [('0', '1'), ('2', '0')], 'one warning at each volley start uses its current recipient', str(warnings))
+    paths, _ = missile_paths(run)
+    late = [path[0][4] for path in paths.values() if 4.45 <= path[0][0] < 6]
+    c(len(late) >= 10 and set(late) == {0}, 'missiles launched after the handoff still home on the original target',
+      str(late))
 
 
 @sequence
@@ -5501,6 +5528,23 @@ def sable_flame_dropship_damage(c):
 
 
 @sequence
+def sable_flame_dropship_volley(c):
+    """Both Falcon dropships converge their live energy fire on a stationary player."""
+    for actor in (8, 9):
+        run = c.run('_%d' % actor, secs=24, throttle=0, mission='SABLSCN1', nostart=True, dos_look=True,
+                    env={'MW2_TEST_AIM': '%d,17000,0' % actor, 'MW2_TEST_PASSIVE': '1', 'MW2_AI_AIM_TRACE': '1'})
+        rays = re.findall(r'^aiaim [\d.]+ actor %d w (\d+) hit 1 dist (\d+) range \d+ conv (\d+) '
+                          r'eye \S+ (\d+) .*? pitch ([-\d.]+)$' % actor, run.out, re.M)
+        c(any(w == '21' and 14000 <= int(d) <= 16000 and d == conv and y == '2300' and -6.3 < float(p) < -5.9
+              for w, d, conv, y, p in rays), 'dropship %d converges PPC fire from its raised eye' % actor,
+          str(rays[:4]))
+        hits = re.findall(r'^plhit [\d.]+ from %d w (\d+) group \d+ right \S+ up (\d+)' % actor, run.out, re.M)
+        c(any(w == '21' and 600 <= int(y) <= 800 for w, y in hits) and
+          sum(w == '25' and 600 <= int(y) <= 800 for w, y in hits) >= 3,
+          'dropship %d lands PPC and laser hits near cockpit height' % actor, str(hits[:8]))
+
+
+@sequence
 def dropship_flies_at_centre(c):
     """aircraft (GP class 5) and dropships (class 8) hang from their centre - the feet + MGEO int[0] (DROPA 7500, AIRCRFTX
     7500): DOSBox TAUPSCN1 shows the Wolf Dropship about 75 m up from the start, crossing over the player and flying away
@@ -5856,6 +5900,23 @@ def radar_zoom_per_mode(c):
     got = [(r.at(tt + 0.25)['radar_mode'], r.at(tt + 0.25)['radar_i'], r.at(tt + 0.25)['satmap']) for tt, _ in keys]
     want = [(1, 1, 0), (2, 2, 0), (0, 2, 0), (0, 2, 0), (1, 1, 0), (1, 1, 1), (1, 1, 1), (1, 1, 0), (2, 2, 0), (2, 3, 0), (0, 2, 0), (1, 1, 0)]
     c(got == want, 'mode / range / satellite after each key', ' '.join('%s%s' % (k, g) for (_, k), g in zip(keys, got)))
+
+
+@sequence
+def external_world_structure(c):
+    """A disk BWD supplies both the mesh and the GT hit points."""
+    archive = os.path.join(GAME, '3d', 'models.prj')
+    os.makedirs(OUT, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=OUT) as tmp:
+        record = os.path.join(tmp, 'ORANARE4.BWD')
+        subprocess.run([os.path.join(REPO, 'prjtool'), 'extract', archive, 'BWD', 'ORANARE4', record],
+                       check=True, capture_output=True)
+        with open(record, 'rb') as source:
+            payload = source.read()
+    r = c.run(secs=0.5, mission='SWISSCN1', files={'INSTMAP1.BWD': payload},
+              env={'MW2_TEST_BLD_LIST': '1'})
+    c(re.search(r'^BLD \d+ hp=100 type=6 .*Tent/', r.out, re.M) is not None,
+      'the archive model and objective metadata load from the external include')
 
 
 @sequence
@@ -8526,6 +8587,27 @@ def bronze_anvil_aircraft_tracks_convoy(c):
       'the gunship starts circling while the convoy moves')
     c(any(state.get('w_on') == 1 and state.get('w_seq') == 0 for state in run.span(7.0, 16.0)),
       'the gunship plays CHPRANIM, whose keys set the DOS drive servo rate')
+
+
+@sequence
+def bronze_anvil_native_flight(c):
+    """Both gunships follow the original DOS opening route on the recorded frame schedule."""
+    with open(os.path.join(HERE, 'bron_dos_flight.txt')) as capture:
+        rows = [line.split() for line in capture if not line.startswith('#')]
+    ticks = [int(row[0]) for row in rows]
+    for actor, col, tolerance in ((4, 1, 2), (5, 3, 6)):
+        expected = {int(row[0]): tuple(map(int, row[col:col+2])) for row in rows if row[col] != '-'}
+        run = c.run(secs=ticks[-1]/182 + 0.01, throttle=0, twist=0, mission='BRONSCN1',
+                    dos_look=True, mech='maddog/mdg00std', dump='/0.001',
+                    env={'MW2_TEST_FRAME_TICKS': ' '.join(map(str, ticks)), 'MW2_WATCH_ACTOR': str(actor)})
+        seen = {state['now']*182//1000: (state['w_x'], state['w_z'])
+                for state in run.states if 'w_x' in state}
+        c(expected.keys() <= seen.keys(), 'all original flight samples for actor %d' % actor,
+          str(sorted(expected.keys() - seen.keys())[:10]))
+        error = max((seen[t][0] - x)**2 + (seen[t][1] - z)**2
+                    for t, (x, z) in expected.items() if t in seen)
+        c(error <= tolerance**2, 'actor %d stays within %d cm of DOS' % (actor, tolerance),
+          'maximum %.2f cm' % math.sqrt(error))
 
 
 def main():

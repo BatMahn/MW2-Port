@@ -234,6 +234,38 @@ uint32_t prj_record_size(const prj_archive *a, int type, int id)
     return a->types[type].slots[id].offset ? a->types[type].slots[id].size : 0;
 }
 
+/* These stock Titanium loadouts were shipped with stale record checksums. */
+static int stock_mek_checksum(const uint8_t *record, uint32_t size, uint32_t stored, uint32_t actual)
+{
+    static const struct { const char *name; uint32_t size, stored, actual, payload_hash; } known[] = {
+        {"ASA00STD", 496, 0x41f3, 0x41f4, 0x75a32439u},
+        {"ASA01STD", 480, 0x33f9, 0x33fa, 0xaf336464u},
+        {"ASA50STD", 472, 0x3336, 0x33fb, 0x1f2f61d4u},
+        {"CEN50STD", 488, 0x3a9f, 0x3b66, 0xb4542b29u},
+        {"CIC50STD", 472, 0x32fa, 0x33c1, 0xe84944cdu},
+        {"CRB50STD", 456, 0x29e5, 0x2a75, 0x36d6b208u},
+        {"CYC50STD", 480, 0x3a5b, 0x3aeb, 0x65c8165au},
+        {"DRA50STD", 496, 0x3fc6, 0x3fc8, 0x1c4fca45u},
+        {"ELE01STD", 464, 0x2a84, 0x2a90, 0x43a00e24u},
+        {"FLA50STD", 496, 0x4c80, 0x4c82, 0x5bf6c2abu},
+        {"JEN50STD", 504, 0x460c, 0x4763, 0xb55e949cu},
+        {"MON00STD", 496, 0x495c, 0x495d, 0x14355830u},
+        {"THG50STD", 496, 0x4486, 0x44a3, 0x66f071feu},
+    };
+    if (memcmp(record + 12, "MEK\0", 4) != 0) return 0;
+    char name[PRJ_NAME_LEN + 1];
+    copy_name(name, record + 30, PRJ_NAME_LEN);
+    for (size_t i = 0; i < sizeof known / sizeof *known; i++)
+        if (size == known[i].size && stored == known[i].stored && actual == known[i].actual &&
+            strcmp(name, known[i].name) == 0) {
+            uint32_t hash = 2166136261u;
+            for (uint32_t k = PRJ_RECORD_HEADER; k < size; k++)
+                hash = (hash ^ record[k]) * 16777619u;
+            return hash == known[i].payload_hash;
+        }
+    return 0;
+}
+
 int prj_read(prj_archive *a, int type, int id, prj_record *out)
 {
     const prj_type *t;
@@ -262,7 +294,10 @@ int prj_read(prj_archive *a, int type, int id, prj_record *out)
     }
     for (i = 12; i < size; i++) sum += buf[i];
     out->checksum = rd32(buf + 8);
-    if (sum != out->checksum) { free(buf); return PRJ_ERR_CHECKSUM; }
+    if (sum != out->checksum && !stock_mek_checksum(buf, size, out->checksum, sum)) {
+        free(buf);
+        return PRJ_ERR_CHECKSUM;
+    }
 
     tag_from(out->tag, buf + 12);
     memcpy(out->stamp, buf + 16, 4);

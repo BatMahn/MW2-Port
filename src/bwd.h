@@ -175,6 +175,8 @@ typedef struct {
     int          record_count;
     char         missing[16][11]; /* includes that couldn't be found */
     int          missing_count;
+    int          generated_world; /* the scene requests an external RANDWLD1 */
+    unsigned     network_stars;   /* EN00STAR indicates a NetMech roster */
     int          music_track;     /* CD track, 0 if none */
     bwd_navpoint *navs;
     int          nav_count;
@@ -185,6 +187,8 @@ typedef struct {
  * Returns 0 on success. */
 int  bwd_mission_load(prj_archive *a, const char *scene, bwd_mission *m);
 void bwd_mission_free(bwd_mission *m);
+/* Name of the first missing generator dependency, or NULL. */
+const char *bwd_mission_missing_generated(const bwd_mission *m);
 
 /* All ORDR text in the mission, in include order, concatenated. malloc'd. */
 char *bwd_mission_text(const bwd_mission *m, const char *record_suffix);

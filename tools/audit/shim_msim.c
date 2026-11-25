@@ -115,6 +115,39 @@ int shim_dos_contact_state(int state, int idle_target)
     return msim_unit_contact(&s, -1, p, p, normal, centre, &radius, velocity) == 0;
 }
 
+void shim_dos_contact_order(int mover, const int32_t *bodies, const int32_t *position, int32_t *out)
+{
+    msim s = {.actor_count = 3};
+    world_actor actors[3] = {0};
+    combat_unit units[3] = {0};
+    float heights[3] = {0}, radii[3];
+    s.actors = actors;
+    s.units = units;
+    s.centre_h = heights;
+    s.radius = radii;
+    for (int i = 0; i < 3; i++) {
+        const int32_t *body = bodies + i * 9;
+        memcpy(actors[i].mech.origin, body, 3 * sizeof *body);
+        units[i].y = body[1];
+        units[i].destroyed = body[3];
+        units[i].dos_contact_unit = body[4];
+        radii[i] = body[5];
+        for (int k = 0; k < 3; k++) units[i].dos_attempted[k] = body[6 + k] / 65536.0f;
+    }
+    s.player_unit.destroyed = 1;
+    const float p[3] = {position[0], position[1], position[2]};
+    float n[3], centre[3], v[3], radius;
+    int hit = msim_unit_contact(&s, mover, p, p, n, centre, &radius, v);
+    out[0] = hit >= 0 ? hit + 2 : 0;
+    if (hit < 0) return;
+    float end[3], bounced[3];
+    dos_unit_bounce(centre, n, radius, units[mover].dos_attempted, v, end, bounced);
+    for (int k = 0; k < 3; k++) {
+        out[1 + k] = (int32_t)end[k];
+        out[4 + k] = (int32_t)lrintf(bounced[k] * 65536.0f);
+    }
+}
+
 void shim_dos_anim_frames(const int32_t *keys, int count, const int32_t *frames,
                           int frame_count, int rate, int kind, unsigned phase, int32_t *out)
 {
@@ -709,9 +742,45 @@ void shim_dos_debris_launch(unsigned index, int32_t gravity, int32_t *out)
     out[6] = (int32_t)s.dos_gaussian_index;
 }
 
-void shim_dos_debris(const int32_t *in, int32_t *out)
+int shim_dos_detached_pose(const int32_t origin[3], int32_t out[5])
 {
     msim s = {0};
+    world_actor actor = {0};
+    mech3d_part limb = {.node = 1, .group = 5, .model = {.object_count = 1}};
+    mech3d *mech = &actor.mech;
+    s.actors = &actor;
+    s.planet.gravity_g = 1.0f;
+    mech->parts = &limb;
+    mech->part_count = mech->skel_count = 1;
+    mech->skel_index[0] = 1;
+    mech->skel_parent[0] = -1;
+    mech->skel_offset[0][2] = 200;
+    int saved = mech3d_dos_hips;
+    mech3d_dos_hips = 1;
+    mech3d_pose(mech, NULL, 0);
+    memcpy(mech->origin, origin, sizeof mech->origin);
+    mech->heading = 90.0f;
+    blow_off(&s, 0, 1u << 5, 0);
+    mech3d_dos_hips = saved;
+    for (int k = 0; k < 3; k++) out[k] = (int32_t)s.debris[0].p[k];
+    out[3] = s.debris[0].dos_rot[2];
+    out[4] = s.debris[0].dos_rot[8];
+    return s.debris_count;
+}
+
+void shim_dos_debris(const int32_t *in, int32_t *out)
+{
+    const float slope = in[13] * 0.5f, height = in[13] ? 120.0f : 0.0f;
+    cpoly_t face = {.n = 4, .nrm = {-slope, 1, 0},
+                    .v = {{0, height - 1000*slope, 0}, {0, height - 1000*slope, 3000},
+                          {2000, height + 1000*slope, 3000}, {2000, height + 1000*slope, 0}}};
+    qnode_t leaf = {.r = {0, 2000, -500, 1000, 0, 3000}, .np = 1};
+    cobj_t tile = {.type = 5};
+    int index = 0, stamp = 0;
+    cell_t cell = {.idx = &index, .n = 1};
+    terrain_t terrain = {.co = &tile, .nco = 1, .ccell = &cell, .stamp = &stamp, .qn = &leaf,
+                         .cp = &face, .qidx = &index, .gw = 1, .gh = 1, .cs = 5000.0f};
+    msim s = {.terrain = &terrain};
     dos_random_init(&s);
     s.dos_random_index = (unsigned)in[10];
     s.planet.gravity_g = (float)in[11] / 65536.0f;

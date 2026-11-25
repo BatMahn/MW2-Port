@@ -2,6 +2,7 @@
 #ifndef MW2_COMMON3D_H
 #define MW2_COMMON3D_H
 #include "bwd.h"
+#include "development.h"
 #include "glr.h"
 #include "mech3d.h"
 #include "prj.h"
@@ -268,7 +269,7 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
         glr_set_skydome(r, NULL, ts.slot);
         glr_set_environment(r, c3d_ti_sg.tile_ground > 0 ? ground : NULL, s->slot[SKYGND_SKY_SLOT], 4.0f,
                             32.0e6f * c3d_ti_sg.tile_ground / (c3d_ti_sg.ground_max * 2.0f));
-        fprintf(stderr, "titanium: no SKYDOME record for %.4sSCN1 in the Titanium archive - is titanium= the 16-bit build's "
+        if (MW2_DEVELOPMENT_LOGS) fprintf(stderr, "titanium: no SKYDOME record for %.4sSCN1 in the Titanium archive - is titanium= the 16-bit build's "
                         "MW2.PRJ (the disc's Install/16bit)? Drawing the mission's own sky.\n", mission);
     }
     {   /* the stars' camouflage sets: the maps' CAMO chunks {i32 star, i32 set}, each clamped 0..7 (mercsw 0x10073a6b ->
@@ -327,7 +328,7 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
         }
         sh.gi = c3d_ti_sg.intensity < 1 ? 0 : c3d_ti_sg.intensity > 128 ? 128 : c3d_ti_sg.intensity;
         glr_set_titanium_extra(r, c3d_ti_scene.bank0, &sh);
-        printf("titanium: shade %s amb %.0f light %d dir %d vec %.0f %.0f %.0f gi %d eye %d range %.0f\n", sh.on ? "LITE" : "none", (double)sh.amb, sh.light, sh.dir,
+        if (MW2_DEVELOPMENT_LOGS) printf("titanium: shade %s amb %.0f light %d dir %d vec %.0f %.0f %.0f gi %d eye %d range %.0f\n", sh.on ? "LITE" : "none", (double)sh.amb, sh.light, sh.dir,
                (double)sh.lvec[0], (double)sh.lvec[1], (double)sh.lvec[2], sh.gi, sh.eye, (double)sh.range);
     }
     for (k = 0; k < 3; k++) { v->fog_color[k] = (float)c3d_ti_sg.fog[k] / 255.0f; v->sky_color[k] = (float)c3d_ti_sg.sky[k] / 255.0f; }
@@ -360,7 +361,7 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
     }
     v->ti_ltype[0] = c3d_ti_sg.wa_type; v->ti_ltype[1] = c3d_ti_sg.wb_type;
     v->ti_dyn_n = 0;
-    printf("titanium: lights amb %.3f %.3f %.3f wa %d %.3f %.3f %.3f wb %d %.3f %.3f %.3f ground %.3f %.3f %.3f camo %d %d %d %d %d %d %d %d\n",
+    if (MW2_DEVELOPMENT_LOGS) printf("titanium: lights amb %.3f %.3f %.3f wa %d %.3f %.3f %.3f wb %d %.3f %.3f %.3f ground %.3f %.3f %.3f camo %d %d %d %d %d %d %d %d\n",
            v->ti_amb[0], v->ti_amb[1], v->ti_amb[2], v->ti_ltype[0], v->ti_lcol[0][0], v->ti_lcol[0][1], v->ti_lcol[0][2],
            v->ti_ltype[1], v->ti_lcol[1][0], v->ti_lcol[1][1], v->ti_lcol[1][2], v->ti_gnd[0], v->ti_gnd[1], v->ti_gnd[2],
            c3d_ti_camo[0], c3d_ti_camo[1], c3d_ti_camo[2], c3d_ti_camo[3], c3d_ti_camo[4], c3d_ti_camo[5], c3d_ti_camo[6], c3d_ti_camo[7]);

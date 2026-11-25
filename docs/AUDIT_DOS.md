@@ -464,7 +464,7 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
 - The Titanium archive contains 133 MEK records with eight zero bytes after the 50-byte name. All 133
   round-trip byte for byte with the new parser. Using the raw Titanium archive and the same 54 base-game
   scenes as the Enhanced objective sweep, 51 scenes completed without fallbacks, up from 13 with the old
-  parser. BRONSCN1, GOUDSCN1 and MAROSCN1 still fail in this raw archive configuration.
+  parser. The follow-up below covers the last three failures in that sweep.
 - The normal Titanium and Rendition looks use the base mission and equipment data alongside the Titanium
   graphics resources. The objective sweep exercises load compatibility separately from that normal path.
   Native Windows AI, weapon tables and combat timing still need a live comparison. Proton's Wineserver
@@ -630,18 +630,38 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   simulation updates. The controller records the press separately from the held state,
   so the second PPC volley reaches the simulation and a short tap cannot leave repeat fire held.
 
-## Not checked
+### Edge-case follow-up after v2.1
 
-- **Live manoeuvre execution.** Bronze Anvil has a paired flight replay. The cause of its
-  remaining horizontal drift and the full paths through terrain in other missions remain open.
+- All 54 base-game scenes completed in the Enhanced and raw Titanium objective sweeps without
+  fallbacks. In raw Titanium, the sweep pilot now reaches Bronze Anvil's live staff before combat
+  and takes the Golden Spire firing position near the boundary. Maroon Flower's limousine
+  clears the lamp at the final approach to Nav Omicron. Direct 3D routes can now steer along the
+  face after repeated slow impacts, then resume steering toward the mission waypoint.
+  This brought the raw archive baseline to 127 of 161 scenes before the mixed-archive fixes below.
+- The checked-in Bronze Anvil frame schedule captures 327 horizontal positions from the original
+  DOS game. The two aircraft were within 1.42 cm and 5 cm of those samples in the current replay.
+- The executable's movement contact scan (0x200d0) and the port agreed on the first contact,
+  projected position and rebound velocity in 480 overlapping-unit cases, including reciprocal
+  contacts and destroyed candidates. The DOS mission AI was also swept for sustained stalls.
+  The headless checks ran for up to 180 seconds in all 59 DOS scenes with passive and firing players.
+  The only unit still requesting movement after ten seconds without travelling a metre was Rogue
+  Chariot's second Kit Fox. Its stock KTF01AFU loadout has zero walking and jump movement points.
+- The original debris routine (0x2b930) agreed with the port's flight and landing updates on flat,
+  upward-sloping and downward-sloping terrain. A separate regression checks that a limb's
+  detachment uses the latest world transform after its root has moved. The live Aquiline Fire
+  replay checks when the five wreck fragments appear and follows their initial flight over terrain.
+- In live DOS-mode play, switching the player's target during an LRM volley preserves the volley
+  target and changes the recipient of the warning on the next launch. Both Sable Flame dropships
+  use their elevated eyes to converge PPC and laser fire onto the player in the live regression.
+
+## Remaining comparisons
+
+- **Live manoeuvre execution.** Full DOS route comparisons across other missions remain open.
 - **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
-  Full playback comparisons across every mission, the live flight of detached mech parts and world
-  fragments, and their spawn timing remain open. Debris landing was compared on flat ground.
+  Paired mission captures of detachment and world-fragment spawn timing still need broader coverage.
 - **Scenery detail changes in live play.** The Silver Staff replay covers scenery before its first
   camera-range update. The selector has isolated executable comparisons. More live replays are
   needed for switches between nearer scenery models.
-- **Simultaneous contacts.** Contact cases outside the recorded training replays still need
-  comparison.
 - **Mission-wide random ordering.** Startup, AI, damage, missile offsets and positional sounds
   use the DOS table. The complete live order, especially for simultaneous effects, remains open.
 - **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
@@ -650,6 +670,43 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
   jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule
   until they get an audit of their own.
-- **Dropship aim and projectile convergence.** The Golden Spade capture covers live turret servo
-  inputs. The full dropship firing path and projectile convergence across other missions still
-  need paired captures.
+- **Dropship aim and projectile convergence.** Golden Spade has a paired turret servo capture,
+  and Sable Flame has a port regression from aim through player impact. Paired DOS captures of
+  the full firing path across other missions still need coverage.
+
+
+### Mixed Titanium archive follow-up
+
+- The raw Titanium archive includes scenes from multiple editions. The BWD loader tries exact-name
+  lookup when a packaged ID fails to match or an external include has a packaged default. Apache's
+  world loads again. Cali's packaged navs load, but its seven opposing stars require a live roster.
+  The ten Mercenaries `MIS0` through `MIS9` templates require `RANDWLD1.BWD` from the original
+  generator. The sweep reports the missing world before starting a simulation.
+- Thirteen stock MEK records have stale checksums. The reader matches the name, size, checksum pair,
+  and payload fingerprint before accepting them. All 19,939 Titanium records verify with that
+  compatibility path. Mercenaries loadouts use the weapon entries from Titanium's
+  `MERCSW.DLL` (0x68-byte rows, file offset 0x98648), leaving existing base-game weapon entries in place.
+- The original objective sweep completed 127 of the 161 entries. The updated sweep reports
+  148 successes with its default loadout, including Cali's timed objective with no opposing roster.
+  Counting `SPA1SCN1` with the stock `WHK02STD` Gauss loadout and excluding that Cali result
+  gives 148 verified objective completions. `ZACKSCN1` still times out. The carrier can be brought
+  down with live fire, while `ZACKENS1` and `ZACKENS3` still prevent the defense objective finishing.
+  The return objective now uses the scene’s Airlock, `ZACKGOU1`.
+
+
+### Offline mission follow-up
+
+- The stock fighter records put the model at a large offset above its base. AIRCRF1D stores
+  395,000 cm and SHILONEA, CHIPPEWB and STINGRAB store 213,000 cm in MGEO, with the negative
+  offset at +8. The simulation now uses those offsets for posing, aiming and hit tests.
+  ZACK’s moving class-2 target uses a DUMMY model. Its mission task now follows the authored
+  path without drawing a model. ZACK and Station Defense pass with the default Timber Wolf
+  and zero fallbacks.
+- The original DOS GBL Cali scene includes CALIWLD1, eight start points and eight network
+  stars. Titanium omitted the includes while retaining the records. The loader restores the
+  packaged terrain and start points and accepts supplied star files. Running
+  `sweep_objectives MW2.PRJ -offline-net -no-fallback APACSCN1 CALISCN1` checks one local
+  player against one AI opponent in Apache and seven in Cali. Both complete with zero fallbacks.
+- World construction, scripted object tasks and building metadata all read the loaded scene
+  tree. This includes externally supplied BWDs. The ten Mercenaries templates remain blocked
+  on original generator output. A local fixture exercised the hand-off path.

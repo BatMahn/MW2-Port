@@ -37,6 +37,7 @@ Game values are traced from the original code or measured in DOSBox. What is sti
 ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
 AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 270 of them) and
 `make sweep` (single-player mission objectives, with NetMech records reported as skipped).
+For local NetMech objective checks with AI pilots, pass `-offline-net -no-fallback` and the scene names to `sweep_objectives`.
 
 ## System requirements
 

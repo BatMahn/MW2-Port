@@ -256,7 +256,7 @@ static void note_missing(bwd_mission *m, const char *name)
     int i;
     for (i = 0; i < m->missing_count; i++)
         if (strcasecmp(m->missing[i], name) == 0) return;
-    if (m->missing_count < 16) snprintf(m->missing[m->missing_count++], 11, "%s", name);
+    if (m->missing_count < 16) snprintf(m->missing[m->missing_count++], 11, "%.10s", name);
 }
 
 static int load_one(prj_archive *a, int type, bwd_mission *m, uint16_t id, const char *name)
@@ -272,14 +272,48 @@ static int load_one(prj_archive *a, int type, bwd_mission *m, uint16_t id, const
         unsigned char *data;
         size_t len;
         snprintf(file, sizeof file, "%s.BWD", upper);
-        if (dp_read_file(file, &data, &len) != 0) { note_missing(m, upper); return 0; }
-        return add_record(m, upper, 1, data, len);
+        if (dp_read_file(file, &data, &len) == 0) return add_record(m, upper, 1, data, len);
     } else {
         prj_record r;
-        if (prj_read(a, type, id, &r) != PRJ_OK) { note_missing(m, upper); return 0; }
-        if (strcasecmp(r.name, upper) != 0) { prj_record_free(&r); return -1; } /* id/name disagree */
-        return add_record(m, upper, 0, r.data, r.size);
+        if (prj_read(a, type, id, &r) == PRJ_OK) {
+            if (strcasecmp(r.name, upper) == 0) return add_record(m, upper, 0, r.data, r.size);
+            prj_record_free(&r);
+        }
     }
+    /* Some Titanium includes retain IDs from the source archive, and some
+     * external records also have a packaged default. Resolve by exact name. */
+    prj_record r = {0};
+    if (prj_read_named(a, "BWD", upper, &r) == PRJ_OK && strcasecmp(r.name, upper) == 0)
+        return add_record(m, upper, 0, r.data, r.size);
+    prj_record_free(&r);
+    note_missing(m, upper);
+    return 0;
+}
+
+/* Titanium's abbreviated Cali scene omits records included by the original
+ * GBL scene. Its matching world and eight start points are still packaged. */
+static int load_cali_extras(prj_archive *a, int type, bwd_mission *m)
+{
+    const bwd_record *root = &m->records[0];
+    int titanium = 0;
+    for (int k = 0; k < root->chunk_count; k++) {
+        uint16_t id;
+        char name[11];
+        if (bwd_incl(&root->chunks[k], &id, name) != 0) continue;
+        if (strcasecmp(name, "CALIWLD1") == 0) return 0;
+        if (strcasecmp(name, "CALIMAP1") == 0) titanium = 1;
+    }
+    if (!titanium) return 0;
+    if (load_one(a, type, m, 0, "CALIWLD1") != 0) return -1;
+    for (int k = 0; k < 8; k++) {
+        char start[11], roster[11];
+        snprintf(start, sizeof start, "CALIST%d1", k);
+        snprintf(roster, sizeof roster, "EN%02dSTAR", k);
+        if (load_one(a, type, m, 0, start) != 0 ||
+            load_one(a, type, m, BWD_EXTERNAL_ID, roster) != 0) return -1;
+    }
+    m->network_stars = 0xff;
+    return 0;
 }
 
 int bwd_mission_load(prj_archive *a, const char *scene, bwd_mission *m)
@@ -291,7 +325,8 @@ int bwd_mission_load(prj_archive *a, const char *scene, bwd_mission *m)
     dp_add_roots_from_env();   /* external includes (UserStar, en01star...) come from the install dir */
     id = prj_find_id(a, type, scene);
     if (id < 0) return -1;
-    if (load_one(a, type, m, (uint16_t)id, scene) != 0) goto fail;
+    if (load_one(a, type, m, (uint16_t)id, scene) != 0 || !m->record_count) goto fail;
+    if (strcasecmp(scene, "CALISCN1") == 0 && load_cali_extras(a, type, m) != 0) goto fail;
 
     /* breadth-first over includes; records array grows as we go */
     for (i = 0; i < m->record_count; i++) {
@@ -301,6 +336,10 @@ int bwd_mission_load(prj_archive *a, const char *scene, bwd_mission *m)
             char inc_name[11];
             if (strcmp(c->tag, "INCL") == 0) {
                 if (bwd_incl(c, &inc_id, inc_name) != 0) goto fail;
+                if (strcasecmp(inc_name, "RANDWLD1") == 0) m->generated_world = 1;
+                if (inc_id == BWD_EXTERNAL_ID && strncasecmp(inc_name, "EN0", 3) == 0 &&
+                    inc_name[3] >= '0' && inc_name[3] <= '7' && strcasecmp(inc_name + 4, "STAR") == 0)
+                    m->network_stars |= 1u << (inc_name[3] - '0');
                 if (load_one(a, type, m, inc_id, inc_name) != 0) goto fail;
                 c = &m->records[i].chunks[k]; /* records may have moved */
             } else if (strcmp(c->tag, "MUSI") == 0 && !m->music_track) {
@@ -317,6 +356,25 @@ int bwd_mission_load(prj_archive *a, const char *scene, bwd_mission *m)
 fail:
     bwd_mission_free(m);
     return -1;
+}
+
+/* RANDWLD1 includes the generator's nav and objective records. A scene
+ * missing those records can otherwise satisfy empty objective targets. */
+const char *bwd_mission_missing_generated(const bwd_mission *m)
+{
+    if (!m->generated_world) return NULL;
+    if (find_record(m, "RANDWLD1") < 0) return "RANDWLD1.BWD";
+    const char *scene = m->records[0].name;
+    if (strncasecmp(scene, "MIS", 3) != 0 || scene[3] < '0' || scene[3] > '9' ||
+        strncasecmp(scene + 4, "SCN", 3) != 0) return NULL;
+    if (find_record(m, "RANDNAV1") < 0) return "RANDNAV1.BWD";
+    char name[12];
+    snprintf(name, sizeof name, "%.4sARE1", scene);
+    if (find_record(m, name) < 0) return "mission objective area";
+    snprintf(name, sizeof name, "%.4sSTP1", scene);
+    if (find_record(m, name) < 0) return "opposing drop site";
+    if (find_record(m, "EN01STAR") < 0) return "EN01STAR.BWD";
+    return NULL;
 }
 
 void bwd_mission_free(bwd_mission *m)

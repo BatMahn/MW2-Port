@@ -1784,7 +1784,7 @@ static int shot_by_id(unsigned id)
 static int follow_newest(void)
 {
     int k = shot_by_id(g_sim.player_last_shot), w = k >= 0 ? g_sim.shots[k].weapon : -1;
-    if (k < 0 || g_sim.shots[k].owner != -1 || w < 0 || w >= 31 || (sim_weapons[w].type != 3 && sim_weapons[w].type != 4)) { g_follow = 0; return 0; }
+    if (k < 0 || g_sim.shots[k].owner != -1 || w < 0 || w >= COMBAT_WEAPON_COUNT || (sim_weapons[w].type != 3 && sim_weapons[w].type != 4)) { g_follow = 0; return 0; }
     g_follow = g_sim.shots[k].id;
     return 1;
 }
@@ -6271,7 +6271,7 @@ static void test_frame(int w, int h)
     { static int d_parmor; test_timed("MW2_TEST_PARMOR", &d_parmor, test_parmor); }
     if (mw2_development_env("MW2_TEST_WHEAT")) {   /* TEST ONLY */
         int w = -1; float h = 0;
-        if (sscanf(mw2_development_env("MW2_TEST_WHEAT"), "%d:%f", &w, &h) == 2 && w >= 0 && w < 31) combat_test_wheat[w] = h;
+        if (sscanf(mw2_development_env("MW2_TEST_WHEAT"), "%d:%f", &w, &h) == 2 && w >= 0 && w < COMBAT_WEAPON_COUNT) combat_test_wheat[w] = h;
     }
     { static int d_rfl; test_timed("MW2_TEST_RFLASH", &d_rfl, test_rflash); }
     if (test_heat_next >= 0) { g_sim.player_unit.heat = g_sim.player_unit.heat_mark = test_heat_next; test_heat_next = -1; }

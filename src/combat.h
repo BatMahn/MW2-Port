@@ -51,6 +51,7 @@
 #include "prj.h"
 #include <stdint.h>
 
+#define COMBAT_WEAPON_COUNT 66
 #define COMBAT_MAX_WEAPONS 10   /* the loader keeps the first 10 weapons (0x10041410) */
 #define COMBAT_MAX_BINS 25      /* ammo bins (0x10041410 stops at 25) */
 #define COMBAT_TICKS_PER_S 182.0f
@@ -197,7 +198,7 @@ void combat_set_planet(const combat_planet *p);
 extern int combat_damage_live;
 extern int combat_ct_split;
 extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 2 a 30 fps frame (0x27c63); 0: ticks / 4 */
-extern float combat_test_wheat[31];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
+extern float combat_test_wheat[COMBAT_WEAPON_COUNT];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
                                         table (DOSBox: MW2.EXE copy, the large pulse laser's heat 3.5 -> 85 at file 0xb1f24) */
 extern int combat_dos;             /* 1: DOS combat rules and weapon data; 0: 3Dfx */
 extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
@@ -263,6 +264,7 @@ int  combat_weapon_visual(int w);   /* projectile object (+0x04) */
 int  combat_hit(combat_unit *t, int w, int loc, float rel_angle, unsigned *rng);
 float combat_weapon_speed(int w);   /* cm per tick */
 float combat_weapon_range(int w);   /* table +0x40, cm */
+int   combat_weapon_min_range(int w);
 /* JETTISON_AMMO (engine 0x10044220): the weapon's ammunition dumped - its count and the matching bins emptied.
  * Returns 1 if there was any. */
 int  combat_jettison(combat_unit *u, int wi);

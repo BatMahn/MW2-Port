@@ -292,7 +292,7 @@ sweep-walk: glview sweep_ai
 
 # scripted in-mission action sequences, headless (tests/sequences/run_sequences.py; SEQ_ARGS="--only NAME -j 2")
 # MW2_GAME_DIR (default ../MW2-game) and MW2_GTEST (an installed game directory, default /tmp/gtest)
-test_sequences: glview
+test_sequences: glview prjtool
 	python3 tests/sequences/run_sequences.py --glview ./glview $(SEQ_ARGS)
 
 # the sequences against the OpenGL 1.2 renderer (RB=gl12): a glview built with it as build/glview_gl12 (the system's
@@ -302,12 +302,12 @@ build/glview_gl12: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddr
 	$(SDL3_CHECK)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DMW2_RB_GL12 -Wno-conversion -Isrc -Ithird_party $(SDL3_CFLAGS) $(filter %.c,$^) $(filter %.o,$^) -o $@ $(SDL3_LIBS) $(if $(filter Darwin,$(UNAME_S)),-framework OpenGL,-lGL) -lm -lpthread $(DLLIB)
-test_sequences_gl12: build/glview_gl12
+test_sequences_gl12: build/glview_gl12 prjtool
 	python3 tests/sequences/run_sequences.py --glview build/glview_gl12 $(SEQ_ARGS)
 .PHONY: test_sequences_gl12
 
 # the same under AddressSanitizer / UBSan (a separate binary, build/glview_asan)
-test_sequences_asan: tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
+test_sequences_asan: prjtool tools/glview.c src/sfx.c src/portcfg.c src/cdaudio.c src/cddrive.c build/miniaudio.o $(GL3D_SRC) $(HDRS)
 	$(CC) -std=c99 -D_DEFAULT_SOURCE -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Isrc -Ithird_party $(filter %.c,$^) $(filter %.o,$^) -o build/glview_asan $(SDL3_CFLAGS) $(SDL3_LIBS) $(RB_LIBS) -lm -lpthread $(DLLIB)
 	ASAN_OPTIONS=detect_leaks=0 SEQ_TIME_SCALE=6 python3 tests/sequences/run_sequences.py --glview build/glview_asan $(SEQ_ARGS)
 .PHONY: test_sequences test_sequences_asan

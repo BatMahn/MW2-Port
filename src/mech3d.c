@@ -283,6 +283,7 @@ typedef struct {
     int objtype;
     int colour_task;
     int effect_pool;
+    int thing;
     int32_t scale[3];
 } wnode;
 
@@ -306,25 +307,23 @@ static int wpos(const wnode *n, int i, float out[3], float *yaw, int depth)
     return 0;
 }
 
-int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d *out)
+static int world3d_append_chunks(prj_archive *a, const char *record, const bwd_chunk *chunks,
+                                 int n, int with_damaged, mech3d *out)
 {
-    prj_record rec;
-    bwd_chunk *chunks = NULL;
-    wnode *nodes = NULL;
-    int n, k, i, poly_type, rc = -1, max = MAX_NODES * 4, scrg_obj = -1;
-
-    if (prj_read_named(a, "BWD", record, &rec) != PRJ_OK) return -1;
-    poly_type = prj_find_type(a, "POLY");
-    n = bwd_chunks(rec.data, rec.size, NULL, 0);
-    nodes = calloc((size_t)max, sizeof *nodes);
-    if (n <= 0 || !nodes || !(chunks = calloc((size_t)n, sizeof *chunks))) goto done;
-    bwd_chunks(rec.data, rec.size, chunks, n);
+    int k, i, poly_type = prj_find_type(a, "POLY"), rc = -1, max = MAX_NODES * 4, scrg_obj = -1;
+    wnode *nodes = calloc((size_t)max, sizeof *nodes);
+    if (n <= 0 || !nodes) goto done;
     for (k = 0; k < n; k++) {
         bwd_obj o;
         bwd_tsk task;
         if (strcmp(chunks[k].tag, "XPLO") == 0 && chunks[k].size >= 6) {
             int index = chunks[k].data[0] | chunks[k].data[1] << 8;
             if (index < max) nodes[index].effect_pool = 1;
+        }
+        if (strcmp(chunks[k].tag, "GT") == 0 && chunks[k].size >= 20 &&
+            (chunks[k].data[18] || chunks[k].data[19])) {
+            int index = chunks[k].data[0] | chunks[k].data[1] << 8;
+            if (index < max) nodes[index].thing = 1;
         }
         if (bwd_tsk_decode(&chunks[k], &task) == 0 && task.type == 1 && task.node >= 0 && task.node < max)
             nodes[task.node].colour_task = 1;
@@ -350,7 +349,8 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         if (!nodes[i].present) continue;
         out->node_count++;
         if (prj_read(a, poly_type, nodes[i].model, &mr) != PRJ_OK) continue;
-        if (strcasecmp(mr.name, "DUMMY") == 0 || (strncasecmp(mr.name, "S_1DUMMY", 8) == 0 && !nodes[i].colour_task) || mr.size == 0 ||
+        int dummy = strcasecmp(mr.name, "DUMMY") == 0;
+        if ((dummy && !nodes[i].thing) || (strncasecmp(mr.name, "S_1DUMMY", 8) == 0 && !nodes[i].colour_task) || mr.size == 0 ||
             (!with_damaged && strncasecmp(mr.name, "SA", 2) == 0)) { prj_record_free(&mr); continue; }
         if (wpos(nodes, i, pos, &yaw, 0) != 0) { prj_record_free(&mr); continue; }
         p = realloc(out->parts, (size_t)(out->part_count + 1) * sizeof *p);
@@ -362,7 +362,8 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         p->pos[0] = (int32_t)lrintf(pos[0]); p->pos[1] = (int32_t)lrintf(pos[1]); p->pos[2] = (int32_t)lrintf(pos[2]);
         p->yaw = yaw;
         p->node = -1;
-        p->coll = nodes[i].coll;
+        /* Scripted GTs can use a model-less point as an AI target. */
+        p->coll = dummy ? -1 : nodes[i].coll;
         p->objtype = nodes[i].objtype;
         snprintf(p->rec, sizeof p->rec, "%.10s", record);
         p->obj_index = i;
@@ -376,7 +377,7 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
         p->facing = (nodes[i].objtype & 0xf0) == 0x10 || (nodes[i].objtype & 0xf0) == 0x60;   /* (see mech3d.h) */
         p->sparse = (nodes[i].objtype & 0xf0) == 0xc0;
         if (p->sparse && world3d_density_low) p->hidden = 1;
-        if (wtb_parse(mr.data, mr.size, &p->model) != 0) { prj_record_free(&mr); continue; }
+        if (!dummy && wtb_parse(mr.data, mr.size, &p->model) != 0) { prj_record_free(&mr); continue; }
         prj_record_free(&mr);
         {   /* the OBJ scale (payload +6, three i32, whole units; 0 counts as 1): the engine builds each world object's model
              * with its vertices multiplied by it (3Dfx 0x10025450 -> 0x100420b0, then 0x10042140 loads each vertex as x scale + offset;
@@ -438,8 +439,22 @@ int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d 
     }
     rc = 0;
 done:
-    free(chunks);
     free(nodes);
+    return rc;
+}
+
+int world3d_append(prj_archive *a, const char *record, int with_damaged, mech3d *out)
+{
+    prj_record rec;
+    int rc = -1;
+    if (prj_read_named(a, "BWD", record, &rec) != PRJ_OK) return -1;
+    int n = bwd_chunks(rec.data, rec.size, NULL, 0);
+    bwd_chunk *chunks = n > 0 ? calloc((size_t)n, sizeof *chunks) : NULL;
+    if (chunks) {
+        bwd_chunks(rec.data, rec.size, chunks, n);
+        rc = world3d_append_chunks(a, record, chunks, n, with_damaged, out);
+        free(chunks);
+    }
     prj_record_free(&rec);
     return rc;
 }
@@ -482,6 +497,10 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
     int i, k, used = 0, nb = 0;
     blk_place *bp;
     if (bwd_mission_load(a, scene, &m) != 0) return -1;
+    if (bwd_mission_missing_generated(&m)) {
+        bwd_mission_free(&m);
+        return -1;
+    }
     bp = calloc((size_t)(m.record_count > 0 ? m.record_count : 1) * 8, sizeof *bp);
     /* the placements: each record's BLKX -> the next INCL's record, composed with the including record's own */
     for (i = 0; bp && i < m.record_count; i++) {
@@ -538,13 +557,13 @@ int world3d_mission(prj_archive *a, const char *scene, int with_damaged, mech3d 
     }
     for (i = 0; i < m.record_count; i++) {
         int objs = 0, repr = 0, first = out->part_count, q;
-        if (m.records[i].external) continue;
         for (k = 0; k < m.records[i].chunk_count; k++) {
             if (strcmp(m.records[i].chunks[k].tag, "OBJ") == 0) objs++;
             else if (strcmp(m.records[i].chunks[k].tag, "REPR") == 0) repr++;
         }
         if (objs == 0 || repr) continue;
-        if (world3d_append(a, m.records[i].name, with_damaged, out) == 0) used++;
+        if (world3d_append_chunks(a, m.records[i].name, m.records[i].chunks, m.records[i].chunk_count,
+                                  with_damaged, out) == 0) used++;
         for (q = 0; bp && q < nb; q++)
             if (bp[q].set && strcasecmp(bp[q].name, m.records[i].name) == 0) {
                 float h = bp[q].yaw * 3.14159265f / 180.0f, ch = cosf(h), sh = sinf(h);
@@ -690,6 +709,7 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
     for (i = 0; i < m.record_count; i++) {
         for (k = 0; k < m.records[i].chunk_count; k++) {
             bwd_gps g;
+            char named_start[10] = "";
             uint16_t start_id;
             const char *start_name, *skel;
             int r2, c2, found = 0;
@@ -705,11 +725,18 @@ int world3d_actors(prj_archive *a, const char *scene, world_actor **actors, int 
             }
             if (g.table < 0 || g.table >= ntables || !tables[g.table] || tables[g.table]->size < 106) continue;
             start_id = (uint16_t)(tables[g.table]->data[102] | (tables[g.table]->data[103] << 8));
-            start_name = prj_symbol_name(a, bwd_type, -1); /* placeholder, resolved below */
-            start_name = NULL;
-            for (r2 = 0; r2 < prj_symbol_count(a, bwd_type); r2++)
-                if (prj_symbol_id(a, bwd_type, r2) == start_id) { start_name = prj_symbol_name(a, bwd_type, r2); break; }
-            if (!start_name) continue;
+            /* The table also carries the record name. External or repacked
+             * start points can have an ID unrelated to the active archive. */
+            if (tables[g.table]->size >= 113) {
+                memcpy(named_start, tables[g.table]->data + 104, 9);
+                for (int j = 0; named_start[j]; j++)
+                    if (named_start[j] == ' ') { named_start[j] = '\0'; break; }
+            }
+            start_name = named_start;
+            if (!named_start[0])
+                for (r2 = 0; r2 < prj_symbol_count(a, bwd_type); r2++)
+                    if (prj_symbol_id(a, bwd_type, r2) == start_id) { start_name = prj_symbol_name(a, bwd_type, r2); break; }
+            if (!start_name[0]) continue;
             /* the start record's nav point (it is part of the mission tree) */
             for (r2 = 0; r2 < m.record_count && !found; r2++) {
                 if (strcasecmp(m.records[r2].name, start_name) != 0) continue;
@@ -1892,7 +1919,6 @@ world3d_paths *world3d_paths_load(prj_archive *a, const char *scene, mech3d *wor
     for (i = 0; i < m.record_count; i++) {
         const bwd_record *br = &m.records[i];
         int ri = -1;
-        if (br->external) continue;
         for (k = 0; k < br->chunk_count; k++) {
             const bwd_chunk *c = &br->chunks[k];
             bwd_tsk tk;

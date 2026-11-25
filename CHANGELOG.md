@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2 (2026-11-25)
+
+- **Scripted vehicle routes.** The Titanium limousine in Maroon Flower steers clear of the lamp on its final approach to Nav Omicron and completes its escort route.
+- **DOS detached parts.** A limb that breaks off during a move starts from the unit's updated position and heading, using the animation pose at the moment it breaks.
+- **Titanium mission loading.** Resolve packaged BWD includes by name when an archived ID is stale or an external include has a packaged default. Restore omitted mission nav references and route ZACK’s return objective to its Airlock. Accept 13 stock MEK records with verified payloads and stale checksums.
+- **Titanium combat.** Load the additional Mercenaries weapon IDs used by stock units. The rescued units, convoy defenders, and submarines can fire their original weapons. A hidden protection objective keeps guarding its target until the explicit primary objectives finish.
+- **Space combat.** Restore the archived flight altitude for fighters in ZACK and Station Defense. ZACK’s moving marker guides the arriving fighters, and both missions complete with the stock Timber Wolf.
+- **External mission data.** Read terrain, object tasks, and building objectives from disk BWD records. Generated mission templates report missing dependencies before launch.
+- **Offline NetMech checks.** Restore Cali’s archived terrain and eight start points. Apache and Cali complete an objective sweep with local AI opponents.
+- **Objective checks.** The sweep pilot prioritizes live scans, works within 3D mission boundaries, and retries stalled attacks from other bearings. All 54 base-game scenes pass from both the Enhanced and raw Titanium archives with zero fallbacks. The Titanium sweep now identifies missing generated mission worlds.
+- **Release builds.** Titanium startup lighting and sky fallback diagnostics appear only in development builds.
+- **DOS regression coverage.** Added Bronze Anvil's original gunship replay, overlapping unit contacts, debris on slopes, live target changes during missile volleys, and incoming fire from both Sable Flame dropships.
+
+The updated Titanium checks verified 151 of 161 raw scene entries, including Apache and Cali with local AI opponents. The ten remaining entries require mission files from the original Mercenaries generator. Live network play still needs verification. See [Known Issues](KNOWN_ISSUES.md). Linux validation passed 315 OpenGL sequences, six software Vulkan sequences, 66 DOS audit groups, and all 59 DOS mission objective sweeps under sanitizers.
+
 ## v2.1 (2026-11-25)
 
 This release restores DOS gameplay and cockpit behavior affected by the v2.0 parity changes, and fixes menu voice volume and release build switching.

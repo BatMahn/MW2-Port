@@ -2,7 +2,7 @@
  * sweep_objectives - the objective sweep: every mission scene run headless by a "perfect player" that works
  * through table 0's objectives, with a report of every objective node and of what looks wrong.
  *
- *   sweep_objectives MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [-nofire] [-installstars] [SCENE ...]
+ *   sweep_objectives MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [-nofire] [-installstars] [-player LOADOUT] [SCENE ...]
  *     -dos           use DOS simulation rules and weapon data
  *     -v             every node change and the sim's log
  *     -nofire        the player never fires (only the fallbacks destroy things)
@@ -53,7 +53,7 @@
 #define PI_F 3.14159265f
 #define SWEEP_AIM_HEIGHT 665.0f  /* msim's default when the pilot has no posed camera */
 
-static int g_verbose, g_nofire, g_no_fallback;
+static int g_verbose, g_nofire, g_no_fallback, g_offline_net;
 static const char *g_stars_dir;   /* own star files: USERSTAR is rewritten per scene with the mission's star size */
 static lance_slot g_fr[3];
 static float g_max_s = 1800.0f;
@@ -76,21 +76,6 @@ typedef struct {
 static unsigned widen(unsigned c) { if (c & 0x730) c |= 0x730; if (c & 3) c |= 3; return c; }
 
 static const char *bld_rec(const msim *s, int b) { return s->world->parts[s->bld[b].intact].rec; }
-
-/* The original NetMech scene includes the session's player as EN00STAR alongside
- * the other network stars. Single-player Instant Action uses USERSTAR instead. */
-static int has_network_roster(const bwd_mission *m)
-{
-    if (m->record_count < 1) return 0;
-    const bwd_record *scene = &m->records[0];
-    for (int i = 0; i < scene->chunk_count; i++) {
-        uint16_t id;
-        char name[11];
-        if (bwd_incl(&scene->chunks[i], &id, name) == 0 && id == BWD_EXTERNAL_ID &&
-            strcasecmp(name, "EN00STAR") == 0) return 1;
-    }
-    return 0;
-}
 
 static int nav_index(const msim *s, const char *t)
 {
@@ -156,6 +141,17 @@ static void classify(const mtbl_logic *ml, int *wanted, int *bad)
     }
 }
 
+static int primary_needs_failure(const mtbl_table *table, int node)
+{
+    for (int i = 0; i < table->node_count; i++) {
+        const mtbl_node *n = &table->nodes[i];
+        if (n->objective != 'M') continue;
+        for (int k = 0; k < n->item_count; k++)
+            if (n->items[k].type == 'F' && n->items[k].table == 0 && n->items[k].node == node) return 1;
+    }
+    return 0;
+}
+
 /* ---- the run ---------------------------------------------------------------------- */
 
 typedef struct {
@@ -169,6 +165,8 @@ typedef struct {
     int    clamped, start_health;
     float  waited;           /* seconds held back at the mission area's edge */
     float  held;             /* seconds of fire held for a protected structure in the line of fire */
+    float  previous_aim[3];
+    int    previous_aim_ok;
     int    fallbacks;
 } attack_state;
 
@@ -258,6 +256,32 @@ static void aim_at(msim *s, float x, float y, float z)
     s->player_aim_pitch = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / PI_F;
 }
 
+static void lead_long_shot(msim *s, attack_state *at, float target[3])
+{
+    float v[3], d[3] = {target[0] - s->player[0],
+                        target[1] - s->player_unit.y - SWEEP_AIM_HEIGHT,
+                        target[2] - s->player[2]};
+    for (int k = 0; k < 3; k++)
+        v[k] = (target[k] - at->previous_aim[k]) * (1000.0f / (DT_MS * 182));
+    memcpy(at->previous_aim, target, sizeof at->previous_aim);
+    float distance = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    int have_previous = at->previous_aim_ok;
+    at->previous_aim_ok = 1;
+    if (!have_previous || distance < 50000.0f) return;
+    float fastest = 0.0f;
+    for (int k = 0; k < s->player_unit.weapon_count; k++) {
+        int w = s->player_unit.weapons[k].weapon;
+        float speed = combat_weapon_speed(w);
+        if (speed * combat_weapon_life(w) > distance && speed > fastest) fastest = speed;
+    }
+    if (fastest <= 0.0f) return;
+    float a = fastest * fastest - (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (a <= 0.0f) return;
+    float b = d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+    float time = (b + sqrtf(b * b + a * distance * distance)) / a;
+    for (int k = 0; k < 3; k++) target[k] += v[k] * time;
+}
+
 static void anom(int *count, const char *scene, const char *fmt, ...)
 {
     va_list ap;
@@ -281,6 +305,29 @@ static int live_member(const msim *s, const char *t)
     int i;
     for (i = 0; i < s->actor_count; i++)   /* never the player's own side (a dropship that has to leave, a starmate) */
         if (strcasecmp(s->actors[i].group, t) == 0 && s->armed[i] && !s->units[i].destroyed && !s->actors[i].friendly && s->actors[i].alliance != 0) return i;
+    return -1;
+}
+
+/* A forbidden kill can still be a required disable when the target's
+ * failure to reach its own waypoint supplies a primary objective. */
+static int disable_member(const msim *s, const mtbl_table *table, const char *target)
+{
+    int actor = live_member(s, target);
+    if (actor < 0 || s->units[actor].immobile) return -1;
+    int side = s->actors[actor].table;
+    if (side <= 0 || side >= s->logic.table_count) return -1;
+    for (int i = 0; i < table->node_count; i++) {
+        const mtbl_node *n = &table->nodes[i];
+        if (n->kind != MTBL_K_SUCCEED || n->other_table != 0 ||
+            n->other_node < 0 || n->other_node >= table->node_count ||
+            table->nodes[n->other_node].objective != 'M') continue;
+        for (int j = 0; j < n->item_count; j++) {
+            const mtbl_item *want = &n->items[j];
+            if (want->type == 'F' && want->table == side && want->node >= 0 &&
+                want->node < s->logic.tables[side].node_count &&
+                s->logic.tables[side].nodes[want->node].kind == MTBL_K_REACH) return actor;
+        }
+    }
     return -1;
 }
 static int live_bld(const msim *s, const char *t, unsigned mask)
@@ -318,6 +365,10 @@ static int protect_threat(const msim *s, const char *t)
         float dx = (float)s->actors[k].mech.origin[0] - px, dz = (float)s->actors[k].mech.origin[2] - pz;
         if (!s->armed[k] || s->units[k].destroyed || s->actors[k].friendly || s->actors[k].alliance != 1 ||
             strcasecmp(s->actors[k].group, t) == 0) continue;
+        int armed = 0;
+        for (int w = 0; w < s->units[k].weapon_count; w++)
+            if (combat_weapon_speed(s->units[k].weapons[w].weapon) > 0) { armed = 1; break; }
+        if (!armed) continue;
         if (dx * dx + dz * dz < bd) { bd = dx * dx + dz * dz; e = k; }
     }
     return e;
@@ -364,7 +415,8 @@ static int hull_centre(const msim *s, int e, float c[3], float *y0, float *y1)
 {
     const mech3d *m = &s->actors[e].mech;
     int q, n = 0;
-    float ux = (float)m->origin[0], uy = s->units[e].y + s->height[e] * 0.5f, uz = (float)m->origin[2], d2;
+    float base = s->draw_lift && s->draw_lift[e] > 20000.0f ? msim_draw_y(s, e) : s->units[e].y;
+    float ux = (float)m->origin[0], uy = base + s->height[e] * 0.5f, uz = (float)m->origin[2], d2;
     c[0] = c[1] = c[2] = 0; *y0 = 1e9f; *y1 = -1e9f;
     for (q = 0; q < m->part_count; q++) {
         if (m->parts[q].model.object_count < 1) continue;
@@ -372,10 +424,10 @@ static int hull_centre(const msim *s, int e, float c[3], float *y0, float *y1)
         if ((float)m->parts[q].pos[1] < *y0) *y0 = (float)m->parts[q].pos[1];
         if ((float)m->parts[q].pos[1] > *y1) *y1 = (float)m->parts[q].pos[1];
     }
-    if (!n) { c[0] = ux; c[1] = uy; c[2] = uz; *y0 = s->units[e].y; *y1 = s->units[e].y + s->height[e]; return 0; }
+    if (!n) { c[0] = ux; c[1] = uy; c[2] = uz; *y0 = base; *y1 = base + s->height[e]; return 0; }
     c[0] /= (float)n; c[1] /= (float)n; c[2] /= (float)n;
     d2 = (c[0] - ux) * (c[0] - ux) + (c[1] - uy) * (c[1] - uy) + (c[2] - uz) * (c[2] - uz);
-    if (d2 <= 1500.0f * 1500.0f) { *y0 = s->units[e].y; *y1 = s->units[e].y + s->height[e]; return 0; }
+    if (d2 <= 1500.0f * 1500.0f) { *y0 = base; *y1 = base + s->height[e]; return 0; }
     *y1 += 200.0f;
     return 1;
 }
@@ -390,6 +442,8 @@ static int run_scene(prj_archive *a, const char *scene)
     int result = SWEEP_ERROR;
     int32_t stuck_since[MTBL_MAX_NODES];   /* ms: the node's condition is met (by our test) but it is still active */
     int reported[MTBL_MAX_NODES], clamp_noted[MTBL_MAX_NODES], gave_up[MTBL_MAX_NODES];
+    int32_t retry_at[MTBL_MAX_NODES] = {0};
+    unsigned reroutes[MTBL_MAX_NODES] = {0};
     float worked[MTBL_MAX_NODES];
     static char displaced_noted[256];
     attack_state at;
@@ -402,7 +456,7 @@ static int run_scene(prj_archive *a, const char *scene)
     memset(displaced_noted, 0, sizeof displaced_noted);
     at.brg = 180.0f; at.actor = at.bld = at.shielded = at.generator = -1;
     printf("=== %s\n", scene);
-    if (g_stars_dir) {   /* the campaign shell writes the star at the mission's size (BRF2 SDSC +8 default, capped at 3,
+    if (g_stars_dir && !g_offline_net) {   /* the campaign shell writes the star at the mission's size (BRF2 SDSC +8 default, capped at 3,
                           * FUN_000291b0 -> 0x0003ab50): a mate beyond it has no formation slot (RUST's "heyyou" has one) */
         char brf[16], path[512];
         prj_record r;
@@ -435,13 +489,33 @@ static int run_scene(prj_archive *a, const char *scene)
         bwd_mission_free(&bm);
         return SWEEP_ERROR;
     }
-    if (has_network_roster(&bm)) {
+    const char *missing = bwd_mission_missing_generated(&bm);
+    if (missing) {
+        printf("RESULT %-9s Missing generated mission data (%s)\n", scene, missing);
+        bwd_mission_free(&bm);
+        return SWEEP_INCOMPLETE;
+    }
+    int network = (bm.network_stars & 1u) != 0, opponents = 0;
+    if (network && !g_offline_net) {
         printf("SKIP %-9s NetMech roster (EN00STAR); single-player sweep\n", scene);
         bwd_mission_free(&bm);
         return SWEEP_OK;
     }
+    if (g_offline_net && !network) {
+        printf("  ERROR -offline-net requires a NetMech scene\n");
+        bwd_mission_free(&bm);
+        return SWEEP_ERROR;
+    }
+    if (network)
+        for (unsigned slots = bm.network_stars >> 1; slots; slots >>= 1) opponents += (int)(slots & 1u);
     if (world3d_actors(a, scene, &ac, &n) != 0) {
         printf("  ERROR world3d_actors failed\n");
+        bwd_mission_free(&bm);
+        return SWEEP_ERROR;
+    }
+    if (network && n != opponents) {
+        printf("  ERROR offline NetMech roster loaded %d of %d opponents\n", n, opponents);
+        world3d_free_actors(ac, n);
         bwd_mission_free(&bm);
         return SWEEP_ERROR;
     }
@@ -453,6 +527,22 @@ static int run_scene(prj_archive *a, const char *scene)
     }
     memset(&world, 0, sizeof world);
     if (world3d_mission(a, scene, 1, &world) > 0) msim_set_world(&s, &world);
+    if (network) {
+        int valid = s.world && strcasecmp(s.player_rec, "EN00STAR") == 0;
+        for (i = 0; i < n; i++)
+            if (ac[i].friendly || !s.armed[i]) valid = 0;
+        if (!valid) {
+            printf("  ERROR offline NetMech world or roster failed validation\n");
+            msim_free(&s);
+            mech3d_free(&world);
+            world3d_free_actors(ac, n);
+            bwd_mission_free(&bm);
+            return SWEEP_ERROR;
+        }
+        printf("  offline NetMech: local player and %d AI opponents\n", opponents);
+    }
+    last_px = s.player[0];
+    last_pz = s.player[2];
     s.player_vertical = 1;
     s.log = logline;
     s.debug_invulnerable = 1;
@@ -544,7 +634,10 @@ static int run_scene(prj_archive *a, const char *scene)
         for (k = 0; k < t0->node_count; k++) {
             const mtbl_node *nd = &t0->nodes[k];
             int doable = 0;
-            if (s.logic.state[0][k] != MTBL_ACTIVE || !wanted[k] || (bad[k] && nd->objective != 'M') || !has_target(nd) || gave_up[k]) continue;
+            if (s.logic.state[0][k] != MTBL_ACTIVE || !wanted[k] ||
+                !has_target(nd) || gave_up[k] || s.now < retry_at[k]) continue;
+            if (bad[k] && nd->objective != 'M' &&
+                (!(nd->kind & 3) || disable_member(&s, t0, nd->target) < 0)) continue;
             switch (nd->kind) {
             case MTBL_K_REACH: doable = 1; break;
             case MTBL_K_ALLMAIN: {   /* only once every other main objective is done */
@@ -553,7 +646,12 @@ static int run_scene(prj_archive *a, const char *scene)
                 for (j = 0; j < t0->node_count; j++) if (j != k && t0->nodes[j].objective == 'M' && s.logic.state[0][j] != MTBL_OK) doable = 0;
                 break;
             }
-            case MTBL_K_LEAVE: doable = nd->objective == 'M' || (nd->objective == 'N' && !bad[k]); break;   /* 'O' leave nodes are "going too far" warnings */
+            case MTBL_K_LEAVE:
+                doable = !bad[k];
+                for (int j = 0; j < t0->node_count && doable; j++)
+                    if (bad[j] && t0->nodes[j].kind == MTBL_K_LEAVE &&
+                        strcasecmp(nd->target, t0->nodes[j].target) == 0) doable = 0;
+                break;
             case MTBL_K_DESTROY1: case MTBL_K_DESTROY2: doable = live_member(&s, nd->target) >= 0 || live_bld(&s, nd->target, 3) >= 0; break;
             case MTBL_K_SCAN: {
                 int q;
@@ -562,14 +660,22 @@ static int run_scene(prj_archive *a, const char *scene)
                 if (!doable && nav_index(&s, nd->target) >= 0) doable = 1;
                 break;
             }
-            case MTBL_K_PROTECT: doable = protect_threat(&s, nd->target) >= 0; break;
+            case MTBL_K_PROTECT:
+                if (primary_needs_failure(t0, k))
+                    doable = live_member(&s, nd->target) >= 0 || live_bld(&s, nd->target, 4) >= 0;
+                else
+                    doable = protect_threat(&s, nd->target) >= 0;
+                break;
             default: break;
             }
-            {   /* protecting comes after everything else - except that a main objective's protect (with a threat) goes
-                 * before the optional objectives (FUCH: the firebase's attackers before the optional kills outside the
-                 * mission area, now that enemy armour carries the loader's x 3, 0x10041410) */
-                int32_t key = s.logic.started[0][k] + (nd->kind == MTBL_K_PROTECT ? (nd->objective == 'M' ? 50000000 : 100000000)
-                                                                                  : (nd->objective == 'O' ? 60000000 : 0));
+            {
+                /* Scan live targets first. A mandatory protect task comes
+                 * before optional combat, so its attackers cannot slip away. */
+                int32_t key = s.logic.started[0][k];
+                if (nd->kind == MTBL_K_SCAN) key -= 50000000;
+                else if (nd->kind == MTBL_K_REACH && s.logic.shown[0][k]) key -= 1000000;
+                else if (nd->kind == MTBL_K_PROTECT) key += nd->objective == 'M' ? 50000000 : 100000000;
+                else if (nd->objective == 'O') key += 60000000;
                 if (doable && key < best_t) { best_t = key; best = k; }
             }
         }
@@ -617,16 +723,17 @@ static int run_scene(prj_archive *a, const char *scene)
             }
             case MTBL_K_DESTROY1: case MTBL_K_DESTROY2: case MTBL_K_PROTECT: {
                 int e = -1, b = -1;
-                if (nd->kind == MTBL_K_PROTECT) e = protect_threat(&s, nd->target);
+                if (nd->kind == MTBL_K_PROTECT && !primary_needs_failure(t0, best)) e = protect_threat(&s, nd->target);
                 else {
                     e = live_member(&s, nd->target);
-                    if (e < 0) b = live_bld(&s, nd->target, 3);
+                    if (e < 0) b = live_bld(&s, nd->target, nd->kind == MTBL_K_PROTECT ? 4 : 3);
                 }
                 if (b >= 0 && b == at.shielded && s.bld[at.generator].hp > 0) b = at.generator;
                 if ((e >= 0 && e != at.actor) || (b >= 0 && b != at.bld) || (e < 0 && b < 0)) {
+                    at.brg = 180.0f + 67.5f * (float)(reroutes[best] & 7u);
                     if (b >= 0) {
                         int blocker = -1;
-                        at.brg = aim_structure(&s, b, 180.0f, &at.dist, &blocker);
+                        at.brg = aim_structure(&s, b, at.brg, &at.dist, &blocker);
                         const int generator = shield_generator(&s, blocker, b);
                         if (generator >= 0) {
                             at.shielded = b;
@@ -636,6 +743,7 @@ static int run_scene(prj_archive *a, const char *scene)
                         }
                     }
                     at.actor = e; at.bld = b; at.since = 0; at.aim = 0; at.stagnant = 0;
+                    at.previous_aim_ok = 0;
                     at.since_damage = 0; at.last_health = -1; at.waited = 0; at.held = 0;
                     at.start_health = e >= 0 ? combat_health(&s.units[e]) : b >= 0 ? s.bld[b].hp : 0;
                     if (g_verbose && b >= 0)
@@ -646,7 +754,7 @@ static int run_scene(prj_archive *a, const char *scene)
                 if (at.clamped) at.waited += DT_MS / 1000.0f;   /* outside the mission area: it has to come to us */
                 else at.since += DT_MS / 1000.0f;
                 at.since_damage += DT_MS / 1000.0f;
-                if (at.waited > 60.0f) at.since = 1e9f;
+                if (at.waited > 60.0f && at.since_damage > 20.0f) at.since = 1e9f;
                 if (e >= 0) {
                     static const float AIM_H[4] = {0.55f, 0.8f, 0.4f, 0.95f};
                     int hl = combat_health(&s.units[e]);
@@ -668,17 +776,37 @@ static int run_scene(prj_archive *a, const char *scene)
                     aim_point[0] = hc[0];
                     aim_point[1] = hy0 + (hy1 - hy0) * AIM_H[at.aim & 3];
                     aim_point[2] = hc[2];
+                    if (bad[best] && nd->objective != 'M' && (nd->kind & 3)) {
+                        const mech3d *model = &s.actors[e].mech;
+                        const mech3d_part *leg = NULL;
+                        for (int q = 0; q < model->part_count; q++) {
+                            const mech3d_part *part = &model->parts[q];
+                            if (part->group == 7 && part->model.object_count > 0 &&
+                                (!leg || part->pos[1] < leg->pos[1])) leg = part;
+                        }
+                        if (leg) {
+                            aim_point[0] = hc[0] = (float)leg->pos[0];
+                            aim_point[1] = (float)leg->pos[1] + 100.0f;
+                            aim_point[2] = hc[2] = (float)leg->pos[2];
+                        }
+                    }
                     if (reposition)
-                        at.brg = clear_bearing(&s, hc[0], aim_point[1], hc[2], 12000.0f, -1, at.aim ? at.brg + 67.5f : 180.0f, &at.dist, NULL);
+                        at.brg = clear_bearing(&s, hc[0], aim_point[1], hc[2], 12000.0f, -1, at.aim ? at.brg + 67.5f : at.brg, &at.dist, NULL);
                     place_near(&s, hc[0], hc[2], at.dist, at.brg);
-                    place_y_ref = displaced ? hy0 : s.units[e].y;
+                    place_y_ref = hy0;
                     s.player_aim_free = s.player_attacks = 1;
                     if ((at.since_damage > 40.0f && at.waited == 0) || at.since > 120.0f) {
                         int guard = 0, w0 = s.player_unit.weapon_count > 0 ? s.player_unit.weapons[0].weapon : 0;
                         anom(&nanom, scene, "node %d %s: %s (%s, actor %d) not destroyed by projectiles (health %d of %d)%s",
                              best, mtbl_kind_name(nd->kind), s.actors[e].name, s.actors[e].group, e, combat_health(&s.units[e]), at.start_health,
                              at.waited > 60.0f ? " - firing position clamped by mission boundary" : "");
-                        if (g_no_fallback) { why_stop = "fallback disabled"; goto report; }
+                        if (g_no_fallback) {
+                            retry_at[best] = s.now + 30000;
+                            reroutes[best]++;
+                            at.actor = -1;
+                            s.player_attacks = 0;
+                            break;
+                        }
                         while (!s.units[e].destroyed && guard++ < 5000) combat_hit(&s.units[e], w0, 3, 0.0f, &s.rng);
                         if (!s.units[e].destroyed) anom(&nanom, scene, "  actor %d survives 5000 combat_hit calls", e);
                         at.since = 0; at.fallbacks++;
@@ -713,7 +841,13 @@ static int run_scene(prj_archive *a, const char *scene)
                         anom(&nanom, scene, "node %d %s: structure %s (%s) of %s not destroyed by projectiles (hp %d of %d)%s",
                              best, mtbl_kind_name(nd->kind), g->name, g->sub, bld_rec(&s, b), g->hp, at.start_health,
                              at.waited > 60.0f ? " - firing position clamped by mission boundary" : "");
-                        if (g_no_fallback) { why_stop = "fallback disabled"; goto report; }
+                        if (g_no_fallback) {
+                            retry_at[best] = s.now + 30000;
+                            reroutes[best]++;
+                            at.bld = -1;
+                            s.player_attacks = 0;
+                            break;
+                        }
                         msim_damage_building(&s, b, (float)g->hp + 1.0f);
                         at.since = 0; at.fallbacks++;
                     }
@@ -735,9 +869,13 @@ static int run_scene(prj_archive *a, const char *scene)
                 float x, z, r, dx, dz, d;
                 if (t0->nodes[k].kind != MTBL_K_LEAVE || !bad[k] || t0->nodes[k].objective == 'M' || !has_target(&t0->nodes[k]) ||
                     target_xz(&s, t0->nodes[k].target, &x, &z, &r) != 0) continue;
+                int ni = nav_index(&s, t0->nodes[k].target);
+                if (ni >= 0 && s.navs[ni].y != 0.0f) continue;
                 dx = s.player[0] - x; dz = s.player[2] - z; d = sqrtf(dx * dx + dz * dz);
-                if (d > r * 0.9f && d > 0) {
-                    s.player[0] = x + dx / d * r * 0.9f; s.player[2] = z + dz / d * r * 0.9f;
+                /* Keep a small margin so the sweep can fire around cover near the boundary. */
+                float limit = r * 0.98f;
+                if (d > limit && d > 0) {
+                    s.player[0] = x + dx / d * limit; s.player[2] = z + dz / d * limit;
                     at.clamped = 1;
                     if (best >= 0 && !clamp_noted[best]) {
                         clamp_noted[best] = 1;
@@ -747,12 +885,45 @@ static int run_scene(prj_archive *a, const char *scene)
                 }
             }
         }
+        s.player_vertical = 1;
         if (fabsf(s.player[0] - last_px) > 100.0f || fabsf(s.player[2] - last_pz) > 100.0f) {
             /* Set the feet and aim after the boundary has adjusted the firing position. */
             s.player_unit.y = msim_ground(&s, s.player[0], s.player[2], place_y_ref + 1000.0f);
             s.player_unit.vy = 0;
         }
+        if (s.player_attacks && place_y_ref > 3000.0f &&
+            ((at.aim & 2) || (s.player_unit.y == 0.0f && place_y_ref > 20000.0f))) {
+            /* Give the scripted pilot an elevated firing pass after the
+             * lower approaches struggle to clear the deck or floor below. */
+            s.player_unit.y = place_y_ref;
+            s.player_unit.vy = 0;
+            s.player_vertical = 0;
+        }
+        /* The script can reposition a pilot between decks. Keep the altitude
+         * inside the boundary when no nearby floor supports the new position. */
+        if (!(best >= 0 && t0->nodes[best].kind == MTBL_K_LEAVE)) {
+            for (k = 0; k < t0->node_count; k++) {
+                const mtbl_node *leave = &t0->nodes[k];
+                if (leave->kind != MTBL_K_LEAVE || !bad[k] || leave->objective == 'M') continue;
+                int ni = nav_index(&s, leave->target);
+                if (ni < 0 || s.navs[ni].y == 0.0f) continue;
+                const msim_nav *nav = &s.navs[ni];
+                float dx = s.player[0] - nav->x, dy = s.player_unit.y - nav->y, dz = s.player[2] - nav->z;
+                float dist = sqrtf(dx * dx + dy * dy + dz * dz), limit = nav->radius * 0.98f;
+                if (dist > limit) {
+                    float scale = limit / dist;
+                    s.player[0] = nav->x + dx * scale;
+                    s.player[2] = nav->z + dz * scale;
+                    s.player_unit.y = nav->y + dy * scale;
+                    s.player_unit.vy = 0;
+                    at.clamped = 1;
+                    s.player_vertical = 0;
+                }
+            }
+        }
         if (s.player_attacks && best >= 0) {   /* hold fire when a protected structure or unit is on or near the line of fire */
+            if (place_y_ref > 100000.0f || fabsf(aim_point[1] - s.player_unit.y) > 50000.0f)
+                lead_long_shot(&s, &at, aim_point);
             float tx = aim_point[0], tz = aim_point[2];
             int b2, q, obstruction = -2;
             aim_at(&s, tx, aim_point[1], tz);
@@ -776,7 +947,8 @@ static int run_scene(prj_archive *a, const char *scene)
             }
             for (q = 0; q < t0->node_count && s.player_attacks; q++) {
                 if (t0->nodes[q].kind != MTBL_K_PROTECT || s.logic.state[0][q] != MTBL_ACTIVE || !has_target(&t0->nodes[q]) ||   /* hidden protects too: failing one fails the mission */
-                    (t0->nodes[best].kind != MTBL_K_PROTECT && strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0)) continue;   /* (a record both
+                    ((t0->nodes[best].kind != MTBL_K_PROTECT || primary_needs_failure(t0, best)) &&
+                     strcasecmp(t0->nodes[q].target, t0->nodes[best].target) == 0)) continue;   /* (a record both
                                                                          * to destroy and to protect: destroy wins; defending it, its own protect counts too -
                                                                          * BROWSCN1's Command Vehicle stands between the player and the threat) */
                 for (b2 = 0; b2 < s.bld_count && s.player_attacks; b2++) {
@@ -804,6 +976,7 @@ static int run_scene(prj_archive *a, const char *scene)
                 }
             }
         }
+        if (!s.player_attacks) at.previous_aim_ok = 0;
         if (g_nofire) s.player_attacks = 0;
         last_px = s.player[0]; last_pz = s.player[2];
         if (getenv("MW2_SWEEP_ACTOR") && step % 100 == 0) {   /* tests: one actor's position every 5 s */
@@ -824,7 +997,7 @@ static int run_scene(prj_archive *a, const char *scene)
             if (s.logic.state[0][k] != prev_state[k]) {
                 if (g_verbose) printf("  %7.1fs node %2d %-9s %-8s %s\n", now_s, k, mtbl_kind_name(nd->kind), nd->target, state_name(s.logic.state[0][k]));
                 prev_state[k] = s.logic.state[0][k];
-                worked[k] = 0; gave_up[k] = 0;
+                worked[k] = 0; gave_up[k] = 0; retry_at[k] = 0;
                 last_change_step = step;
             }
             if (s.logic.state[0][k] != MTBL_ACTIVE || !has_target(nd)) { stuck_since[k] = -1; continue; }
@@ -880,7 +1053,6 @@ static int run_scene(prj_archive *a, const char *scene)
         }
     }
 
-report:
     /* the report */
     printf("  stop: %s at %.1f s; outcome %s%s\n", why_stop, (double)s.now / 1000.0,
            msim_outcome_text(&s) ? msim_outcome_text(&s) : "none", s.player_lost ? " (player lost)" : "");
@@ -922,11 +1094,13 @@ done:
 
 static void cleanup_stars(const char *dir)
 {
-    static const char *const F[7] = {"USERSTAR.BWD", "EN01STAR.BWD", "EN02STAR.BWD", "EN03STAR.BWD", "EN04STAR.BWD", "EN05STAR.BWD", "INSTMAP1.BWD"};
+    static const char *const F[] = {"USERSTAR.BWD", "EN00STAR.BWD", "EN01STAR.BWD", "EN02STAR.BWD",
+                                    "EN03STAR.BWD", "EN04STAR.BWD", "EN05STAR.BWD", "EN06STAR.BWD",
+                                    "EN07STAR.BWD", "INSTMAP1.BWD"};
     char p[512];
     int k;
     if (!dir) return;
-    for (k = 0; k < 7; k++) { snprintf(p, sizeof p, "%s/%s", dir, F[k]); unlink(p); }
+    for (k = 0; k < (int)(sizeof F / sizeof F[0]); k++) { snprintf(p, sizeof p, "%s/%s", dir, F[k]); unlink(p); }
     rmdir(dir);
 }
 
@@ -937,16 +1111,27 @@ int main(int argc, char **argv)
     char err[256];
     prj_archive *a;
     int i, first = 2, nscenes = 0, fails = 0, own_stars = 1;
-    const char *stars_dir = NULL;
+    const char *stars_dir = NULL, *player_loadout = NULL;
     char **scenes = NULL;
-    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [SCENE ...]\n", argv[0]); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: %s MW2.PRJ [-dos] [-v] [-t max_seconds] [-no-fallback] [-offline-net] [-player LOADOUT] [SCENE ...]\n", argv[0]); return 2; }
     for (; first < argc && argv[first][0] == '-'; first++) {
         if (strcmp(argv[first], "-v") == 0) g_verbose = 1;
         else if (strcmp(argv[first], "-nofire") == 0) g_nofire = 1;   /* debugging: the player never fires (fallbacks only) */
         else if (strcmp(argv[first], "-no-fallback") == 0) g_no_fallback = 1;
+        else if (strcmp(argv[first], "-offline-net") == 0) g_offline_net = 1;
         else if (strcmp(argv[first], "-t") == 0 && first + 1 < argc) g_max_s = (float)atof(argv[++first]);
+        else if (strcmp(argv[first], "-player") == 0 && first + 1 < argc) player_loadout = argv[++first];
         else if (strcmp(argv[first], "-dos") == 0) msim_set_dos(1);
         else if (strcmp(argv[first], "-installstars") == 0) own_stars = 0;
+        else { fprintf(stderr, "invalid option: %s\n", argv[first]); return 2; }
+    }
+    if (g_offline_net && (!own_stars || first == argc)) {
+        fprintf(stderr, "-offline-net needs named scenes and uses a generated local roster\n");
+        return 2;
+    }
+    if (player_loadout && (!own_stars || strlen(player_loadout) != 8)) {
+        fprintf(stderr, "-player needs an eight-character loadout and a generated player star\n");
+        return 2;
     }
     if (!(a = prj_open(argv[1], err, sizeof err))) { fprintf(stderr, "%s\n", err); return 1; }
     if (own_stars) {
@@ -967,11 +1152,40 @@ int main(int argc, char **argv)
                 if (strcmp(lance_mech_file(m), EN[k]) == 0) en[k].mech = m;
             }
         }
-        if (lance_write_all(a, dir, fr, en, 1) != 0 || lance_write_instmap(a, dir, 1, 0) != 0) { fprintf(stderr, "lance files: failed\n"); return 1; }
+        if (player_loadout) {
+            mek_def check;
+            fr[0].mech = -1;
+            for (m = 0; m < lance_mech_count(); m++)
+                if (strncasecmp(player_loadout, lance_mech_code(m), 3) == 0) fr[0].mech = m;
+            if (fr[0].mech < 0 || mek_load(a, player_loadout, &check) != 0) {
+                fprintf(stderr, "cannot load player variant %s\n", player_loadout);
+                cleanup_stars(dir);
+                prj_close(a);
+                return 2;
+            }
+            snprintf(fr[0].loadout, sizeof fr[0].loadout, "%s", player_loadout);
+        }
+        int failed = 0;
+        if (g_offline_net) {
+            for (k = 0; k < 8 && !failed; k++) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/EN%02dSTAR.BWD", dir, k);
+                failed = lance_write_star(a, path, k == 0 ? fr : &en[(k - 1) % 3], 1, k, 6);
+            }
+        } else {
+            failed = lance_write_all(a, dir, fr, en, 1) || lance_write_instmap(a, dir, 1, 0);
+        }
+        if (failed) {
+            fprintf(stderr, "lance files: failed\n");
+            cleanup_stars(dir);
+            prj_close(a);
+            return 1;
+        }
         dp_add_root(dir);
         stars_dir = g_stars_dir = dir;
         memcpy(g_fr, fr, sizeof g_fr);
-        printf("star files: %s (Timber Wolf, Mad Dog, Stormcrow vs Mad Dog, Stormcrow, Nova)\n", dir);
+        printf("star files: %s (%s, Mad Dog, Stormcrow vs Mad Dog, Stormcrow, Nova)\n", dir,
+               player_loadout ? player_loadout : "Timber Wolf");
     }
     dp_add_roots_from_env();
     if (first < argc) { scenes = argv + first; nscenes = argc - first; }

@@ -229,6 +229,26 @@ static int is_player_rec(const msim *s, const char *t)
 {
     return t && (strcasecmp(t, "UserStar") == 0 || (s->player_rec[0] && strcasecmp(t, s->player_rec) == 0));
 }
+
+static int load_nav_chunks(msim *s, const char *record, const bwd_chunk *chunks, int count, int player_table)
+{
+    for (int k = 0; k < count && s->nav_count < MSIM_MAX_NAVS; k++) {
+        bwd_navpoint nv;
+        if (bwd_navp(&chunks[k], &nv) != 0) continue;
+        msim_nav *nav = &s->navs[s->nav_count++];
+        snprintf(nav->name, sizeof nav->name, "%s", record);
+        snprintf(nav->label, sizeof nav->label, "%.21s", nv.name);
+        nav->selectable = nv.shown != 0 && nv.team == player_table;
+        nav->shown = nv.shown != 0;
+        nav->x = (float)nv.x;
+        nav->y = (float)nv.y;
+        nav->z = (float)nv.z;
+        nav->radius = nv.radius > 0 ? (float)nv.radius * 100.0f : 20000.0f;
+        nav->cls = (unsigned)(chunks[k].data[26] | chunks[k].data[27] << 8);
+        return 1;
+    }
+    return 0;
+}
 static int target_pos(msim *s, const char *name, float *x, float *z, float *radius)
 {
     const msim_nav *n = find_nav(s, name);
@@ -247,6 +267,18 @@ static int target_pos(msim *s, const char *name, float *x, float *z, float *radi
 
 /* turrets (class 3) and doors (class 7) have their own controller and locomotion (0x10021a50 / 0x100219e0, 0x10021f20 /
  * 0x10021e60): they never walk, turn their body or fall - a turret stays where it was placed, turning only its twist */
+/* High-altitude fighters have a ground reference and a separate model
+ * altitude. Aiming uses the model, while floor lookup uses the reference. */
+static float high_flight_lift(const msim *s, int i)
+{
+    return s->draw_lift && s->draw_lift[i] > 20000.0f ? s->draw_lift[i] : 0.0f;
+}
+
+static float actor_aim_base(const msim *s, int i)
+{
+    return s->units[i].y + high_flight_lift(s, i);
+}
+
 static int fixed_unit(const world_actor *ac) { return ac->unit_class == 3 || ac->unit_class == 7; }
 static unsigned class_widen(unsigned c) { if (c & 0x730) c |= 0x730; if (c & 3) c |= 3; return c; }   /* 0x1003ddf0 */
 /* A node's targets and their test (engine 0x1003ff60 attach, 0x1000a1d0 / 0x10009a50 / 0x10009ab0 / 0x10009b80), see
@@ -272,7 +304,7 @@ static int tgt_within(msim *s, int table, int type, int idx)
         tx = n->x; ty = n->y; tz = n->z; r = n->radius >= 1.0f ? n->radius : 20000.0f;
     } else if (type == 2) {
         if (idx < 0) { tx = s->player[0]; ty = s->player_unit.y; tz = s->player[2]; }
-        else { tx = (float)s->actors[idx].mech.origin[0]; ty = s->units[idx].y; tz = (float)s->actors[idx].mech.origin[2]; }
+        else { tx = (float)s->actors[idx].mech.origin[0]; ty = actor_aim_base(s, idx); tz = (float)s->actors[idx].mech.origin[2]; }
     } else {
         const mech3d_part *p = &s->world->parts[s->bld[idx].intact];
         tx = (float)p->pos[0]; ty = (float)p->pos[1]; tz = (float)p->pos[2];
@@ -819,13 +851,19 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                 int32_t r = (int32_t)(mg.data[24] | (mg.data[25] << 8) | (mg.data[26] << 16) | ((uint32_t)mg.data[27] << 24));
                 int32_t hc = (int32_t)(mg.data[0] | (mg.data[1] << 8) | (mg.data[2] << 16) | ((uint32_t)mg.data[3] << 24));
                 if (r > 0 && r < 5000) s->radius[i] = (float)r;
+                const uint8_t *p = mg.data + 8;
+                int32_t below = (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
                 int air = actors[i].unit_class == 5 || actors[i].unit_class == 8;
+                /* The high-altitude fighter variants use class 2 and store
+                 * their entire flight offset in MGEO (+0, with -offset at +8).
+                 * AIRCRF1D: 3950 m. SHILONEA and CHIPPEWB: 2130 m. */
+                int high_fighter = actors[i].unit_class == 2 && hc > 20000 && below == -hc;
                 /* aircraft and dropships: int[0] is their flying height (AIRCRFT* 30-100 m, DROPA 75 m) */
                 /* 0 counts (doors and turrets: DOORA / B, TURRET*, the centre at their base) - it had fallen back to 5.5 m,
                  * and the target viewer, framed on the centre (DOS: the object's position), showed Scorching Sand's
                  * turrets at the box's lower edge (user report) */
-                if (hc >= 0 && (hc < 5000 || (air && hc <= 20000))) s->centre_h[i] = (float)hc;
-                if (air && s->draw_lift) s->draw_lift[i] = s->centre_h[i];
+                if (high_fighter || (hc >= 0 && (hc < 5000 || (air && hc <= 20000)))) s->centre_h[i] = (float)hc;
+                if ((air || high_fighter) && s->draw_lift) s->draw_lift[i] = s->centre_h[i];
             }
             prj_record_free(&mg);
         }
@@ -877,31 +915,36 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
                     s->player_tex = v >= 0 && v < 16 ? v : 0;
                 }
             }
+        /* The engine only shows navs on the player's table (0x1001cea0). */
         for (i = 0; i < m.record_count && s->nav_count < MSIM_MAX_NAVS; i++)
-            for (k = 0; k < m.records[i].chunk_count; k++) {
-                bwd_navpoint nv;
-                if (bwd_navp(&m.records[i].chunks[k], &nv) != 0) continue;
-                snprintf(s->navs[s->nav_count].name, sizeof s->navs[0].name, "%s", m.records[i].name);
-                snprintf(s->navs[s->nav_count].label, sizeof s->navs[0].label, "%.21s", nv.name);
-                /* engine 0x1001cea0: skipped when NAVP +16 is 0 or +22 differs from the unit's +8 - the player's table,
-                 * its GPS +4 (the loader 0x1003f34b: the byte, 0 when 0x10 or more; 0 in all 50 mission trees' player GPS
-                 * and in the shell's USERSTAR). The runtime flags (+0x24 of the nav record, NAVP +18 at load: 0 in all 629
-                 * NAVPs) gain only 1 (the AI's own temporary points, 0x1001cab0 - never in the player's list) and 0x20
-                 * (visited); 0x40 (0x1001cea0 with 0x10000, 0x10015c00's 0x1000ad40 call) and 0x100 (0x10020e40) are
-                 * never set */
-                s->navs[s->nav_count].selectable = nv.shown != 0 && nv.team == player_table;
-                s->navs[s->nav_count].shown = nv.shown != 0;
-                s->navs[s->nav_count].x = (float)nv.x;
-                s->navs[s->nav_count].y = (float)nv.y;
-                s->navs[s->nav_count].z = (float)nv.z;
-                /* NAVP radius x100 (assumed metres -> cm); engine default 20,000 when unset */
-                s->navs[s->nav_count].radius = nv.radius > 0 ? (float)nv.radius * 100.0f : 20000.0f;
-                {   /* NAVP +0x1a: the class the objective nodes attach it by (0x1003ef3a) */
-                    const bwd_chunk *nc = &m.records[i].chunks[k];
-                    s->navs[s->nav_count].cls = nc->size >= 28 ? (unsigned)(nc->data[26] | nc->data[27] << 8) : 0x100u;
+            load_nav_chunks(s, m.records[i].name, m.records[i].chunks, m.records[i].chunk_count, player_table);
+        /* ZACK's return objective names BRAN's drop site in the raw archive.
+         * The Airlock is the ZACKGOU1 nav included in this scene. */
+        if (strcasecmp(scene, "ZACKSCN1") == 0) {
+            mtbl_table *player = &s->logic.tables[0];
+            const msim_nav *airlock = find_nav(s, "ZACKGOU1");
+            if (airlock && strcasecmp(airlock->label, "Airlock") == 0)
+                for (k = 0; k < player->node_count; k++) {
+                    mtbl_node *node = &player->nodes[k];
+                    if (node->kind == MTBL_K_REACH &&
+                        strcasecmp(node->target, "BRANST01") == 0 &&
+                        strcasecmp(node->text, airlock->label) == 0)
+                        memcpy(node->target, "ZACKGOU1", sizeof "ZACKGOU1");
                 }
-                s->nav_count++;
-                break;
+        }
+        /* A few repacked scenes omit INCL for navs still present in their mission data. */
+        for (i = 0; i < s->logic.table_count; i++)
+            for (k = 0; k < s->logic.tables[i].node_count && s->nav_count < MSIM_MAX_NAVS; k++) {
+                const mtbl_node *node = &s->logic.tables[i].nodes[k];
+                if ((node->kind != MTBL_K_REACH && node->kind != MTBL_K_LEAVE) ||
+                    strncasecmp(node->target, scene, 4) != 0 || find_nav(s, node->target)) continue;
+                prj_record nav;
+                if (prj_read_named(a, "BWD", node->target, &nav) != PRJ_OK) continue;
+                bwd_chunk chunks[4];
+                int count = bwd_chunks(nav.data, nav.size, chunks, 4);
+                if (count > 0 && count <= 4 && strcasecmp(nav.name, node->target) == 0)
+                    load_nav_chunks(s, nav.name, chunks, count, player_table);
+                prj_record_free(&nav);
             }
         bwd_mission_free(&m);
     }
@@ -1008,7 +1051,7 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
     }
     if (f >= 0 && f < s->actor_count && s->armed[f] && !s->units[f].destroyed) {
         *ex = (float)s->actors[f].mech.origin[0]; *ez = (float)s->actors[f].mech.origin[2];
-        *ey = s->units[f].y; *eface = s->actors[f].mech.heading; *eh = s->height ? s->height[f] : 0; *who = f;
+        *ey = actor_aim_base(s, f); *eface = s->actors[f].mech.heading; *eh = s->height ? s->height[f] : 0; *who = f;
         return 1;
     }
     if (s->minds && s->minds[i].tgt != -2) {   /* the target condition 7 / the group assignment gave it (engine +0x14e) */
@@ -1019,7 +1062,7 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
         }
         if (t >= 0 && t < s->actor_count && s->armed[t] && !s->units[t].destroyed) {
             *ex = (float)s->actors[t].mech.origin[0]; *ez = (float)s->actors[t].mech.origin[2];
-            *ey = s->units[t].y; *eface = s->actors[t].mech.heading; *eh = s->height ? s->height[t] : 0; *who = t;
+            *ey = actor_aim_base(s, t); *eface = s->actors[t].mech.heading; *eh = s->height ? s->height[t] : 0; *who = t;
             return 1;
         }
     }
@@ -1048,7 +1091,7 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
         if (d < best) {
             best = d; found = 1; *who = k;
             *ex = (float)s->actors[k].mech.origin[0]; *ez = (float)s->actors[k].mech.origin[2];
-            *ey = s->units[k].y; *eface = s->actors[k].mech.heading; *eh = s->height ? s->height[k] : 0;
+            *ey = actor_aim_base(s, k); *eface = s->actors[k].mech.heading; *eh = s->height ? s->height[k] : 0;
         }
     }
     return found;
@@ -1206,7 +1249,8 @@ static int task_pos(const msim *s, int code, float p[3], float *range)
         *range = s->navs[idx].radius >= 100.0f ? s->navs[idx].radius : 100.0f;
         return 1;
     }
-    if (type == 4 && msim_dos_int) return thing_point(s, idx, p);
+    if (type == 4 && (msim_dos_int || (s->world && idx < s->bld_count &&
+        !s->world->parts[s->bld[idx].intact].model.object_count))) return thing_point(s, idx, p);
     if (type == 4 && idx < s->bld_count && s->bld[idx].hp > 0) {
         int k;
         for (k = 0; k < 3; k++) p[k] = (s->bld[idx].mn[k] + s->bld[idx].mx[k]) * 0.5f;
@@ -1683,6 +1727,12 @@ static void ammo_booms(msim *s)
  * chunks, 0xe24 ticks, 128 bodies), each part once: those under a location in `mask` and under none in `old` */
 static void blow_off(msim *s, int unit, unsigned mask, unsigned old)
 {
+    if (msim_dos_int && unit >= 0 && (mask & ~old)) {
+        /* Movement has already updated the root and servos. Keep the current
+         * local animation keys and detach from their new world transform. */
+        mech3d *mech = &s->actors[unit].mech;
+        mech3d_pose(mech, (const anim_set *)mech->pose_anim, mech->pose_t);
+    }
     const mech3d *m = unit < 0 ? &s->pl_mech : &s->actors[unit].mech;
     int32_t now = (int32_t)((int64_t)s->now * 182 / 1000);
     int q, k;
@@ -2342,7 +2392,8 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
                      * clears it */
                     s->units[i].blocked = !(imp & 2);
                     if (!(imp & 2)) {
-                        if (msim_dos_int && ac->unit_class == 1 && wn[1] > 0.0f && wn[1] < 0.70710677f) {
+                        if (ac->unit_class == 1 && wn[1] < 0.70710677f &&
+                            (msim_dos_int ? wn[1] > 0.0f : m->state == AI_GODIRECT && wn[1] >= 0.0f)) {
                             steep_contact = 1;
                             m->terrain_normal[0] = wn[0];
                             m->terrain_normal[1] = wn[2];
@@ -2364,14 +2415,18 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
                 if (rest <= 1e-5f) break;
             }
         }
-        if (msim_dos_int && ac->unit_class == 1) {
-            /* A sliding or bouncing contact can have clear frames between impacts. */
-            int ticks = m->terrain_block_ticks + (steep_contact && fabsf(m->speed) < 200.0f ? dos_ticks : -dos_ticks);
+        if (ac->unit_class == 1) {
+            /* A sliding or bouncing contact can have clear frames between impacts.
+             * In 3D, short clear moves between wall bounces decay the stall more slowly. */
+            int decay = msim_dos_int ? dos_ticks : (dos_ticks + 3) / 4;
+            int ticks = m->terrain_block_ticks + (steep_contact && fabsf(m->speed) < 200.0f ? dos_ticks : -decay);
             m->terrain_block_ticks = ticks < 0 ? 0 : ticks > 182 ? 182 : ticks;
         }
         if (fixed_unit(ac)) s->units[i].ground = s->units[i].y;   /* 0x100219e0: no translation, no gravity */
         else {
-            s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2], s->units[i].y + (s->centre_h ? s->centre_h[i] : 550.0f));
+            float probe_h = s->centre_h ? s->centre_h[i] : 550.0f;
+            s->units[i].ground = msim_ground(s, (float)ac->mech.origin[0], (float)ac->mech.origin[2],
+                                             s->units[i].y + probe_h - high_flight_lift(s, i));
             float y3 = s->units[i].y + dy_done;
             /* falling fast (off a mesa, a cliff): an AI unit with jets fires them to slow the drop before it would land
              * hard enough to hurt its legs (fall damage beyond 16.154 cm/tick, combat_land). User report against DOS,
@@ -2406,16 +2461,18 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
     }
 }
 
-/* A prolonged stall can alternate between a forward and reverse attack on
- * the same slope. Steer along the face with enough downhill bias to clear it. */
-static void dos_ai_escape_terrain(ai_mind *m, float heading, int ticks)
+/* Keep driving along the face after getting free, so the normal controller
+ * does not immediately steer back into the same obstruction. */
+static void ai_escape_terrain(ai_mind *m, float heading, float goal, int ticks, int dos)
 {
     if (m->terrain_escape_ticks <= 0) {
         if (m->terrain_block_ticks < 182 || m->throttle <= 0.0f) return;
         const float downhill = atan2f(m->terrain_normal[0], m->terrain_normal[1]) * 57.29578f;
-        const float side = wrap180(heading - downhill);
-        m->terrain_escape_bearing = downhill + (side < 0.0f ? -60.0f : 60.0f);
-        m->terrain_escape_ticks = 3 * 182;
+        const float side = wrap180((dos ? heading : goal) - downhill);
+        /* Scripted 3D routes need longer and closer to parallel to pass a wall. */
+        const float angle = dos ? 60.0f : 85.0f;
+        m->terrain_escape_bearing = downhill + (side < 0.0f ? -angle : angle);
+        m->terrain_escape_ticks = (dos ? 3 : 5) * 182;
         m->terrain_block_ticks = 0;
     }
     const float err = wrap180(m->terrain_escape_bearing - heading);
@@ -2781,7 +2838,7 @@ void msim_step(msim *s, int32_t dt_ms)
     star_done:
         m->targets_player = v.has_enemy && v.enemy_is_player;
         {   /* DOS 0x2da50 and 0x2e150 test from the unit centre and again at the target's elevation. */
-            const float own_y = s->units[i].y + (msim_dos_int && s->centre_h ? s->centre_h[i] : 0.0f);
+            const float own_y = msim_dos_int && s->centre_h ? s->units[i].y + s->centre_h[i] : actor_aim_base(s, i);
             const float target_h = !msim_dos_int || !v.has_enemy ? 0.0f :
                                    enemy_who == -1 ? s->player_centre_h :
                                    enemy_who >= 0 && s->centre_h ? s->centre_h[enemy_who] : 0.0f;
@@ -2840,7 +2897,7 @@ void msim_step(msim *s, int32_t dt_ms)
                 int32_t own_y = (int32_t)lroundf(v.world_height);
                 v.enemy_elev = (float)dos_atan2(target_y - own_y, (int32_t)v.enemy_dist) / 65536.0f;
             } else {
-                v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - s->units[i].y - eye_up,
+                v.enemy_elev = atan2f(v.enemy_height + aim_up + s->units[i].ground - actor_aim_base(s, i) - eye_up,
                                       fmaxf(hd, 1.0f)) * 180.0f / 3.14159265f;
             }
         }
@@ -2956,9 +3013,10 @@ void msim_step(msim *s, int32_t dt_ms)
             float gb = m->state == AI_ATTACK || m->state == AI_TARGET ? v.enemy_bearing : (v.has_goal ? v.goal_bearing : ac->mech.heading);
             avoid_obstacles(s, i, m, gb, msim_dos_int ? (float)dos_ticks : dt * 182.0f);
         }
-        if (msim_dos_int && ac->unit_class == 1 && !starting && !s->units[i].offline && !s->units[i].shutdown &&
+        if (ac->unit_class == 1 && (msim_dos_int || (m->state == AI_GODIRECT && v.has_goal)) &&
+            !starting && !s->units[i].offline && !s->units[i].shutdown &&
             !s->units[i].immobile && !m->jet && m->state >= AI_TARGET && m->state <= AI_GODIRECT)
-            dos_ai_escape_terrain(m, ac->mech.heading, dos_ticks);
+            ai_escape_terrain(m, ac->mech.heading, v.goal_bearing, dos_ticks, msim_dos_int);
         if (!msim_dos_int) actor_move(s, i, dt, dos_ticks, starting, v.jets_installed);
         if (mw2_development_env("MW2_AI_TRACE") && i == atoi(mw2_development_env("MW2_AI_TRACE")) && (s->now / dt_ms) % 10 == 0) {   /* tests: one AI every 10 steps */
             fprintf(stderr, "ai %.2fs actor %d at %d,%d y %.0f immobile %d heading %.1f turn %.0f avoid %.0f/%d goal %.1f\n", s->now / 1000.0, i, ac->mech.origin[0], ac->mech.origin[2], s->units[i].y, s->units[i].immobile,
@@ -3204,10 +3262,12 @@ static void muzzle(msim *s, int weapon, const float from[3], const mech3d *m, in
 }
 
 /* weapon table +0x18 (3dfx MW2.DLL 0x1025a6d8 + 0x58 i): LRM 20/15/10/5, Streak SRM-6/4/2, Narc */
-static const unsigned char GUIDED[31] = {1,1,1,1, 0,0,0, 1,1,1, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 1, 0,0};
-int msim_weapon_guided(int w) { return w >= 0 && w < 31 && GUIDED[w]; }
-/* weapon table +0x3c / +0x40: the lock's range window, cm */
-static const int LOCK_MIN[31] = {7500,7500,7500,7500, 0,0,0, 25,25,25, 0,0,0,0,0,0,0,0,0,0,1000,0,0,0,0,0,0,0, 0, 0,0};
+static const unsigned char GUIDED[COMBAT_WEAPON_COUNT] = {
+    [0] = 1, [1] = 1, [2] = 1, [3] = 1, [7] = 1, [8] = 1, [9] = 1, [28] = 1,
+    [32] = 1, [33] = 1, [34] = 1, [35] = 1, [36] = 1, [37] = 1, [38] = 1,
+    [42] = 1, [61] = 1, [64] = 1, [65] = 1,
+};
+int msim_weapon_guided(int w) { return w >= 0 && w < COMBAT_WEAPON_COUNT && GUIDED[w]; }
 static void car_inc(msim *s, int off);
 
 static mech3d *player_hull(msim *s)
@@ -4018,7 +4078,7 @@ static int dos_lock_in_window(int weapon, int32_t dx, int32_t dy, int32_t dz,
 {
     const uint64_t range2 = (uint64_t)((int64_t)dx * dx) + (uint64_t)((int64_t)dy * dy) +
                             (uint64_t)((int64_t)dz * dz);
-    const uint64_t minimum = (uint64_t)LOCK_MIN[weapon];
+    const uint64_t minimum = (uint64_t)combat_weapon_min_range(weapon);
     const uint64_t maximum = (uint64_t)combat_weapon_range(weapon);
     const uint64_t min2 = minimum * minimum, max2 = maximum * maximum;
     if (range2 < min2 || (uint32_t)(range2 - min2) == 0) return 0;
@@ -4052,7 +4112,7 @@ static void player_lock_step(msim *s, float pl_h, float ticks)
         float dz = th ? tp[2] - s->player[2] : (float)s->actors[e].mech.origin[2] - s->player[2];
         /* DOS 0x52f14 compares the positions stored by target selection, measured from each unit's feet. */
         float dy = th ? tp[1] - s->player_unit.y : msim_dos_int ? s->units[e].y - s->player_unit.y :
-                   (s->units[e].y + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
+                   (actor_aim_base(s, e) + s->height[e] * 0.5f) - (s->player_unit.y + pl_h * 0.7f);
         if (msim_dos_int) {
             in = dos_lock_in_window(wid, (int32_t)dx, (int32_t)dy, (int32_t)dz,
                                     (int32_t)llround(s->player_aim_yaw * 65536.0),
@@ -4060,7 +4120,7 @@ static void player_lock_step(msim *s, float pl_h, float ticks)
         } else {
             float d = sqrtf(dx * dx + dz * dz + dy * dy);
             const float max_range = combat_weapon_range(wid);
-            if (d > (float)LOCK_MIN[wid] && (d < max_range || (th && d == max_range))) {
+            if (d > (float)combat_weapon_min_range(wid) && (d < max_range || (th && d == max_range))) {
                 float yaw = wrap180(atan2f(dx, dz) * 180.0f / 3.14159265f - s->player_aim_yaw);
                 float pit = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180.0f / 3.14159265f - s->player_aim_pitch;
                 in = fabsf(yaw) < 16.0f && fabsf(pit) < 16.0f;
@@ -4118,7 +4178,7 @@ static void ai_missile_lock(msim *s, int i, ai_mind *m, int has_target, int who,
         } else if (who == -3) wid = -1;
         m->lock &= ~0x80;
         if (wid >= 0 && msim_weapon_guided(wid)) {
-            float dy = ly - s->units[i].y;
+            float dy = ly - actor_aim_base(s, i);
             int on = 0;
             if (msim_dos_int) {
                 on = dos_lock_in_window(wid, (int32_t)lx, (int32_t)dy, (int32_t)lz,
@@ -4126,7 +4186,7 @@ static void ai_missile_lock(msim *s, int i, ai_mind *m, int has_target, int who,
                                         (int32_t)llround(m->pitch * 65536.0));
             } else {
                 float d3 = sqrtf(lx * lx + lz * lz + dy * dy);
-                if (d3 > (float)LOCK_MIN[wid] && d3 <= combat_weapon_range(wid)) {
+                if (d3 > (float)combat_weapon_min_range(wid) && d3 <= combat_weapon_range(wid)) {
                     float yaw = wrap180(atan2f(lx, lz) * 180.0f / 3.14159265f - s->actors[i].mech.heading - m->twist);
                     float el = atan2f(dy, sqrtf(lx * lx + lz * lz)) * 180.0f / 3.14159265f;
                     on = fabsf(yaw) < 16.0f && fabsf(m->pitch - el) < 16.0f;
@@ -4162,7 +4222,7 @@ static void combat_actor_shots(msim *s, int i, float lock_ticks)
     aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
     dx = ex - (float)s->actors[i].mech.origin[0];
     dz = ez - (float)s->actors[i].mech.origin[2];
-    from[0] = (float)s->actors[i].mech.origin[0]; from[1] = s->units[i].y + s->height[i] * 0.7f; from[2] = (float)s->actors[i].mech.origin[2];
+    from[0] = (float)s->actors[i].mech.origin[0]; from[1] = actor_aim_base(s, i) + s->height[i] * 0.7f; from[2] = (float)s->actors[i].mech.origin[2];
     if (starmate && who >= 0) {
         const mech3d *mech = &s->actors[i].mech;
         aim_h = msim_draw_y(s, who) + eh * 0.55f;
@@ -4459,7 +4519,7 @@ static void combat_step(msim *s, int32_t dt_ms, int dos_ticks)
                 s->player_conv = best;
                 to[0] = from[0] + dir[0] * best; to[1] = from[1] + dir[1] * best; to[2] = from[2] + dir[2] * best;
             }
-            else if (tgt_ok) { to[0] = (float)s->actors[e].mech.origin[0]; to[1] = s->units[e].y + s->height[e] * 0.55f; to[2] = (float)s->actors[e].mech.origin[2]; }
+            else if (tgt_ok) { to[0] = (float)s->actors[e].mech.origin[0]; to[1] = actor_aim_base(s, e) + s->height[e] * 0.55f; to[2] = (float)s->actors[e].mech.origin[2]; }
             else { to[0] = from[0] + dx; to[1] = from[1] + sinf(ap) * 100000.0f; to[2] = from[2] + dz; }
             /* a volley triggered now latches the target if locked (0x100437a0 / 0x10044440: slot +0x18 / +0x1c from the
              * mech's +0xdc when the controller's 0x80 is set) - its later missiles home even if the lock breaks */
@@ -6826,115 +6886,98 @@ static void buildings_init(msim *s, const mech3d *w)
     int team_all[64];   /* the scene's STAR entries {u32 team, u32 alliance, name[16]} (0x10042d40: DAT_101e0170[team] = alliance) */
     free(s->bld); s->bld = NULL; s->bld_count = 0;
     if (!s->arch) return;
+    bwd_mission mission;
+    if (bwd_mission_load(s->arch, s->scene, &mission) != 0) return;
     memset(team_all, 0, sizeof team_all);
-    {
-        prj_record r;
-        bwd_chunk *c;
-        int n;
-        if (s->scene[0] && prj_read_named(s->arch, "BWD", s->scene, &r) == PRJ_OK) {
-            n = bwd_chunks(r.data, r.size, NULL, 0);
-            if (n > 0 && (c = calloc((size_t)n, sizeof *c))) {
-                bwd_chunks(r.data, r.size, c, n);
-                for (k = 0; k < n; k++)
-                    if (strcmp(c[k].tag, "STAR") == 0)
-                        for (q = 0; (size_t)(q + 1) * 24 <= c[k].size; q++) {
-                            const uint8_t *e = c[k].data + q * 24;
-                            /* +0 the star's affiliation, +4 its side: LoadStarTable 0x10042d40 g_starSides[affiliation] = side
-                             * (a thing's AFFL names an affiliation) */
-                            uint32_t tm = (uint32_t)e[0] | (uint32_t)e[1] << 8 | (uint32_t)e[2] << 16 | (uint32_t)e[3] << 24;
-                            if (tm < 64) team_all[tm] = (int)((uint32_t)e[4] | (uint32_t)e[5] << 8 | (uint32_t)e[6] << 16 | (uint32_t)e[7] << 24);
-                        }
-                free(c);
-            }
-            prj_record_free(&r);
+    const bwd_record *scene = &mission.records[0];
+    for (k = 0; k < scene->chunk_count; k++) {
+        const bwd_chunk *star = &scene->chunks[k];
+        if (strcmp(star->tag, "STAR") != 0) continue;
+        for (q = 0; (size_t)(q + 1) * 24 <= star->size; q++) {
+            const uint8_t *e = star->data + q * 24;
+            /* +0 the star's affiliation, +4 its alliance (0x10042d40). */
+            uint32_t team = (uint32_t)e[0] | (uint32_t)e[1] << 8 | (uint32_t)e[2] << 16 | (uint32_t)e[3] << 24;
+            if (team < 64) team_all[team] = (int)((uint32_t)e[4] | (uint32_t)e[5] << 8 | (uint32_t)e[6] << 16 | (uint32_t)e[7] << 24);
         }
     }
     for (i = 0; i < w->part_count; i++) {
-        prj_record r;
-        bwd_chunk *c;
-        int n, seen = 0, affl = -1;   /* 0x1003de10: an AFFL chunk sets the team of the GT records after it (-1 none) */
-        if (!w->parts[i].rec[0]) continue;
-        for (k = 0; k < i && !seen; k++) if (strcmp(w->parts[k].rec, w->parts[i].rec) == 0) seen = 1;
-        if (seen || prj_read_named(s->arch, "BWD", w->parts[i].rec, &r) != PRJ_OK) continue;
-        n = bwd_chunks(r.data, r.size, NULL, 0);
-        if (n > 0 && (c = calloc((size_t)n, sizeof *c))) {
-            bwd_chunks(r.data, r.size, c, n);
-            for (k = 0; k < n; k++) {
-                const uint8_t *d = c[k].data;
-                int a, b, hp, ia = -1, ib = -1;
-                if (strcmp(c[k].tag, "AFFL") == 0 && c[k].size >= 4) { affl = (int32_t)((uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 | (uint32_t)d[3] << 24); continue; }
-                if (strcmp(c[k].tag, "GT") != 0 || c[k].size < 68) continue;
-                a = (int16_t)(d[0] | d[1] << 8); b = (int16_t)(d[2] | d[3] << 8); hp = (int16_t)(d[16] | d[17] << 8);
-                /* the destroyed variant (b) is not created until the swap (the thing table's entries, 0x10024fe0 -> 0x10025450:
-                 * flagged 0x800, they wait), nor are its children: hidden here whatever its model is called - the port hid
-                 * only the SA* models, so GREYSCN1's wrecked Wolf dropship (VA1DROPA / VA1DRPWS, the destroyed variants of
-                 * the V_B* dropship that GREYDRP1 carries to the drop site) and GREYFLF1's crashed Aerotechs stood at the
-                 * records' own origin, mid-map, from the start (user report: a disassembled dropship one walks through) */
-                if (b >= 0 && b != a && w->part_count > 0) {
-                    char *mark = calloc((size_t)w->part_count, 1);   /* the variant and everything under it */
-                    int changed = 1;
-                    if (mark) {
-                        /* by object index (a dummy node in between - GREYFLF1's 0x70 nodes - has no part of its own) */
-                        int objs[64], no = 0, j;
-                        objs[no++] = b;
-                        while (changed) {
-                            changed = 0;
-                            for (q = 0; q < w->part_count; q++) {
-                                if (mark[q] || strcmp(w->parts[q].rec, w->parts[i].rec) != 0) continue;
-                                for (j = 0; j < no; j++)
-                                    if (w->parts[q].obj_index == objs[j] || w->parts[q].parent_obj == objs[j]) {
-                                        mark[q] = 1; changed = 1;
-                                        if (no < 64) objs[no++] = w->parts[q].obj_index;
-                                        break;
-                                    }
-                            }
+        const char *name = w->parts[i].rec;
+        const bwd_record *record = NULL;
+        int seen = 0, affl = -1;   /* AFFL sets the team of the GT records that follow (0x1003de10). */
+        if (!name[0]) continue;
+        for (k = 0; k < i && !seen; k++) if (strcmp(w->parts[k].rec, name) == 0) seen = 1;
+        if (seen) continue;
+        for (k = 0; k < mission.record_count; k++)
+            if (strcmp(mission.records[k].name, name) == 0) { record = &mission.records[k]; break; }
+        if (!record) continue;
+        const bwd_chunk *c = record->chunks;
+        for (k = 0; k < record->chunk_count; k++) {
+            const uint8_t *d = c[k].data;
+            int a, b, hp, ia = -1, ib = -1;
+            if (strcmp(c[k].tag, "AFFL") == 0 && c[k].size >= 4) { affl = (int32_t)((uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 | (uint32_t)d[3] << 24); continue; }
+            if (strcmp(c[k].tag, "GT") != 0 || c[k].size < 68) continue;
+            a = (int16_t)(d[0] | d[1] << 8); b = (int16_t)(d[2] | d[3] << 8); hp = (int16_t)(d[16] | d[17] << 8);
+            /* the destroyed variant (b) is not created until the swap (the thing table's entries, 0x10024fe0 -> 0x10025450:
+             * flagged 0x800, they wait), nor are its children: hidden here whatever its model is called - the port hid
+             * only the SA* models, so GREYSCN1's wrecked Wolf dropship (VA1DROPA / VA1DRPWS, the destroyed variants of
+             * the V_B* dropship that GREYDRP1 carries to the drop site) and GREYFLF1's crashed Aerotechs stood at the
+             * records' own origin, mid-map, from the start (user report: a disassembled dropship one walks through) */
+            if (b >= 0 && b != a && w->part_count > 0) {
+                char *mark = calloc((size_t)w->part_count, 1);   /* the variant and everything under it */
+                int changed = 1;
+                if (mark) {
+                    /* by object index (a dummy node in between - GREYFLF1's 0x70 nodes - has no part of its own) */
+                    int objs[64], no = 0, j;
+                    objs[no++] = b;
+                    while (changed) {
+                        changed = 0;
+                        for (q = 0; q < w->part_count; q++) {
+                            if (mark[q] || strcmp(w->parts[q].rec, w->parts[i].rec) != 0) continue;
+                            for (j = 0; j < no; j++)
+                                if (w->parts[q].obj_index == objs[j] || w->parts[q].parent_obj == objs[j]) {
+                                    mark[q] = 1; changed = 1;
+                                    if (no < 64) objs[no++] = w->parts[q].obj_index;
+                                    break;
+                                }
                         }
-                        for (q = 0; q < w->part_count; q++) if (mark[q]) ((mech3d_part *)&w->parts[q])->hidden = 1;
-                        free(mark);
                     }
-                }
-                if (((d[20] | d[21] << 8) & 0x8000) && (d[18] & 0xf0) != 0x70)   /* a debris node (0x10025450 / 0x10015530) */
-                    for (q = 0; q < w->part_count; q++)
-                        if (w->parts[q].obj_index == a && strcmp(w->parts[q].rec, w->parts[i].rec) == 0) w->parts[q].gt_debris = 1;
-                /* 0x10046c20 takes no damage at 0 hit points or with flag 0x0004 (+20, the runtime "destroyed" bit);
-                 * flag 0x0400 (dropships, gunships, spheres) is only a type selector, not tested there */
-                /* things that take no damage (0 hit points, or flag 4) stay when they have a class: the objective nodes
-                 * attach them (0x1003ff60) - an indestructible protect target never fails, a scan target is inspected */
-                if ((hp <= 0 || (d[20] & 0x04)) && !(d[18] | d[19])) continue;
-                for (q = 0; q < w->part_count; q++)
-                    if (strcmp(w->parts[q].rec, w->parts[i].rec) == 0) {
-                        if (w->parts[q].obj_index == a) ia = q;
-                        if (w->parts[q].obj_index == b) ib = q;
-                    }
-                if (ia < 0) continue;
-                {
-                    struct msim_building *g = realloc(s->bld, (size_t)(s->bld_count + 1) * sizeof *g);
-                    if (!g) break;
-                    s->bld = g;
-                    g = &s->bld[s->bld_count++];
-                    g->intact = ia; g->destroyed = ib; g->hp = (hp <= 0 || (d[20] & 0x04)) ? 0x7fffffff : hp; g->inspected = 0;
-                    g->type = d[18] | d[19] << 8;   /* +18: the thing's class bits (0x1003ddf0 widens them) */
-                    g->flags = d[20] | d[21] << 8;   /* +20: the thing record's flags word (0x1003eb97): targeting 0x400 / 0x800 / 0x1000 (0x1001d2d0) */
-                    g->side = affl < 0 || affl >= 64 ? 2 : team_all[affl];   /* 0x10019060: no team -> 2, else the team's alliance */
-                    {   /* broad phase: the intact model's world box */
-                        const mech3d_part *pp = &w->parts[ia];
-                        int v, j;
-                        for (j = 0; j < 3; j++) { g->mn[j] = 1e30f; g->mx[j] = -1e30f; }
-                        if (pp->model.object_count > 0)
-                            for (v = 0; v < pp->model.objects[0].vert_count; v++) {
-                                float q3[3];
-                                part_vertex(pp, &pp->model.objects[0].verts[v], q3);
-                                for (j = 0; j < 3; j++) { if (q3[j] < g->mn[j]) g->mn[j] = q3[j]; if (q3[j] > g->mx[j]) g->mx[j] = q3[j]; }
-                            }
-                    }
-                    snprintf(g->name, sizeof g->name, "%.22s", (const char *)d + 24);
-                    snprintf(g->sub, sizeof g->sub, "%.22s", (const char *)d + 46);
+                    for (q = 0; q < w->part_count; q++) if (mark[q]) ((mech3d_part *)&w->parts[q])->hidden = 1;
+                    free(mark);
                 }
             }
-            free(c);
+            if (((d[20] | d[21] << 8) & 0x8000) && (d[18] & 0xf0) != 0x70)   /* a debris node (0x10025450 / 0x10015530) */
+                for (q = 0; q < w->part_count; q++)
+                    if (w->parts[q].obj_index == a && strcmp(w->parts[q].rec, w->parts[i].rec) == 0) w->parts[q].gt_debris = 1;
+            /* 0x10046c20 takes no damage at 0 hit points or with flag 0x0004 (+20, the runtime "destroyed" bit);
+             * flag 0x0400 (dropships, gunships, spheres) is only a type selector, not tested there */
+            /* things that take no damage (0 hit points, or flag 4) stay when they have a class: the objective nodes
+             * attach them (0x1003ff60) - an indestructible protect target never fails, a scan target is inspected */
+            if ((hp <= 0 || (d[20] & 0x04)) && !(d[18] | d[19])) continue;
+            for (q = 0; q < w->part_count; q++)
+                if (strcmp(w->parts[q].rec, w->parts[i].rec) == 0) {
+                    if (w->parts[q].obj_index == a) ia = q;
+                    if (w->parts[q].obj_index == b) ib = q;
+                }
+            if (ia < 0) continue;
+            {
+                struct msim_building *g = realloc(s->bld, (size_t)(s->bld_count + 1) * sizeof *g);
+                if (!g) break;
+                s->bld = g;
+                g = &s->bld[s->bld_count++];
+                g->intact = ia; g->destroyed = ib; g->hp = (hp <= 0 || (d[20] & 0x04)) ? 0x7fffffff : hp; g->inspected = 0;
+                g->type = d[18] | d[19] << 8;   /* +18: the thing's class bits (0x1003ddf0 widens them) */
+                g->flags = d[20] | d[21] << 8;   /* +20: the thing record's flags word (0x1003eb97): targeting 0x400 / 0x800 / 0x1000 (0x1001d2d0) */
+                g->side = affl < 0 || affl >= 64 ? 2 : team_all[affl];   /* 0x10019060: no team -> 2, else the team's alliance */
+                const mech3d_part *part = &w->parts[ia];
+                if (part_box(part, g->mn, g->mx) != 0)
+                    for (int axis = 0; axis < 3; axis++)
+                        g->mn[axis] = g->mx[axis] = (float)part->pos[axis];
+                snprintf(g->name, sizeof g->name, "%.22s", (const char *)d + 24);
+                snprintf(g->sub, sizeof g->sub, "%.22s", (const char *)d + 46);
+            }
         }
-        prj_record_free(&r);
     }
+    bwd_mission_free(&mission);
 }
 
 /* the engine's collision-list insertion order (msim clist_seq): the loader 0x1003de10 handles a record's chunks in

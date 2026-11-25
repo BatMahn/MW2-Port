@@ -157,6 +157,24 @@ static void pick_current(mtbl_logic *ml)
     }
 }
 
+/* Retain a hidden, untimed protection guard as a failure condition until the
+ * other primary objectives complete. A script with an explicit completion
+ * instruction still owns the guard's successful transition. */
+static int standing_protection(const mtbl_logic *ml, int node)
+{
+    const mtbl_node *n = &ml->tables[0].nodes[node];
+    if (n->kind != MTBL_K_PROTECT || (int32_t)n->delay >= 0 || n->text[0] ||
+        ml->shown[0][node] || ml->state[0][node] != MTBL_ACTIVE) return 0;
+    for (int t = 0; t < ml->table_count; t++)
+        for (int k = 0; k < ml->tables[t].node_count; k++) {
+            const mtbl_node *order = &ml->tables[t].nodes[k];
+            if (order->other_table == 0 &&
+                (order->kind == MTBL_K_STAR_WIN ||
+                 (order->kind == MTBL_K_SUCCEED && order->other_node == node))) return 0;
+        }
+    return 1;
+}
+
 void mtbl_logic_step(mtbl_logic *ml, int32_t now, const mtbl_world *w)
 {
     int t, i, changed = 1, guard = 0;
@@ -267,13 +285,20 @@ void mtbl_logic_step(mtbl_logic *ml, int32_t now, const mtbl_world *w)
     /* per-star mission result (engine 0x1000a9b0): every main ('M') node done -> success; any failed
      * -> failure; else the table's time limit -> time exceeded */
     for (t = 0; t < ml->table_count; t++) {
-        int all = 1, failed = 0;
+        int all = 1, failed = 0, guard = -1, objective_done = 0;
         if (ml->result[t]) continue;
         for (i = 0; i < ml->tables[t].node_count; i++) {
-            if (ml->tables[t].nodes[i].objective != 'M' || ml->state[t][i] == MTBL_OK) continue;
+            const mtbl_node *n = &ml->tables[t].nodes[i];
+            if (n->objective != 'M') continue;
+            if (ml->state[t][i] == MTBL_OK) {
+                if (n->kind != MTBL_K_START) objective_done = 1;
+                continue;
+            }
+            if (t == 0 && standing_protection(ml, i)) { guard = i; continue; }
             all = 0;
             if (ml->state[t][i] == MTBL_FAILED) failed = 1;
         }
+        if (guard >= 0 && !objective_done) all = 0;
         if (all || ml->force_win) ml->result[t] = 2;
         else if (failed) ml->result[t] = 3;
         /* the time limit (0x1000a9b0: limit <= now_s - star start, now_s = clock / 181; DOS 0x16e80 the same, clock / 182): the star's
