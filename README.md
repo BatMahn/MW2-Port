@@ -1,43 +1,50 @@
 # MechWarrior 2 (DOS, 1995) - native port
 
 A native reimplementation of MechWarrior 2: 31st Century Combat, rebuilt module by module from the original
-MW2.EXE / MW2SHELL.EXE and the 3D editions' MW2.DLL. Portable C99, builds on macOS, Linux and Windows - 64-bit, and
-(from v1.1.2) a 32-bit legacy build for Windows XP-era PCs, so the port is no longer 64-bit only. You need your own copy
-of the game (see "Setting up the game folder").
+MW2.EXE / MW2SHELL.EXE and the 3D editions' combat DLLs. The port builds on macOS, Linux and Windows, with a 32-bit
+legacy build for Windows XP-era PCs. You need your own copy of the game. [Game folder setup](FOLDER_SETUP.md)
 
-## Status (2026-11-24, v1.1.59)
-Complete and playable on macOS, Linux and Windows. Tagged releases (`v*`) are built by GitHub Actions: a macOS app,
-a Linux tarball, a Fedora RPM, a Windows zip and a Windows legacy zip (32-bit, Windows XP and newer, OpenGL 1.2).
-New, and **ALPHA**: a classic Mac OS build for PowerPC Macs (Mac OS 9 / CarbonLib, Mac OS X 10.1-10.4) - it has had
-almost no testing on real hardware; see "The classic Mac build (ALPHA)".
+## Status (v2.4)
+
+Both single-player campaigns, Cadet Training and Instant Action are playable on macOS, Linux and Windows. GitHub Actions
+builds tagged releases for Apple Silicon macOS, Linux x86-64, Fedora x86-64, Windows x64, and legacy Windows x86.
+The classic PowerPC Mac build is **alpha** and has had limited testing on real hardware. v2.4 packages compile out
+development switches, scripted test input and routine diagnostic logging. [Changelog](CHANGELOG.md#v24)
 
 - **Shell:** clan halls, both campaigns, Instant Action, Cadet Training, Mech Lab, Combat Variables, Cockpit Controls,
   Hall of Honor, the roster and both clans' Archives. The pilot-name easter-egg mechs (Elemental, Tarantula, Battle
   Master IIC) are unlocked everywhere at their real tonnage.
-- **Simulation:** every mission, with AI, mission logic, combat, heat, movement, jump jets, HUD, autopilot and
-  path-driven dropships / convoys; dropships and gunships fly at their original heights. Locked missiles home on the
-  target's centre; destroyed buildings stay destroyed.
+- **Simulation:** mission AI, objectives, combat, heat and jump jets, including scripted dropship, gunship and convoy
+  routes. DOS AI uses the original firing deadlines and backs out of steep slopes when it gets pinned. Titanium
+  single-player combat uses the weapon data and volley timing from the original `BATTLE.DLL`.
 - **Look:** chosen in Combat Variables with two settings. RENDERER: ENHANCED (the default: 3Dfx look + PowerVR fog), DOS,
   3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE or RENDITION (the Titanium disc's Rendition Verite renderer; needs the Titanium files). TEXTURES: ORIGINAL (each renderer's own textures, sky and
-  ground) or TITANIUM (with the Titanium disc's files, its own models and lighting). Each look follows its own edition's
-  code: the DOS look's cockpit and HUD match DOSBox pixel for pixel; the 3D looks draw, filter and light their textures
-  as their editions did (the Rendition look from the code only - no hardware to compare with).
+  ground) or TITANIUM (with the Titanium disc's files, its own models and lighting). The DOS look uses the original
+  cockpit layouts and palette. The 3D looks reproduce edition-specific filtering and lighting, with hardware
+  comparisons still open for some effects.
 - **Graphics (from v1.1.0):** drawn through SDL3's GPU API - Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal
   on macOS. The legacy Windows build (from v1.1.2) draws with OpenGL 1.2's fixed-function pipeline instead, for the
   cards of the XP years (see "System requirements").
-- **Sound:** the original's volumes, stereo pans and distance delay; CD music from your own rips; MIDI through the
-  MT-32 emulator, the Roland SC-55 emulator (Nuked SC-55, from v1.1.3) or Gravis UltraSound patches (the GUS synth
-  follows the original ULTRA.MDI driver).
+- **Sound:** positional audio, menu ambience and voice cues, CD music from your own rips, and menu MIDI through MT-32
+  emulation, Nuked SC-55 or Gravis UltraSound patches. Menu regressions cover title and Archive ambience, door
+  transitions, spoken announcements and volume controls.
 - **Input:** keyboard, mouse and joystick, with the original's key rates and mouse scaling; the external camera (C) and
   every view control as in the original.
 - **Cheat codes (from v1.1.17):** the Windows 95 edition's codes, typed in a mission with Ctrl, Alt and Shift held
   (see "Cheat codes" under "Playing").
 
-Game values are traced from the original code or measured in DOSBox. What is still assumed is listed at the end of
-ASSUMPTIONS.md ("Open items"); [KNOWN_ISSUES.md](KNOWN_ISSUES.md) is the plain-language list of what is still open.
-AUDIT.md is the audit log. Test suites: `make check`, `make test_sequences` (scripted play sequences, 270 of them) and
-`make sweep` (single-player mission objectives, with NetMech records reported as skipped).
-For local NetMech objective checks with AI pilots, pass `-offline-net -no-fallback` and the scene names to `sweep_objectives`.
+**Verified on Linux.** All 319 scripted OpenGL sequences and five focused software Vulkan checks passed. The
+automated objective sweeps completed all 59 DOS missions under sanitizers and all 54 scenes listed by the original
+Titanium single-player shells. Apache and Cali also completed offline NetMech checks with local AI.
+[DOS audit](docs/AUDIT_DOS.md)
+
+**Still open.** Live NetMech sessions and side-by-side combat in the original Windows game need verification.
+DOS replay comparisons still have gaps around later aircraft routes, AI target handoffs and the ordering of sound
+and combat events. Native 4K DOS performance on Apple Silicon still needs hardware measurements.
+[Known issues](KNOWN_ISSUES.md)
+
+Run `make check` for core tests, `make test_sequences` for scripted play and `make sweep` for single-player objectives.
+For offline NetMech checks with AI pilots, pass `-offline-net -no-fallback` and the scene names to `sweep_objectives`.
 
 ## System requirements
 
@@ -52,7 +59,7 @@ The normal builds (64-bit) draw through SDL3's GPU API, so they need a graphics 
 Older cards - the GeForce 8 to 500 series, Radeon HD 2000 to 6000, Intel before Haswell (Windows) - can't run it.
 On Windows, install the card maker's driver: Windows' basic display driver has neither Direct3D 12 nor Vulkan. When
 neither starts, the game says so in a message box; on Linux, `vulkaninfo --summary` (package vulkan-tools) shows the
-Vulkan drivers installed. The game prints which interface it started (`gpu: Vulkan (...)` on stdout). These minimums
+Vulkan drivers installed. Development builds print the active interface (`gpu: Vulkan (...)` on stdout). These minimums
 are with SDL3 3.4 (the release builds); built against an older SDL3, Vulkan also needs depthClamp, shaderClipDistance and
 drawIndirectFirstInstance, Direct3D 12 resource binding tier 2 (no Haswell / Broadwell) and Metal a Mac2-family GPU. A grey sky and
 ground with untextured models means the `3d/` folder is missing, not an old card (see "The 3D data" below).
@@ -71,8 +78,8 @@ A modern PC should use the normal build.
 | Colour | 32-bit desktop with a 24-bit depth buffer, else 16-bit (5-6-5) with a 16-bit depth buffer |
 
 The legacy build has no multisampling (the RESOLUTION row's AA steps do nothing) and shows `GPU OPENGL`; the menus
-draw with SDL's OpenGL renderer (its software renderer if that can't start). It prints `gpu: OpenGL (...)` with the
-card, the driver's version, the colour / depth bits and the texture limit. Not yet tested on real Windows XP hardware
+draw with SDL's OpenGL renderer (its software renderer if that can't start). Development builds print
+`gpu: OpenGL (...)` with the card, driver version, colour and depth bits, and texture limit. Testing on real Windows XP hardware is pending
 (KNOWN_ISSUES.md). The legacy build has no Roland SC-55 menu music (the emulator needs most of a modern CPU core, and it
 keeps that build lean): it plays the menu music on the MT-32 or the Gravis UltraSound patches.
 
@@ -251,8 +258,8 @@ greyed when there is only one). The change takes effect when you leave Combat Va
 device starts and the song playing before starts again on it (the SC-55 after its boot, about a second). Or
 `menu_music=` in the settings file - `auto` (the default) takes the first whose files are there, in the order MT-32,
 SC-55, Gravis UltraSound, so adding `sc55/` changes nothing while `mt32/` is there; `menu_music=sc55` (or `mt32`, `gus`)
-picks one, and falls back to auto's choice if its files are missing. The start-up line says which: `menu music Roland
-SC-55mk2 (ROMs from ...)`.
+picks one, and falls back to auto's choice if its files are missing. Development builds report the selected device
+at startup, for example `menu music Roland SC-55mk2 (ROMs from ...)`.
 
 The emulator runs the unit's chips cycle by cycle and needs a good part of one modern CPU core while music plays (it
 runs on its own thread, a short queue ahead of the sound output; it sleeps when no music plays, e.g. during missions).
