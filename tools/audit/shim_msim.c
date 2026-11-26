@@ -1,6 +1,32 @@
 /* shim_msim.c - the port's msim.c with its statics reachable, for tools/audit/simdiff.py */
 #include "../../src/msim.c"
 void shim_set_dos(int on) { msim_dos_int = on; }
+
+int shim_projected_face(const float *vertices, int count, int a, int b, float x, float y)
+{
+    cpoly_t face = {.n = count};
+    memcpy(face.v, vertices, (size_t)count * sizeof face.v[0]);
+    return cpoly_in(&face, a, b, x, y);
+}
+
+void shim_dos_splash_lifetime(int type, const int *frames, int count, int *applied, int *active)
+{
+    msim *s = calloc(1, sizeof *s);
+    combat_damage_live = 1;
+    s->splash = 1;
+    s->player_radius = 1;
+    for (int i = 0; i < 8; i++) s->player_unit.armor[i] = 100;
+    const float pos[3] = {0};
+    s->dos_frame_ticks = frames[0];
+    effect(s, type, pos, 0);
+    for (int frame = 0; frame < count; frame++) {
+        const float armour = s->player_unit.armor[1] + s->player_unit.armor[2];
+        area_damage(s, (float)frames[frame]);
+        applied[frame] = armour > s->player_unit.armor[1] + s->player_unit.armor[2];
+        active[frame] = s->area_count;
+    }
+    free(s);
+}
 float shim_servo(float cur, float tgt, float T, float ticks) { return drive_servo(cur, tgt, T, ticks); }
 int32_t shim_dos_drive_servo(int32_t value, int32_t target, int ticks, int tau) { return dos_drive_servo(value, target, ticks, tau); }
 void shim_dos_drive_frame(int32_t current, int32_t target, int32_t speed, int32_t factor,
@@ -56,6 +82,34 @@ int shim_dos_warning_roll(unsigned *index, int weapon, int level)
     int react = dos_warning_roll(&s, weapon, level);
     *index = s.dos_random_index;
     return react;
+}
+
+int shim_dos_volley_handoff(const int *frames, int count, int *events)
+{
+    msim s = {0};
+    combat_unit *unit = &s.player_unit;
+    dos_random_init(&s);
+    s.dos_random_index = 2;
+    unit->weapon_count = 2;
+    for (int i = 0; i < unit->weapon_count; i++) {
+        unit->weapons[i].weapon = 2;
+        unit->weapons[i].state = CW_READY;
+        unit->weapons[i].ammo = 100;
+    }
+    int used = 0;
+    for (int frame = 0; frame < count; frame++, frames += 4) {
+        const int target = frames[1];
+        unit->ai_trigger = frames[0];
+        unit->ai_sel = frames[2];
+        unit->lock_target = target;
+        int started = combat_ai_trigger(unit);
+        if (started >= 0 && dos_warning_roll(&s, started, 1)) events[used++] = 0x100 * frame + 0x80 + target;
+        combat_tick(unit, (float)frames[3] / 182.0f, frames[3]);
+        int homing;
+        while (combat_next_projectile_h(unit, NULL, NULL, &homing) >= 0)
+            events[used++] = 0x100 * frame + homing;
+    }
+    return used;
 }
 
 static void record_selection_sound(void *user, int sound, const float pos[3])

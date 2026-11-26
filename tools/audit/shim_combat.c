@@ -5,6 +5,47 @@ combat_unit *shim_unit_new(void) { combat_unit *u = calloc(1, sizeof *u); return
 void shim_unit_free(combat_unit *u) { free(u); }
 void shim_set_dos(int on) { combat_dos = on; }
 
+void shim_titanium_weapon(int profile, int weapon, float values[13])
+{
+    combat_titanium = (enum titanium_combat)profile;
+    sim_weapon spec = weapon_spec(weapon);
+    const float fields[] = {
+        spec.repeat, spec.per_volley, spec.speed, spec.drop, spec.field3c, spec.range,
+        spec.ammo_per_ton, spec.refire, spec.interval, spec.life, spec.damage, spec.heat, spec.target_heat,
+    };
+    memcpy(values, fields, sizeof fields);
+}
+
+void shim_titanium_volley(int profile, int weapon, int age, int ticks, int shots, float values[3])
+{
+    combat_titanium = (enum titanium_combat)profile;
+    combat_unit unit = {.weapon_count = 1};
+    combat_weapon *slot = &unit.weapons[0];
+    slot->weapon = weapon;
+    slot->ammo = -1;
+    slot->state = CW_FIRING;
+    slot->shots = shots;
+    slot->t = (float)age;
+    combat_tick(&unit, 0.0f, ticks);
+    values[0] = (float)slot->pulses_due;
+    values[1] = slot->t;
+    values[2] = unit.heat;
+}
+
+int shim_dos_volley_sounds(const int weapons[2], const int ages[2], const int shots[2], int ticks, int output[16])
+{
+    combat_unit unit = {.weapon_count = 2};
+    int count = 0, first, weapon;
+    for (int i = 0; i < 2; i++) {
+        unit.weapons[i] = (combat_weapon){.weapon = weapons[i], .state = CW_FIRING, .ammo = -1,
+                                        .shots = shots[i], .t = (float)ages[i]};
+    }
+    combat_tick(&unit, 0.0f, ticks);
+    while ((weapon = combat_next_projectile_ex(&unit, &first)) >= 0)
+        if (first) output[count++] = combat_weapon_sound(weapon);
+    return count;
+}
+
 int shim_dos_damage_shade(const int base[3], const int remaining[3], int divisor,
                           int previous, int damage, int rear, int loc)
 {

@@ -4,13 +4,17 @@ Open issues in the port. Technical details and evidence are in [ASSUMPTIONS.md](
 [the DOS parity audit](docs/AUDIT_DOS.md).
 
 ## Open
-- **DOS mission parity**. Bronze Anvil's two gunships, simultaneous contact ordering and debris landing
-  on slopes have recorded checks. Live comparisons with the original DOS game still have gaps for
-  aircraft routes beyond the captured departures, AI target handoffs and debris spawn timing.
-  See the DOS parity audit.
-- **Titanium simulation**. All 54 single-player scenes in the original Titanium shell's campaign,
-  training, and Instant Action tables pass the objective sweep. Apache and Cali pass with local
-  AI opponents. Live network sessions and native Windows combat timing still need verification.
+- **DOS mission parity**. The Umber Wall comparison now follows the aircraft into the hangar
+  attack. Golden Spade matches its first 589 random draws and 24 debris spawns using the original
+  frame schedule with audio mixing disabled. The DOS dispatcher comparison verifies overlapping
+  LRM volleys through an AI target switch. Later Bronze Anvil routes and Golden Spade debris
+  bursts still diverge. Natural warning handoffs in stock missions still need a paired capture.
+  [DOS parity audit](docs/AUDIT_DOS.md)
+- **Titanium simulation**. The 8-bit and 16-bit editions use their original combat tables. All 54
+  single-player scenes pass the objective sweep with each disc archive. Isolated firing routines
+  match both DLLs. Full mission comparisons in the original Windows game and live NetMech
+  sessions still need verification. Apache and Cali pass with local AI opponents using the
+  configured Titanium game data.
 - **Classic Mac build (ALPHA)** - new, and has had almost no testing on a real PowerPC Mac: crashes, sound / music
   (QuickTime's synthesizer is untested) and display problems are expected. docs/CARBON.md lists what still needs
   checking on real hardware.
@@ -18,7 +22,6 @@ Open issues in the port. Technical details and evidence are in [ASSUMPTIONS.md](
   captures are needed to confirm the first texture upload across different approaches.
 - **Rendition look**. The GPU renderer uses an RGB565 frame when the device supports it. Antialiased lines,
   hardware dithering, and 8-bit fog precision remain open.
-- **3D collision**. The floating-point polygon boundary rule still needs comparison against the original.
 
 ## Other
 - **Graphics interfaces** - the game draws through SDL3's GPU API (Direct3D 12 / Vulkan on Windows, Vulkan on Linux,

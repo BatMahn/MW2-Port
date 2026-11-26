@@ -68,6 +68,7 @@ typedef struct anim_player {
     int32_t dos_step[ANIM_MAX_TRACKS];
     int dos_applied;             /* the DOS task ran its delta callbacks this frame */
     int dos_footstep;            /* the next controller update consumes object +0x80 bit 3 */
+    int dos_drive_slow;          /* object +0x80 bit 1, latched by an animation key */
     int32_t dos_rot[ANIM_MAX_TRACKS][9];
     unsigned dos_rot_left[ANIM_MAX_TRACKS];
 } anim_player;

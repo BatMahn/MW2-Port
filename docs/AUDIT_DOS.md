@@ -470,13 +470,17 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   damage, speed, ammunition, refire, projectile interval, and lifetime. The table starts at file offset
   `0xb4ff0` in the 8-bit DLL and `0xb51f8` in the 16-bit DLL. The Mercenaries runtime has a different table
   and a different numeric representation.
-- A Rendition launch and a mission loaded directly from the Titanium archive use Battle combat parameters.
-  The Enhanced renderer's optional Titanium textures remain a graphical choice. The mission keeps its
-  combat profile when the renderer changes. Asset sound and effect mappings follow the loaded game data.
+- The 8-bit Titanium launcher loads `BATTLE.DLL`. The unpacked 16-bit launcher loads `MERCSW.DLL`
+  at `0x401560`. Rendition uses the 16-bit profile. Both original Titanium mission archives have an
+  `MWK` directory, and the 16-bit archive has extended explosion frames including `A9EXBR32`.
+  Optional Titanium textures on the Enhanced renderer leave its combat profile intact. Graphics
+  changes during a mission retain its combat profile. Sound and effect slots follow the game data.
   The Battle controller accumulates whole ticks at `0x100612a4`, using the timer divisor registered at
   `0x1000c909`. The isolated Battle firing loop matched 136 release-count, carry, and heat cases
   with the projectile creation callback stubbed. Live Windows AI and projectile behavior still need
-  a paired mission capture.
+  a paired mission capture. The `MERCSW.DLL` firing loop at `0x1006c455` also adds the whole frame
+  ticks. `tools/audit/windiff.py` checks 13 fields per weapon against both tables and compares the
+  two firing loops with a stub for projectile creation.
 
 ### Verification
 
@@ -671,9 +675,15 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   applies gravity on the first player movement and rolls the timer afterward. The two departing
   aircraft match all 112 earlier horizontal positions through tick 1994. The extended replay
   compares 182 positions per aircraft through tick 5679 (31 seconds). The greatest horizontal
-  differences were 5 cm and 1 cm. Routes triggered by later objectives still need comparison.
+  differences were 5 cm and 1 cm. A second Umber Wall capture covers the order to attack the
+  hangar at tick 9310. The port had cleared the first order during the wingman's own update, then
+  issued both orders again a frame late. The leader now synchronizes the whole star's node
+  before assigning targets. Through tick 10983, maximum horizontal differences are 7 cm and
+  1.65 m. Later Bronze Anvil route comparisons still diverge after combat starts.
 - **Remaining pose comparisons.** The captured task order and pooled rotations are covered above.
-  Paired mission captures of detachment and world-fragment spawn timing still need broader coverage.
+  The stationary Golden Spade replay matches the first 24 pooled fragments through tick 3422,
+  including two reused body slots. Later bursts diverge. Native timing for detached limbs and
+  world fragments still needs more paired coverage.
 - **Scenery detail changes in live play.** The Silver Staff replay covers scenery before its first
   camera-range update. The selector has isolated executable comparisons. More live replays are
   needed for switches between nearer scenery models. The renderer now uses the same selection
@@ -682,17 +692,39 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   use the DOS table. The original sets an absolute firing deadline when it assigns a target
   (`0x22c56`) and compares it with the current tick in `0x2e860`. The port used to shorten
   the delay by the assigning frame's tick count. With the same disabled mixer and frame schedule,
-  Golden Spade now agrees on the first 212 draws through tick 1806, up from 12.
-  Later sound and combat-event ordering still needs comparison.
-- **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
-  start. The stock mission captures still lack a natural target handoff during an active volley.
-- **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's
-  IsPointInFaceXZ shows the 3D engines use the same rule in floats; switching the 3D looks to it changed where a
-  jetting mech comes to rest under AQUA's dropship wing (the airborne_move_3d sequence), so they keep the even-odd rule
-  until they get an audit of their own.
+  Golden Spade now agrees on the first 589 draws through the opening of tick 3572. The next
+  native draw selects a weapon for the second attacker. The port's attacker is facing 127.9°
+  at that point, against 165.6° in the capture, and fails the firing angle check.
+- **Live AI warning timing.** The full DOS weapon dispatch loop at `0x52080` matches the port
+  when an AI changes targets and starts a second LRM volley while its first is still active.
+  Each release retains its slot's original homing reference, and the second warning uses the
+  new target. The stock mission captures still lack a natural warning handoff during an active volley.
 - **Dropship aim and projectile convergence.** Golden Spade has a paired turret servo capture,
   and Sable Flame has a port regression from aim through player impact. Paired DOS captures of
   the full firing path across other missions still need coverage.
+
+### Projected collision faces and DOS effects
+
+- The 16-bit Titanium executable's face tests at `0x1001941a`, `0x10019730` and `0x10019a46`
+  use a half-open bounds check and visit edges in reverse order. The interpolated crossing
+  is compared as a signed floating-point distance. All 20,285 projected-face cases match,
+  including concave outlines, corners, edge points and both windings.
+- DOS weapon dispatch sets a shared first-shot flag when it visits a fresh volley
+  (`0x5242f`). The next successful release consumes it (`0x524bc`), including a release from
+  another slot. The differential test covers both slot orders and waiting volleys.
+- DOS effect lifetimes come from `0x9f900`. Creation at `0x5137e` adds the creating frame's ticks.
+  `0x515c0` visits effect slots in order, applies splash damage, then subtracts the current
+  frame's ticks. `0x517c0` visits unit slots in reverse order. At `0x51186` the effect admission
+  check uses the integer distance estimate instead of Euclidean distance.
+- `0x25740` detaches destroyed locations during the damage call. The port now creates those
+  bodies before allocating an impact's effects or moving on to the next splash recipient.
+- The animation task sets the slow-drive flag before movement. The unit controller reads it at
+  `0x27f1a`, after movement, and sets the servo period to 91 ticks. Applying it during the
+  animation task slowed a unit one movement update early. The Bronze Anvil and Umber Wall
+  replays again match their recorded aircraft positions within their original tolerances.
+- In the DOS Maroon Flower sweep, the contact trace showed the waiting pilot blocking the
+  limousine as it turned toward Nav Omicron. The sweep pilot now steps aside for protected
+  units on a direct route. The convoy finished in 271.1 seconds with zero fallbacks.
 
 
 ### Mixed Titanium archive follow-up

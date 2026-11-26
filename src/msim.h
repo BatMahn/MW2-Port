@@ -101,6 +101,7 @@ typedef struct {
     uint16_t     dos_random[127]; /* Watcom draws, seeded once and reused by DOS rand (0x4a070). */
     unsigned     dos_random_index;
     int          dos_boot_ticks;  /* startup time before the first supplied simulation frame */
+    int          dos_frame_ticks;
     int32_t      dos_gaussian[128];
     unsigned     dos_gaussian_index;
     msim_shot    shots[MSIM_MAX_SHOTS];
@@ -284,7 +285,7 @@ typedef struct {
     msim_aim     player_aim;       /* the player's aim range servos (unit +0xa8 / +0x98) */
     /* area damage (0x10046490 -> 0x10046700): live effects of the damaging types (0x1025b180) with their place, radius
      * (the effect object's geometry +0x40) and end tick; Combat Variables SPLASH DAMAGE (MW2DIF +2, DAT_1024ac6c + 2) */
-    struct msim_area { int type; float pos[3], r; int32_t end; } area[64];
+    struct msim_area { int type, dos_slot; float pos[3], r; int32_t end, dos_ticks_left; } area[64];
     int          area_count, splash;
     float        fx_radius[32];
     msim_aim    *aim;              /* per actor: the same (stepped as each projectile leaves, 0x10043e2d) */
@@ -357,7 +358,7 @@ extern const char *const MSIM_FORMATION_TEXT[7]; /* "Echelon Left" .. "No Format
 
 /* actors from world3d_actors(); the sim does not own them. */
 void msim_set_dos(int dos);   /* select edition rules before loading a mission */
-void msim_use_titanium_combat(int enabled);
+void msim_use_titanium_16bit(int enabled);
 int  msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count);
 /* Count whole 182 Hz clock ticks crossed by a frame. */
 static inline int msim_dos_frame_ticks(int32_t now, int32_t dt_ms)

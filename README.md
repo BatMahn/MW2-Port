@@ -16,7 +16,8 @@ development switches, scripted test input and routine diagnostic logging. [Chang
   Master IIC) are unlocked everywhere at their real tonnage.
 - **Simulation:** mission AI, objectives, combat, heat and jump jets, including scripted dropship, gunship and convoy
   routes. DOS AI uses the original firing deadlines and backs out of steep slopes when it gets pinned. Titanium
-  single-player combat uses the weapon data and volley timing from the original `BATTLE.DLL`.
+  single-player combat uses the weapon data and volley timing from `BATTLE.DLL` with the 8-bit archive and
+  `MERCSW.DLL` with the 16-bit archive or Rendition.
 - **Look:** chosen in Combat Variables with two settings. RENDERER: ENHANCED (the default: 3Dfx look + PowerVR fog), DOS,
   3DFX, ATI RAGE, S3 VIRGE, POWERVR, MATROX MYSTIQUE or RENDITION (the Titanium disc's Rendition Verite renderer; needs the Titanium files). TEXTURES: ORIGINAL (each renderer's own textures, sky and
   ground) or TITANIUM (with the Titanium disc's files, its own models and lighting). The DOS look uses the original

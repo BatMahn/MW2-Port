@@ -66,6 +66,7 @@ typedef struct {
     int   state, shots, pulses_due;
     int   ammo;         /* projectiles left; -1 = energy weapon (no ammunition) */
     int   volley_start; /* the next projectile released is the volley's first (plays the sound) */
+    int   dos_volley_marker; /* this slot sets the DOS dispatcher's shared first-shot flag */
     uint32_t item;      /* MEK item id of this weapon instance */
     float t;            /* ticks into the current state */
     float t10;          /* slot +0x10 as the release loop finds it: the volley timer before this frame's ticks (0x100437a0) */
@@ -201,7 +202,8 @@ extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 
 extern float combat_test_wheat[COMBAT_WEAPON_COUNT];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
                                         table (DOSBox: MW2.EXE copy, the large pulse laser's heat 3.5 -> 85 at file 0xb1f24) */
 extern int combat_dos;             /* DOS combat rules and weapon data */
-extern int combat_titanium;        /* Titanium single-player weapon data */
+enum titanium_combat { TITANIUM_COMBAT_NONE, TITANIUM_COMBAT_BATTLE, TITANIUM_COMBAT_MERCSW };
+extern enum titanium_combat combat_titanium;
 extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
 /* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */

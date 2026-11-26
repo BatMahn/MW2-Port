@@ -19,6 +19,12 @@ static const int TABLE[FX_TYPES][3] = {   /* duration, sound, light */
     {36, -1, 0}, {36, -1, 0},
 };
 
+/* DOS MW2.EXE 0x9f900, first field of the 28-byte effect records. */
+static const int dos_duration[FX_TYPES] = {
+    273, 273, 273, 254, 254, 91, 582, 400, 91, 163, 0, 1820, 400, 582, 72, 72,
+    72, 109, 145, 364, 364, 582, 5460, 36, 36, 72, 36, 36, 36, 36, 36, 36,
+};
+
 /* engine weapon table 0x1025a6c0 (0x58 per weapon): +0x08, +0x0c */
 static const signed char MUZZLE[31][2] = {
     {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27}, {26, 27},
@@ -28,7 +34,7 @@ static const signed char MUZZLE[31][2] = {
 };
 int fx_muzzle(int weapon, int k) { return weapon >= 0 && weapon < 31 && (k == 0 || k == 1) ? MUZZLE[weapon][k] : -1; }
 
-int fx_duration(int type) { return type >= 0 && type < FX_TYPES ? TABLE[type][0] : 0; }
+int fx_duration(int type, int dos) { return type >= 0 && type < FX_TYPES ? (dos ? dos_duration[type] : TABLE[type][0]) : 0; }
 int fx_sound(int type) { return type >= 0 && type < FX_TYPES ? TABLE[type][1] : -1; }
 int fx_light(int type) { return type >= 0 && type < FX_TYPES ? TABLE[type][2] : 0; }
 
@@ -201,21 +207,30 @@ int fx_load(prj_archive *a, fx_defs *d)
 }
 
 int fx_detail_low;
-int fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_t now)
+int fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_t now, int dos)
 {
     int k, alive = 0, near = 0, free_i = -1, slot;
     uint32_t used = 0;
-    if (type < 0 || type >= FX_TYPES || d->slots[type] <= 0 || fx_duration(type) <= 0) return -1;
+    const int duration = fx_duration(type, dos);
+    if (duration <= 0 || d->slots[type] <= 0) return -1;
     for (k = 0; k < FX_LIVE; k++) {
         const fx_live *e = &w->e[k];
         if (!e->alive) { if (free_i < 0) free_i = k; continue; }
         if (e->type != type) continue;
         alive++;
         if (e->slot >= 0 && e->slot < 32) used |= 1u << e->slot;
-        if (type < 0x17) {   /* 0x10045d00: neighbours of the type within 5 m (0x102485f0) - DISPLAY DETAIL high allows two
-                              * (three together), low none */
+        if (type < 0x17) {   /* High detail allows two existing neighbours within 5 m, low detail allows none. */
             float dx = e->pos[0] - pos[0], dy = e->pos[1] - pos[1], dz = e->pos[2] - pos[2];
-            if (dx * dx + dy * dy + dz * dz < 500.0f * 500.0f && ++near > (fx_detail_low ? 0 : 2)) return -1;
+            int nearby;
+            if (dos) {   /* 0x51186 measures distance as (4 * max + mid + min) / 4. */
+                dx = fabsf((float)(int32_t)e->pos[0] - (float)(int32_t)pos[0]);
+                dy = fabsf((float)(int32_t)e->pos[1] - (float)(int32_t)pos[1]);
+                dz = fabsf((float)(int32_t)e->pos[2] - (float)(int32_t)pos[2]);
+                nearby = dx + dy + dz + 3.0f * fmaxf(dx, fmaxf(dy, dz)) < 2000.0f;
+            } else {
+                nearby = dx * dx + dy * dy + dz * dz < 500.0f * 500.0f;
+            }
+            if (nearby && ++near > (fx_detail_low ? 0 : 2)) return -1;
         }
     }
     if (alive >= d->slots[type] || free_i < 0) return -1;   /* no free pool slot of the type */
@@ -225,7 +240,7 @@ int fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_
     w->e[free_i].alive = 1;
     memcpy(w->e[free_i].pos, pos, sizeof w->e[free_i].pos);
     w->e[free_i].start = now;
-    w->e[free_i].end = now + fx_duration(type);
+    w->e[free_i].end = now + duration;
     return free_i;
 }
 

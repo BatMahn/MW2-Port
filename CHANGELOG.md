@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.5 (2026-11-26)
+
+- **3D collision.** Use the original projected face test for terrain and object boundaries, including edge hits and the original winding order.
+- **Titanium combat.** Select the combat table used by each Titanium launcher. The 8-bit build uses `BATTLE.DLL`, and the 16-bit build and Rendition use `MERCSW.DLL`. Weapon range and projectile gravity now follow the selected table.
+- **DOS combat audio.** Preserve the original first-shot sound flag across slots when one volley starts while another releases a round.
+- **DOS effects.** Use the DOS effect lifetimes and apply splash damage on the frame an effect expires.
+- **DOS aircraft.** Apply the animation-driven servo slowdown after movement so the Bronze Anvil and Umber Wall aircraft follow their recorded routes.
+- **DOS mission orders.** Apply the new mission node to the entire star before the leader issues orders. Wingmen retain the first order when a route changes, including the hangar attack in Umber Wall.
+- **DOS explosions.** Include the creating frame in the splash lifetime, apply damage in pool order, and use the original distance test for nearby effects. Detach destroyed parts before allocating the impact effect. Golden Spade matches the first 24 recorded debris spawns and physics slots.
+
+Linux verification passed all 321 OpenGL sequences, three focused Vulkan replays for the DOS comparisons, and all 59 DOS objective sweeps under sanitizers. All 54 stock Titanium scenes passed with each original archive. The objective sweep pilot now gives the Maroon Flower limousine room to pass while it waits near Nav Omicron.
+
 ## v2.4
 
 - **Release builds.** Compile out the game and map viewer's debug switches, scripted input, and diagnostic output. Strip debug symbols and check the binaries before packaging.

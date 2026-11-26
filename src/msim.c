@@ -377,11 +377,11 @@ static void cb_finished(void *u, int t, int i, int ok)
     }
 }
 
-static int titanium_combat_requested;
+static int titanium_16bit_requested;
 
-void msim_use_titanium_combat(int enabled)
+void msim_use_titanium_16bit(int enabled)
 {
-    titanium_combat_requested = enabled;
+    titanium_16bit_requested = enabled;
 }
 
 void msim_set_dos(int dos)
@@ -554,9 +554,18 @@ static void dos_init_anim_order(msim *s, const bwd_mission *mission)
 
 int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count)
 {
-    /* The stock Titanium mission archive adds the MWK directory. A renderer
-     * switch inside a mission never reselects its combat rules. */
-    combat_titanium = !msim_dos_int && (titanium_combat_requested || prj_find_type(a, "MWK") >= 0);
+    /* MWK identifies the Titanium archives. The 16-bit archive has
+     * extended explosion frames, including A9EXBR32. Rendition can also
+     * select the 16-bit engine when the mission uses an older archive. */
+    combat_titanium = TITANIUM_COMBAT_NONE;
+    if (!msim_dos_int) {
+        if (titanium_16bit_requested) combat_titanium = TITANIUM_COMBAT_MERCSW;
+        else if (prj_find_type(a, "MWK") >= 0) {
+            const int cel = prj_find_type(a, "CEL");
+            combat_titanium = cel >= 0 && prj_find_id(a, cel, "A9EXBR32") >= 0
+                              ? TITANIUM_COMBAT_MERCSW : TITANIUM_COMBAT_BATTLE;
+        }
+    }
     int player_table;
     bwd_mission m;
     prj_record rec;
@@ -1346,6 +1355,35 @@ static int on_target(const msim *s, int q, int code)   /* +0x14e == the target *
     if ((code >> 16) == 2) return (m->state == AI_TARGET || m->state == AI_ATTACK) ? m->tgt == (code & 0xffff) - 1 : m->node_tgt == code;
     return m->node_tgt == code;
 }
+
+static void sync_unit_node(msim *s, int i, int cur)
+{
+    if (!s->seen_node || s->seen_node[i] == cur) return;
+    const world_actor *ac = &s->actors[i];
+    ai_mind *m = &s->minds[i];
+    const mtbl_node *node = cur >= 0 ? &s->logic.tables[ac->table].nodes[cur] : NULL;
+    const uint32_t kind = node ? node->kind : 0;
+    s->seen_node[i] = cur;
+    m->lock_bits = node && node->lock == 1 ? 2 : node && node->lock == 2 ? 1 : 0;
+    /* DOS 0x23c34: a node change leaves a pushed state alone. */
+    if (msim_dos_int && m->counter) return;
+    if (kind & 0x400) {
+        m->state = AI_REST;
+        m->target = 0;
+        ai_power_down(s, i);
+    } else if (kind & (0x800 | 0x10)) {
+        m->state = AI_SHUTDOWN;
+        m->target = 0;
+        ai_power_down(s, i);
+    } else {
+        ai_wake(s, i);
+        if (m->state == AI_FOLLOW || m->state == AI_PATROL) guard_drop(m);
+        m->state = ac->leader ? AI_IDLE : AI_FOLLOW;
+        m->target = 0;
+        m->node_tgt = 0;
+    }
+}
+
 static void node_assign(msim *s, int table, int leader)
 {
     int cur = table < s->logic.table_count ? s->logic.current[table] : -1;
@@ -1546,6 +1584,8 @@ static void debris_start_motion(msim *s, msim_debris *d, int32_t radius, const m
         }
         for (int axis = 0; axis < 3; axis++) d->dos_spin[axis] = dos_gauss(s) * 0x7e98 / 1024;
         d->dos_bottom = radius / 2;
+        if (d->dos_chunk && mw2_development_env("MW2_DEBRIS_TRACE") && atoi(mw2_development_env("MW2_DEBRIS_TRACE")) > 1)
+            fprintf(stderr, "chunk %d body %d\n", msim_dos_frame_ticks(0, s->now), d->dos_body);
         return;
     }
     d->v[0] = gauss(&s->rng) * 5.5f;
@@ -1609,15 +1649,33 @@ static void aim_trace(const msim *s, const msim_shot *sh, const char *what, cons
 static int missile_fx(int weapon) { int v = combat_weapon_visual(weapon); return v >= 0 && ((v & 0xff) == 3 || (v & 0xff) == 4); }
 /* effect types whose live effect damages the units round it (0x1025b180: +0x18 of the 0x1025b168 rows) */
 static const unsigned char AREA_TYPE[32] = {0,0,0,1, 1,0,1,1, 0,0,0,0, 1,1,0,0, 0,1,0,1, 1,1,1,0, 0,0,0,0, 0,0,0,0};
+static void blow_off_unit(msim *s, int unit);
 static void effect(msim *s, int type, const float p[3], int chunks)
 {
     s->fx_refused = 0;
     if (s->on_effect) s->on_effect(s->shot_user, type, p);
     if (chunks && !s->fx_refused) spawn_debris(s, 4, p);
     if (!s->fx_refused && type >= 0 && type < 32 && AREA_TYPE[type] && s->area_count < (int)(sizeof s->area / sizeof s->area[0])) {
-        struct msim_area *a = &s->area[s->area_count++];
+        int index = s->area_count, slot = 0;
+        if (msim_dos_int) {
+            /* MW2_SHT1 groups damaging effects by type. 0x51153 chooses
+             * the first free slot of that type, and 0x515e5 visits slots in order. */
+            index = 0;
+            while (index < s->area_count && s->area[index].type < type) index++;
+            while (index < s->area_count && s->area[index].type == type && s->area[index].dos_slot == slot) {
+                index++;
+                slot++;
+            }
+            memmove(s->area + index + 1, s->area + index, (size_t)(s->area_count - index) * sizeof s->area[0]);
+        }
+        s->area_count++;
+        struct msim_area *a = &s->area[index];
+        a->dos_slot = slot;
         a->type = type; memcpy(a->pos, p, sizeof a->pos); a->r = s->fx_radius[type];
-        a->end = (int32_t)((int64_t)s->now * 182 / 1000) + fx_duration(type);
+        a->dos_ticks_left = fx_duration(type, msim_dos_int);
+        a->end = msim_dos_frame_ticks(0, s->now) + a->dos_ticks_left;
+        /* At 0x5137e DOS adds the creating frame's ticks to the lifetime. */
+        if (msim_dos_int) a->dos_ticks_left += s->dos_frame_ticks;
     }
 }
 /* 0x10046490, every frame: each live effect of a damaging type, with SPLASH DAMAGE on (DAT_1024ac6c + 2), calls
@@ -1634,8 +1692,12 @@ static void effect(msim *s, int type, const float p[3], int chunks)
  * head, a wreck twice that - 0x10046700's loop (see area_damage) */
 static void units_in_radius(msim *s, const float pos[3], float r, float base)
 {
-    int u, l;
-    for (u = -1; u < s->actor_count; u++) {
+    for (int slot = 0; slot <= s->actor_count; slot++) {
+        int u = slot - 1;
+        if (msim_dos_int) {
+            const int index = s->actor_count - slot - 1;
+            u = index >= 0 && s->dos_anim_order ? s->dos_anim_order[index] : index;
+        }
         combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
         float x = u < 0 ? s->player[0] : (float)s->actors[u].mech.origin[0], z = u < 0 ? s->player[2] : (float)s->actors[u].mech.origin[2];
         float y = cu->y + (u < 0 ? s->player_centre_h : s->centre_h ? s->centre_h[u] : 550.0f), rr = u < 0 ? s->player_radius : (s->radius ? s->radius[u] : 450.0f), dx = x - pos[0], dy = y - pos[1], dz = z - pos[2];
@@ -1647,11 +1709,13 @@ static void units_in_radius(msim *s, const float pos[3], float r, float base)
             float p0 = fabsf(dx), p1 = fabsf(dy), p2 = fabsf(dz), q;
             if (p0 < p1) { q = p0; p0 = p1; p1 = q; }
             if (p0 < p2) { q = p0; p0 = p2; p2 = q; }
-            if ((p0 * 4.0f + p1 + p2) * 0.25f >= rr + r) continue;
+            const float distance = (p0 * 4.0f + p1 + p2) * 0.25f;
+            if (msim_dos_int ? (int32_t)distance >= (int32_t)rr + (int32_t)r : distance >= rr + r) continue;
         }
         /* the head: half (3Dfx 0x10046700: / DAT_102485f8 = 2.0); a quarter in DOS (MW2.EXE 0x517c0: 0x26270(iVar4 >> 2, 1)) */
         combat_damage_at(cu, msim_dos_int ? d / 4.0f : d / 2.0f, 1, &s->rng);
-        for (l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
+        for (int l = 2; l <= 8; l++) combat_damage_at(cu, d, l, &s->rng);
+        if (msim_dos_int) blow_off_unit(s, u);
     }
 }
 static void part_vertex(const mech3d_part *p, const wtb_vertex *v, float out[3]);
@@ -1708,8 +1772,14 @@ static void area_damage(msim *s, float ticks)
     int k;
     for (k = 0; k < s->area_count; ) {
         struct msim_area *a = &s->area[k];
-        if (now >= a->end) { s->area[k] = s->area[--s->area_count]; continue; }
+        if (!msim_dos_int && now >= a->end) { s->area[k] = s->area[--s->area_count]; continue; }
         if (s->splash) units_in_radius(s, a->pos, a->r, ticks / 256.0f);
+        /* DOS 0x51684 subtracts elapsed ticks after applying this frame's damage. */
+        if (msim_dos_int && (a->dos_ticks_left -= (int32_t)ticks) <= 0) {
+            s->area_count--;
+            memmove(a, a + 1, (size_t)(s->area_count - k) * sizeof *a);
+            continue;
+        }
         k++;
     }
 }
@@ -1769,16 +1839,21 @@ static void blow_off(msim *s, int unit, unsigned mask, unsigned old)
         d->until = now + (msim_dos_int ? 0xe38 : 0xe24);
     }
 }
+static void blow_off_unit(msim *s, int unit)
+{
+    if (!s->fly_seen || (unit >= 0 && !s->armed[unit])) return;
+    const combat_unit *cu = unit < 0 ? &s->player_unit : &s->units[unit];
+    const unsigned mask = mech3d_fly_mask(cu->loc_gone);
+    unsigned *seen = &s->fly_seen[unit + 1];
+    if (mask != *seen) {
+        blow_off(s, unit, mask, *seen);
+        *seen = mask;
+    }
+}
+
 static void blow_offs(msim *s)
 {
-    int u;
-    if (!s->fly_seen) return;
-    for (u = -1; u < s->actor_count; u++) {
-        const combat_unit *cu = u < 0 ? &s->player_unit : &s->units[u];
-        unsigned mask = mech3d_fly_mask(cu->loc_gone);
-        if (u >= 0 && !s->armed[u]) continue;
-        if (mask != s->fly_seen[u + 1]) { blow_off(s, u, mask, s->fly_seen[u + 1]); s->fly_seen[u + 1] = mask; }
-    }
+    for (int u = -1; u < s->actor_count; u++) blow_off_unit(s, u);
 }
 
 /* DOS 0x2b930: integrate the bottom of the object's sphere in whole centimetres,
@@ -2554,7 +2629,7 @@ static void actors_animate(msim *s, float dt, int dos_ticks)
                 s->on_sound(s->shot_user, 0x103, p3);
             }
             /* a key flagged 0x10 (object +0x80 bit 1): the drive servo's T becomes 90.5 ticks for good (0x1001a180) */
-            if ((ev & ANIM_EV_SLOW) && m && (msim_dos_int || fabsf(m->speed) > 1.0f)) s->minds[i].drive_slow = 1;
+            if (!msim_dos_int && (ev & ANIM_EV_SLOW) && m && fabsf(m->speed) > 1.0f) s->minds[i].drive_slow = 1;
             ac->t = s->anim_pl[i].t;
         }
         if (mw2_development_env("MW2_ANIM_TRACE") && i == atoi(mw2_development_env("MW2_ANIM_TRACE")))   /* tests: one actor every step */
@@ -2573,6 +2648,7 @@ void msim_step(msim *s, int32_t dt_ms)
     mtbl_world w;
     float dt = (float)dt_ms / 1000.0f;
     int dos_ticks = msim_dos_frame_ticks(s->now, dt_ms);
+    s->dos_frame_ticks = dos_ticks;
     int first_frame = s->now == 0;
     int i;
     w.user = s; w.targets = cb_targets; w.finished = cb_finished; w.started = cb_started;
@@ -2694,22 +2770,14 @@ void msim_step(msim *s, int32_t dt_ms)
             prog = ac->leader ? LEAD[order] : FOLL[order];
             if (prog == AIP_DEFLT) prog = -1;          /* DEFLT already in slot 0 */
         }
-        if (!in_star && s->seen_node && cur != s->seen_node[i]) {   /* 0x10014520 on the star's node change */
-            uint32_t kn = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].kind : 0;
-            int lk = cur >= 0 ? s->logic.tables[ac->table].nodes[cur].lock : 0;
-            s->seen_node[i] = cur;
-            m->lock_bits = lk == 1 ? 2 : lk == 2 ? 1 : 0;   /* +0x152 = (+0x152 & ~3) | 0x100146e0(node +0xb7) | 0x40 */
-            /* DOS MW2.EXE 0x23c34..0x23c97: with a state pushed (+0x13c) the node's (state, target) goes to the stack slot
-             * instead - the unit keeps what it is doing (a unit woken on the player stays on it when its hold node ends) */
-            if (msim_dos_int && m->counter) {}
-            else if (kn & 0x400) { m->state = AI_REST; m->target = 0; ai_power_down(s, i); }
-            else if (kn & (0x800 | 0x10)) { m->state = AI_SHUTDOWN; m->target = 0; ai_power_down(s, i); }
-            else {   /* the leader idles, the members follow; the node's targets come one a tick (node_assign) */
-                ai_wake(s, i);
-                if (m->state == AI_FOLLOW || m->state == AI_PATROL) guard_drop(m);   /* the exit (0x10013680 -> 0x10013e90) */
-                m->state = ac->leader ? AI_IDLE : AI_FOLLOW; m->target = 0; m->node_tgt = 0;
-            }
+        if (!in_star && msim_dos_int && l == ac && s->seen_node && s->seen_node[i] != cur) {
+            /* The whole star enters its new node before the leader dispatches
+             * the first order. A later controller must retain that order. */
+            for (int member = 0; member < s->actor_count; member++)
+                if (s->actors[member].table == ac->table && s->armed[member] && !s->units[member].destroyed)
+                    sync_unit_node(s, member, cur);
         }
+        if (!in_star) sync_unit_node(s, i, cur);
         if (m->progs[1] != prog) {
             m->progs[1] = prog;
             /* engine 0x10014520 on a node change: kind 0x400 -> rest (10), 0x800 -> shutdown (11); otherwise the leader
@@ -3100,6 +3168,8 @@ void msim_step(msim *s, int32_t dt_ms)
         if (msim_dos_int) {
             dos_ai_fire_decision(s, i, &v, enemy_who);
             dos_ai_weapon_step(s, i, dt, dos_ticks, starting);
+            /* DOS 0x27f1a samples the key's drive flag after this frame's move. */
+            if (s->anim_pl && s->anim_pl[i].dos_drive_slow) m->drive_slow = 1;
             /* 0x27b5d consumes the footstep flag set in this frame’s task pass. */
             if (s->anim_pl && s->anim_pl[i].dos_footstep) {
                 s->anim_pl[i].dos_footstep = 0;
@@ -4392,6 +4462,8 @@ static void combat_actor_shots(msim *s, int i, float lock_ticks)
             if (shot) {
                 shot->first = first;
                 shot->life -= combat_last_age;   /* lifetime less the carry already spent in the weapon slot */
+                if (mw2_development_env("MW2_AI_AIM_TRACE"))
+                    fprintf(stderr, "aishot %u actor %d w %d carry %.0f\n", shot->id, i, w, combat_last_age);
             }
         }
         if (!msim_dos_int && who >= 0 && (msim_weapon_guided(w) || w == 0x15)) {   /* 0x10020ac0 from 0x1004397b */
@@ -4493,7 +4565,7 @@ static void combat_step(msim *s, int32_t dt_ms, int dos_ticks)
             s->nuke_max = 400000.0f;
             for (k = 0; k < s->area_count; k++) if (s->area[k].type == 0x16) { s->nuke_max = s->fx_radius[0x16] * 100.0f; break; }
             s->nuke_pos[0] = (float)s->actors[u].mech.origin[0]; s->nuke_pos[1] = cu->y; s->nuke_pos[2] = (float)s->actors[u].mech.origin[2];
-            s->nuke_left = (float)fx_duration(0x16) * 2.0f;
+            s->nuke_left = (float)fx_duration(0x16, msim_dos_int) * 2.0f;
             s->nuke_r = 0;
             effect(s, 0x16, s->nuke_pos, 0);
         } else if (!cu->destroyed && s->armed[u]) {
@@ -4782,17 +4854,17 @@ static void projectile_step(msim *s, float ticks, int dos_ticks)
             for (int axis = 0; axis < 3; axis++) hp[axis] = msim_dos_int ? dos_unit_contact[axis] : o[axis] + dv[axis] * tbest;
             float th = hit_unit == -1 ? s->player_facing : s->actors[hit_unit].mech.heading;
             float dir = atan2f(sh->vx, sh->vz) * 180.0f / 3.14159265f;
-            int gone_before[8], li;
             int was = tu->destroyed, dealt;
-            memcpy(gone_before, tu->loc_gone, sizeof gone_before);
             if (hit_unit == -1 && mw2_development_env("MW2_TEST_PLHIT_GROUP")) hit_group = atoi(mw2_development_env("MW2_TEST_PLHIT_GROUP"));   /* TEST ONLY: the location struck */
             if (hit_unit == -1 && mw2_development_env("MW2_AI_AIM_TRACE")) {   /* TEST ONLY: where the player was struck (right, up, forward of the player) */
                 float hx = hp[0] - s->player[0], hz = hp[2] - s->player[2], fh = s->player_facing * 3.14159265f / 180.0f;
-                fprintf(stderr, "plhit %.2f from %d w %d group %d right %.0f up %.0f fwd %.0f\n", s->now / 1000.0, sh->owner, sh->weapon, hit_group,
-                        hx * cosf(fh) - hz * sinf(fh), hp[1] - s->player_unit.y, hx * sinf(fh) + hz * cosf(fh));
+                fprintf(stderr, "plhit %.2f from %d w %d group %d right %.0f up %.0f fwd %.0f age %.0f shot %u\n", s->now / 1000.0, sh->owner, sh->weapon, hit_group,
+                        hx * cosf(fh) - hz * sinf(fh), hp[1] - s->player_unit.y, hx * sinf(fh) + hz * cosf(fh), sh->age, sh->id);
             }
             dealt = combat_hit(tu, sh->weapon, hit_group, th - dir, &s->rng);
-            (void)gone_before; (void)li;   /* the blown-off parts: blow_offs, each step */
+            /* DOS 0x25740 detaches destroyed locations in the damage call,
+             * before the impact effect can reserve its own body slots. */
+            if (msim_dos_int) blow_off_unit(s, hit_unit);
             s->hits++;
             if (hit_unit >= 0) {   /* career counters (MW2CAR.CFG) */
                 /* each counter is a triple: enemy, neutral, friendly (engine 0x102441d5 / d7 / d9) */
@@ -5143,27 +5215,14 @@ static void cpoly_fill(cpoly_t *c, const mech3d_part *wp, const wtb_poly *pg, co
     }
 }
 
-/* point in polygon on two axes (DOS MW2.EXE 0x1ca00 x / z, 0x1cd60 y / z, 0x1cbb0 x / y - the GBL port's emulated comparison; MW2.EXE the same code, simdiff seg_poly; the 3Dfx DLL's 0x10010a90 /
- * 0x100110d0 / 0x10010db0): a vertex on each side of the point on both axes first (else out); then the edges (v[n-1],
- * v[0]), (v[n-2], v[n-1]) .. (v[0], v[1]) whose y range holds y (ends included; an edge starting at y is skipped, so a
- * vertex at y counts once) are classed left / right of the point: the first of each side is noted, a second on the side
- * already seen gives out, one on the other side gives in. A point ON an edge or a corner - the crossing at x, or on a
- * flat edge at y between its ends - is in. The port had the even-odd rule, which leaves a point on the outline out
- * (simdiff seg_poly: 80 of 2000 corner / edge hits) */
+/* Projected face test: DOS 0x1ca00, 3Dfx 0x10010a90, Titanium 16-bit
+ * 0x1001941a. The bounds test uses [min, max) on each axis. Visit the
+ * edges in reverse order, stopping at the first crossing on each side
+ * or rejecting a second crossing on the same side. */
 static int cpoly_in(const cpoly_t *p, int a, int b, float x, float y)
 {
     int k, bits = 0, left = 0, right = 0;
     const float *Q;
-    if (!msim_dos_int) {   /* the 3D looks: the even-odd crossing rule as before (the engines' rule, demech2 IsPointInFaceXZ,
-                            * is the same as DOS's, but its floats were not compared, and AQUA's dropship wing then
-                            * holds a jetting mech 73 cm up - the airborne_move_3d sequence; left for a 3D-look audit) */
-        int i, j, c = 0;
-        for (i = 0, j = p->n - 1; i < p->n; j = i++) {
-            const float *P = p->v[i], *R = p->v[j];
-            if ((P[b] > y) != (R[b] > y) && x < (R[a] - P[a]) * (y - P[b]) / (R[b] - P[b]) + P[a]) c = !c;
-        }
-        return c;
-    }
     if (p->n < 3) return 0;
     for (k = p->n - 1; k >= 0 && bits != 0xf; k--) {
         bits |= x < p->v[k][a] ? 2 : 1;
@@ -5176,6 +5235,8 @@ static int cpoly_in(const cpoly_t *p, int a, int b, float x, float y)
         int side;   /* -1 left, 1 right */
         if (!((y <= P[b] || y <= Q[b]) && (P[b] <= y || Q[b] <= y))) continue;
         if (y == P[b] && P[b] == Q[b]) {
+            if (!msim_dos_int)
+                return fminf(P[a], Q[a]) <= x && x <= fmaxf(P[a], Q[a]);
             if (P[a] < x && Q[a] < x) return 0;
             if (P[a] <= x) return 1;
             return x < Q[a] ? 0 : 1;
@@ -5184,9 +5245,17 @@ static int cpoly_in(const cpoly_t *p, int a, int b, float x, float y)
         if (P[a] < x && Q[a] < x) side = -1;
         else if (x < P[a] && x < Q[a]) side = 1;
         else {
-            float xi = truncf((Q[a] - P[a]) * (y - P[b]) / (Q[b] - P[b])) + P[a];   /* (the 64-bit idiv truncates) */
-            if (xi == x) return 1;
-            side = xi < x ? -1 : 1;
+            float delta;
+            if (msim_dos_int) {
+                float xi = truncf((Q[a] - P[a]) * (y - P[b]) / (Q[b] - P[b])) + P[a];
+                delta = xi - x;
+            } else {
+                /* Store the signed distance once, after the interpolation. */
+                delta = (float)((((double)Q[a] - P[a]) * ((double)y - P[b])) /
+                                ((double)Q[b] - P[b]) + ((double)P[a] - x));
+            }
+            if (delta == 0.0f) return 1;
+            side = delta < 0.0f ? -1 : 1;
         }
         if (side < 0) { if (left) return 0; if (right) return 1; left = 1; }
         else { if (right) return 0; if (left) return 1; right = 1; }

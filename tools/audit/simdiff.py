@@ -1526,6 +1526,139 @@ def dos_volley_warning_order(rep, rnd, n):
 
 
 @test
+def dos_splash_lifetime(rep, rnd, n):
+    """A new effect includes the creating frame, then damages units before aging."""
+    e = emu()
+    dif_block(e, heat=0)
+    pool = 1404912
+    obj, model = e.alloc(128), e.alloc(80)
+    e.w32(obj + 108, model)
+    e.w32(model + 64, 1)
+    e.stub(0x51f50)
+    e.stub(0x5166f + 673)
+    e.stub(0x51684 - 153732)
+    e.stub(0x51747 - 210327)
+    applied = []
+    e.stub(0x517c0, lambda _: applied.append(1) or 0, pops=4)
+    shim = lib('msim').shim_dos_splash_lifetime
+    for case in range(n):
+        effect_type = rnd.choice((3, 4, 6, 7, 12, 13, 17, 19, 20, 21))
+        duration = e.r32(0x9f900 + effect_type * 28)
+        batch = [rnd.randint(1, 40) for _ in range(10)]
+        batch.extend((max(1, duration - sum(batch[1:]) + case % 2), 1, 20))
+        seen, active = (ctypes.c_int * len(batch))(), (ctypes.c_int * len(batch))()
+        shim(effect_type, (ctypes.c_int * len(batch))(*batch), len(batch), seen, active)
+        for offset, value in ((0, obj), (16, duration + batch[0]), (20, 1), (32, effect_type)):
+            e.w32(pool + offset, value)
+        for j, ticks in enumerate(batch):
+            applied.clear()
+            e.w32(TICKS, ticks)
+            e.call(0x515c0)
+            expected = (len(applied), int(e.r32(pool + 20) != 0))
+            rep.check(expected == (seen[j], active[j]),
+                      (effect_type, 'batch', batch[:j + 1], expected, (seen[j], active[j])))
+
+
+@test
+def dos_volley_sound_order(rep, rnd, n):
+    """0x52080 shares the first-shot flag between weapon slots until a round is released."""
+    e = emu()
+    ctrl, obj, inputs, slots, eye = (e.alloc(size) for size in (0x200, 0x200, 64, 1040, 12))
+    e.w32(ctrl, obj)
+    e.w32(ctrl + 84, slots)
+    e.w32(ctrl + 160, 2)
+    e.w32(obj + 4, 1)
+    e.w32(obj + 76, inputs)
+    e.w32(0x9701c, eye)
+    e.w32(PLAYER, 0)
+    for i in range(10):
+        e.w32(slots + i * 104 + 4, -1)
+    e.stub(0x52620, ret=1)
+    e.stub(0x52486 - 5254)
+    e.stub(0x52493 - 5267)
+    sounded = []
+    e.stub(0x40cf0, lambda em: sounded.append(em.reg('ecx')) or 0, pops=4)
+    shim = lib('combat').shim_dos_volley_sounds
+    pairs = ctypes.c_int * 2
+    for _ in range(n * 12):
+        weapons = rnd.sample([0, 2, 4, 25, 26], 2)
+        ages, shots = [], []
+        for i, weapon in enumerate(weapons):
+            spec = 0x9ee58 + weapon * 88
+            salvos, interval = e.r32(spec + 28), e.r32(spec + 72)
+            remaining = rnd.choice((salvos, salvos, salvos - 1))
+            age = rnd.choice((0, 1, interval - 1))
+            shots.append(remaining)
+            ages.append(age)
+            for offset, value in ((4, weapon), (8, 2), (16, age), (36, remaining)):
+                e.w32(slots + 104 * i + offset, value)
+        ticks = rnd.choice((1, 8, 12, 22, 51))
+        e.w32(TICKS, ticks)
+        sounded.clear()
+        e.call(0x52080, eax=ctrl)
+        output = (ctypes.c_int * 16)()
+        count = shim(pairs(*weapons), pairs(*ages), pairs(*shots), ticks, output)
+        rep.check(sounded == list(output[:count]),
+                  (weapons, ages, shots, ticks, sounded, list(output[:count])))
+
+
+@test
+def dos_volley_handoff(rep, rnd, n):
+    """Run the native dispatcher as an AI switches targets during overlapping LRM volleys."""
+    e = emu()
+    ctrl, obj, inputs, slots, eye = (e.alloc(size) for size in (0x200, 0x200, 64, 1040, 12))
+    e.w32(ctrl, obj)
+    e.w32(ctrl + 0x54, slots)
+    e.w32(ctrl + 0xa0, 2)
+    e.w32(obj + 4, 3)
+    e.w32(obj + 0x10, 2)
+    e.w32(obj + 0x4c, inputs)
+    e.w8(obj + 0x198, 4)
+    e.w32(PLAYER, 0)
+    e.w32(0x9701c, eye)
+    for i in (1, 2):
+        target = e.alloc(0x200)
+        e.w32(0xf8a40 + 4 * i, target)
+        e.w32(target + 0x16e, 4)  # already jumping, so avoid running the reaction
+    def round_fired(em):
+        fired = em.reg('edx')
+        events.append(256 * frame + em.r32(fired + 0x18))
+        return 1
+    def warned(_uc, _addr, _size, _data):
+        events.append(256 * frame + 128 + (e.reg('eax') & 255))
+    e.uc.hook_add(UC_HOOK_CODE, warned, begin=0x2e4cb, end=0x2e4cb)
+    e.stub(0x52620, round_fired)
+    e.stub(0x528b0)
+    e.stub(0x51000)
+    e.stub(0x40cf0, pops=4)
+    shim = lib('msim').shim_dos_volley_handoff
+    for _ in range(n):
+        e.call(0x49fe0, eax=0)
+        e.w32(0x9e8f4, 2)
+        e.w32(ctrl + 0x10c, 0x80)
+        for i in range(10):
+            slot = slots + 104 * i
+            for offset, value in ((4, 2 if i < 2 else -1), (8, 1), (16, 0), (24, 0),
+                                  (28, 0), (32, 100), (36, 0)):
+                e.w32(slot + offset, value)
+        a, b = rnd.choice(((1, 2), (2, 1)))
+        frames = [(1, a, 0, rnd.randint(6, 10)), (0, b, 1, rnd.randint(6, 10)),
+                  (1, b, 1, rnd.randint(6, 10))]
+        frames += [(0, b, 1, rnd.randint(6, 25)) for _ in range(10)]
+        events = []
+        for frame, (trigger, target, slot, ticks) in enumerate(frames):
+            e.w8(inputs + 0x25, trigger)
+            e.w32(obj + 0xdc, 0x200 + target)
+            e.w32(ctrl + 0xac, slot)
+            e.w32(TICKS, ticks)
+            e.call(0x52080, eax=ctrl)
+        frame_args = (ctypes.c_int * (4 * len(frames)))(*(v for row in frames for v in row))
+        actual = (ctypes.c_int * 64)()
+        length = shim(frame_args, len(frames), actual)
+        rep.check(events == list(actual[:length]), (frames, events, list(actual[:length])))
+
+
+@test
 def dos_weapon_selection_effects(rep, rnd, n):
     """Follow a successful selection into the forced-lock roll and ENEMYFIR cue."""
     e = emu()

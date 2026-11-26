@@ -1005,7 +1005,7 @@ static void on_effect(void *u, int type, const float pos[3])
     (void)u;
     if (!g_fx_ok) return;
     {
-        int fi = fx_spawn(&g_fxw, &g_fxd, type, pos, (int32_t)((int64_t)g_sim.now * 182 / 1000));
+        int fi = fx_spawn(&g_fxw, &g_fxd, type, pos, (int32_t)((int64_t)g_sim.now * 182 / 1000), msim_dos_int);
         if (fi < 0) { g_sim.fx_refused = 1; return; }   /* nor its chunks */
         g_fxw.e[fi].has_rot = g_sim.fx_rot_ok;   /* a muzzle flash / jet flame: its mount node's orientation (0x10044a70) */
         if (g_sim.fx_rot_ok) memcpy(g_fxw.e[fi].rot, g_sim.fx_rot, sizeof g_fxw.e[fi].rot);
@@ -4985,7 +4985,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                         m.parts[q].objtype, m.parts[q].obj_index, m.parts[q].parent_obj, m.parts[q].pos[0], m.parts[q].pos[1], m.parts[q].pos[2], m.parts[q].hidden);
         }
         g_exit_fade_t0 = -1;
-        msim_use_titanium_combat(g_edition == PORTCFG_ED_RENDITION);
+        msim_use_titanium_16bit(g_edition == PORTCFG_ED_RENDITION);
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */

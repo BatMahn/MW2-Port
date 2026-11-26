@@ -409,6 +409,32 @@ static void hold_clear_of_protected_things(msim *s, const mtbl_table *table)
     }
 }
 
+static void hold_clear_of_escort_route(msim *s, const mtbl_table *table)
+{
+    for (int i = 0; i < s->actor_count; i++) {
+        const world_actor *actor = &s->actors[i];
+        if (s->units[i].destroyed || !s->minds || s->minds[i].state != AI_GODIRECT) continue;
+        const float dx = s->player[0] - (float)actor->mech.origin[0];
+        const float dz = s->player[2] - (float)actor->mech.origin[2];
+        const float h = actor->mech.heading * PI_F / 180.0f;
+        const float sh = sinf(h), ch = cosf(h);
+        const float forward = dx * sh + dz * ch;
+        const float side = dx * ch - dz * sh;
+        const float clearance = s->player_radius + s->radius[i] + 500.0f;
+        if (forward < 0.0f || forward > clearance + 1500.0f || fabsf(side) >= clearance) continue;
+        for (int j = 0; j < table->node_count; j++) {
+            const mtbl_node *node = &table->nodes[j];
+            if (node->kind != MTBL_K_PROTECT || s->logic.state[0][j] != MTBL_ACTIVE ||
+                strcasecmp(node->target, actor->group) != 0) continue;
+            /* The waiting pilot can be parked on the very route it must protect. */
+            const float offset = copysignf(clearance, side) - side;
+            s->player[0] += ch * offset;
+            s->player[2] -= sh * offset;
+            return;
+        }
+    }
+}
+
 /* the posed parts' centre and height range (cm); returns 1 if the centre is more than 15 m from the unit's own point
  * (origin, unit height + half the model) - a model drawn away from where the sim keeps the unit */
 static int hull_centre(const msim *s, int e, float c[3], float *y0, float *y1)
@@ -859,6 +885,7 @@ static int run_scene(prj_archive *a, const char *scene)
         } else {
             idle_steps++;
             hold_clear_of_protected_things(&s, t0);
+            hold_clear_of_escort_route(&s, t0);
         }
 
         /* stay inside the mission area: every leave node of table 0 that is not itself the goal (the "going too far"

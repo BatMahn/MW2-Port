@@ -26,8 +26,6 @@ static int damage_roll(const combat_unit *u, unsigned *fallback, int limit)
     return limit > 0 && u->dos_roll ? (int)u->dos_roll(u->dos_roll_context, (unsigned)limit) : rand_n(fallback, limit);
 }
 
-static float range_cm(int w) { return (float)sim_weapons[w].range; }   /* table +0x40 */
-
 static inline sim_weapon weapon_spec(int w)
 {
     sim_weapon spec = sim_weapons[w];
@@ -40,20 +38,26 @@ static inline sim_weapon weapon_spec(int w)
         spec.heat = (float)dos->heat16 / 65536.0f;
         spec.ammo_per_ton = dos->ammo_per_ton;
     } else if (combat_titanium) {
-        const battle_weapon_values *battle = &battle_weapons[w];
-        spec.repeat = battle->repeat;
-        spec.per_volley = battle->per_volley;
-        spec.speed = battle->speed;
-        spec.damage = (float)battle->damage;
-        spec.heat = (float)battle->heat16 / 65536.0f;
-        spec.target_heat = (float)battle->target_heat16 / 65536.0f;
-        spec.ammo_per_ton = battle->ammo_per_ton;
-        spec.refire = battle->refire;
-        spec.interval = battle->interval;
-        spec.life = battle->life;
+        const titanium_weapon_values *ti = combat_titanium == TITANIUM_COMBAT_MERCSW
+                                          ? &mercsw_weapons[w] : &battle_weapons[w];
+        spec.repeat = ti->repeat;
+        spec.per_volley = ti->per_volley;
+        spec.speed = ti->speed;
+        spec.damage = ti->damage;
+        spec.heat = ti->heat;
+        spec.target_heat = ti->target_heat;
+        spec.ammo_per_ton = ti->ammo_per_ton;
+        spec.refire = ti->refire;
+        spec.interval = ti->interval;
+        spec.life = ti->life;
+        spec.range = ti->range;
+        spec.field3c = ti->min_range;
+        spec.drop = ti->drop;
     }
     return spec;
 }
+
+static float range_cm(int w) { return (float)weapon_spec(w).range; }
 
 /* The loadout rating (DOS 0x4cf20 -> object +0x14c; 3Dfx 0x10041c80 -> +0x150, called by 0x10041410 on the MEK
  * record): a 16-bit sum (wrapping), starting at the tonnage. For each of the 8 locations in turn: every
@@ -201,6 +205,9 @@ static int take_round(combat_unit *u, combat_weapon *cw)
 static void release_due(combat_unit *u, combat_weapon *cw)
 {
     const sim_weapon spec = weapon_spec(cw->weapon), *sw = &spec;
+    /* DOS 0x5242f sets the unit's flag even when a freshly started
+     * volley has yet to accumulate enough ticks to release a round. */
+    if (combat_dos && cw->shots == sw->per_volley) cw->dos_volley_marker = 1;
     while (cw->state == CW_FIRING && cw->shots > 0 && cw->t >= (float)sw->interval) {
         int ok = take_round(u, cw);
         /* 0x100437a0 calls the spawn (0x10043cc0) before it takes the interval off: the projectile's life is the
@@ -238,8 +245,8 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
 
 void combat_tick(combat_unit *u, float dt, int clock_ticks)
 {
-    /* DOS 0x52436 and Titanium BATTLE.DLL 0x100612a4 use the
-     * whole clock ticks crossed by this frame at the volley boundary. */
+    /* DOS 0x52436, BATTLE.DLL 0x100610a4 and MERCSW.DLL 0x1006c47d
+     * use the whole clock ticks crossed by this frame. */
     float ticks = combat_dos || combat_titanium ? (float)clock_ticks : dt * COMBAT_TICKS_PER_S, net;
     int i;
     if (u->destroyed) return;
@@ -253,6 +260,7 @@ void combat_tick(combat_unit *u, float dt, int clock_ticks)
     u->restarted = 0;
     for (i = 0; i < u->weapon_count; i++) {
         combat_weapon *cw = &u->weapons[i];
+        cw->dos_volley_marker = 0;
         if (cw->state < 0) continue;   /* destroyed by a critical hit, or out of ammunition */
         const int refire = weapon_spec(cw->weapon).refire;
         /* 0x100437a0 runs only while the mech is up (state 2): a volley's timer stands still while shut down; the
@@ -552,7 +560,7 @@ int combat_jet_refill_dos = 0;
 int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
 float combat_test_wheat[COMBAT_WEAPON_COUNT];   /* TEST ONLY */
 int combat_dos = 0;   /* combat rules and weapon data for the DOS edition */
-int combat_titanium = 0;
+enum titanium_combat combat_titanium = TITANIUM_COMBAT_NONE;
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 
 int combat_dos_damage_level(const combat_unit *u, int loc, int rear, int divisor)
@@ -789,19 +797,30 @@ int combat_next_projectile_at(combat_unit *u, int *first, int *loc) { return com
 float combat_last_age;
 int combat_next_projectile_h(combat_unit *u, int *first, int *loc, int *homing)
 {
-    int i, k;
-    for (i = 0; i < u->weapon_count; i++)
-        if (u->weapons[i].pulses_due > 0) {
-            combat_weapon *cw = &u->weapons[i];
+    int dos_first = 0;
+    for (int i = 0; i < u->weapon_count; i++) {
+        combat_weapon *cw = &u->weapons[i];
+        dos_first |= cw->dos_volley_marker;
+        if (cw->pulses_due > 0) {
+            int volley_start = cw->volley_start;
+            if (combat_dos) {
+                /* DOS 0x524bc consumes the flag on the next successful release
+                 * in slot order, including a release from a different volley.
+                 * The last ammunition round flies without consuming it. */
+                volley_start = dos_first && (cw->state >= 0 || cw->pulses_due > 1);
+                if (volley_start)
+                    for (int k = 0; k <= i; k++) u->weapons[k].dos_volley_marker = 0;
+            }
             combat_last_age = cw->pulse_age[0];   /* first due, first out */
-            for (k = 1; k < cw->pulses_due && k < 24; k++) cw->pulse_age[k - 1] = cw->pulse_age[k];
-            u->weapons[i].pulses_due--;
-            if (first) *first = u->weapons[i].volley_start;
-            u->weapons[i].volley_start = 0;
+            for (int k = 1; k < cw->pulses_due && k < 24; k++) cw->pulse_age[k - 1] = cw->pulse_age[k];
+            cw->pulses_due--;
+            if (first) *first = volley_start;
+            cw->volley_start = 0;
             if (loc) *loc = u->weapons[i].location;
             if (homing) *homing = u->weapons[i].homing;
             return u->weapons[i].weapon;
         }
+    }
     return -1;
 }
 
@@ -868,11 +887,11 @@ int combat_has_masc(const combat_unit *u)
     return 0;
 }
 
-int combat_weapon_min_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].field3c : 0; }
+int combat_weapon_min_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).field3c : 0; }
 float combat_weapon_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? range_cm(w) : 0; }
 float combat_weapon_speed(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? (float)weapon_spec(w).speed : 0; }
 int   combat_weapon_life(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).life : 0; }
-int   combat_weapon_drop(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].drop : 0; }
+int   combat_weapon_drop(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).drop : 0; }
 
 static int jets_held(const combat_unit *u, int jetting)
 {

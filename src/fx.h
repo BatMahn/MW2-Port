@@ -81,14 +81,14 @@ int  fx_muzzle(int weapon, int k);
 #define FX_JET 0x19   /* jump-jet flame (engine 0x1001bf90, at the two jet mounts while jetting) */
 
 /* engine table 0x1025b168 */
-int  fx_duration(int type);   /* ticks */
+int  fx_duration(int type, int dos);   /* ticks */
 int  fx_sound(int type);      /* SNDS index, -1 none */
 int  fx_light(int type);      /* lights its surroundings */
 
 /* Start an effect at pos (cm, game coordinates) at time `now` (ticks). Returns its index or -1
  * when the type has no free pool slot or two of it are already alive within 5 m. */
 extern int fx_detail_low;   /* DISPLAY DETAIL low: no neighbouring effects of a type within 5 m */
-int  fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_t now);
+int  fx_spawn(fx_world *w, const fx_defs *d, int type, const float pos[3], int32_t now, int dos);
 void fx_update(fx_world *w, int32_t now);
 /* The cel id an effect shows at `now` (looping its animation), -1 if none. */
 int  fx_frame(const fx_defs *d, const fx_live *e, int32_t now);

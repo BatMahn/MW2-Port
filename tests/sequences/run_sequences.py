@@ -2257,7 +2257,7 @@ def aqua_time_to_death(c):
     first_hit = next((float(l.split()[1]) for l in recorded.out.splitlines() if l.startswith('plhit ')), None)
     c(first_hit is not None and abs(first_hit - 2887 / 182) <= 0.02,
       'first player hit within 0.02 s of the recorded DOS hit', str(first_hit))
-    ttd, uac, reach = [], [], []
+    ttd, uac, flight_checks, long_shots = [], [], [], []
     # The DOS stream starts at the same index each mission. Frame cadence changes when each unit draws from it.
     for fps in (12, 14, 16, 18, 24, 30):
         r = c.run(suffix='_%d' % fps, secs=90, throttle=0, twist=0, mission='AQUASCN1', dos_look=True, dump='/1',
@@ -2270,17 +2270,25 @@ def aqua_time_to_death(c):
         e45 = min(end, 45.0)   # DOSBox counted 0-4 UAC sounds before deaths at ~25-60 s
         uac.append((sum(1 for f in aim if f[3] == '1' and f[5] == '19' and float(f[1]) < e45),
                     sum(1 for f in aim if f[3] == '1' and f[5] == '23' and float(f[1]) < e45)))
-        # each Stormcrow ER ML hit: the distance (eye to the player) of its last ER ML shot before it
+        # Match each hit to its own projectile since several shots can be in flight.
         ml = [(float(f[1]), math.hypot(float(f[15]) - 127500.0, float(f[17]) - 57000.0) / 100.0) for f in aim
               if f[3] == '1' and f[5] == '23']
+        launches = {}
         for l in r.out.splitlines():
+            if l.startswith('aishot '):
+                f = l.split()
+                if f[3] == '1' and f[5] == '23':
+                    launches[f[1]] = int(f[7])
             if l.startswith('plhit '):
                 f = l.split()
                 if f[3] == '1' and f[5] == '23':
-                    prev = [d for t, d in ml if t <= float(f[1])]
-                    if prev:
-                        reach.append(prev[-1])
-        reach.append(-max([d for t, d in ml if t < 23.0] or [0.0]))   # negative: the farthest shot before 23 s
+                    carry = launches[f[-1]]
+                    flight = int(f[-3])
+                    frame_ticks = math.ceil(182 * math.ceil(1000 / fps) / 1000)
+                    # The original checks impact before expiry on the final frame (0x5091c).
+                    limit = 182 - carry + frame_ticks - 1
+                    flight_checks.append((flight, limit, carry, frame_ticks))
+        long_shots.extend(d for t, d in ml if t < 23.0)
         if fps != 18:
             continue
         pre = r.before((dead[0] if dead else 90.0) - 1.0)
@@ -2297,11 +2305,11 @@ def aqua_time_to_death(c):
           ' DOSBox: arm hits within ~200 m)', '%s' % arm)
         c(by_hit or (len(arm) == 8 and arm[2] < full[2]), 'a critical ended it: the CT armour struck', '%s' % arm)
         c(aim and all(abs(float(f[19]) - float(f[21])) < 0.3 for f in aim), 'every AI aim ray along legs + lagged twist (no torso sway; the hips\' carried offsets)')
-    hits_d, far = [d for d in reach if d >= 0], [-d for d in reach if d < 0]
-    c(hits_d and max(hits_d) <= 380.0, 'ER ML hits only from within ~358 m (life 182 less the ~54-tick volley timer, 0x10043cc0)',
-      'farthest %.0f m' % max(hits_d or [0]))
-    c(far and max(far) >= 450.0, 'the Stormcrow fires the ER ML from beyond 450 m (DOSBox: from ~505 m, 21 s) - those miss',
-      '%s' % ['%.0f' % d for d in far])
+    outside = [(flight, limit, carry, ticks) for flight, limit, carry, ticks in flight_checks
+               if flight > limit or not 60 - ticks <= carry < 60]
+    c(flight_checks and not outside, 'each ER ML hit respects its DOS carry and final-frame lifetime', str(outside))
+    c(long_shots and max(long_shots) >= 450.0, 'the Stormcrow fires early ER ML shots from beyond 450 m',
+      'farthest %.0f m' % max(long_shots or [0]))
     # DOSBox produced a run that was still alive at the 90 s cutoff. Keep the median and early-death checks below.
     c(sum(22.0 <= t <= 90.0 for t in ttd) >= len(ttd) - 1 and all(t >= 22.0 for t in ttd),
       'all but at most one run ends within the DOSBox window', '%s' % ttd)
@@ -8647,15 +8655,17 @@ def bronze_anvil_aircraft_tracks_convoy(c):
       'the gunship plays CHPRANIM, whose keys set the DOS drive servo rate')
 
 
-def check_dos_aircraft_replay(c, capture_name, mission, aircraft):
+def check_dos_aircraft_replay(c, capture_name, mission, aircraft, audio_driver=None):
     with open(os.path.join(HERE, capture_name)) as capture:
         rows = [line.split() for line in capture if not line.startswith('#')]
     ticks = [int(row[0]) for row in rows]
     for actor, col, tolerance in aircraft:
-        expected = {int(row[0]): tuple(map(int, row[col:col+2])) for row in rows if row[col] != '-'}
+        expected = {int(row[0]): tuple(map(int, row[col:col+2])) for row in rows if len(row) > col and row[col] != '-'}
+        env = {'MW2_TEST_FRAME_TICKS': ' '.join(map(str, ticks)), 'MW2_WATCH_ACTOR': str(actor)}
+        if audio_driver:
+            env['SDL_AUDIODRIVER'] = audio_driver
         run = c.run('_%d' % actor, secs=ticks[-1]/182 + 0.01, throttle=0, twist=0, mission=mission,
-                    dos_look=True, mech='maddog/mdg00std', dump='/0.001',
-                    env={'MW2_TEST_FRAME_TICKS': ' '.join(map(str, ticks)), 'MW2_WATCH_ACTOR': str(actor)})
+                    dos_look=True, mech='maddog/mdg00std', dump='/0.001', env=env)
         seen = {state['now']*182//1000: (state['w_x'], state['w_z'])
                 for state in run.states if 'w_x' in state}
         missing = expected.keys() - seen.keys()
@@ -8676,6 +8686,26 @@ def bronze_anvil_native_flight(c):
 def umber_wall_native_takeoff(c):
     """A landing before the player's startup roll shifts both aircraft's timers in stock DOS."""
     check_dos_aircraft_replay(c, 'umber_dos_flight.txt', 'UMBESCN1', ((5, 1, 5), (6, 3, 1)))
+
+
+@sequence
+def umber_wall_native_attack_route(c):
+    """The two gunships switch from the waypoint to the hangar attack in the native order."""
+    check_dos_aircraft_replay(c, 'umber_dos_attack.txt', 'UMBESCN1', ((5, 1, 7), (6, 3, 165)), audio_driver='none')
+
+
+@sequence
+def golden_spade_native_chunk_spawns(c):
+    """The opening combat spawns the same debris groups on the original frame schedule."""
+    with open(os.path.join(HERE, 'gold_dos_chunk_ticks.txt')) as capture:
+        ticks = capture.read()
+    run = c.run(secs=3422 / 182 + 0.01, throttle=0, twist=0, mission='GOLDSCN1', dos_look=True,
+                mech='maddog/mdg00std', env={'MW2_TEST_FRAME_TICKS': ticks, 'SDL_AUDIODRIVER': 'none',
+                                           'MW2_DEBRIS_TRACE': '2'})
+    spawned = [(int(tick), int(body)) for tick, body in re.findall(r'^chunk (\d+) body (\d+)$', run.out, re.M)]
+    expected = [(tick, body) for tick, bodies in ((2847, range(4)), (2919, range(4, 8)), (3119, range(8, 12)),
+                (3184, range(12, 16)), (3422, (1, 2, 16, 17, 18, 19, 20, 21))) for body in bodies]
+    c(spawned == expected, 'opening debris uses the recorded spawn ticks and physics slots', str(spawned))
 
 
 def main():

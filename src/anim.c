@@ -256,6 +256,7 @@ int anim_player_step(const anim_set *s, anim_player *p, int req, int gait, int r
     }
     int ev = anim_key_step(s, p, req, gait, rate, (float)elapsed, 1);
     p->dos_footstep |= (ev & ANIM_EV_STEP) != 0;
+    p->dos_drive_slow |= (ev & ANIM_EV_SLOW) != 0;
     if (entering_key && p->key >= 0) {
         for (int k = 0; k < s->track_count; k++)
             p->dos_pending[k] = (int32_t)((uint32_t)p->dos_pending[k] + (uint32_t)s->tracks[k].delta[p->key]);
