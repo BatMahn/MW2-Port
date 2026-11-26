@@ -357,6 +357,7 @@ extern const char *const MSIM_FORMATION_TEXT[7]; /* "Echelon Left" .. "No Format
 
 /* actors from world3d_actors(); the sim does not own them. */
 void msim_set_dos(int dos);   /* select edition rules before loading a mission */
+void msim_use_titanium_combat(int enabled);
 int  msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count);
 /* Count whole 182 Hz clock ticks crossed by a frame. */
 static inline int msim_dos_frame_ticks(int32_t now, int32_t dt_ms)

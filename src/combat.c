@@ -39,6 +39,18 @@ static inline sim_weapon weapon_spec(int w)
         spec.damage = (float)dos->damage;
         spec.heat = (float)dos->heat16 / 65536.0f;
         spec.ammo_per_ton = dos->ammo_per_ton;
+    } else if (combat_titanium) {
+        const battle_weapon_values *battle = &battle_weapons[w];
+        spec.repeat = battle->repeat;
+        spec.per_volley = battle->per_volley;
+        spec.speed = battle->speed;
+        spec.damage = (float)battle->damage;
+        spec.heat = (float)battle->heat16 / 65536.0f;
+        spec.target_heat = (float)battle->target_heat16 / 65536.0f;
+        spec.ammo_per_ton = battle->ammo_per_ton;
+        spec.refire = battle->refire;
+        spec.interval = battle->interval;
+        spec.life = battle->life;
     }
     return spec;
 }
@@ -216,7 +228,7 @@ static void release_due(combat_unit *u, combat_weapon *cw)
 static void start_volley(combat_unit *u, combat_weapon *cw)
 {
     cw->state = CW_FIRING;
-    cw->shots = sim_weapons[cw->weapon].per_volley;
+    cw->shots = weapon_spec(cw->weapon).per_volley;
     cw->t = u->last_ticks;
     cw->t10 = 0;   /* the trigger sets +0x10 = 0; the release loop adds this frame's ticks to it */
     cw->volley_start = 1;
@@ -224,10 +236,11 @@ static void start_volley(combat_unit *u, combat_weapon *cw)
     release_due(u, cw);
 }
 
-void combat_tick(combat_unit *u, float dt, int dos_ticks)
+void combat_tick(combat_unit *u, float dt, int clock_ticks)
 {
-    /* DOS 0x52436 uses the whole clock ticks crossed by this frame, including at the volley boundary. */
-    float ticks = combat_dos ? (float)dos_ticks : dt * COMBAT_TICKS_PER_S, net;
+    /* DOS 0x52436 and Titanium BATTLE.DLL 0x100612a4 use the
+     * whole clock ticks crossed by this frame at the volley boundary. */
+    float ticks = combat_dos || combat_titanium ? (float)clock_ticks : dt * COMBAT_TICKS_PER_S, net;
     int i;
     if (u->destroyed) return;
     u->last_ticks = ticks;
@@ -282,9 +295,9 @@ void combat_tick(combat_unit *u, float dt, int dos_ticks)
             u->seq_ticks = 0;
             u->auto_shutdown = 1;          /* message 0xd "Shutting down", nothing else that frame */
         } else if (h > 100 && u->override) {
-            if (!u->invulnerable && dos_ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
+            if (!u->invulnerable && clock_ticks > 0) {   /* 0x250c0 (the player's invulnerability 0x250e1) */
                 /* 0x250f0: one 15-bit draw modulo 500 times this frame's whole ticks. */
-                if (damage_roll(u, &u->rng, 500 * dos_ticks) == 0) {
+                if (damage_roll(u, &u->rng, 500 * clock_ticks) == 0) {
                     cook_off(u);
                     if (u->destroyed) u->down_in_update = 1;
                 }
@@ -539,6 +552,7 @@ int combat_jet_refill_dos = 0;
 int combat_ct_split = 3;   /* 3: the 3D editions' CT spread, 2: DOS's (the front end sets it by edition) */
 float combat_test_wheat[COMBAT_WEAPON_COUNT];   /* TEST ONLY */
 int combat_dos = 0;   /* combat rules and weapon data for the DOS edition */
+int combat_titanium = 0;
 const char *combat_damage_src = "weapon";   /* TEST ONLY: what the next damage is, for MW2_DAMAGE_LOG */
 
 int combat_dos_damage_level(const combat_unit *u, int loc, int rear, int divisor)
@@ -753,7 +767,7 @@ int combat_ai_trigger(combat_unit *u)
             u->ai_latch = 1;
             if (cw->state == CW_READY) {
                 cw->state = CW_FIRING;
-                cw->shots = sim_weapons[cw->weapon].per_volley;
+                cw->shots = weapon_spec(cw->weapon).per_volley;
                 cw->t = 0;
                 cw->volley_start = 1;
                 cw->homing = u->lock_target;
@@ -813,10 +827,10 @@ int combat_hit(combat_unit *t, int w, int loc, float rel_angle, unsigned *rng)
     while (rel_angle > 180.0f) rel_angle -= 360.0f;
     while (rel_angle < -180.0f) rel_angle += 360.0f;
     rear = rel_angle > -90.0f && rel_angle < 90.0f;
-    float damage = combat_weapon_damage(w);
-    apply_damage_at(t, damage, rear, loc, rng);
-    t->heat += sim_weapons[w].target_heat;
-    return (int)(damage + 0.5f);
+    const sim_weapon spec = weapon_spec(w);
+    apply_damage_at(t, spec.damage, rear, loc, rng);
+    t->heat += spec.target_heat;
+    return (int)(spec.damage + 0.5f);
 }
 
 int combat_crit_ammo(combat_unit *u)
@@ -839,7 +853,7 @@ int combat_jettison(combat_unit *u, int wi)
     combat_weapon *cw;
     if (!u || wi < 0 || wi >= u->weapon_count) return 0;
     cw = &u->weapons[wi];
-    if (sim_weapons[cw->weapon].per_volley <= 0 || cw->ammo <= 0) return 0;   /* an energy weapon (-1) or empty */
+    if (weapon_spec(cw->weapon).per_volley <= 0 || cw->ammo <= 0) return 0;   /* an energy weapon (-1) or empty */
     /* engine 0x10044220: the count goes to 0 and the weapon is spent (state -1); its bins are left as they are,
      * which is harmless - a bin feeding a weapon with no rounds neither explodes nor cooks off (0x100167b0, 0x10015e10) */
     cw->ammo = 0;
@@ -856,7 +870,7 @@ int combat_has_masc(const combat_unit *u)
 
 int combat_weapon_min_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].field3c : 0; }
 float combat_weapon_range(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? range_cm(w) : 0; }
-float combat_weapon_speed(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? (float)sim_weapons[w].speed : 0; }
+float combat_weapon_speed(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? (float)weapon_spec(w).speed : 0; }
 int   combat_weapon_life(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? weapon_spec(w).life : 0; }
 int   combat_weapon_drop(int w) { return (w >= 0 && w < COMBAT_WEAPON_COUNT) ? sim_weapons[w].drop : 0; }
 
@@ -1000,7 +1014,7 @@ static void collide(combat_unit *u, float speed, float ny, float rel_deg, int ot
     if (latch) u->blocked = 1;   /* terrain (0x10019d84 -> 0x1000c3c0) and a unit (0x10019d77 -> 0x1000c160) alike: every contact
                                   * frame - the impact cuts the velocity to a quarter (msim_world_impact), so pressing on stays
                                   * under the threshold; blocked = the contact (the player's impact-sound latch 0x1007c338) */
-    if (dmg <= 0 || u->destroyed || u->invulnerable || u->no_collision_damage || getenv("MW2_NO_COLLISION_DAMAGE")) return;   /* Combat Variables */
+    if (dmg <= 0 || u->destroyed || u->invulnerable || u->no_collision_damage || mw2_development_env("MW2_NO_COLLISION_DAMAGE")) return;   /* Combat Variables */
     if (ny < -0.8660254f) {                       /* from above: the head (0x1000c212) */
         if (other_tons > 0) {
             /* x 2 x the other's tonnage / its own in the 3Dfx DLL; DOS x 4 (0x2094c..0x20969: lea [esi*4], at least x 1) */

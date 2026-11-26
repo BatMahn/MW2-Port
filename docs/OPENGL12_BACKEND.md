@@ -73,7 +73,7 @@ a hand-run `glview` doesn't) — without it fog comparisons silently compare not
 
 ## 5. Test switches
 
-`MW2_GL12_MAXTEX=n` (pretend the card's largest texture is n — 256 for Voodoo-class cards), `MW2_GL12_NO_MULTITEX=1`
+Development builds accept `MW2_GL12_MAXTEX=n` (simulate a texture size limit), `MW2_GL12_NO_MULTITEX=1`
 (one texture unit), `MW2_GL12_NOFOG=1`, `MW2_GL12_TRACE=1` (padded / resampled textures, fog parameters).
 
 ## 6. Things specific to a 32-bit x86 build

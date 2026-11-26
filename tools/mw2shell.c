@@ -73,7 +73,7 @@ static bool shell_poll(SDL_Event *e)
     {   /* TEST ONLY: MW2_SHELL_PUSH="ms:x,y;ms:x,y" - left clicks at 640 x 480 coordinates, ms after start-up */
         static const char *q;
         static Uint64 t0;
-        const char *env = getenv("MW2_SHELL_PUSH");
+        const char *env = mw2_development_env("MW2_SHELL_PUSH");
         if (env && !t0) { t0 = SDL_GetTicks(); q = env; }
         if (q && *q) {
             int ms = 0, x = 0, y = 0;
@@ -722,7 +722,7 @@ static void text_layer_draw(SDL_Renderer *rd)
 {
     int i;
     static int grab_frames = -1;
-    if (grab_frames < 0) grab_frames = getenv("MW2_SHELL_GRAB_FRAMES") ? atoi(getenv("MW2_SHELL_GRAB_FRAMES")) : 0;
+    if (grab_frames < 0) grab_frames = mw2_development_env("MW2_SHELL_GRAB_FRAMES") ? atoi(mw2_development_env("MW2_SHELL_GRAB_FRAMES")) : 0;
     for (i = 0; i < g_ntext; i++) {
         SDL_Rect pc[32];
         int np = hole_pieces(g_text[i].hole, pc), k;
@@ -738,11 +738,11 @@ static void text_layer_draw(SDL_Renderer *rd)
         SDL_SetRenderClipRect(rd, NULL);
     }
     cursor_draw(rd);
-    if (grab_frames > 0 && --grab_frames == 0 && getenv("MW2_SHELL_GRAB")) {   /* tests: the rendered window, full resolution */
+    if (grab_frames > 0 && --grab_frames == 0 && mw2_development_env("MW2_SHELL_GRAB")) {   /* tests: the rendered window, full resolution */
         SDL_Surface *got = SDL_RenderReadPixels(rd, NULL);   /* SDL3: the whole output, as a surface */
         SDL_Surface *rgb = got ? SDL_ConvertSurface(got, SDL_PIXELFORMAT_RGB24) : NULL;
         if (rgb) {
-            FILE *o = fopen(getenv("MW2_SHELL_GRAB"), "wb");
+            FILE *o = fopen(mw2_development_env("MW2_SHELL_GRAB"), "wb");
             if (o) {
                 int y;
                 fprintf(o, "P6\n%d %d\n255\n", rgb->w, rgb->h);
@@ -980,7 +980,7 @@ static int movie_rows(vidfx *v, uint8_t *out, int pitch, int y0, int y1)
     movie_band b[MAXB];
     SDL_Thread *th[MAXB];
     int n = SDL_GetNumLogicalCPUCores(), i, r = 0;
-    if (getenv("MW2_SHELL_MOVIE_THREADS")) n = atoi(getenv("MW2_SHELL_MOVIE_THREADS"));   /* TEST ONLY: the band count */
+    if (mw2_development_env("MW2_SHELL_MOVIE_THREADS")) n = atoi(mw2_development_env("MW2_SHELL_MOVIE_THREADS"));   /* TEST ONLY: the band count */
     n = n < 1 ? 1 : n > MAXB ? MAXB : n;
     if (y1 - y0 < 64 * n) n = (y1 - y0) / 64 > 0 ? (y1 - y0) / 64 : 1;
     for (i = 0; i < n; i++) {
@@ -1064,7 +1064,7 @@ static int movie_present(SDL_Renderer *rd, const smk *s, int look, int fit, SDL_
  * the renderer's logical presentation draws it); MW2_SHELL_MOVIE_LOG: the geometry and the time the look took */
 static void movie_test_shot(const smk *s)
 {
-    const char *o = getenv("MW2_SHELL_MOVIE_OUT"), *shot = getenv("MW2_SHELL_MOVIE_SHOT");
+    const char *o = mw2_development_env("MW2_SHELL_MOVIE_OUT"), *shot = mw2_development_env("MW2_SHELL_MOVIE_SHOT");
     int w = 0, h = 0, fit, look = movie_look(s, &fit), ya = 0, yb = 0, y, x, iw, ih;
     movie_rect d;
     uint8_t *win, *pic = NULL;
@@ -1107,13 +1107,13 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
     int fit, look;
     SDL_Texture *mtx = NULL;   /* the movie looks' picture */
     movie_pace mp = {1.0, 0};
-    if (getenv("MW2_SHELL_MOVIE_SCALE")) mp.sc = atof(getenv("MW2_SHELL_MOVIE_SCALE"));   /* TEST ONLY: the picture's starting scale */
+    if (mw2_development_env("MW2_SHELL_MOVIE_SCALE")) mp.sc = atof(mw2_development_env("MW2_SHELL_MOVIE_SCALE"));   /* TEST ONLY: the picture's starting scale */
     if (!s) return;
     g_cursor_off = 1;
     text_layer_clear();   /* the screen's queued text (e.g. the hovered hotspot's label) is not part of the movie */
     look = movie_look(s, &fit);
     n = headless ? 3 : smk_frames(s);
-    if (headless && getenv("MW2_SHELL_MOVIE_FRAME")) n = atoi(getenv("MW2_SHELL_MOVIE_FRAME"));   /* TEST ONLY: frames decoded */
+    if (headless && mw2_development_env("MW2_SHELL_MOVIE_FRAME")) n = atoi(mw2_development_env("MW2_SHELL_MOVIE_FRAME"));   /* TEST ONLY: frames decoded */
     {   /* the clip's sound (audio track 0), mixed as one 8-bit voice; the frames then follow the clock */
         int16_t *a = NULL;
         size_t ns = 0;
@@ -1158,9 +1158,9 @@ static void play_cinematic(SDL_Renderer *rd, SDL_Texture *tx, const char *name, 
         }
     }
     (void)last;
-    if (headless && getenv("MW2_SHELL_MOVIE_SHOT")) movie_test_shot(s);   /* TEST ONLY */
-    if (headless && getenv("MW2_SHELL_MOVIE_RAW")) {   /* TEST ONLY: the source frame (the palette applied) */
-        FILE *o = fopen(getenv("MW2_SHELL_MOVIE_RAW"), "wb");
+    if (headless && mw2_development_env("MW2_SHELL_MOVIE_SHOT")) movie_test_shot(s);   /* TEST ONLY */
+    if (headless && mw2_development_env("MW2_SHELL_MOVIE_RAW")) {   /* TEST ONLY: the source frame (the palette applied) */
+        FILE *o = fopen(mw2_development_env("MW2_SHELL_MOVIE_RAW"), "wb");
         int i2;
         if (o) { fprintf(o, "P6\n%d %d\n255\n", smk_width(s), smk_height(s)); for (i2 = 0; i2 < smk_width(s) * smk_height(s); i2++) fwrite(smk_palette(s)[smk_pixels(s)[i2]], 1, 3, o); fclose(o); }
     }
@@ -1510,7 +1510,7 @@ static void edition_files(void)
 /* the archive the simulation will use (record ids differ between editions): MW2_SIM_PRJ (tests), else the edition's */
 static const char *sim_archive(void)
 {
-    const char *e = getenv("MW2_SIM_PRJ");
+    const char *e = mw2_development_env("MW2_SIM_PRJ");
     if (e) return e;
     edition_files();
     return g_edf.models[0] ? g_edf.models : gpath("MW2.PRJ");
@@ -1526,12 +1526,12 @@ static void sim_returned(int rc)
 #else
     int code = rc != -1 && WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
 #endif
-    if (code == 42) { printf("launch: fled to Windows\n"); SDL_Quit(); exit(0); }
+    if (code == 42) { if (MW2_DEVELOPMENT_LOGS) printf("launch: fled to Windows\n"); SDL_Quit(); exit(0); }
 }
 
 static void sim_command(char *line, size_t n, const char *scen, const char *save)
 {
-    const char *cmd = getenv("MW2_SIM");
+    const char *cmd = mw2_development_env("MW2_SIM");
     setenv("MW2_INSTALL_DIR", save, 1);   /* (the only place the child gets its paths) */
     if (g_cfg.cd[0]) {
         size_t k = strlen(g_cfg.cd);
@@ -1631,8 +1631,8 @@ static void loading_screen(int clan)
     int x, y, have_txt;
     Uint64 t0;
     (void)clan;
-    const char *shot = getenv("MW2_LOADING_SHOT");   /* tests: compose, write a PPM, no wait */
-    if (getenv("MW2_LOADING_SCENE")) snprintf(g_load_scene, sizeof g_load_scene, "%s", getenv("MW2_LOADING_SCENE"));
+    const char *shot = mw2_development_env("MW2_LOADING_SHOT");   /* tests: compose, write a PPM, no wait */
+    if (mw2_development_env("MW2_LOADING_SCENE")) snprintf(g_load_scene, sizeof g_load_scene, "%s", mw2_development_env("MW2_LOADING_SCENE"));
     if (getenv("MW2_NO_LOADING") || !g_load_scene[0]) return;
     if (!shot) return;   /* the simulation shows the drop screen in its own window (glview drop_screen_*); this is the test path */
     if (!shot && SDL_GetCurrentVideoDriver() && (strcmp(SDL_GetCurrentVideoDriver(), "offscreen") == 0 || strcmp(SDL_GetCurrentVideoDriver(), "dummy") == 0)) return;   /* tests */
@@ -1724,7 +1724,7 @@ static int launch_ia(void)
     snprintf(scen, sizeof scen, "%s", IA_SCEN[g_ia.scen]);
     for (k = 0; scen[k]; k++) if (scen[k] >= 'a' && scen[k] <= 'z') scen[k] = (char)(scen[k] - 32);
     snprintf(g_load_scene, sizeof g_load_scene, "%s", scen);
-    printf("launch: %s -of=%s -oe=%s (files in %s)\n", scen, FORM_ARG[g_ia.form[0]], FORM_ARG[g_ia.form[1]], save);
+    if (MW2_DEVELOPMENT_LOGS) printf("launch: %s -of=%s -oe=%s (files in %s)\n", scen, FORM_ARG[g_ia.form[0]], FORM_ARG[g_ia.form[1]], save);
     setenv("MW2_OF", FORM_ARG[g_ia.form[0]], 1);
     setenv("MW2_OE", FORM_ARG[g_ia.form[1]], 1);
     { char cl[8]; snprintf(cl, sizeof cl, "%d", g_ia.clan[0]); setenv("MW2_CLAN", cl, 1); }   /* (the friendly clan: the world's decals) */
@@ -1740,7 +1740,7 @@ static int launch_ia(void)
     read_results(save);
     sim_returned(rc);
     shell_show_after_sim();
-    printf("launch: mission returned %d\n", rc);
+    if (MW2_DEVELOPMENT_LOGS) printf("launch: mission returned %d\n", rc);
     return 0;
 }
 
@@ -1775,8 +1775,8 @@ static int run_instant_action(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
                     for (i = 0; i < 25; i++)
                         if (e.button.x >= IA_HS[i].x0 && e.button.x <= IA_HS[i].x1 && e.button.y >= IA_HS[i].y0 && e.button.y <= IA_HS[i].y1) click = i;
             }
-        } else if (getenv("MW2_SHELL_CLICKS") && f == 0) {   /* headless: "3,3,14,11" */
-            const char *c = getenv("MW2_SHELL_CLICKS");
+        } else if (mw2_development_env("MW2_SHELL_CLICKS") && f == 0) {   /* headless: "3,3,14,11" */
+            const char *c = mw2_development_env("MW2_SHELL_CLICKS");
             while (*c) {
                 int h = atoi(c), side;
                 if (h >= 3 && h <= 5) { side = 0; g_ia.mech[side][h - 3] = g_ia.mech[side][h - 3] + 1 >= g_ia.nmech ? -1 : g_ia.mech[side][h - 3] + 1; }
@@ -2022,8 +2022,8 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
             text_on = editing >= 0;
             if (text_on) SDL_StartTextInput(g_win); else SDL_StopTextInput(g_win);
         }
-        if (f == 0 && getenv("MW2_SHELL_CLICKS")) {   /* tests: "x,y;x,y;..." clicks on the first frame */
-            const char *q = getenv("MW2_SHELL_CLICKS");
+        if (f == 0 && mw2_development_env("MW2_SHELL_CLICKS")) {   /* tests: "x,y;x,y;..." clicks on the first frame */
+            const char *q = mw2_development_env("MW2_SHELL_CLICKS");
             while (*q && nclick < 16) {
                 if (sscanf(q, "%d,%d", &click[nclick][0], &click[nclick][1]) == 2) nclick++;
                 while (*q && *q != ';') q++;
@@ -2086,7 +2086,7 @@ static int run_roster(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frame
                      * the campaign position nor the honor changes */
                     star_reset_mission(clan, k);
                     prm_player_name(g_reg[sel].name);   /* 0x38644: FUN_0003a8a0(0, 0, pilot + 0x28) */
-                    printf("roster: launch old mission %d (%s)\n", k + 1, CAMPAIGN_TITLE[clan][k]);
+                    if (MW2_DEVELOPMENT_LOGS) printf("roster: launch old mission %d (%s)\n", k + 1, CAMPAIGN_TITLE[clan][k]);
                     launch_campaign_m(clan, sel, k);
                     music_after_mission(12, clan);   /* the roster is the return state (12) */
                     reg_load();
@@ -3002,11 +3002,11 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         }
     }
     load_bg(clan == 1 ? 21 : clan >= 2 ? 9 : 14);
-    if (getenv("MW2_LAB_PAGE")) e->page = atoi(getenv("MW2_LAB_PAGE"));   /* tests */
-    if (getenv("MW2_LAB_LOC")) e->crit_loc = e->armor_loc = atoi(getenv("MW2_LAB_LOC")) & 7;   /* TEST ONLY: the location picked */
-    if (getenv("MW2_LAB_OPS")) {   /* TEST ONLY: "a<item>" ADD AMMO, "d<item>" DELETE AMMO, "x<item>" DELETE WEAPON, "w<type>" ADD
+    if (mw2_development_env("MW2_LAB_PAGE")) e->page = atoi(mw2_development_env("MW2_LAB_PAGE"));   /* tests */
+    if (mw2_development_env("MW2_LAB_LOC")) e->crit_loc = e->armor_loc = atoi(mw2_development_env("MW2_LAB_LOC")) & 7;   /* TEST ONLY: the location picked */
+    if (mw2_development_env("MW2_LAB_OPS")) {   /* TEST ONLY: "a<item>" ADD AMMO, "d<item>" DELETE AMMO, "x<item>" DELETE WEAPON, "w<type>" ADD
                                     * WEAPON, ';'-separated; then every location's slots, the pool and the links as saved */
-        const char *q = getenv("MW2_LAB_OPS");
+        const char *q = mw2_development_env("MW2_LAB_OPS");
         char tb[64];
         int l2, s2, j2;
         static mek_def wd;
@@ -3030,8 +3030,8 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         printf("\n");
         fflush(stdout);
     }
-    if (getenv("MW2_LAB_UNASSIGN")) {   /* TEST ONLY: "loc,slot;loc,slot..." unassigned as a click on them would, then the texts */
-        const char *q = getenv("MW2_LAB_UNASSIGN");
+    if (mw2_development_env("MW2_LAB_UNASSIGN")) {   /* TEST ONLY: "loc,slot;loc,slot..." unassigned as a click on them would, then the texts */
+        const char *q = mw2_development_env("MW2_LAB_UNASSIGN");
         int l2, s2, j2;
         char tb[64];
         while (sscanf(q, "%d,%d", &l2, &s2) == 2) {
@@ -3044,7 +3044,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         fflush(stdout);
     }
     {   /* tests: MW2_LAB_CLICKS="x,y;x,y;..." - left clicks fed through the screen's own input handling */
-        const char *cs = getenv("MW2_LAB_CLICKS");
+        const char *cs = mw2_development_env("MW2_LAB_CLICKS");
         while (cs && *cs) {
             int x2, y2;
             if (sscanf(cs, "%d,%d", &x2, &y2) == 2) {
@@ -3062,7 +3062,7 @@ static int run_customize(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fr
         mek_mass mm;
         int pg = e->page;
         ed_masses(e, &mm);
-        if (!headless || getenv("MW2_LAB_CLICKS")) {
+        if (!headless || mw2_development_env("MW2_LAB_CLICKS")) {
             while (shell_poll(&ev)) {
                 int x, y, row, k;
                 pg = e->page;   /* every event: an earlier one may have changed the page */
@@ -3399,7 +3399,7 @@ static int shell_confirm(SDL_Renderer *rd, SDL_Texture *tx, int headless, const 
 static int run_mech_lab(SDL_Renderer *rd, SDL_Texture *tx, int headless, int frames, int clan, int slot, int *mx, int *my)
 {
     lance_slot *sl = &g_star[clan].slot[slot];
-    int lheld = getenv("MW2_SC_HELD") != NULL;   /* TEST ONLY: the left button held */
+    int lheld = mw2_development_env("MW2_SC_HELD") != NULL;   /* TEST ONLY: the left button held */
     int next = -1, f = 0, m = sl->mech >= 0 ? sl->mech : (clan == 1 ? 5 : 9), nv = 0, vi = 0, i, kdmt = clan >= 2 ? g_ia.tons[clan - 2] : mech_lab_kdmt(clan), reg;
     char var[24][9], pilot[24] = "MechWarrior";
     uint8_t *shp = NULL;
@@ -3678,10 +3678,10 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                                       {{108, 306}, {39, 164}, {272, 119}, {487, 209}, {216, 434}, {369, 416}, {286, 438}, {242, 438}, {296, 434}, {220, 437}},
                                       {{108, 306}, {73, 158}, {305, 125}, {500, 181}, {219, 414}, {415, 417}, {265, 430}, {238, 437}, {302, 431}, {223, 437}}};   /* FUN_0003b420 context 2 */
     clip *cl[10];
-    int next = -1, f = 0, i, k, cx = CTX(clan), back = clan >= 2 ? 7 : 11, lheld = getenv("MW2_SC_HELD") != NULL;   /* TEST ONLY */
+    int next = -1, f = 0, i, k, cx = CTX(clan), back = clan >= 2 ? 7 : 11, lheld = mw2_development_env("MW2_SC_HELD") != NULL;   /* TEST ONLY */
     int ed_m = -1, ed_box = 0, text_on = 0, whole[3] = {0, 0, 0};   /* the name being typed (member, box); names shown uncut */
     char ed_buf[20] = "";
-    const char *script = headless ? getenv("MW2_SC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
+    const char *script = headless ? mw2_development_env("MW2_SC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
     star_cfg *st = &g_star[clan];
     star_load(clan);
     const int reg = clan < 2 ? reg_selected(clan) : -1;
@@ -3774,7 +3774,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
             }
         }
         draw_bg();
-        g_clip_pal = getenv("MW2_NO_CLIPPAL") || !cl[0] || !cl[0]->s ? NULL : smk_palette(cl[0]->s);
+        g_clip_pal = mw2_development_env("MW2_NO_CLIPPAL") || !cl[0] || !cl[0]->s ? NULL : smk_palette(cl[0]->s);
         {   /* each clip steps at its own Smacker rate (the grids, bays and panels: 67 ms; DOSBox AWOGRID 71-74 ms a frame,
              * the 67 ms rounded up to the 70 Hz display) - the loop had stepped them every 66 ms pass */
             static Uint64 clast[10];
@@ -3791,7 +3791,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                 if (shown) clip_blit(cl[k], CXY[cx][k][0], CXY[cx][k][1]);
             }
         }
-        if (!getenv("MW2_SC_CLIPPAL")) g_clip_pal = NULL;
+        if (!mw2_development_env("MW2_SC_CLIPPAL")) g_clip_pal = NULL;
         {   /* FUN_0003b1f0: the formation (centred at 320, y 4) and four lines (y 35 / 50 / 65 / 80);
              * FUN_0003ad60 / 0x3aeb0: per formation (0x83e84: 3 x {member, showcase x, y, box}) the member's showcase
              * <ctx>sc<pic> on the grid and its box text (pilot cut at 92 px, 'Mech, tonnage) at 0x84210 / 0x8421c */
@@ -3941,7 +3941,7 @@ static int launch_campaign_m(int clan, int reg, int m)
     snprintf(scen, sizeof scen, "%s", CAMPAIGN_SCEN[clan][m]);
     snprintf(g_load_scene, sizeof g_load_scene, "%s", scen);
     for (k = 0; scen[k]; k++) if (scen[k] >= 'a' && scen[k] <= 'z') scen[k] = (char)(scen[k] - 32);
-    printf("launch: campaign mission %d %s (%s)\n", m + 1, scen, CAMPAIGN_TITLE[clan][m]);
+    if (MW2_DEVELOPMENT_LOGS) printf("launch: campaign mission %d %s (%s)\n", m + 1, scen, CAMPAIGN_TITLE[clan][m]);
     unsetenv("MW2_OE");
     setenv("MW2_OF", FORM_ARG[g_star[clan].formation], 1);
     setenv("MW2_PILOT", g_reg[reg].name, 1);
@@ -4145,7 +4145,7 @@ static void menu_slider(uint8_t *snd, int offset, int x)
 
 static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 {
-    const char *script = headless ? getenv("MW2_CV_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, all in
+    const char *script = headless ? mw2_development_env("MW2_CV_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, all in
                                                                        * the one headless pass; the settings then saved */
     uint8_t snd[60], dif[8];
     char p[700];
@@ -4376,7 +4376,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         SDL_Delay(30);
     }
     smk_close(logo);
-    if (!headless || getenv("MW2_CV_EVENTS")) {
+    if (!headless || mw2_development_env("MW2_CV_EVENTS")) {
         snprintf(p, sizeof p, "%s/MW2SND.CFG", g_dir); if ((f = fopen(p, "wb"))) { fwrite(snd, 1, sizeof snd, f); fclose(f); }
         snprintf(p, sizeof p, "%s/MW2DIF.CFG", g_dir); if ((f = fopen(p, "wb"))) { fwrite(dif, 1, sizeof dif, f); fclose(f); }
         portcfg_save(g_dir, &pc);
@@ -4499,7 +4499,7 @@ static void the_keshik(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         frames++;
         if (headless) top--;
         else top = 0x1cc - (int)((SDL_GetTicks() - t0) * 79u / 1000u);
-        if (headless) { if (frames >= (getenv("MW2_KESHIK_FRAMES") ? atoi(getenv("MW2_KESHIK_FRAMES")) : 300)) done = 1; continue; }
+        if (headless) { if (frames >= (mw2_development_env("MW2_KESHIK_FRAMES") ? atoi(mw2_development_env("MW2_KESHIK_FRAMES")) : 300)) done = 1; continue; }
         while (shell_poll(&e))
             if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) done = 1;
         if (logo && SDL_GetTicks() - logo_t >= (Uint64)smk_frame_ms(logo)) { smk_next(logo); logo_t = SDL_GetTicks(); }
@@ -4643,7 +4643,7 @@ static int cc_accept(SDL_Renderer *rd, SDL_Texture *tx, int headless)
 static int cc_test_click(int *mx, int *my)
 {
     static int used;
-    const char *q = getenv("MW2_CC_CLICKS");
+    const char *q = mw2_development_env("MW2_CC_CLICKS");
     int i;
     if (!q) return 0;
     for (i = 0; i < used && q; i++) if ((q = strchr(q, ';'))) q++;
@@ -4706,7 +4706,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
     int white = -1, grey = cc_colour(154, 154, 154), red = cc_colour(255, 16, 24);
     char msg[64] = "", nbuf[64] = "";
     int naming = 0, text_on = 0;   /* the name being typed (FUN_0001e350) */
-    const char *script = headless ? getenv("MW2_CC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
+    const char *script = headless ? mw2_development_env("MW2_CC_EVENTS") : NULL;   /* TEST ONLY: events as MW2_SHELL_MENU_EVENTS, one a pass */
     while (!done) {
         SDL_Event e;
         const cc_device *d = &g_ccdev[shown];
@@ -4757,7 +4757,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
             const char *q = script;
             while (*q == ';' || *q == ' ') q++;
             if (!*q && f >= 2) {
-                FILE *o = getenv("MW2_CC_SHOT") ? fopen(getenv("MW2_CC_SHOT"), "wb") : NULL;
+                FILE *o = mw2_development_env("MW2_CC_SHOT") ? fopen(mw2_development_env("MW2_CC_SHOT"), "wb") : NULL;
                 if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
                 done = 1;
             }
@@ -4855,8 +4855,8 @@ static void cockpit_controls(SDL_Renderer *rd, SDL_Texture *tx, int headless)
     g_cclogo_t = 0;
     grey = cc_colour(154, 154, 154); red = cc_colour(255, 16, 24);
     cc_init();
-    if (getenv("MW2_CC_EDITOR")) { cc_reset_defaults(); cc_editor(rd, tx, headless, &g_cccur); if (g_cclogo) smk_close(g_cclogo); g_cclogo = NULL; load_bg(prev_bg); return; }   /* tests */
-    if (headless && getenv("MW2_CC_CLICKS")) {   /* TEST ONLY */
+    if (mw2_development_env("MW2_CC_EDITOR")) { cc_reset_defaults(); cc_editor(rd, tx, headless, &g_cccur); if (g_cclogo) smk_close(g_cclogo); g_cclogo = NULL; load_bg(prev_bg); return; }   /* tests */
+    if (headless && mw2_development_env("MW2_CC_CLICKS")) {   /* TEST ONLY */
         printf("cc: current \"%s\" devices", g_cccur.name);
         for (k = 0; k < CC_DEVICES; k++) if (g_ccsel[k]) printf(" %s", CC_DEVNAME[k]);
         printf("\n");
@@ -4982,7 +4982,7 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
     static const char *ITEM[6] = {"NEW ALLEGIANCE", "COMBAT VARIABLES", "COCKPIT CONTROLS", "HALL OF HONOR", "THE KESHIK", "FLEE TO " PORTCFG_OS_UPPER};   /* the DOS shell's FLEE TO DOS: the system it runs on */
     static uint8_t saved[W * H * 3];
     static text_item tsaved[256];
-    const char *script = headless ? getenv("MW2_SHELL_MENU_EVENTS") : NULL;
+    const char *script = headless ? mw2_development_env("MW2_SHELL_MENU_EVENTS") : NULL;
     static tt_item ttsaved[32];
     int sel = 0, done = 0, closed = 0, result = -1, i, n0 = g_ntext, nt0 = g_ntt, bg0 = g_bg_entry, reopen = 1;
     memcpy(saved, g_fb, sizeof saved);
@@ -5011,14 +5011,14 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
             draw_text(fo, 320 - text_width(fo, ITEM[i]) / 2, 157 + 33 * i - font_height(fo) / 2, ITEM[i], (const uint8_t (*)[3])g_bg.pal, -1);
         }
         if (headless && !script) {   /* tests: MW2_SHELL_MENU=item selected (and MW2_MENU_KESHIK=1 runs The Keshik) -> MW2_SHELL_SHOT */
-            if (getenv("MW2_SHELL_MENU") && getenv("MW2_SHELL_SHOT")) {
+            if (mw2_development_env("MW2_SHELL_MENU") && mw2_development_env("MW2_SHELL_SHOT")) {
                 FILE *o;
-                if (getenv("MW2_MENU_KESHIK")) the_keshik(rd, tx, headless);
-                if (getenv("MW2_MENU_COCKPIT")) cockpit_controls(rd, tx, headless);
-                if (getenv("MW2_MENU_FLEE")) shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1);
-                if (getenv("MW2_MENU_CV")) combat_variables(rd, tx, headless);
-                else if (sel != atoi(getenv("MW2_SHELL_MENU"))) { sel = atoi(getenv("MW2_SHELL_MENU")); continue; }
-                if ((o = fopen(getenv("MW2_SHELL_SHOT"), "wb"))) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
+                if (mw2_development_env("MW2_MENU_KESHIK")) the_keshik(rd, tx, headless);
+                if (mw2_development_env("MW2_MENU_COCKPIT")) cockpit_controls(rd, tx, headless);
+                if (mw2_development_env("MW2_MENU_FLEE")) shell_dialog(rd, tx, headless, "Embrace cowardice?#Yes|No", 1);
+                if (mw2_development_env("MW2_MENU_CV")) combat_variables(rd, tx, headless);
+                else if (sel != atoi(mw2_development_env("MW2_SHELL_MENU"))) { sel = atoi(mw2_development_env("MW2_SHELL_MENU")); continue; }
+                if ((o = fopen(mw2_development_env("MW2_SHELL_SHOT"), "wb"))) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
                 exit(0);
             }
             break;
@@ -5061,7 +5061,7 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
         }
     }
     if (script) {   /* tests: the frame as the script left it (menu included), then the state */
-        const char *shot = getenv("MW2_SHELL_SHOT");
+        const char *shot = mw2_development_env("MW2_SHELL_SHOT");
         FILE *o;
         printf("menu: sel=%d result=%d%s\n", sel, result, closed ? " closed" : "");
         if (shot && (o = fopen(shot, "wb"))) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }
@@ -5097,7 +5097,7 @@ static int launch_scenario(int clan, const char *scen, const char *pilot)
      * +0x0e == 0) - the sim takes the player from there, so whatever USERSTAR.BWD is on disk stays untouched */
     snprintf(up, sizeof up, "%s", scen);
     for (k = 0; up[k]; k++) if (up[k] >= 'a' && up[k] <= 'z') up[k] = (char)(up[k] - 32);
-    printf("launch: training %s\n", up);
+    if (MW2_DEVELOPMENT_LOGS) printf("launch: training %s\n", up);
     unsetenv("MW2_OF"); unsetenv("MW2_OE");
     setenv("MW2_PILOT", pilot, 1);
     { char cl[8]; snprintf(cl, sizeof cl, "%d", clan); setenv("MW2_CLAN", cl, 1); }   /* (the world's insignia decals) */
@@ -5208,8 +5208,8 @@ static int run_cadet_training(SDL_Renderer *rd, SDL_Texture *tx, int headless, i
             for (i = 0; i < 6; i++) draw_text(&g_flabel, 540 - text_width(&g_flabel, TRN_LABEL[i]) / 2, 18 + 25 * i, TRN_LABEL[i], pal, -1);
         if (hover == 0) draw_text(&g_flabel, 18, 203, "CLAN HALL", pal, -1);   /* 0x7d7cc: "CLAN HALL" (no '~') drawn from (18, 203) - DOSBox */
         f++;
-        if (headless && getenv("MW2_SHELL_TRAIN") && f == 1) {   /* TEST ONLY: launch training item 1-6 as its button does */
-            int it = atoi(getenv("MW2_SHELL_TRAIN"));
+        if (headless && mw2_development_env("MW2_SHELL_TRAIN") && f == 1) {   /* TEST ONLY: launch training item 1-6 as its button does */
+            int it = atoi(mw2_development_env("MW2_SHELL_TRAIN"));
             if (it >= 1 && it <= 6) {
                 char scen[16];
                 snprintf(scen, sizeof scen, "%s%dSCN1", clan == 1 ? "tnj" : "tnw", it);
@@ -5278,7 +5278,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
     snprintf(path, sizeof path, "%s", gpath(clan == 1 ? "ARCHJF.MW2" : "ARCHWO.MW2"));
     if ((f = fopen(path, "rb"))) { fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET); d = malloc((size_t)len); if (d && fread(d, 1, (size_t)len, f) != (size_t)len) len = 0; fclose(f); }
     if (!d || len < 8) { free(d); return 1; }
-    if (getenv("MW2_ARCH_PAGE")) sscanf(getenv("MW2_ARCH_PAGE"), "%d,%d", &page, &sub);   /* TEST ONLY: page, sub-page */
+    if (mw2_development_env("MW2_ARCH_PAGE")) sscanf(mw2_development_env("MW2_ARCH_PAGE"), "%d,%d", &page, &sub);   /* TEST ONLY: page, sub-page */
     load_bg(clan == 1 ? 18 : 11);
     while (next == -1) {
         static arch_tok tok[3000];
@@ -5387,7 +5387,7 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             static const char *tc;
             static int tc_init;
             int x, y, h, used = 0;
-            if (!tc_init) { tc_init = 1; tc = getenv("MW2_ARCH_CLICK"); }
+            if (!tc_init) { tc_init = 1; tc = mw2_development_env("MW2_ARCH_CLICK"); }
             if (tc && *tc && sscanf(tc, "%d,%d%n", &x, &y, &used) == 2) {
                 tc += used;
                 if (*tc == ';') tc++;
@@ -5404,8 +5404,8 @@ static int run_archive(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
             static int tb = -1;
             if (tb < 0) {
                 int fp, fs;
-                tb = getenv("MW2_ARCH_BACK") ? atoi(getenv("MW2_ARCH_BACK")) : 0;
-                if (getenv("MW2_ARCH_FROM") && sscanf(getenv("MW2_ARCH_FROM"), "%d,%d", &fp, &fs) == 2) { hsub[0] = fs; hist[0] = fp; nh = 1; }
+                tb = mw2_development_env("MW2_ARCH_BACK") ? atoi(mw2_development_env("MW2_ARCH_BACK")) : 0;
+                if (mw2_development_env("MW2_ARCH_FROM") && sscanf(mw2_development_env("MW2_ARCH_FROM"), "%d,%d", &fp, &fs) == 2) { hsub[0] = fs; hist[0] = fp; nh = 1; }
             }
             if (tb > 0) { tb--; back = 1; }
         }
@@ -5570,7 +5570,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
 {
     static char lines[600][96], slines[600][96];
     static int centre[600], scentre[600];
-    int next = -1, f = 0, i, n = 0, ns = 0, top = 0, reg, m, sit = getenv("MW2_SHELL_SITUATION") && *getenv("MW2_SHELL_SITUATION"), spage = 0;   /* (MW2_SHELL_SITUATION: tests open the page) */
+    int next = -1, f = 0, i, n = 0, ns = 0, top = 0, reg, m, sit = mw2_development_env("MW2_SHELL_SITUATION") && *mw2_development_env("MW2_SHELL_SITUATION"), spage = 0;   /* (MW2_SHELL_SITUATION: tests open the page) */
     int bx = clan == 1 ? 98 : 88, by = clan == 1 ? 51 : 30, bw = clan == 1 ? 403 : 454, bh = clan == 1 ? 372 : 400, lh = 12;
     char msg[96] = "";
     reg_load();
@@ -5606,7 +5606,7 @@ static int run_briefing(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fra
         }
     }
     load_bg(clan == 1 ? 22 : 15);
-    if (getenv("MW2_SHELL_AUTOLAUNCH")) return launch_campaign(clan, reg) == 0 ? 3 : -2;   /* tests: press LAUNCH once */
+    if (mw2_development_env("MW2_SHELL_AUTOLAUNCH")) return launch_campaign(clan, reg) == 0 ? 3 : -2;   /* tests: press LAUNCH once */
     while (next == -1) {
         SDL_Event e;
         int hover = -1;
@@ -5872,7 +5872,7 @@ static int run_debrief(SDL_Renderer *rd, SDL_Texture *tx, int headless, int fram
 #undef TEXT
     reg_save();
     load_bg(clan == 1 ? 22 : 15);
-    if (headless && getenv("MW2_SHELL_AFTERMATH") && mission_done >= 0 && mission_done < 16) {   /* tests: the AFTERMATH page -> MW2_SHELL_SHOT */
+    if (headless && mw2_development_env("MW2_SHELL_AFTERMATH") && mission_done >= 0 && mission_done < 16) {   /* tests: the AFTERMATH page -> MW2_SHELL_SHOT */
         text_page(rd, tx, headless, clan, CAMPAIGN_SCEN[clan][mission_done], success ? "DBFS" : "DBFF");
         printf("aftermath: title %d (%s) honor %d\n", g_reg[reg].title, RANK_TITLE[g_reg[reg].title >= 0 && g_reg[reg].title < 9 ? g_reg[reg].title : 0], g_reg[reg].honor);
         return -2;
@@ -6196,7 +6196,7 @@ static int pick_folder(char *out, size_t n)
 #endif
     };
     size_t i;
-    if (getenv("MW2_PICKER")) return run_picker(getenv("MW2_PICKER"), out, n);   /* tests: a command standing in for the picker */
+    if (mw2_development_env("MW2_PICKER")) return run_picker(mw2_development_env("MW2_PICKER"), out, n);   /* tests: a command standing in for the picker */
     for (i = 0; i < sizeof cmds / sizeof cmds[0]; i++) {
         int r = run_picker(cmds[i], out, n);
         if (r >= 0) return r;
@@ -6248,9 +6248,9 @@ int main(int argc, char **argv)
     SDL_Window *win = NULL;
     SDL_Renderer *rd = NULL;
     SDL_Texture *tx = NULL;
-    const char *shot = getenv("MW2_SHELL_SHOT");
-    int headless = shot != NULL, frames = getenv("MW2_SHELL_FRAMES") ? atoi(getenv("MW2_SHELL_FRAMES")) : 30;
-    int screen = getenv("MW2_SHELL_SCREEN") ? atoi(getenv("MW2_SHELL_SCREEN")) : 8, clan = getenv("MW2_SHELL_CLAN") ? atoi(getenv("MW2_SHELL_CLAN")) : 2, running = 1, mx = -1, my = -1;
+    const char *shot = mw2_development_env("MW2_SHELL_SHOT");
+    int headless = shot != NULL, frames = mw2_development_env("MW2_SHELL_FRAMES") ? atoi(mw2_development_env("MW2_SHELL_FRAMES")) : 30;
+    int screen = mw2_development_env("MW2_SHELL_SCREEN") ? atoi(mw2_development_env("MW2_SHELL_SCREEN")) : 8, clan = mw2_development_env("MW2_SHELL_CLAN") ? atoi(mw2_development_env("MW2_SHELL_CLAN")) : 2, running = 1, mx = -1, my = -1;
 #ifdef MW2_ONE_BINARY
     if (argc >= 2 && strcmp(argv[1], "--sim") == 0) return glview_main(argc - 1, argv + 1);   /* the simulation */
     snprintf(g_exe_path, sizeof g_exe_path, "%s", argv[0]);
@@ -6350,7 +6350,7 @@ int main(int argc, char **argv)
     g_fbig.len = shelldb_entry(&g_db, 29, &g_fbig.d);     /* the roster's values */
     g_f26.len = shelldb_entry(&g_db, 26, &g_f26.d);       /* shell font 0x1b (DAT_00091174): The Keshik's headings */
     g_f28.len = shelldb_entry(&g_db, 27, &g_f28.d);       /* shell font 0x1c (DAT_00091178) */
-    if (getenv("MW2_SHELL_MOUSE")) sscanf(getenv("MW2_SHELL_MOUSE"), "%d,%d", &mx, &my);
+    if (mw2_development_env("MW2_SHELL_MOUSE")) sscanf(mw2_development_env("MW2_SHELL_MOUSE"), "%d,%d", &mx, &my);
     if (mw2_development_env("MW2_STAR_PRM")) {   /* TEST ONLY: the star record in <dir>/MW2PRM.CFG - load, print, save with formation + 1, reload */
         int k, pass;
         snprintf(g_dir, sizeof g_dir, "%s", mw2_development_env("MW2_STAR_PRM"));
@@ -6374,7 +6374,7 @@ int main(int argc, char **argv)
             if (!strstr(nm, "STD") || mek_load(a, nm, &d) != 0) continue;
             if (!strncmp(nm, "DOR", 3) || !strncmp(nm, "ELE", 3) || !strncmp(nm, "TAR", 3) || !strncmp(nm, "TCK", 3) || !strncmp(nm, "TUR", 3)) continue;   /* dropship, Elemental, vehicles */
             ed_init(&g_lab_test, &d); ed_masses(&g_lab_test, &mm); cnt++;
-            if (getenv("MW2_LAB_ENDO") && !ed_endo(&g_lab_test)) {   /* tests: Std -> Endo as the Internal page's Type entry, slots unassigned */
+            if (mw2_development_env("MW2_LAB_ENDO") && !ed_endo(&g_lab_test)) {   /* tests: Std -> Endo as the Internal page's Type entry, slots unassigned */
                 mek_mass m2;
                 int q;
                 for (q = 0; q < 7; q++) ed_pool_add(&g_lab_test, (uint16_t)(8001 + q), 1);
@@ -6455,31 +6455,31 @@ int main(int argc, char **argv)
         g_text_hires = rd != NULL;
         { const char *bp = SDL_GetBasePath(); ttext_init(bp); }
     }
-    if (getenv("MW2_SHELL_LAB_EDIT")) {   /* tests: the editor on the slot's (or the Mad Dog's) design */
+    if (mw2_development_env("MW2_SHELL_LAB_EDIT")) {   /* tests: the editor on the slot's (or the Mad Dog's) design */
         char saved[16] = "";
-        int r = run_customize(rd, tx, 1, getenv("MW2_SHELL_FRAMES") ? atoi(getenv("MW2_SHELL_FRAMES")) : 3, 0, 5, getenv("MW2_SHELL_LAB_EDIT"), saved);
+        int r = run_customize(rd, tx, 1, mw2_development_env("MW2_SHELL_FRAMES") ? atoi(mw2_development_env("MW2_SHELL_FRAMES")) : 3, 0, 5, mw2_development_env("MW2_SHELL_LAB_EDIT"), saved);
         (void)r;
         { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } }
         running = 0;
     }
-    if (getenv("MW2_SHELL_TW")) {   /* tests: text widths in fonts 26, 27, 29, 30 */
+    if (mw2_development_env("MW2_SHELL_TW")) {   /* tests: text widths in fonts 26, 27, 29, 30 */
         int e2;
         for (e2 = 24; e2 < 32; e2++) {
             font fo;
             fo.len = shelldb_entry(&g_db, e2, &fo.d);
-            if (fo.len > 32 && fo.d[0] == '1' && fo.d[1] == '.') printf("font %d: '%s' %d px, height %d\n", e2, getenv("MW2_SHELL_TW"), text_width(&fo, getenv("MW2_SHELL_TW")), fo.d[8]);
+            if (fo.len > 32 && fo.d[0] == '1' && fo.d[1] == '.') printf("font %d: '%s' %d px, height %d\n", e2, mw2_development_env("MW2_SHELL_TW"), text_width(&fo, mw2_development_env("MW2_SHELL_TW")), fo.d[8]);
             free(fo.d);
         }
         running = 0;
     }
-    if (getenv("MW2_SHELL_GLYPHS")) {   /* tests: font 31's codes 1-31 */
+    if (mw2_development_env("MW2_SHELL_GLYPHS")) {   /* tests: font 31's codes 1-31 */
         int c2;
         load_bg(14); draw_bg();
         for (c2 = 1; c2 < 32; c2++) { char t[8]; snprintf(t, sizeof t, "%c", c2); raster_text(&g_fthin, 20 + (c2 % 16) * 30, 100 + (c2 / 16) * 40, t, (const uint8_t (*)[3])g_bg.pal, -1); snprintf(t, sizeof t, "%d", c2); raster_text(&g_fthin, 20 + (c2 % 16) * 30, 115 + (c2 / 16) * 40, t, (const uint8_t (*)[3])g_bg.pal, 6); }
         { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } }
         running = 0;
     }
-    if (getenv("MW2_SHELL_FONTTEST")) {   /* tests: every font entry, on the Mech Lab background */
+    if (mw2_development_env("MW2_SHELL_FONTTEST")) {   /* tests: every font entry, on the Mech Lab background */
         int e2, y = 10;
         load_bg(14); draw_bg();
         for (e2 = 0; e2 < 40 && y < 470; e2++) {
@@ -6495,10 +6495,10 @@ int main(int argc, char **argv)
         { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } }
         running = 0;
     }
-    if (getenv("MW2_SHELL_CV_LIVE") && rd) combat_variables(rd, tx, 0);
-    if (getenv("MW2_SHELL_MENU_LIVE") && rd) {
+    if (mw2_development_env("MW2_SHELL_CV_LIVE") && rd) combat_variables(rd, tx, 0);
+    if (mw2_development_env("MW2_SHELL_MENU_LIVE") && rd) {
         load_bg(g_bg_entry < 0 ? 0 : g_bg_entry);
-        if (atoi(getenv("MW2_SHELL_MENU_LIVE")) == 2) {   /* tests: a screen's text crossing the panel (the briefing's) */
+        if (atoi(mw2_development_env("MW2_SHELL_MENU_LIVE")) == 2) {   /* tests: a screen's text crossing the panel (the briefing's) */
             int k;
             for (k = 0; k < 6; k++) draw_text(&g_flabel, 100, 140 + 40 * k, "THE FALCON'S POWERFUL ASSAULT CLUSTER HAS PUSHED FAR", (const uint8_t (*)[3])g_bg.pal, -1);
             tt_text(120, 330, "TrueType line crossing the menu panel here", 0);
@@ -6506,12 +6506,12 @@ int main(int argc, char **argv)
         global_menu(rd, tx, 0, mx, my);
     }   /* tests: the menu through the renderer (with MW2_SHELL_GRAB) */
     if (!g_text_hires) { const char *bp = SDL_GetBasePath(); ttext_init(bp); }
-    if (getenv("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
-    if (getenv("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
-    if (getenv("MW2_LOADING_SHOT")) { loading_screen(0); running = 0; }   /* tests */
-    if (getenv("MW2_SHELL_MOVIE")) {   /* TEST ONLY: a cinematic decoded headless (MW2_SHELL_MOVIE_FRAME frames), its 640x480
+    if (mw2_development_env("MW2_SHELL_CV")) { combat_variables(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
+    if (mw2_development_env("MW2_SHELL_HOH")) { reg_load(); hall_of_honor(rd, tx, 1); { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } } running = 0; }   /* tests */
+    if (mw2_development_env("MW2_LOADING_SHOT")) { loading_screen(0); running = 0; }   /* tests */
+    if (mw2_development_env("MW2_SHELL_MOVIE")) {   /* TEST ONLY: a cinematic decoded headless (MW2_SHELL_MOVIE_FRAME frames), its 640x480
                                         * frame -> MW2_SHELL_SHOT (and MW2_SHELL_MOVIE_SHOT / _RAW, play_cinematic) */
-        play_cinematic(rd, tx, getenv("MW2_SHELL_MOVIE"), 1);
+        play_cinematic(rd, tx, mw2_development_env("MW2_SHELL_MOVIE"), 1);
         if (shot) { FILE *o = fopen(shot, "wb"); if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); } }
         running = 0;
     }
@@ -6524,7 +6524,7 @@ int main(int argc, char **argv)
         const screen_def *sd = find_screen(screen, clan);
         {   /* the screen we came from (the Mech Lab's ACCEPT MECH returns there - FUN_000339e0 case 7: EBX) */
             static int cur = -99;
-            if (screen != cur) { g_from_screen = cur == -99 && getenv("MW2_SHELL_FROM") ? atoi(getenv("MW2_SHELL_FROM")) : cur; cur = screen; }   /* tests: MW2_SHELL_FROM = the screen before the first */
+            if (screen != cur) { g_from_screen = cur == -99 && mw2_development_env("MW2_SHELL_FROM") ? atoi(mw2_development_env("MW2_SHELL_FROM")) : cur; cur = screen; }   /* tests: MW2_SHELL_FROM = the screen before the first */
         }
         smk *ov = NULL, *xov[8] = {0}, *doors[2] = {0};
         Uint64 xlast[8] = {0};
@@ -6578,7 +6578,7 @@ int main(int argc, char **argv)
         if (screen == 8) g_reg_session = 0;   /* main 0x36700 case 8 (0x37048) */
         if (screen == 1 && clan >= 0 && clan <= 1) {   /* not registered this session (or no pilot): registration clip, then the roster */
             reg_load();
-            if ((!g_reg_session || reg_selected(clan) < 0) && !getenv("MW2_SHELL_NOREG")) {
+            if ((!g_reg_session || reg_selected(clan) < 0) && !mw2_development_env("MW2_SHELL_NOREG")) {
                 play_cinematic(rd, tx, clan == 1 ? "AJFRGSTR" : "AWORGSTR", headless);
                 screen = 12;
             }
@@ -6817,7 +6817,7 @@ int main(int argc, char **argv)
             f++;
             if (headless && mw2_development_env("MW2_SHELL_MUSICLOG") && g_song) fprintf(stderr, "music entry %d playing\n", g_song_entry);
             if (headless) {
-                if (f >= frames && (getenv("MW2_SHELL_MENU") || getenv("MW2_SHELL_MENU_EVENTS"))) global_menu(rd, tx, headless, mx, my);   /* tests: the menu over this screen */
+                if (f >= frames && (mw2_development_env("MW2_SHELL_MENU") || mw2_development_env("MW2_SHELL_MENU_EVENTS"))) global_menu(rd, tx, headless, mx, my);   /* tests: the menu over this screen */
                 if (f >= frames) {
                     FILE *o = fopen(shot, "wb");
                     if (o) { fprintf(o, "P6\n%d %d\n255\n", W, H); fwrite(g_fb, 1, sizeof g_fb, o); fclose(o); }

@@ -11,6 +11,17 @@ static unsigned ammo_roll(void *user, unsigned limit)
     return r->values[r->used++ % 2] % limit;
 }
 
+int shim_dos_fire_deadline(int now, int ticks, int deadline, int roll)
+{
+    struct ammo_rolls rolls = {{(unsigned)roll, 0}, 0};
+    ai_mind m = {.progs = {-1, -1, -1}, .state = AI_TARGET, .man = -1, .dos_next_fire = deadline,
+                 .random_roll = ammo_roll, .random_context = &rolls};
+    const ai_view view = {.has_enemy = 1, .enemy_is_player = 1, .enemy_dist = 14000,
+                          .dos_clock = now, .skill = 1};
+    ai_step(NULL, &m, &view, (float)ticks / 182.0f, ticks);
+    return m.dos_next_fire;
+}
+
 void shim_dos_empty_weapons(int cls, int level, int jets, unsigned first, unsigned second, int out[3])
 {
     struct ammo_rolls rolls = {{first, second}, 0};
@@ -51,7 +62,7 @@ void shim_dos_attack_step(int man, int chosen, int ticks, int left, int distance
     m.man = man;
     m.forced_man = man < 0 ? chosen : -1;
     m.man_limit = (float)left;
-    m.next_fire = 1000.0f;
+    m.dos_next_fire = 1000;
     m.throttle = (float)throttle / 1024.0f;
     m.turn = 15.0f;
     m.reverse = man == 8 || man == 10;
@@ -85,7 +96,7 @@ void shim_dos_glide(int phase, int previous, int distance, int bearing, int twis
     m.man_phase = phase;
     m.last_dist = (float)previous;
     m.man_limit = 900;
-    m.next_fire = 1000;
+    m.dos_next_fire = 1000;
     m.throttle = 0.5f;
     m.turn = 15;
     m.jet = held_jet;
@@ -119,7 +130,7 @@ void shim_dos_jump_climb(int phase, int elapsed, int left, int ticks, int bearin
     m.jet = held_jet;
     m.man_phase_ticks = (float)elapsed;
     m.man_limit = (float)left;
-    m.next_fire = 1000;
+    m.dos_next_fire = 1000;
     m.throttle = 0.5f;
     m.turn = 15;
     const ai_view v = {.has_enemy = 1, .enemy_dist = 20000, .enemy_bearing = (float)bearing,
@@ -167,7 +178,7 @@ void shim_dos_flank(int man, int face, int x, int z, int target, int throttle, i
     m.state = AI_ATTACK;
     m.man = man;
     m.man_limit = 900;
-    m.next_fire = 1000;
+    m.dos_next_fire = 1000;
     m.throttle = (float)throttle / 1024.0f;
     m.turn = 15;
     m.flank_slot = 0;
@@ -192,7 +203,7 @@ void shim_dos_circle(int x, int z, int until_retarget, int ticks, int blocked, i
     m.state = AI_ATTACK;
     m.man = 12;
     m.man_limit = 900;
-    m.next_fire = 1000;
+    m.dos_next_fire = 1000;
     m.throttle = 0.5f;
     m.turn = 15;
     m.flank_retarget = (float)until_retarget;
@@ -217,7 +228,7 @@ void shim_dos_circle_replay(const int32_t *frames, int count, int32_t *out)
     ai_set_class(&m, 5, 80);
     m.progs[0] = -1;
     m.state = AI_ATTACK;
-    m.next_fire = 30000;
+    m.dos_next_fire = 30000;
     ai_view v = {.has_enemy = 1, .pilot_level = 4, .enemy_x = 50000, .enemy_z = 60000};
     start_manoeuvre(&m, &v, 12);
     for (int i = 0; i < count; i++) {
@@ -251,7 +262,7 @@ void shim_dos_approach(int man, int previous, int distance, int bearing, int tic
     m.last_dist = (float)previous;
     m.weave = (float)sign;
     m.weave_ticks = (float)until_flip;
-    m.next_fire = 1000;
+    m.dos_next_fire = 1000;
     m.throttle = 0.5f;
     m.turn = 15;
     const ai_view v = {.has_enemy = 1, .enemy_dist = (float)distance, .enemy_bearing = (float)bearing,

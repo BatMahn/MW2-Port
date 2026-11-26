@@ -620,7 +620,7 @@ static void export_done(int ok, const char *what, const char *path)
 {
     snprintf(g_msg, sizeof g_msg, ok ? "Exported %s: %.800s%s" : "Could not export %s (%.800s)%s", what, path,
              ok && !g_export_note++ ? "   (the game's art from your copy: for your own use)" : "");
-    printf("mapview: %s\n", g_msg);
+    if (MW2_DEVELOPMENT_LOGS) printf("mapview: %s\n", g_msg);
 }
 static void part_extras(char *out, size_t n, const mech3d_part *p, int pi)
 {
@@ -1013,7 +1013,7 @@ static void SDLCALL picked(void *ud, const char *const *list, int filter)
 int main(int argc, char **argv)
 {
     char err[256], models[PORTCFG_PATH], textures[PORTCFG_PATH], kind[32];
-    const char *base, *hint = NULL, *want = NULL, *shot = getenv("MW2_MAPVIEW_SHOT");
+    const char *base, *hint = NULL, *want = NULL, *shot = mw2_development_env("MW2_MAPVIEW_SHOT");
     portcfg cfg;
     SDL_Window *win;
     int i, running = 1, drag = 0, dragged = 0;
@@ -1057,7 +1057,7 @@ int main(int argc, char **argv)
     }
     if (!(g_ma = prj_open(models, err, sizeof err)) || !(g_ta = prj_open(textures, err, sizeof err))) { fprintf(stderr, "mapview: %s\n", err); return 1; }
     snprintf(g_export_root, sizeof g_export_root, "%s", cfg.game[0] ? cfg.game : cfg.install);
-    if (getenv("MW2_MAPVIEW_EXPORTS")) snprintf(g_export_root, sizeof g_export_root, "%s", getenv("MW2_MAPVIEW_EXPORTS"));   /* tests */
+    if (mw2_development_env("MW2_MAPVIEW_EXPORTS")) snprintf(g_export_root, sizeof g_export_root, "%s", mw2_development_env("MW2_MAPVIEW_EXPORTS"));   /* tests */
     if (MW2_DEVELOPMENT_LOGS)
         printf("mapview: game folder %s\nmapview: models %s, textures %s (%s)\n",
                cfg.game[0] ? cfg.game : cfg.install, models, textures, kind);
@@ -1087,13 +1087,13 @@ int main(int argc, char **argv)
         if (want) for (i = 0; i < g_mn; i++) if (!strcasecmp(g_ms[i].scene, want)) start = i;
         load_mission(start);
     }
-    if (getenv("MW2_MAPVIEW_CAM")) {
+    if (mw2_development_env("MW2_MAPVIEW_CAM")) {
         float c[5] = {0, 0, 0, 0, 0};
-        sscanf(getenv("MW2_MAPVIEW_CAM"), "%f,%f,%f,%f,%f", &c[0], &c[1], &c[2], &c[3], &c[4]);
+        sscanf(mw2_development_env("MW2_MAPVIEW_CAM"), "%f,%f,%f,%f,%f", &c[0], &c[1], &c[2], &c[3], &c[4]);
         g_eye[0] = c[0] * 100.0f; g_eye[1] = c[1] * 100.0f; g_eye[2] = c[2] * 100.0f; g_yaw = c[3]; g_pitch = c[4];
         g_top_c[0] = g_eye[0]; g_top_c[1] = g_eye[2];
     }
-    if (getenv("MW2_MAPVIEW_TOP")) { g_top = 1; g_top_w = (float)atof(getenv("MW2_MAPVIEW_TOP")) * 100.0f; }
+    if (mw2_development_env("MW2_MAPVIEW_TOP")) { g_top = 1; g_top_w = (float)atof(mw2_development_env("MW2_MAPVIEW_TOP")) * 100.0f; }
     SDL_SetWindowTitle(win, g_cur >= 0 ? g_ms[g_cur].title : MV_TITLE);
     {
         int ww, wh;
@@ -1107,16 +1107,16 @@ int main(int argc, char **argv)
         for (c = 0; c < nc; c++) { load_mission((g_cur + 1) % g_mn); g_top = c & 1; draw_frame(); rb_present(); }
         g_top = 0;
     }
-    if (getenv("MW2_MAPVIEW_EXPORT")) {   /* tests */
-        const char *x = getenv("MW2_MAPVIEW_EXPORT");
-        if (getenv("MW2_MAPVIEW_CLICK")) { float cx = 0, cy = 0; sscanf(getenv("MW2_MAPVIEW_CLICK"), "%f,%f", &cx, &cy); pick(cx, cy); }
+    if (mw2_development_env("MW2_MAPVIEW_EXPORT")) {   /* tests */
+        const char *x = mw2_development_env("MW2_MAPVIEW_EXPORT");
+        if (mw2_development_env("MW2_MAPVIEW_CLICK")) { float cx = 0, cy = 0; sscanf(mw2_development_env("MW2_MAPVIEW_CLICK"), "%f,%f", &cx, &cy); pick(cx, cy); }
         if (strstr(x, "sel")) export_selection();
         if (strstr(x, "map")) export_map();
         if (strstr(x, "tex")) export_textures();
     }
-    if (getenv("MW2_MAPVIEW_LIST")) g_list = 1;   /* tests */
-    if (getenv("MW2_MAPVIEW_HELP")) g_help = 1;
-    if (getenv("MW2_MAPVIEW_CLICK")) { float cx = 0, cy = 0; sscanf(getenv("MW2_MAPVIEW_CLICK"), "%f,%f", &cx, &cy); pick(cx, cy); }
+    if (mw2_development_env("MW2_MAPVIEW_LIST")) g_list = 1;   /* tests */
+    if (mw2_development_env("MW2_MAPVIEW_HELP")) g_help = 1;
+    if (mw2_development_env("MW2_MAPVIEW_CLICK")) { float cx = 0, cy = 0; sscanf(mw2_development_env("MW2_MAPVIEW_CLICK"), "%f,%f", &cx, &cy); pick(cx, cy); }
     if (shot) {
         draw_frame();
         write_shot(shot);
@@ -1138,7 +1138,7 @@ int main(int argc, char **argv)
         static int frame;
         if (mw2_development_env("MW2_MAPVIEW_FRAMES")) {   /* tests: n frames of the window's loop; MW2_MAPVIEW_EVENTS="frame:k<keycode>|c<x>,<y>|d<dx>,<dy>;..."
                                                * pushes a key press, a click or a drag at that frame; the last frame -> MW2_MAPVIEW_OUT */
-            const char *ev = getenv("MW2_MAPVIEW_EVENTS");
+            const char *ev = mw2_development_env("MW2_MAPVIEW_EVENTS");
             while (ev && *ev) {
                 int f = atoi(ev);
                 const char *c = strchr(ev, ':');
@@ -1161,7 +1161,7 @@ int main(int argc, char **argv)
                 if (ev) ev++;
             }
             if (++frame > atoi(mw2_development_env("MW2_MAPVIEW_FRAMES"))) {
-                if (getenv("MW2_MAPVIEW_OUT")) { draw_frame(); write_shot(getenv("MW2_MAPVIEW_OUT")); }
+                if (mw2_development_env("MW2_MAPVIEW_OUT")) { draw_frame(); write_shot(mw2_development_env("MW2_MAPVIEW_OUT")); }
                 printf("mapview: loop end - mission %s, %s view, yaw %.1f pitch %.1f, centre %.0f,%.0f, selection %d/%d, list %d\n", g_cur >= 0 ? g_ms[g_cur].scene : "-",
                        g_top ? "map" : "3D", (double)g_yaw, (double)g_pitch, (double)(g_top ? g_top_c[0] : g_eye[0]), (double)(g_top ? g_top_c[1] : g_eye[2]), g_sel_kind, g_sel, g_list);
                 break;

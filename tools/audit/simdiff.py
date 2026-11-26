@@ -182,6 +182,31 @@ def weapon_parameters(rep, rnd, n):
         rep.check(tuple(result) == expected, 'weapon %d: DOS %s port %s' % (w, expected, tuple(result)))
 
 @test
+def dos_ai_fire_deadline(rep, rnd, n):
+    """The frame that creates a target does not shorten its first firing deadline."""
+    L = lib('ai')
+    e = emu()
+    actor = e.alloc(0x200)
+    e.w32(actor + 0x4c, e.alloc(0x80))
+    e.w8(actor + 0x154, 2)  # fire chance bound (skill 1)
+    e.stub(0x22850)
+    e.stub(0x22970)
+    e.stub(0x229a0)
+    # Golden Spade assigned at tick 255. The first delay was 2 × 18 ticks.
+    for now, ticks, deadline in ((255, 21, 291), (276, 21, 291), (297, 21, 291),
+                                 (290, 15, 291), (291, 1, 291), (255, 21, 255)):
+        rolls = []
+        e.stub(0x4a070, lambda _: rolls.append(1) or 1)
+        e.w32(NOW, now)
+        e.w32(PLAYER, 0)
+        e.w32(actor + 0x156, deadline)
+        e.call(0x2e860, eax=actor)
+        port = L.shim_dos_fire_deadline(now, ticks, deadline, 1)
+        expected = e.rs32(actor + 0x156)
+        rep.check(port == expected and len(rolls) == (now >= deadline),
+                  f'tick {now}, deadline {deadline} gives DOS {expected}, port {port}')
+
+@test
 def ai_volley_without_target(rep, rnd, n):
     """An in-progress volley keeps releasing rounds after the AI loses its target."""
     L = lib('msim')

@@ -226,8 +226,8 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
         GLint mt = 256, u = 1;
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &mt);
         g12_maxtex = mt >= 64 ? mt : 64;
-        if ((env = getenv("MW2_GL12_MAXTEX")) && atoi(env) >= 16) { int m = pot(atoi(env)); if (m < g12_maxtex) g12_maxtex = m; }
-        if (has_ext(ext, "GL_ARB_multitexture") && !getenv("MW2_GL12_NO_MULTITEX")) {
+        if ((env = mw2_development_env("MW2_GL12_MAXTEX")) && atoi(env) >= 16) { int m = pot(atoi(env)); if (m < g12_maxtex) g12_maxtex = m; }
+        if (has_ext(ext, "GL_ARB_multitexture") && !mw2_development_env("MW2_GL12_NO_MULTITEX")) {
             p_active = (pfn_active_tex)(uintptr_t)SDL_GL_GetProcAddress("glActiveTextureARB");
             p_client_active = (pfn_active_tex)(uintptr_t)SDL_GL_GetProcAddress("glClientActiveTextureARB");
             if (p_active && p_client_active) glGetIntegerv(GL_MAX_TEXTURE_UNITS_ARB, &u);
@@ -243,7 +243,7 @@ int rb_init(SDL_Window *win, int pref, int samples, char *err, size_t errn)
 #endif
     }
     g12_trace = mw2_development_env("MW2_GL12_TRACE") != NULL;
-    g12_nofog = getenv("MW2_GL12_NOFOG") != NULL;
+    g12_nofog = mw2_development_env("MW2_GL12_NOFOG") != NULL;
     g_fogn = g12_maxtex < 2048 ? g12_maxtex : 2048;
     {   /* vsync (none on SDL's offscreen driver: the tests) */
         const char *vd = SDL_GetCurrentVideoDriver();

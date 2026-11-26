@@ -850,7 +850,9 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt, int 
                     if (from == AI_TARGET && m->state == AI_GODIRECT) m->target = m->to_navref ? 0 : m->target;
                     if (m->state == AI_TARGET) {   /* entry 0x10013790 case 2: next fire decision rand(10) x 22 ticks on; leaving
                                                     * patrol (7) with no nav assigned, a 30 m nav point here (0x1001cab0) */
-                        m->next_fire = (float)(ai_rand(m, 10) * (ai_dos_int ? 18u : 22u));   /* DOS 0x22c56: x 0x12 */
+                        const unsigned delay = ai_rand(m, 10);
+                        if (ai_dos_int) m->dos_next_fire = v->dos_clock + (int)delay * 18;   /* DOS 0x22c56 */
+                        else m->next_fire = (float)(delay * 22u);
                         if (from == AI_PATROL && v->unit_led && !m->nav_ok) { m->nav_ok = 1; m->nav_x = v->self_x; m->nav_z = v->self_z; }
                     }
                 }
@@ -866,7 +868,7 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt, int 
     }
     if (m->state != AI_ATTACK) m->jet = 0;
     m->wants_fire = 0;
-    m->next_fire -= ticks;
+    if (!ai_dos_int) m->next_fire -= ticks;
     if (fired) return;   /* inputs hold (0x10011c50: the state's movement runs only when no rule fired) */
 
     /* movement per state (engine 0x100130f0) */
@@ -962,9 +964,10 @@ void ai_step(const ai_library *lib, ai_mind *m, const ai_view *v, float dt, int 
              * fires only with the LAGGED twist within 10 deg of the bearing, r == 0, a target other than the player
              * passing rand(3) == 0 too. (+0x158 = max(GPS skill, 1) + 1, 0x10012000.) No range test here: 0x100232b0
              * (combat_ai_fire) checks each weapon's window. */
-            if (m->next_fire <= 0) {
+            if (ai_dos_int ? v->dos_clock >= m->dos_next_fire : m->next_fire <= 0) {
                 unsigned r = ai_rand(m, (unsigned)(v->skill > 0 ? v->skill : 1) + 1u);
-                m->next_fire = (float)(r * 22u);
+                if (ai_dos_int) m->dos_next_fire = v->dos_clock + (int)r * 22;
+                else m->next_fire = (float)(r * 22u);
                 if (fabsf(aim - m->twist) < 10.0f && (v->enemy_is_player || ai_rand(m, 3) == 0) && r == 0) m->wants_fire = 1;
             }
         } else {

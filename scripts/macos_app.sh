@@ -1,6 +1,5 @@
 #!/bin/sh
-# Build "MechWarrior 2.app" from a macOS build (make mw2) in the current directory (CI: the repo root), and
-# "MW2 Map Viewer.app" from make mapview when that binary is there.
+# Bundle a macOS release build (make MW2_RELEASE=1 mw2 mapview) in the current directory.
 # Layout: the binary in Contents/MacOS, the font in Contents/Resources/assets (SDL_GetBasePath() returns
 # Contents/Resources inside a bundle; codesign rejects non-code files in Contents/MacOS), the icon (packaging/macos/mw2port.icns, made from the box art by tools/make_icon.py) in
 # Contents/Resources, and the SDL3 dylib the binary was linked against (Homebrew's sdl3) copied into Contents/Frameworks so
@@ -8,7 +7,10 @@
 # needs  xattr -dr com.apple.quarantine "MechWarrior 2.app"  once (README).
 set -e
 VERSION=${GITHUB_REF_NAME#v}   # the release tag in CI, or the version below
-[ -n "$VERSION" ] || VERSION=2.3
+[ -n "$VERSION" ] || VERSION=2.4
+
+sh scripts/check_release_binary.sh mw2
+if [ -f mapview ]; then sh scripts/check_release_binary.sh mapview; fi
 
 # bundle APP BINARY BUNDLE_ID NAME
 bundle() {
@@ -18,7 +20,7 @@ bundle() {
   cp "$BIN" "$APP/Contents/MacOS/"
   cp assets/fonts/LiberationSans-Bold.ttf assets/fonts/README.md "$APP/Contents/Resources/assets/fonts/"
   cp packaging/macos/mw2port.icns "$APP/Contents/Resources/"
-  cp LICENSE THIRD_PARTY.md "$APP/Contents/Resources/"   # the licences (GPL-2.0-or-later; third-party components)
+  cp LICENSE THIRD_PARTY.md CHANGELOG.md "$APP/Contents/Resources/"
   # bundle SDL3: the dylib named libSDL3 in the binary's load commands (Homebrew: /opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib;
   # an SDL3 built from source links @rpath/libSDL3.0.dylib - found through pkg-config's libdir then)
   if otool -L "$APP/Contents/MacOS/$BIN" | grep -q 'libSDL2'; then

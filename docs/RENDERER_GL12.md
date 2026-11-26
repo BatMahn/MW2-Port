@@ -112,7 +112,7 @@ hand-run `glview` doesn't) - without it fog comparisons compare nothing.
 
 - `make test_sequences_gl12 SEQ_ARGS="--only NAME,..."`: the sequence suite against a glview built with this renderer
   (`build/glview_gl12`, the system's OpenGL; headless on Mesa's llvmpipe).
-- `MW2_GL12_MAXTEX=n` (pretend the card's largest texture is n - 256 as a Voodoo 3), `MW2_GL12_NO_MULTITEX=1` (one
+- Development builds accept `MW2_GL12_MAXTEX=n` (simulate a texture size limit), `MW2_GL12_NO_MULTITEX=1` (one
   texture unit), `MW2_GL12_NOFOG=1` (no fog), `MW2_GL12_TRACE=1` (the extensions, textures tiled / resampled, fog).
 
 ## Limits

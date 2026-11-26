@@ -377,6 +377,13 @@ static void cb_finished(void *u, int t, int i, int ok)
     }
 }
 
+static int titanium_combat_requested;
+
+void msim_use_titanium_combat(int enabled)
+{
+    titanium_combat_requested = enabled;
+}
+
 void msim_set_dos(int dos)
 {
     combat_dos = msim_dos_int = ai_dos_int = combat_jet_refill_dos = mech3d_dos_hips = dos != 0;
@@ -547,6 +554,9 @@ static void dos_init_anim_order(msim *s, const bwd_mission *mission)
 
 int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, int count)
 {
+    /* The stock Titanium mission archive adds the MWK directory. A renderer
+     * switch inside a mission never reselects its combat rules. */
+    combat_titanium = !msim_dos_int && (titanium_combat_requested || prj_find_type(a, "MWK") >= 0);
     int player_table;
     bwd_mission m;
     prj_record rec;
@@ -625,7 +635,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     /* DOS chooses the delay in the first controller pass. Until then the
      * base delay keeps the player's controls in the startup state. */
     s->player_online_at = startup_deadline(s, msim_dos_int ? DOS_STARTUP_BASE_TICKS : startup_ticks(s), 1);
-    combat_damage_live = getenv("MW2_NO_STARTUP") != NULL;   /* DAT_1024c570 = 0 at the mission start (0x1002388d) */
+    combat_damage_live = mw2_development_env("MW2_NO_STARTUP") != NULL;   /* DAT_1024c570 = 0 at the mission start (0x1002388d) */
     s->armed = calloc((size_t)(count > 0 ? count : 1), sizeof *s->armed);
     if (!s->units || !s->armed) return -1;
     for (i = 0; i < count; i++) {
@@ -787,7 +797,7 @@ int msim_init(msim *s, prj_archive *a, const char *scene, world_actor *actors, i
     }
     s->col_lod = calloc((size_t)count + 1, sizeof *s->col_lod);
     s->col_lod_ok = calloc((size_t)count + 1, sizeof *s->col_lod_ok);
-    s->no_col_lod = getenv("MW2_NO_COL_LOD") != NULL || getenv("MW2_NO_LOD") != NULL;   /* TEST ONLY */
+    s->no_col_lod = mw2_development_env("MW2_NO_COL_LOD") != NULL || mw2_development_env("MW2_NO_LOD") != NULL;   /* TEST ONLY */
     s->cmd = calloc((size_t)(count ? count : 1), sizeof *s->cmd);
     s->cmd_target = calloc((size_t)(count ? count : 1), sizeof *s->cmd_target);
     s->engage = calloc((size_t)(count ? count : 1), sizeof *s->engage);
@@ -1014,7 +1024,7 @@ static void unit_startup(msim *s, int i)
         startup_sound(s, 0xf7, p3);
         return;
     }
-    if (s->player_unit.destroyed || (s->now < s->player_online_at && !getenv("MW2_NO_STARTUP"))) return;
+    if (s->player_unit.destroyed || (s->now < s->player_online_at && !mw2_development_env("MW2_NO_STARTUP"))) return;
     startup_sound(s, 0x104, p3);
     /* The radar contact appears as the sequence begins. Artillery and doors have no voice cue. */
     if (s->on_message && ac->unit_class != 3 && ac->unit_class != 7)
@@ -1156,6 +1166,13 @@ static int assign_ok(const msim *s, int q)
     return ai_allows(&s->ai, m, AI_TARGET);   /* 0x10013e00 -> 0x10013d90 */
 }
 static void ai_wake(msim *s, int i);
+
+static void target_fire_delay(msim *s, ai_mind *m)
+{
+    const unsigned delay = ms_roll(s, 10);
+    if (msim_dos_int) m->dos_next_fire = msim_dos_frame_ticks(0, s->now) + (int)delay * 18;
+    else m->next_fire = (float)(delay * 22u);
+}
 static void group_assign(msim *s, int table, int leader, int who)
 {
     if (mw2_development_env("MW2_POST_TRACE")) fprintf(stderr, "group_assign %.2f table %d leader %d who %d ok %d\n", s->now / 1000.0, table, leader, who, leader >= 0 ? assign_ok(s, leader) : -1);   /* TEST ONLY */
@@ -1174,7 +1191,7 @@ static void group_assign(msim *s, int table, int leader, int who)
         ai_mind *m = &s->minds[pick];
         m->prev_state = m->state; m->state = AI_TARGET; m->target = 1; m->tgt = who;
         if (msim_dos_int) m->counter = 1;   /* DOS: the assignment pushes (state, target), depth 1 (the GBL port's audit) */
-        m->next_fire = (float)(ms_roll(s, 10) * (msim_dos_int ? 18u : 22u));   /* entry 0x10013790 case 2 (DOS 0x22c56: x 0x12) */
+        target_fire_delay(s, m);
         ai_wake(s, pick);
     }
 }
@@ -1329,7 +1346,7 @@ static int on_target(const msim *s, int q, int code)   /* +0x14e == the target *
     if ((code >> 16) == 2) return (m->state == AI_TARGET || m->state == AI_ATTACK) ? m->tgt == (code & 0xffff) - 1 : m->node_tgt == code;
     return m->node_tgt == code;
 }
-static void node_assign(msim *s, int table, int leader, int dos_ticks)
+static void node_assign(msim *s, int table, int leader)
 {
     int cur = table < s->logic.table_count ? s->logic.current[table] : -1;
     const mtbl_node *n;
@@ -1404,9 +1421,7 @@ static void node_assign(msim *s, int table, int leader, int dos_ticks)
         m->node_tgt = tcode;
         m->prev_state = m->state; m->state = st; m->target = st == AI_TARGET; m->tgt = unit && st == AI_TARGET ? (tcode & 0xffff) - 1 : -2;
         m->to_navref = 0;
-        /* ai_step subtracts the frame ticks. DOS 0x22c56 sets a deadline from now. */
-        if (st == AI_TARGET)
-            m->next_fire = (float)(ms_roll(s, 10) * (msim_dos_int ? 18u : 22u) + (unsigned)dos_ticks);
+        if (st == AI_TARGET) target_fire_delay(s, m);
         if (st == AI_PATROL) guard_enter(s, m, tcode);                       /* entry case 7 -> 0x10013f00 */
         ai_wake(s, pick);
     }
@@ -2131,7 +2146,6 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
          * contact the frame is one move */
         float rest = dt, sdt;
         int steep_contact = 0;
-        if (msim_dos_int) m->dos_gait_throttle = m->thr_servo;
         /* the frame's vertical move goes into the move test with the horizontal one (engine 0x10019310 -> 0x1000b5e0:
          * one 3D segment; walking it is 0): combat_jets makes it below unless a move was refused - then the 3D
          * impact's vertical move and reflected vertical velocity stand (dy_done, vy3) */
@@ -2437,7 +2451,7 @@ static void actor_move(msim *s, int i, float dt, int dos_ticks, int starting, in
              * unhurt; the port's dropped like stones and both red-legged. INFERRED from that observation (the engine's
              * code not traced): the jets on while over 2 m up and falling faster than 10 cm/tick */
             if ((!msim_dos_int || m->man != 9) && !s->units[i].destroyed && !s->units[i].shutdown &&
-                jets_installed && s->units[i].jet_fuel > 0 && s->units[i].y - s->units[i].ground > 200.0f && s->units[i].vy < -10.0f && !getenv("MW2_NO_FALL_BRAKE")) m->jet = 1;   /* (tests: MW2_NO_FALL_BRAKE) */
+                jets_installed && s->units[i].jet_fuel > 0 && s->units[i].y - s->units[i].ground > 200.0f && s->units[i].vy < -10.0f && !mw2_development_env("MW2_NO_FALL_BRAKE")) m->jet = 1;   /* (tests: MW2_NO_FALL_BRAKE) */
             combat_motion impact = {dy_done, vy3, dos_ticks};
             combat_jets_motion(&s->units[i], m->jet, dt, &s->rng, msim_dos_int ? (imp3 ? &impact : &lift) : NULL);
             if (msim_dos_int) {
@@ -2477,12 +2491,79 @@ static void ai_escape_terrain(ai_mind *m, float heading, float goal, int ticks, 
         m->terrain_escape_bearing = downhill + (side < 0.0f ? -angle : angle);
         m->terrain_escape_ticks = (dos ? 3 : 5) * 182;
         m->terrain_block_ticks = 0;
+    } else if (dos && m->terrain_block_ticks >= 182 &&
+               fabsf(wrap180(m->terrain_escape_bearing - heading)) < 20.0f) {
+        const float downhill = atan2f(m->terrain_normal[0], m->terrain_normal[1]) * 57.29578f;
+        if (fabsf(wrap180(m->terrain_escape_bearing - downhill)) > 20.0f) {
+            /* A shallow escape can stay pinned at the join between slope faces. */
+            m->terrain_escape_bearing = downhill;
+            m->terrain_escape_ticks = 3 * 182;
+            m->terrain_block_ticks = 0;
+        }
     }
     const float err = wrap180(m->terrain_escape_bearing - heading);
     m->reverse = 0;
     m->turn = fminf(819.2f, fmaxf(-819.2f, 24.0f * err));
     m->throttle = fabsf(err) > 30.0f ? 0.25f : 0.75f;
     m->terrain_escape_ticks -= ticks;
+}
+
+static void actors_animate(msim *s, float dt, int dos_ticks)
+{
+    /* pose everyone: the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13] and the key
+     * player (0x1000dec0, anim_player_step) walks the keys toward it - a stopping mech finishes its stride and comes to
+     * the standing pose (the old code froze the keys mid-stride whenever the ground speed fell under 1 cm/s) */
+    /* DOS animation tasks run newest first. The player gait tasks follow the other units,
+     * then scenery tasks consume the next normalization periods. */
+    for (int k = 0; k < s->actor_count; k++) {
+        int i = !msim_dos_int ? k : s->dos_anim_order ? s->dos_anim_order[s->actor_count - k - 1] : s->actor_count - k - 1;
+        world_actor *ac = &s->actors[i];
+        /* no walk animation (vehicles, turrets, dropships): the rest pose, placed at the unit's position and heading -
+         * the model drawn and hit is where the unit is */
+        if (!actor_has_animation(ac)) { mech3d_pose(&ac->mech, NULL, 0); continue; }
+        /* destroyed (state 4): the mech stands as it was struck (the engine's state 4 runs no gait; DOSBox shows the
+         * self-destructed Mad Dog mid-stride - ASSUMPTIONS "Standing wrecks"); only the dead are held */
+        if (s->armed[i] && s->units[i].destroyed) continue;
+        int held = 0;
+        if (s->anim_pl) {
+            /* airborne - the feet more than the centre height c[0x33] over the ground (0x10019310 0x10019df2) - or the
+             * jets firing with fuel left (0x1001a180 0x1001a688): object +0x80 bit 0 cleared every frame, so the key
+             * player holds its key and pose, drops the frame's time and starts no key (no footstep) until it lands; the
+             * gait request runs on (as the player's, tools/glview.c). Was: held whenever 1 cm off the ground (ASSUMED) */
+            held = s->units[i].jet_on || s->units[i].y - s->units[i].ground > (s->centre_h ? s->centre_h[i] : 550.0f);
+            if (held) anim_player_hold(&s->anim_pl[i]);
+            /* 0x1000b3a0: c[0x13] over the stop level (1/64) by more than 1/2048 (1/32 of full: 0x3c840001) walks -
+             * gait 1 under 1/4 of full, 2 under 3/4, else 3; sequence 0 (walk) below gait 3, 1 (run) at it, 2 (reverse)
+             * while reversing (input +0x2f; the AI's throttle stays positive), the gait then at most 2; at or under it
+             * the request is "stop" (-1, gait 0: 0x1000b350) */
+            const ai_mind *m = s->minds ? &s->minds[i] : NULL;
+            float fr = m ? fabsf(m->thr_servo) : 0.0f;
+            int req = -1, gait = 0, ev;
+            int rate = ac->mech.anim_rate > 0 ? ac->mech.anim_rate : 70;   /* the TSK key time */
+            if (m && fr > 1.0f / 32.0f) {
+                gait = fr < 0.25f ? 1 : fr < 0.75f ? 2 : 3;
+                req = gait == 3 ? 1 : 0;
+                if (s->anim_pl[i].cur == 2 && gait > 2) gait = 2;
+                if (m->reverse) req = 2;
+            }
+            ev = anim_player_step(&ac->anim, &s->anim_pl[i], req, gait, rate,
+                                  msim_dos_int ? (float)dos_ticks : dt * 182.0f, msim_dos_int);
+            if (msim_dos_int) mech3d_dos_anim_step(&ac->mech, &ac->anim, &s->anim_pl[i], &s->dos_anim_phase);
+            if (!msim_dos_int && (ev & ANIM_EV_STEP) && ac->have_anim && !s->units[i].destroyed && s->on_sound) {
+                float p3[3] = {(float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2]};
+                s->on_sound(s->shot_user, 0x103, p3);
+            }
+            /* a key flagged 0x10 (object +0x80 bit 1): the drive servo's T becomes 90.5 ticks for good (0x1001a180) */
+            if ((ev & ANIM_EV_SLOW) && m && (msim_dos_int || fabsf(m->speed) > 1.0f)) s->minds[i].drive_slow = 1;
+            ac->t = s->anim_pl[i].t;
+        }
+        if (mw2_development_env("MW2_ANIM_TRACE") && i == atoi(mw2_development_env("MW2_ANIM_TRACE")))   /* tests: one actor every step */
+            fprintf(stderr, "anim %.2fs actor %d held %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, held, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
+        const anim_player *ap = s->anim_pl && !mw2_development_env("MW2_NO_POSE_OFF") ? &s->anim_pl[i] : NULL;
+        ac->mech.pose_off = ap && !msim_dos_int ? ap->off : NULL;
+        ac->mech.pose_dos = msim_dos_int ? ap : NULL;
+        mech3d_pose(&ac->mech, &ac->anim, ac->t);
+    }
 }
 
 void msim_step(msim *s, int32_t dt_ms)
@@ -2508,6 +2589,19 @@ void msim_step(msim *s, int32_t dt_ms)
         /* The player's first movement can land before the startup roll. */
         s->player_online_at = startup_deadline(s, startup_ticks(s), 1);
         dos_player_startup_sound(s);
+    }
+    if (msim_dos_int) {
+        /* DOS runs animation tasks at 0x15d7f, before movement and the controller.
+         * Newly entered keys are already available to both passes. */
+        actors_animate(s, dt, dos_ticks);
+        s->dos_player_anim_event = 0;
+        if (s->dos_player_anim && !s->player_unit.destroyed) {
+            anim_player *player = s->dos_player_anim;
+            if (s->dos_player_anim_held) anim_player_hold(player);
+            s->dos_player_anim_event = anim_player_step(s->dos_player_anim_set, player, s->dos_player_anim_seq,
+                                                        s->dos_player_gait, s->dos_player_anim_rate, (float)dos_ticks, 1);
+            mech3d_dos_anim_step(s->dos_player_model, s->dos_player_anim_set, player, &s->dos_anim_phase);
+        }
     }
     if (msim_dos_int && !first_frame) {
         /* DOS 0x15d84 calls 0x24810. Movement consumes the state left by
@@ -2568,7 +2662,7 @@ void msim_step(msim *s, int32_t dt_ms)
             int li = l ? (int)(l - s->actors) : -1, cur = s->logic.current[t];
             if (li < 0 || (l->friendly && t == 0) || !s->armed[li] || s->units[li].destroyed) continue;
             if (s->seen_node[li] != cur) continue;   /* its node change (0x10014520) is applied first, below */
-            for (k = 0; k < (n > 0 ? n : 1); k++) node_assign(s, t, li, 0);
+            for (k = 0; k < (n > 0 ? n : 1); k++) node_assign(s, t, li);
         }
     }
     for (i = 0; s->minds && s->ai_ok && i < s->actor_count; i++) {
@@ -2633,12 +2727,13 @@ void msim_step(msim *s, int32_t dt_ms)
         /* Each DOS leader assigns one order in its controller visit. Its
          * target-entry draw precedes this controller's startup draw. */
         if (msim_dos_int && l == ac && !(ac->friendly && ac->table == 0) && s->seen_node && s->seen_node[i] == cur)
-            node_assign(s, ac->table, i, dos_ticks);
+            node_assign(s, ac->table, i);
         memset(&v, 0, sizeof v);
         v.heading = ac->mech.heading;
         v.heat = s->units[i].heat;
         v.range_c = ac->ai_range[0]; v.range_a = ac->ai_range[1]; v.range_b = ac->ai_range[2];   /* GPS (engine 0x10012000) */
         v.skill = ac->ai_skill;
+        if (msim_dos_int) v.dos_clock = msim_dos_frame_ticks(0, s->now);
         v.twist_limit = s->twist_limit ? s->twist_limit[i] : 90.0f;
         v.self_x = (float)ac->mech.origin[0]; v.self_z = (float)ac->mech.origin[2];
         /* the attacker reaction (0x10012520, at the start of every rule pass unless lock bit 1): a live unit of another
@@ -2655,7 +2750,17 @@ void msim_step(msim *s, int32_t dt_ms)
                 int al = s->actors[q3].friendly ? 0 : s->actors[q3].alliance;
                 if (q3 != i && s->armed[q3] && !s->units[q3].destroyed && s->ai_who[q3] == i && al != self_al) att = q3;
             }
-            if (att != -2 && s->ai_focus[i] != att) { s->ai_focus[i] = att; m->prev_state = m->state; if (msim_dos_int) { m->counter = 1; m->next_fire = (float)(ms_roll(s, 10) * 18u); } m->state = AI_TARGET; m->target = 1; ai_wake(s, i); }   /* DOS: pushed; the entry's fire delay */
+            if (att != -2 && s->ai_focus[i] != att) {
+                s->ai_focus[i] = att;
+                m->prev_state = m->state;
+                if (msim_dos_int) {
+                    m->counter = 1;
+                    target_fire_delay(s, m);
+                }
+                m->state = AI_TARGET;
+                m->target = 1;
+                ai_wake(s, i);
+            }
         }
         if (s->ai_focus && s->ai_focus[i] >= 0 && (!s->armed[s->ai_focus[i]] || s->units[s->ai_focus[i]].destroyed)) s->ai_focus[i] = -2;
         if (s->ai_focus && s->ai_focus[i] == -1 && s->player_unit.destroyed) s->ai_focus[i] = -2;
@@ -2995,7 +3100,7 @@ void msim_step(msim *s, int32_t dt_ms)
         if (msim_dos_int) {
             dos_ai_fire_decision(s, i, &v, enemy_who);
             dos_ai_weapon_step(s, i, dt, dos_ticks, starting);
-            /* 0x27b5d consumes the footstep flag left by the previous frame's task. */
+            /* 0x27b5d consumes the footstep flag set in this frame’s task pass. */
             if (s->anim_pl && s->anim_pl[i].dos_footstep) {
                 s->anim_pl[i].dos_footstep = 0;
                 if (ac->have_anim && !s->units[i].destroyed && s->on_sound) {
@@ -3030,69 +3135,8 @@ void msim_step(msim *s, int32_t dt_ms)
         }
     }
 
-    /* pose everyone: the gait code (engine 0x1000b3a0) asks for a sequence by the current throttle c[0x13] and the key
-     * player (0x1000dec0, anim_player_step) walks the keys toward it - a stopping mech finishes its stride and comes to
-     * the standing pose (the old code froze the keys mid-stride whenever the ground speed fell under 1 cm/s) */
-    /* DOS animation tasks run newest first. The player gait tasks follow the other units,
-     * then scenery tasks consume the next normalization periods. */
-    for (int k = 0; k < s->actor_count; k++) {
-        i = !msim_dos_int ? k : s->dos_anim_order ? s->dos_anim_order[s->actor_count - k - 1] : s->actor_count - k - 1;
-        world_actor *ac = &s->actors[i];
-        /* no walk animation (vehicles, turrets, dropships): the rest pose, placed at the unit's position and heading -
-         * the model drawn and hit is where the unit is */
-        if (!actor_has_animation(ac)) { mech3d_pose(&ac->mech, NULL, 0); continue; }
-        /* destroyed (state 4): the mech stands as it was struck (the engine's state 4 runs no gait; DOSBox shows the
-         * self-destructed Mad Dog mid-stride - ASSUMPTIONS "Standing wrecks"); only the dead are held */
-        if (s->armed[i] && s->units[i].destroyed) continue;
-        int held = 0;
-        if (s->anim_pl) {
-            /* airborne - the feet more than the centre height c[0x33] over the ground (0x10019310 0x10019df2) - or the
-             * jets firing with fuel left (0x1001a180 0x1001a688): object +0x80 bit 0 cleared every frame, so the key
-             * player holds its key and pose, drops the frame's time and starts no key (no footstep) until it lands; the
-             * gait request runs on (as the player's, tools/glview.c). Was: held whenever 1 cm off the ground (ASSUMED) */
-            held = s->units[i].jet_on || s->units[i].y - s->units[i].ground > (s->centre_h ? s->centre_h[i] : 550.0f);
-            if (held) anim_player_hold(&s->anim_pl[i]);
-            /* 0x1000b3a0: c[0x13] over the stop level (1/64) by more than 1/2048 (1/32 of full: 0x3c840001) walks -
-             * gait 1 under 1/4 of full, 2 under 3/4, else 3; sequence 0 (walk) below gait 3, 1 (run) at it, 2 (reverse)
-             * while reversing (input +0x2f; the AI's throttle stays positive), the gait then at most 2; at or under it
-             * the request is "stop" (-1, gait 0: 0x1000b350) */
-            const ai_mind *m = s->minds ? &s->minds[i] : NULL;
-            float fr = m ? fabsf(msim_dos_int ? m->dos_gait_throttle : m->thr_servo) : 0.0f;
-            int req = -1, gait = 0, ev;
-            int rate = ac->mech.anim_rate > 0 ? ac->mech.anim_rate : 70;   /* the TSK key time */
-            if (m && fr > 1.0f / 32.0f) {
-                gait = fr < 0.25f ? 1 : fr < 0.75f ? 2 : 3;
-                req = gait == 3 ? 1 : 0;
-                if (s->anim_pl[i].cur == 2 && gait > 2) gait = 2;
-                if (m->reverse) req = 2;
-            }
-            ev = anim_player_step(&ac->anim, &s->anim_pl[i], req, gait, rate,
-                                  msim_dos_int ? (float)dos_ticks : dt * 182.0f, msim_dos_int);
-            if (msim_dos_int) mech3d_dos_anim_step(&ac->mech, &ac->anim, &s->anim_pl[i], &s->dos_anim_phase);
-            if (!msim_dos_int && (ev & ANIM_EV_STEP) && ac->have_anim && !s->units[i].destroyed && s->on_sound) {
-                float p3[3] = {(float)ac->mech.origin[0], s->units[i].y, (float)ac->mech.origin[2]};
-                s->on_sound(s->shot_user, 0x103, p3);
-            }
-            /* a key flagged 0x10 (object +0x80 bit 1): the drive servo's T becomes 90.5 ticks for good (0x1001a180) */
-            if ((ev & ANIM_EV_SLOW) && m && (msim_dos_int || fabsf(m->speed) > 1.0f)) s->minds[i].drive_slow = 1;
-            ac->t = s->anim_pl[i].t;
-        }
-        if (mw2_development_env("MW2_ANIM_TRACE") && i == atoi(mw2_development_env("MW2_ANIM_TRACE")))   /* tests: one actor every step */
-            fprintf(stderr, "anim %.2fs actor %d held %d vy %.2f fuel %.0f jet %d y %.0f ground %.0f throttle %.2f key %.2f (seq %d)\n", s->now / 1000.0, i, held, s->units[i].vy, s->units[i].jet_fuel, s->minds ? s->minds[i].jet : -1, s->units[i].y, s->units[i].ground, s->minds ? s->minds[i].thr_servo : 0.0f, ac->t, s->anim_pl ? s->anim_pl[i].cur : -1);
-        const anim_player *ap = s->anim_pl && !getenv("MW2_NO_POSE_OFF") ? &s->anim_pl[i] : NULL;
-        ac->mech.pose_off = ap && !msim_dos_int ? ap->off : NULL;
-        ac->mech.pose_dos = msim_dos_int ? ap : NULL;
-        mech3d_pose(&ac->mech, &ac->anim, ac->t);
-    }
+    if (!msim_dos_int) actors_animate(s, dt, dos_ticks);
     if (msim_dos_int) {
-        s->dos_player_anim_event = 0;
-        if (s->dos_player_anim && !s->player_unit.destroyed) {
-            anim_player *player = s->dos_player_anim;
-            if (s->dos_player_anim_held) anim_player_hold(player);
-            s->dos_player_anim_event = anim_player_step(s->dos_player_anim_set, player, s->dos_player_anim_seq,
-                                                        s->dos_player_gait, s->dos_player_anim_rate, (float)dos_ticks, 1);
-            mech3d_dos_anim_step(s->dos_player_model, s->dos_player_anim_set, player, &s->dos_anim_phase);
-        }
         if (s->paths && s->world) paths_step(s);
         if (s->on_dos_world_sound) s->on_dos_world_sound();
         debris_step(s, (float)dos_ticks);
@@ -4387,7 +4431,8 @@ static void combat_step(msim *s, int32_t dt_ms, int dos_ticks)
 {
     int i, w;
     float dt = (float)dt_ms / 1000.0f;
-    float ticks = dt * COMBAT_TICKS_PER_S;
+    /* BATTLE.DLL registers the 182 Hz timer with a PIT divisor of 6556. */
+    float ticks = combat_titanium ? (float)dos_ticks : dt * COMBAT_TICKS_PER_S;
     float lock_ticks = msim_dos_int ? (float)dos_ticks : ticks;
     const float pl_h = 950.0f;          /* Timber Wolf muzzle / aim height, cm (approx.) */
 
@@ -4424,7 +4469,7 @@ static void combat_step(msim *s, int32_t dt_ms, int dos_ticks)
     }
     /* the fire routine (0x100437a0) runs from the controller only in state 2: not while starting up (states 0 / 1,
      * 0x1001a180 / 0x10021a50) or powered down - a queued volley waits, nothing is triggered */
-    s->player_unit.offline = (float)s->now < s->player_online_at && !getenv("MW2_NO_STARTUP");   /* the front end's test hook */
+    s->player_unit.offline = (float)s->now < s->player_online_at && !mw2_development_env("MW2_NO_STARTUP");   /* the front end's test hook */
     if (!s->player_unit.offline && !s->player_unit.shutdown) combat_damage_live = 1;   /* DAT_1024c570: the player's first start-up done (0x1001ac68) */
     for (i = 0; i < s->actor_count; i++)
         s->units[i].offline = (s->online_at && (float)s->now < s->online_at[i]) || (s->powered_down && s->powered_down[i]);
@@ -4513,7 +4558,7 @@ static void combat_step(msim *s, int32_t dt_ms, int dos_ticks)
                  * test), found within the mech's bounding sphere */
                 float dir[3] = {sinf(ay) * cosf(ap), sinf(ap), cosf(ay) * cosf(ap)}, best = 150000.0f;
                 int hit = 0;
-                if (s->player_eye_ok && !getenv("MW2_AIM_BODY")) memcpy(from, s->player_eye, sizeof from);   /* TEST ONLY: MW2_AIM_BODY the old ray */
+                if (s->player_eye_ok && !mw2_development_env("MW2_AIM_BODY")) memcpy(from, s->player_eye, sizeof from);   /* TEST ONLY: MW2_AIM_BODY the old ray */
                 /* every frame for the player (0x10019310 -> 0x1001a021): the ray's hit range (aim_ray) through the
                  * servos (aim_range_step): with nothing struck the range drifts back toward 50000 (tau 20 s) and the
                  * convergence follows the range with tau 0.2 s */
@@ -4762,7 +4807,7 @@ static void projectile_step(msim *s, float ticks, int dos_ticks)
                     int j;
                     /* a port addition (requested): the engine has no such reaction (0x10014110 records attackers only on
                      * the player's record) - off by default (the original); MW2_PROVOKE=1 turns it on */
-                    for (j = 0; j < s->actor_count && getenv("MW2_PROVOKE"); j++) {
+                    for (j = 0; j < s->actor_count && mw2_development_env("MW2_PROVOKE"); j++) {
                         float gx = (float)(s->actors[j].mech.origin[0] - s->actors[hit_unit].mech.origin[0]);
                         float gz = (float)(s->actors[j].mech.origin[2] - s->actors[hit_unit].mech.origin[2]);
                         if (s->armed[j] && !s->units[j].destroyed && !s->actors[j].friendly &&

@@ -1600,8 +1600,8 @@ def ai_self_destruct(c):
     c('Self-destruct sequence' not in r.out, 'no message for an AI unit')
     # Exercise the DOS controller's charge completion even when another unit
     # takes the next shared random draw. The executable audit checks the choice.
-    dos = {'MW2_TEST_DISARM': '8:2:1', 'MW2_TEST_MAN': '8:2:6', 'MW2_TEST_AIM': '2,1500,0'}
-    r2 = c.run('_dos', secs=12, env=dos, edition='dos')
+    dos = {'MW2_TEST_DISARM': '10:2:1', 'MW2_TEST_MAN': '10:2:6', 'MW2_TEST_AIM': '2,-1500,0'}
+    r2 = c.run('_dos', secs=12, env=dos, dos_look=True)
     d0, d1 = times(r2)
     c(d0 is not None and d1 is not None and abs(d1 - d0) < 0.05, 'DOS: destroyed at once', '%s / %s' % (d0, d1))
 
@@ -5522,8 +5522,8 @@ def sable_flame_dropship_damage(c):
     r = c.run(secs=27, throttle=0, fire=1, mission='SABLSCN1', nostart=True, dos_look=True, dump='/0.25',
               env={'MW2_TEST_AIM': '8,13000,0', 'MW2_TEST_WATCH': '0:8',
                    'MW2_TEST_TARGET': '8', 'MW2_TEST_PASSIVE': '1'})
-    c(r.at(1).get('tgt_health', 0) > 7000 and r.at(15).get('tgt_health', 9999) < 6450,
-      'player fire damages the stock Falcon dropship hull', str(r.at(15).get('tgt_health')))
+    c(r.at(1).get('tgt_health', 0) > 7000 and 0 < r.at(16).get('tgt_health', 9999) < 6450,
+      'player fire damages the stock Falcon dropship hull', str(r.at(16).get('tgt_health')))
     c(r.last.get('a_dead') == 1, 'the dropship is destroyed by sustained player fire', str(r.last.get('a_armor')))
 
 
@@ -5531,7 +5531,7 @@ def sable_flame_dropship_damage(c):
 def sable_flame_dropship_volley(c):
     """Both Falcon dropships converge their live energy fire on a stationary player."""
     for actor in (8, 9):
-        run = c.run('_%d' % actor, secs=24, throttle=0, mission='SABLSCN1', nostart=True, dos_look=True,
+        run = c.run('_%d' % actor, secs=42, throttle=0, mission='SABLSCN1', nostart=True, dos_look=True,
                     env={'MW2_TEST_AIM': '%d,17000,0' % actor, 'MW2_TEST_PASSIVE': '1', 'MW2_AI_AIM_TRACE': '1'})
         rays = re.findall(r'^aiaim [\d.]+ actor %d w (\d+) hit 1 dist (\d+) range \d+ conv (\d+) '
                           r'eye \S+ (\d+) .*? pitch ([-\d.]+)$' % actor, run.out, re.M)

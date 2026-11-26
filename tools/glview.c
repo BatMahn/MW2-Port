@@ -168,7 +168,7 @@ static SDL_Scancode g_zoom_reset_key = SDL_SCANCODE_UNKNOWN;
  * every key belongs to GAMEKEY.MAP / INPUT.MAP (user report 2026-10-23: rebinding to G dropped the piloting) */
 static void cheat_reset(void);
 static int g_cheat_dbg;   /* the cheat code "hangaround": the debug commands too (Win95 0x1004d321 -> 0x1004af0d) */
-static int dbg_keys(void) { static int v = -1; if (v < 0) v = getenv("MW2_DEBUG_KEYS") && atoi(getenv("MW2_DEBUG_KEYS")) > 0; return v || g_cheat_dbg; }
+static int dbg_keys(void) { static int v = -1; if (v < 0) v = mw2_development_env("MW2_DEBUG_KEYS") && atoi(mw2_development_env("MW2_DEBUG_KEYS")) > 0; return v || g_cheat_dbg; }
 #define H(name) (g_im_ok && im_held(&g_im, name, ks))
 
 static mech3d    g_mech;          /* the viewed mech, kept for posing */
@@ -242,7 +242,7 @@ static void write_results(void)
     if (g_results_written || !g_sim_ok || !getenv("MW2_INSTALL_DIR")) return;
     snprintf(rp, sizeof rp, "%s/MW2MSN.CFG", getenv("MW2_INSTALL_DIR"));
     if (msim_write_results(&g_sim, rp) == 0 && MW2_DEVELOPMENT_LOGS)
-        printf("results: %s (%s)\n", rp, msim_outcome_text(&g_sim) ? msim_outcome_text(&g_sim) : "left early");
+        if (MW2_DEVELOPMENT_LOGS) printf("results: %s (%s)\n", rp, msim_outcome_text(&g_sim) ? msim_outcome_text(&g_sim) : "left early");
     snprintf(rp, sizeof rp, "%s/MW2CAR.CFG", getenv("MW2_INSTALL_DIR"));
     msim_write_career(&g_sim, rp);
     g_results_written = 1;
@@ -533,7 +533,7 @@ static void cd_music_cb(void *u, float *out, int frames)
     (void)u;
     if (g_cd) got = cdaudio_render(g_cd, out, (size_t)frames);
     if (got < (size_t)frames) memset(out + got * 2, 0, ((size_t)frames - got) * 2 * sizeof(float));
-    if (getenv("MW2_MUSIC_PROBE")) {   /* tests: the level reaching the mixer, after ~1.5 s */
+    if (mw2_development_env("MW2_MUSIC_PROBE")) {   /* tests: the level reaching the mixer, after ~1.5 s */
         static long total;
         static double acc;
         int i;
@@ -650,7 +650,7 @@ static mech3d *actor_lod(int k, const mech3d *full, const char *skel, float dist
     float a0 = lod_a0(g_zoom);
     int r = repr >= 0 ? repr : dist < a0 * 3600.0f ? 0 : dist < a0 * 8500.0f ? 1 : dist < a0 * 22500.0f ? 2 : 3;
     mech3d *m;
-    if (getenv("MW2_NO_LOD") && repr < 0) r = 0;
+    if (mw2_development_env("MW2_NO_LOD") && repr < 0) r = 0;
     if (r == 0 || k < 0 || k >= 65 || !g_ma) return NULL;
     if (!g_alod[k].tried || strcmp(g_alod[k].skel, skel) != 0) {
         int q;
@@ -732,7 +732,7 @@ static int ti_tip_load(const char *mission)
     int k, w, h;
     snprintf(path, sizeof path, "%s/particle.PID", g_ti_dir);
     if (!(f = fopen(path, "rb"))) { snprintf(path, sizeof path, "%s/PARTICLE.PID", g_ti_dir); f = fopen(path, "rb"); }
-    if (!f) { printf("titanium: no particle.PID in %s: no missile smoke\n", g_ti_dir); return -1; }
+    if (!f) { if (MW2_DEVELOPMENT_LOGS) printf("titanium: no particle.PID in %s: no missile smoke\n", g_ti_dir); return -1; }
     len = fread(buf, 1, sizeof buf, f);
     fclose(f);
     w = len >= 16 ? buf[8] | buf[9] << 8 : 0; h = len >= 16 ? buf[12] | buf[13] << 8 : 0;   /* header +8 w, +0xc h (0x100025d4) */
@@ -773,7 +773,7 @@ static void ti_particles(glr *r, const glr_view *v, float now_ticks, const char 
     static glr_particle *pp;
     static int pcap;
     int k, q, n = 0;
-    if (!c3d_ti || !g_sim_ok || getenv("MW2_NO_PARTICLES")) { glr_set_particles(r, NULL, 0, 0); g_tip_n = 0; last = -1; return; }
+    if (!c3d_ti || !g_sim_ok || mw2_development_env("MW2_NO_PARTICLES")) { glr_set_particles(r, NULL, 0, 0); g_tip_n = 0; last = -1; return; }
     if (g_tip_state > 0 && g_tip_keyed != (g_edition != PORTCFG_ED_RENDITION)) g_tip_state = 0;   /* (the renderer changed) */
     if (g_tip_state == 0) { g_tip_keyed = g_edition != PORTCFG_ED_RENDITION; g_tip_state = ti_tip_load(mission); }
     if (g_tip_state < 0) { glr_set_particles(r, NULL, 0, 0); return; }
@@ -1151,7 +1151,7 @@ static int lower_mode(void) { return g_vport ? g_vport + 2 : g_dmg_off ? 0 : g_h
 static void lower_mode_set(int m) { g_vport = m >= 3 ? m - 2 : 0; g_htal = m == 2; g_dmg_off = m == 0; }
 static int ui_click(void)
 {
-    if (g_sfx && g_sim_ok && !g_sim.player_unit.destroyed && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")))
+    if (g_sfx && g_sim_ok && !g_sim.player_unit.destroyed && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")))
         sfx_play(g_sfx, 0xdc, SFX_V64, 0.0f);
     return 1;
 }
@@ -4305,7 +4305,7 @@ static void mm_activate(int k)
          * with the mech not up, the game leaves at once. (The Windows 95 edition leaves at once, 0x100642e0) */
         if (it->arg && g_edition == PORTCFG_ED_DOS && g_sim_ok && g_world && !g_sim.over && !g_sim.ending) {
             const combat_unit *pu2 = &g_sim.player_unit;
-            if (!pu2->destroyed && !pu2->shutdown && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))) {
+            if (!pu2->destroyed && !pu2->shutdown && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP"))) {
                 hud_message_v("Self-destruct sequence initiated", 16);   /* message 4 */
                 player_eject(0); g_sim.player_unit.down_in_update = 1;
                 g_mm_flee = 1;
@@ -4907,7 +4907,7 @@ static void load_view_far(prj_archive *ma, const char *scene)
                 g_view_far = (float)(int32_t)(ch->data[4] | ch->data[5] << 8 | ch->data[6] << 16 | (uint32_t)ch->data[7] << 24);
         }
     bwd_mission_free(&bm);
-    if (getenv("MW2_NO_FAR_CULL")) g_view_far = 0;   /* comparison shots */
+    if (mw2_development_env("MW2_NO_FAR_CULL")) g_view_far = 0;   /* comparison shots */
     if (mw2_development_env("MW2_DEBUG_VIEW")) fprintf(stderr, "view far %.0f (%s)\n", (double)g_view_far, scene);   /* tests */
 }
 
@@ -4975,7 +4975,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         if (mw2_development_env("MW2_LIST_ACTORS")) {   /* TEST ONLY: "actor <k> <group> <skeleton> flags <GPS +0x1a> at <x> <z>" */
             int k;
             for (k = 0; k < g_actor_count; k++) { printf("actor %d %s %s flags %#x at %d %d parts %d table %d leader %d\n", k, g_actors[k].group, g_actors[k].skel, g_actors[k].unit_flags, g_actors[k].mech.origin[0], g_actors[k].mech.origin[2], g_actors[k].mech.part_count, g_actors[k].table, g_actors[k].leader);
-            if (getenv("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s node %d pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->node, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
+            if (mw2_development_env("MW2_LIST_PARTS")) { int q; for (q = 0; q < g_actors[k].mech.part_count; q++) { const mech3d_part *pp = &g_actors[k].mech.parts[q]; printf("  part %d %s node %d pos %d,%d,%d grp %d hidden %d objs %d verts %d\n", q, pp->model_name, pp->node, pp->pos[0], pp->pos[1], pp->pos[2], pp->group, pp->hidden, pp->model.object_count, pp->model.object_count ? pp->model.objects[0].vert_count : 0); } } }
         }
         load_view_far(ma, scene);
         if (mw2_development_env("MW2_DEBUG_CARDS")) {   /* TEST hook: the fire / smoke cards (class 0x10 / 0x60) and where they stand */
@@ -4985,12 +4985,13 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
                         m.parts[q].objtype, m.parts[q].obj_index, m.parts[q].parent_obj, m.parts[q].pos[0], m.parts[q].pos[1], m.parts[q].pos[2], m.parts[q].hidden);
         }
         g_exit_fade_t0 = -1;
+        msim_use_titanium_combat(g_edition == PORTCFG_ED_RENDITION);
         g_sim_ok = msim_init(&g_sim, ma, scene, g_actors, g_actor_count) == 0;
         cheat_reset();   /* the cheats last one mission (the Combat Variables come back from MW2DIF.CFG with the sim) */
         if (g_sim_ok && !g_drop_tex) music_start(g_sim.music_track);   /* with the drop screen: when it fades (main loop) */
         if (MW2_DEVELOPMENT_LOGS) g_sim.log = sim_log;
         g_sim.on_message = cc_message;                 /* lancemate acknowledgements on the message bar, with voice */
-        if (getenv("MW2_CC_PAGE")) g_cc_page = atoi(getenv("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
+        if (mw2_development_env("MW2_CC_PAGE")) g_cc_page = atoi(mw2_development_env("MW2_CC_PAGE"));   /* tests: open a COMMAND COMPUTER page */
         g_sim.on_shot = on_shot;
         g_sim.shot_user = r;
         g_sim.dos_warning_view = dos_warning_view;
@@ -5046,7 +5047,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
         /* the cockpit view (engine 0x100267d0: in the cockpit the player's object takes level of detail 4, the
          * record's fifth representation - KF5_HEAD, the upper legs and arms - drawn like any object from the eye) */
         if (pl_loaded) g_plpit_ok = mech3d_load(ma, g_sim.player_skel, 4, &g_plpit) == 0 && g_plpit.part_count > 0;
-        if (g_plpit_ok && !getenv("MW2_PIT_OWN_SKEL")) mech3d_use_skeleton(&g_plpit, &g_pl);   /* the engine's single skeleton (mech3d.c) */
+        if (g_plpit_ok && !mw2_development_env("MW2_PIT_OWN_SKEL")) mech3d_use_skeleton(&g_plpit, &g_pl);   /* the engine's single skeleton (mech3d.c) */
         if (mw2_development_env("MW2_DEBUG_PIT")) {
             int q;
             fprintf(stderr, "cockpit repr 4: %d (%d parts, repr_count %d)\n", g_plpit_ok, g_plpit.part_count, g_pl.repr_count);
@@ -5079,12 +5080,12 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             }
             g_frame_mech++;
             if (mw2_development_env("MW2_DEBUG_NAVS")) { int q; for (q = 0; q < g_sim.nav_count; q++) fprintf(stderr, "nav %d %s '%s' %.0f %.0f %.0f shown %d sel %d\n", q, g_sim.navs[q].name, g_sim.navs[q].label, (double)g_sim.navs[q].x, (double)g_sim.navs[q].y, (double)g_sim.navs[q].z, g_sim.navs[q].shown, g_sim.navs[q].selectable); }   /* TEST hook */
-            if (getenv("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
+            if (mw2_development_env("MW2_START")) {   /* debug: start the player at "x,z" (or "x,z,y": the feet's height too) */
                 float sx0 = 0, sz0 = 0, sy0 = 0;
-                int nst = sscanf(getenv("MW2_START"), "%f,%f,%f", &sx0, &sz0, &sy0);
+                int nst = sscanf(mw2_development_env("MW2_START"), "%f,%f,%f", &sx0, &sz0, &sy0);
                 if (nst >= 2) { g_sim.player[0] = sx0; g_sim.player[2] = sz0; }
                 if (nst == 3) { g_sim.player_unit.y = sy0; g_sim.player_unit.vy = 0; }
-                if (getenv("MW2_START_HEADING")) g_sim.player_heading = (float)atof(getenv("MW2_START_HEADING"));   /* debug */
+                if (mw2_development_env("MW2_START_HEADING")) g_sim.player_heading = (float)atof(mw2_development_env("MW2_START_HEADING"));   /* debug */
             }
             g_pl.origin[0] = (int32_t)g_sim.player[0]; g_pl.origin[2] = (int32_t)g_sim.player[2];
             g_pl.heading = g_sim.player_heading;
@@ -5092,7 +5093,7 @@ static int load(glr *r, prj_archive *ma, prj_archive *ta, int ati, const char *r
             g_throttle = 0; g_reverse = 0; g_pl_speed = 0; g_jet_vx = g_jet_vz = 0; g_pl_free = 0; g_pl_jet_fire = 0; g_pl_anim_held = 0; g_pl_free_h = 1e9f; g_pl_frac[0] = g_pl_frac[1] = 0; g_pl_across = 0; g_pl_contact = -2; g_pl_contact_acc = 0; g_pl_contact_hold = 0; g_thr_srv = 0; g_spd_srv = 0; g_pl_reset_legs = 1; g_drive_slow = 0; g_pl_t = 0; g_pl_ap_ok = 0; g_pitch = 0; g_pl.twist = 0; g_masc = 0; g_masc_key = 0; g_twist_dem = g_pitch_dem = 0; g_tgt_any = 0;
             g_pow_last = -1;   /* the start-up animation from the mission's tick 0 */
             g_sel_weapon = g_sim_ok && g_sim.player_unit.weapon_count > 0 ? weapon_next(&g_sim.player_unit, -1, 0, 0) : 0;   /* the panel's first (top left) */
-            if (getenv("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
+            if (mw2_development_env("MW2_WEAPON_ORDER") && g_sim_ok) {   /* tests: the selector's order, with each weapon's panel window */
                 int q, w = g_sel_weapon;
                 for (q = 0; q < g_sim.player_unit.weapon_count; q++) { printf("weapon %d %s window %d\n", w, sim_weapon_short[g_sim.player_unit.weapons[w].weapon], weapon_window(&g_sim.player_unit, w)); w = weapon_next(&g_sim.player_unit, w, 0, 0); }
             }
@@ -5399,7 +5400,7 @@ static void edition_look(glr_view *v)
     /* the 3D editions' laser bolts by default (user choice); MW2_DOS_LASERS=1: glowing balls (a port option). The DOS
      * edition draws its own LASER1-3 objects (DOS MW2_SHT1: scale 3, 3, 12; Gouraud vertices a 33 / 37, 13 / 15, 45 / 47 -
      * all under 48, so drawn as those palette indices unscaled, 0x3bb80) like any object */
-    g_dos_lasers = getenv("MW2_DOS_LASERS") != NULL;
+    g_dos_lasers = mw2_development_env("MW2_DOS_LASERS") != NULL;
     /* each edition's texture filtering (traced in its renderer DLL):
      *   3Dfx  guTexAllocateMemory(min = mag = bilinear, GR_MIPMAP_NEAREST_DITHER): linear, nearest mip
      *   ATi   "Filter Textures" on (the default): C3D_ETFILT_MINPNT_MAG2BY2 - point minification, bilinear magnification
@@ -5906,7 +5907,7 @@ static void draw_snow(float x, float y, float w, float h)
 static int targeting_online(void)
 {
     return !g_sim.player_unit.destroyed && !g_sim.player_unit.shutdown &&
-           (g_sim.now >= g_sim.player_online_at || getenv("MW2_NO_STARTUP"));
+           (g_sim.now >= g_sim.player_online_at || mw2_development_env("MW2_NO_STARTUP"));
 }
 
 /* TARGET_AT_RETICLE (engine 0x1001d870): the unit the player's aim ray last struck (msim reticle_actor / reticle_bld,
@@ -5980,7 +5981,7 @@ static SDL_Keycode test_keycode(const char *kn, int *mods)
 static const bool *test_ks(void)
 {
     static bool ks[SDL_SCANCODE_COUNT];
-    const char *q = getenv("MW2_HOLD");
+    const char *q = mw2_development_env("MW2_HOLD");
     int n = 0;
     const bool *real = SDL_GetKeyboardState(&n);
     if (!q || !g_auto_on) return real;
@@ -6214,8 +6215,8 @@ static void test_dump(const char *tag)
                    (double)(g_sim.minds ? g_sim.minds[wa].thr_servo : 0.0f), g_actors[wa].mech.origin[0], g_actors[wa].mech.origin[2],
                    (double)g_actors[wa].mech.heading, g_sim.minds ? g_sim.minds[wa].state : -1);
     }
-    if (getenv("MW2_KILL_ACTOR")) {
-        int ka = atoi(getenv("MW2_KILL_ACTOR"));
+    if (mw2_development_env("MW2_KILL_ACTOR")) {
+        int ka = atoi(mw2_development_env("MW2_KILL_ACTOR"));
         if (ka >= 0 && ka < g_actor_count)
             printf(" k_key=%.3f k_dead=%d k_gone=0x%02x", (double)g_actors[ka].t, g_sim.units[ka].destroyed,
                    (g_sim.units[ka].loc_gone[0] != 0) | (g_sim.units[ka].loc_gone[2] != 0) << 2);
@@ -6250,7 +6251,7 @@ static void test_frame(int w, int h)
 {
     static int d_phit, d_heat, d_thing, d_bld, d_shot, dump_idx, d_node;
     static float next_every = -1;
-    const char *sd = mw2_development_env("MW2_STATE_DUMP"), *sh = getenv("MW2_SHOT");
+    const char *sd = mw2_development_env("MW2_STATE_DUMP"), *sh = mw2_development_env("MW2_SHOT");
     if (!g_auto_on || !g_sim_ok || !g_world) return;
     {
         static int prev[COMBAT_MAX_WEAPONS];
@@ -6362,7 +6363,7 @@ static void syskeys_apply(int off)
         looked = 1;
         if (!dlsym(h, "CGSSetGlobalHotKeyOperatingMode")) h = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
         if (h) { conn = (int (*)(void))dlsym(h, "_CGSDefaultConnection"); mode = (int (*)(int, int))dlsym(h, "CGSSetGlobalHotKeyOperatingMode"); }
-        if (!conn || !mode) fprintf(stderr, "system shortcuts: CGSSetGlobalHotKeyOperatingMode not found - left on\n");
+        if (MW2_DEVELOPMENT_LOGS && (!conn || !mode)) fprintf(stderr, "system shortcuts: CGSSetGlobalHotKeyOperatingMode not found - left on\n");
     }
     if (conn && mode) mode(conn(), off ? 1 : 0);   /* CGSGlobalHotKeyDisable 1 / CGSGlobalHotKeyEnable 0 (SDL's enum) */
 #else
@@ -6688,9 +6689,9 @@ int main(int argc, char **argv)
         char gerr[512];
         SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
         const char *drv = SDL_GetCurrentVideoDriver();
-        int test = getenv("MW2_SIZE") || (drv && strcmp(drv, "offscreen") == 0) || getenv("MW2_AUTOPILOT");
+        int test = mw2_development_env("MW2_SIZE") || (drv && strcmp(drv, "offscreen") == 0) || mw2_development_env("MW2_AUTOPILOT");
         portcfg_load(getenv("MW2_INSTALL_DIR"), &pc);
-        if (getenv("MW2_SIZE")) sscanf(getenv("MW2_SIZE"), "%dx%d", &ww, &wh);   /* e.g. 1024x768 to compare with DOS */
+        if (mw2_development_env("MW2_SIZE")) sscanf(mw2_development_env("MW2_SIZE"), "%dx%d", &ww, &wh);   /* e.g. 1024x768 to compare with DOS */
         if (!test) {
             const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
             if (pc.mode == 0 && dm) { ww = dm->w; wh = dm->h; flags |= SDL_WINDOW_FULLSCREEN; }   /* SDL3: no fullscreen mode set = the desktop's */
@@ -6724,8 +6725,8 @@ int main(int argc, char **argv)
         g_win_w = ww; g_win_h = wh;
         aa = pc.aa;
         g_render_w = pc.render_w; g_render_h = pc.render_h;
-        g_cockpit_frame = getenv("MW2_COCKPIT_FRAME") ? atoi(getenv("MW2_COCKPIT_FRAME")) : 0;   /* 0: the engine's (repr 4), -1: none, 1: the old attempt */
-        if (getenv("MW2_RENDER")) { g_render_w = g_render_h = 0; sscanf(getenv("MW2_RENDER"), "%dx%d", &g_render_w, &g_render_h); }   /* tests */
+        g_cockpit_frame = mw2_development_env("MW2_COCKPIT_FRAME") ? atoi(mw2_development_env("MW2_COCKPIT_FRAME")) : 0;   /* 0: the engine's (repr 4), -1: none, 1: the old attempt */
+        if (mw2_development_env("MW2_RENDER")) { g_render_w = g_render_h = 0; sscanf(mw2_development_env("MW2_RENDER"), "%dx%d", &g_render_w, &g_render_h); }   /* tests */
         if (g_render_w) aa = 0;   /* the original resolutions: no multisampling (the window is only blitted to) */
         gpu = pc.gpu == PORTCFG_GPU_D3D12 ? RB_GPU_D3D12 : pc.gpu == PORTCFG_GPU_VULKAN ? RB_GPU_VULKAN : RB_GPU_AUTO;
         win = sim_window(g_win_w, g_win_h, flags);
@@ -6764,10 +6765,10 @@ int main(int argc, char **argv)
             (rb_backend() == RB_GPU_METAL || mw2_development_env("MW2_TEST_DOS_NATIVE_INTERPOLATION"));
         g_syskeys_allow = pc.system_shortcuts;
         g_hud_wide = !pc.hud_original;
-        if (getenv("MW2_HUD_LAYOUT")) g_hud_wide = strcmp(getenv("MW2_HUD_LAYOUT"), "original") != 0;   /* tests */
+        if (mw2_development_env("MW2_HUD_LAYOUT")) g_hud_wide = strcmp(mw2_development_env("MW2_HUD_LAYOUT"), "original") != 0;   /* tests */
         g_dos_sky_smooth = pc.dos_sky_smooth;
-        if (getenv("MW2_DOS_SKY")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SKY"), "smooth") == 0;   /* tests */
-        if (getenv("MW2_DOS_SHADING")) g_dos_sky_smooth = strcmp(getenv("MW2_DOS_SHADING"), "smooth") == 0;   /* tests */
+        if (mw2_development_env("MW2_DOS_SKY")) g_dos_sky_smooth = strcmp(mw2_development_env("MW2_DOS_SKY"), "smooth") == 0;   /* tests */
+        if (mw2_development_env("MW2_DOS_SHADING")) g_dos_sky_smooth = strcmp(mw2_development_env("MW2_DOS_SHADING"), "smooth") == 0;   /* tests */
     }
     /* port: no text input in the simulation - SDL2 started it with the video (SDL_VideoInit), and on macOS active text
      * input passes the keys through the input method (Cocoa_HandleKeyEvent -> interpretKeyEvents): holding z (zoom)
@@ -6787,11 +6788,11 @@ int main(int argc, char **argv)
         if (sscanf(mw2_development_env("MW2_TEST_VIEWER"), "%f,%f,%f", &vy, &vp, &vh) >= 1) { v.yaw = vy; v.pitch = vp; g_test_vhead = vh; }
         g_walk = 0;   /* (a still pose) */
     }
-    if (getenv("MW2_AUTOPILOT")) {
+    if (mw2_development_env("MW2_AUTOPILOT")) {
         char out[256] = "autopilot.ppm";
         int fire = 0, ck = 0;
         int jt = 0;
-        if (sscanf(getenv("MW2_AUTOPILOT"), "%f,%f,%f,%d,%255[^,],%d,%d", &g_auto_secs, &g_auto_throttle, &g_auto_twist, &fire, out, &ck, &jt) >= 4) {
+        if (sscanf(mw2_development_env("MW2_AUTOPILOT"), "%f,%f,%f,%d,%255[^,],%d,%d", &g_auto_secs, &g_auto_throttle, &g_auto_twist, &fire, out, &ck, &jt) >= 4) {
             g_auto_on = 1; g_auto_fire = fire; g_auto_cockpit = ck; g_auto_jet = jt;
             if (mw2_development_env("MW2_TEST_FPS") && atof(mw2_development_env("MW2_TEST_FPS")) >= 1.0) g_auto_dt = (float)(1.0 / atof(mw2_development_env("MW2_TEST_FPS")));   /* TEST ONLY */
             snprintf(g_auto_out, sizeof g_auto_out, "%s", out);
@@ -6850,7 +6851,7 @@ int main(int argc, char **argv)
             fclose(fs);
         }
     }
-    if (mission && mission[0] && !getenv("MW2_AUTOPILOT")) {   /* the drop screen while the mission loads */
+    if (mission && mission[0] && !mw2_development_env("MW2_AUTOPILOT")) {   /* the drop screen while the mission loads */
         drop_screen_build(ma, mission);
         g_drop_t0 = SDL_GetTicks();
         {   /* a new window settles over its first events (macOS: a Retina window's drawable reports its point size until
@@ -6897,10 +6898,10 @@ int main(int argc, char **argv)
             fclose(f);
         }
     }
-    g_show_objectives = getenv("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
+    g_show_objectives = mw2_development_env("MW2_SHOW_OBJECTIVES") != NULL;   /* tests: open the F12 display */
     edition_look(&v);
-    if (getenv("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
-        const char *p = getenv("MW2_GROUPS");
+    if (mw2_development_env("MW2_GROUPS")) {   /* tests: "g:w,w;g:w" e.g. "1:2,3" puts weapons 2 and 3 in group 1 */
+        const char *p = mw2_development_env("MW2_GROUPS");
         while (*p) {
             int g = atoi(p) - 1;
             while (*p && *p != ':') p++;
@@ -6960,7 +6961,7 @@ int main(int argc, char **argv)
              * does not repeat it) at 0x64, pan 0x1f. The port's lock exists only with a guided weapon selected */
             static int l_lock, l_trk;
             const combat_unit *pu3 = &g_sim.player_unit;
-            int up = !pu3->destroyed && !pu3->shutdown && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"));
+            int up = !pu3->destroyed && !pu3->shutdown && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP"));
             if (t_trk < 0) { int st = g_ma ? prj_find_type(g_ma, "SNDS") : -1; t_trk = st >= 0 ? prj_find_id(g_ma, st, "MECBYHLX") : 0; t_lock = st >= 0 ? prj_find_id(g_ma, st, "MECXLOCK") : 0; }
             if (VIEW_IN_COCKPIT) {
                 if (lk & 0x80) { if (!l_lock && up) { l_lock = 1; if (t_lock > 0) sfx_play(g_sfx, t_lock, SFX_V64, sfx_pan(0x5f)); } }
@@ -6972,9 +6973,9 @@ int main(int argc, char **argv)
             }
         }
         if (g_sim_ok && g_world) on_radio(NULL, NULL);   /* the radio queue */
-        if (g_auto_on && getenv("MW2_MOUSE")) {   /* TEST ONLY: "secs:dx:dy,..." mouse motion (SDL relative units) at autopilot times */
+        if (g_auto_on && mw2_development_env("MW2_MOUSE")) {   /* TEST ONLY: "secs:dx:dy,..." mouse motion (SDL relative units) at autopilot times */
             static int msent;
-            const char *q = getenv("MW2_MOUSE");
+            const char *q = mw2_development_env("MW2_MOUSE");
             int idx = 0, dx, dy;
             float at;
             while (*q && sscanf(q, "%f:%d:%d", &at, &dx, &dy) == 3) {
@@ -6991,10 +6992,10 @@ int main(int argc, char **argv)
                 q++;
             }
         }
-        if (g_auto_on && getenv("MW2_KEYS")) {   /* tests: "secs:key,..." key presses at autopilot times (esc, 0-9, up, down,
+        if (g_auto_on && mw2_development_env("MW2_KEYS")) {   /* tests: "secs:key,..." key presses at autopilot times (esc, 0-9, up, down,
                                                   * left, right, space, enter, tab, or a letter; "ctrl+" before one holds Ctrl) */
             static int sent;
-            const char *q = getenv("MW2_KEYS");
+            const char *q = mw2_development_env("MW2_KEYS");
             int idx = 0;
             while (*q) {
                 float at = (float)atof(q);
@@ -7264,7 +7265,7 @@ int main(int argc, char **argv)
                 }
                 else if (g_world && g_sim_ok && A("SELF_DESTRUCT")) {   /* 0x57: input +0x43, taken by 0x1001a180 in state 2 */
                     const combat_unit *pu2 = &g_sim.player_unit;
-                    if (!pu2->destroyed && !pu2->shutdown && g_sd_at < 0 && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))) {
+                    if (!pu2->destroyed && !pu2->shutdown && g_sd_at < 0 && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP"))) {
                         hud_message_v("Self-destruct sequence initiated", 16);   /* message 4 */
                         if (g_edition == PORTCFG_ED_DOS) { player_eject(0); g_sim.player_unit.down_in_update = 1; }   /* DOS: at once, inside the unit's update (its case 4 at once: msim on_player_down) */
                         else g_sd_at = g_sim.now + 0x16a * 1000 / 182;            /* state 7: 0x16a ticks */
@@ -7278,7 +7279,7 @@ int main(int argc, char **argv)
                 else if (g_world && g_sim_ok && A("EJECT")) player_eject(1);   /* 0x3b: 0x100174f0(c, 1) */
                 else if (g_world && g_sim_ok && A("TOGGLE_AUTOEJECT")) {   /* 0x3c: only with the mech up (+0x15 & 0x20) */
                     const combat_unit *pu2 = &g_sim.player_unit;
-                    if (!pu2->destroyed && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))) {
+                    if (!pu2->destroyed && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP"))) {
                         combat_set_auto_eject(!combat_auto_eject());
                         hud_message_ex(combat_auto_eject() ? "Automatic ejection ON" : "Automatic ejection OFF", 0x16a, 0x32);
                     }
@@ -7398,7 +7399,7 @@ int main(int argc, char **argv)
                 if (speed < 0) {
                     portcfg pc;
                     portcfg_load(NULL, &pc);
-                    speed = getenv("MW2_SPEED") ? (float)atof(getenv("MW2_SPEED")) : pc.speed;
+                    speed = mw2_development_env("MW2_SPEED") ? (float)atof(mw2_development_env("MW2_SPEED")) : pc.speed;
                     if (speed < 0.5f || speed > 1.5f) speed = 1.0f;
                 }
                 dt *= speed;
@@ -7463,10 +7464,10 @@ int main(int argc, char **argv)
             aprev = now;
             (void)i;
             if (g_sim_ok) g_sim.player_nav = g_nav_sel;   /* Disengage goes to the player's selected nav point */
-            if (g_sim_ok && getenv("MW2_KILL_ACTOR")) {   /* tests: "k,secs" - stand 60 m from actor k facing it; destroy it at secs */
+            if (g_sim_ok && mw2_development_env("MW2_KILL_ACTOR")) {   /* tests: "k,secs" - stand 60 m from actor k facing it; destroy it at secs */
                 static int placed;
-                int ka = atoi(getenv("MW2_KILL_ACTOR"));
-                const char *kc = strchr(getenv("MW2_KILL_ACTOR"), ',');
+                int ka = atoi(mw2_development_env("MW2_KILL_ACTOR"));
+                const char *kc = strchr(mw2_development_env("MW2_KILL_ACTOR"), ',');
                 if (ka >= 0 && ka < g_actor_count && g_sim.armed[ka]) {
                     if (!placed) {
                         placed = 1;
@@ -7503,7 +7504,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "mtarget %.3f %d at %d %.0f %d destroyed %d lock %#x\n", g_sim.now / 1000.0, g_tgt_sel, g_actors[g_tgt_sel].mech.origin[0],
                             g_sim.units[g_tgt_sel].y, g_actors[g_tgt_sel].mech.origin[2], g_sim.units[g_tgt_sel].destroyed, g_sim.player_lock);
             }
-            if (g_sim_ok && getenv("MW2_HIT_BUILDINGS") && g_sim.now >= 1000 && !g_sim.buildings_destroyed) {   /* tests */
+            if (g_sim_ok && mw2_development_env("MW2_HIT_BUILDINGS") && g_sim.now >= 1000 && !g_sim.buildings_destroyed) {   /* tests */
                 int b3;
                 for (b3 = 0; b3 < g_sim.bld_count; b3++) msim_damage_building(&g_sim, b3, 50.0f);
             }
@@ -7522,7 +7523,7 @@ int main(int argc, char **argv)
             if (g_auto_on && g_pl_ok) {   /* the held controls (a twist demand is discarded while the mech is down, as the keys') */
                 if (g_auto_throttle >= -1.5f) { g_throttle = g_auto_throttle; g_reverse = g_throttle < 0; }   /* TEST hook: throttle -9 = the keys drive it */
                 g_cockpit = g_auto_cockpit;
-                if (g_auto_twist > -900.0f && !(g_sim_ok && (g_sim.player_unit.shutdown || (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP"))))) g_pl.twist = g_auto_twist;   /* twist -999 = free */
+                if (g_auto_twist > -900.0f && !(g_sim_ok && (g_sim.player_unit.shutdown || (g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP"))))) g_pl.twist = g_auto_twist;   /* twist -999 = free */
             }
             g_sim.no_player_muzzle = VIEW_IN_COCKPIT;
             if (g_pl_ok && g_pilot && !g_sim.player_unit.destroyed) {
@@ -7533,7 +7534,7 @@ int main(int argc, char **argv)
                 const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
                 /* start-up (engine 0x1001a180 states 0-1): until the player's mech is online (5.97-7.95 s) every tick clears
                  * the throttle and the leg turn - input is discarded, not held - and the weapons stay off */
-                int starting = g_sim_ok && g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP");
+                int starting = g_sim_ok && g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP");
                 if (msim_dos_int) g_sim.player_unit.offline = starting;
                 /* not up (engine 0x1001a180 LAB_1001aae9: controller state != 2 - starting or shut down): every tick the
                  * throttle input (+8), the twist demand c[2], the leg turn c[0xe], the drive c[10] and the pitch demand c[6]
@@ -7699,7 +7700,7 @@ int main(int argc, char **argv)
                     if (pr && g_im_dev.joy) g_eye_tilt = a * 60.0f;
                 }
                 /* the pilot's view: pan / tilt keys, glances (held: pilot pan -70 / +70, tilt 50 up / 40 down, 0x1002e640), recentre, zoom */
-                if (getenv("MW2_EYE_PAN")) g_eye_pan = (float)atof(getenv("MW2_EYE_PAN"));   /* tests */
+                if (mw2_development_env("MW2_EYE_PAN")) g_eye_pan = (float)atof(mw2_development_env("MW2_EYE_PAN"));   /* tests */
                 /* the engine's key-driven controls (0x10039ee0): while a _plus / _minus key is held the control's velocity
                  * grows at a constant acceleration (3 << shift per tick, velocity capped at half scale per tick) and the
                  * value (-1..1) moves by it; the velocity drops to 0 on release. pilot_pan spans -70..70, pilot_tilt
@@ -7754,7 +7755,7 @@ int main(int argc, char **argv)
                                    * x 2 (0x102473d4) with no speed term while the tank holds fuel after this frame's burn,
                                    * else 0 - an empty tank with the jets held does not turn (0x1001a180: bVar3 -> local_2c) */
                     const combat_unit *pu = &g_sim.player_unit;
-                    int jh = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || pu->shutdown);
+                    int jh = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !((g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) || pu->shutdown);
                     if (jh && pu->jets > 0 && !pu->no_jump && !pu->destroyed && pu->jet_fuel >= 0)
                         turn = combat_jets_firing(pu, jh, dt) ? 180.0f : 0.0f;
                     else if (pu->immobile) turn = 0.0f;   /* a leg gone: the legs no longer turn, only the torso twists
@@ -7902,7 +7903,7 @@ int main(int argc, char **argv)
                  * velocity approach 1/45 per tick; 0x1001a180 / 0x100190d0), the throttle signed here (reverse at half) */
                 {   /* the frame's vertical move for the move test (as combat_jets below will make it) */
                     const bool *ks = test_ks();
-                    int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
+                    int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     if (g_sim_ok) {   /* the no-lift flag (0x100196cc..0x10019711: |+0xc| >= 1e-7 or a directional jet held) */
                         int dj = H("jumpjet_fire_left") || H("jumpjet_fire_right") || H("jumpjet_fire_forward") || H("jumpjet_fire_backward");
                         g_sim.player_unit.jet_forward = jet && ((msim_dos_int ? dos_turn_input : g_pl_legs_turn) || dj);
@@ -7989,7 +7990,7 @@ int main(int argc, char **argv)
                         player_gait_sound(seq, p3);
                     }
                 }
-                const anim_player *ap = getenv("MW2_NO_POSE_OFF") ? NULL : &g_pl_ap;
+                const anim_player *ap = mw2_development_env("MW2_NO_POSE_OFF") ? NULL : &g_pl_ap;
                 g_pl.pose_off = ap && !msim_dos_int ? ap->off : NULL;
                 g_pl.pose_dos = msim_dos_int ? ap : NULL;
                 /* the torso object turned by half the servo's pitch (0x10019310: the player's torso pitch = value >> 1,
@@ -8003,7 +8004,7 @@ int main(int argc, char **argv)
                     g_plpit.heading = g_pl.heading; g_plpit.twist = g_pl.twist; g_plpit.tilt = g_pl.tilt; g_plpit.pitch = g_pl.pitch;
                     g_plpit.pose_off = g_pl.pose_off;
                     g_plpit.pose_dos = g_pl.pose_dos;
-                    mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
+                    mech3d_pose(&g_plpit, mw2_development_env("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
                 }
                 if (g_sim_ok) {   /* the mounts as drawn (walk animation, torso twist) for the shots and jet flames */
                     memcpy(g_sim.pl_shown.mount_pos, g_pl.mount_pos, sizeof g_pl.mount_pos);
@@ -8058,7 +8059,7 @@ int main(int argc, char **argv)
                 g_sim.player_unit.ground = msim_ground(&g_sim, (float)g_pl.origin[0], (float)g_pl.origin[2], g_sim.player_unit.y + g_sim.player_centre_h);   /* 0x10010080 at the centre */
                 {
                     const bool *ks = test_ks();   /* TEST hook: + MW2_HOLD */
-                    int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
+                    int jet = (H("jumpjet_enabled") || (g_auto_on && g_auto_jet)) && !(g_sim_ok && ((g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) || g_sim.player_unit.shutdown));
                     if (!msim_dos_int && !g_sim.player_unit.destroyed) {   /* directional jets (INPUT.MAP jumpjet_fire_left / right / forward / backward, each also enabling
                          * the jets): while jetting, the FIRST held direction in the order left, right, forward, back pushes at the jets' thrust (+0xec)
                          * along it - forward (sin h, cos h), left (-cos h, sin h), right (cos h, -sin h); no lift meanwhile.
@@ -8276,7 +8277,7 @@ int main(int argc, char **argv)
                         else if (g_sel_weapon >= 0 && g_sel_weapon < g_sim.player_unit.weapon_count) {
                             const combat_unit *pu2 = &g_sim.player_unit;
                             const combat_weapon *cw2 = &pu2->weapons[g_sel_weapon];
-                            if (!g_fire_was && !(g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) &&
+                            if (!g_fire_was && !(g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) &&
                                 !(cw2->state == CW_READY && cw2->ammo != 0 && !pu2->shutdown && !pu2->loc_gone[cw2->location]) && g_sfx)
                                 sfx_play(g_sfx, 0x149, SFX_V64, 0.0f);   /* 0x100439c7: (0x149, 0x64, 0x40, 5, 0x32) */
                             mask |= 1u << g_sel_weapon;
@@ -8317,7 +8318,7 @@ int main(int argc, char **argv)
                     }
                     g_sim.player_fire_mask = all ? 0 : mask;
                     g_sim.player_attacks = (all || mask) != 0;   /* the trigger fires with or without a target (along the aim line) */
-                    if (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) { g_sim.player_fire_mask = 0; g_sim.player_attacks = 0; }   /* starting up */
+                    if (g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) { g_sim.player_fire_mask = 0; g_sim.player_attacks = 0; }   /* starting up */
                     {   /* the triggers held now (combat.c fires on their press); autopilot fire tests press every other frame */
                         static int auto_tog;
                         if (!msim_dos_int || frame_ms > 0)
@@ -8346,10 +8347,10 @@ int main(int argc, char **argv)
                 g_sim.player_aim_pitch = g_pitch;
                 g_sim.player_twist = g_pl.twist;   /* poses the player's collision pieces */
                 if (!msim_dos_int)
-                    g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");
+                    g_sim.player_cockpit = g_camode == 0 && !mw2_development_env("MW2_HULL_FULL");
                 {   /* the aim ray's origin: the eye the cockpit camera rides (repr 4's EYEO, else the full model's) */
                     float ep[3];
-                    g_sim.player_eye_ok = (g_plpit_ok && !getenv("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, ep) == 0) || mech3d_head_point(&g_pl, ep) == 0;
+                    g_sim.player_eye_ok = (g_plpit_ok && !mw2_development_env("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, ep) == 0) || mech3d_head_point(&g_pl, ep) == 0;
                     if (g_sim.player_eye_ok) memcpy(g_sim.player_eye, ep, sizeof ep);
                 }
                 /* the lock works on the selected target (T / E / Q): a unit, or a thing (kind 0x400, 0x10044560) */
@@ -8368,7 +8369,7 @@ int main(int argc, char **argv)
                     g_masc_key = g_pl_ap.key >= 0 && g_pl_ap.key < g_pl_anim.key_count &&
                                  (g_pl_anim.key_flags[g_pl_ap.key] & 0x10);
                     mech3d_pose(&g_pl, &g_pl_anim, g_pl_t);
-                    if (g_plpit_ok) mech3d_pose(&g_plpit, getenv("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
+                    if (g_plpit_ok) mech3d_pose(&g_plpit, mw2_development_env("MW2_PIT_NOANIM") ? NULL : &g_pl_anim, g_pl_t);
                 }
                 g_sim.dos_player_anim = NULL;
                 if (!g_mm_depth && !g_paused) start_up_sounds();   /* the first frame's unit updates (0x1001ab71) */
@@ -8402,9 +8403,9 @@ int main(int argc, char **argv)
                     /* the eye: in the cockpit the player's object is at level of detail 4, so the camera rides that
                      * representation's EYEO node (engine 0x100267d0 + the camera's attached object, 0x395d0 in DOS) - for
                      * some mechs well above the full model's (Timber Wolf +1.7 m, Mad Dog +1.5 m) */
-                    if ((g_plpit_ok && !getenv("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, hp) == 0) || mech3d_head_point(&g_pl, hp) == 0) {
-                        if (getenv("MW2_EYE_DY")) hp[1] += (float)atof(getenv("MW2_EYE_DY"));   /* tests */
-                        if (getenv("MW2_EYE_DF")) { float df = (float)atof(getenv("MW2_EYE_DF")), hh2 = g_pl.heading * 3.14159265f / 180.0f; hp[0] += sinf(hh2) * df; hp[2] += cosf(hh2) * df; }
+                    if ((g_plpit_ok && !mw2_development_env("MW2_EYE_FULL") && mech3d_head_point(&g_plpit, hp) == 0) || mech3d_head_point(&g_pl, hp) == 0) {
+                        if (mw2_development_env("MW2_EYE_DY")) hp[1] += (float)atof(mw2_development_env("MW2_EYE_DY"));   /* tests */
+                        if (mw2_development_env("MW2_EYE_DF")) { float df = (float)atof(mw2_development_env("MW2_EYE_DF")), hh2 = g_pl.heading * 3.14159265f / 180.0f; hp[0] += sinf(hh2) * df; hp[2] += cosf(hh2) * df; }
                         v.eye[0] = hp[0]; v.eye[1] = hp[1]; v.eye[2] = hp[2];
                         if (mw2_development_env("MW2_DEBUG_EYE")) fprintf(stderr, "eye %.0f %.0f %.0f  origin %d %d %d\n", (double)hp[0], (double)hp[1], (double)hp[2], g_pl.origin[0], g_pl.origin[1], g_pl.origin[2]);
                     } else {
@@ -8432,7 +8433,7 @@ int main(int argc, char **argv)
                         if (gl) { glanced = 1; if (gp != 0) g_eye_pan = 0; if (gt != 0) g_eye_tilt = 0; }
                         else if (glanced) { glanced = 0; g_eye_pan = g_eye_tilt = 0; }
                         v.look_yaw += g_eye_pan + gp;
-                        v.look_pitch = 0.5f * g_pitch - g_eye_tilt + gt + (getenv("MW2_EYE_PITCH") ? (float)atof(getenv("MW2_EYE_PITCH")) : 0.0f);
+                        v.look_pitch = 0.5f * g_pitch - g_eye_tilt + gt + (mw2_development_env("MW2_EYE_PITCH") ? (float)atof(mw2_development_env("MW2_EYE_PITCH")) : 0.0f);
                     }
                 } else {
                     v.eye[0] = (float)g_pl.origin[0] - sinf(aim) * 2600.0f;
@@ -8450,8 +8451,8 @@ int main(int argc, char **argv)
             if (msim_dos_int && g_world && g_sim_ok && g_pl_ok && g_pilot) {
                 v.vfov = g_cockpit ? 2.0f * atanf(tanf(73.74f * 3.14159265f / 360.0f) / g_zoom) * 180.0f / 3.14159265f : 40.0f;
                 camera_modes(&v);
-                g_sim.player_external = g_camode != 0 && !getenv("MW2_HULL_FULL");
-                g_sim.player_cockpit = g_camode == 0 && !getenv("MW2_HULL_FULL");
+                g_sim.player_external = g_camode != 0 && !mw2_development_env("MW2_HULL_FULL");
+                g_sim.player_cockpit = g_camode == 0 && !mw2_development_env("MW2_HULL_FULL");
             }
             all.parts = NULL;
             g_pit_first = -1;
@@ -8901,7 +8902,7 @@ int main(int argc, char **argv)
             g_mm_world_dirty = 0;
         }
         if (g_mm_quit) { write_results(); running = 0; exit_code = 42; }   /* Flee to Windows: the shell leaves too */
-        if (g_sim_ok && g_world && g_sim.over && g_tex_kind == 3 && g_exit_fade_t0 < 0 && !getenv("MW2_NO_EXIT_FADE"))
+        if (g_sim_ok && g_world && g_sim.over && g_tex_kind == 3 && g_exit_fade_t0 < 0 && !mw2_development_env("MW2_NO_EXIT_FADE"))
             g_exit_fade_t0 = g_sim.now;   /* DOS: the exit fade first (exit_fade_level) */
         if (g_sim_ok && g_world && g_sim.over && exit_fade_level(NULL) >= 1.0f) {   /* the mission has ended: results for the shell, then leave */
             test_dump("over");   /* TEST hook */
@@ -9200,7 +9201,7 @@ int main(int argc, char **argv)
                 {
                     int ed_light = g_edition == PORTCFG_ED_3DFX || g_edition == PORTCFG_ED_ATI || g_edition == PORTCFG_ED_S3 || g_edition == PORTCFG_ED_DOS ||
                                    g_edition == PORTCFG_ED_MGA;   /* the Mystique relights per frame too (~0x1006c7a0) */
-                    if (!(ed_light || getenv("MW2_FXLIGHT")) || getenv("MW2_NO_FXLIGHT")) bi = -1;
+                    if (!(ed_light || mw2_development_env("MW2_FXLIGHT")) || mw2_development_env("MW2_NO_FXLIGHT")) bi = -1;
                 }
                 v.point_light = bi >= 0;
                 if (bi >= 0) {
@@ -9219,7 +9220,7 @@ int main(int argc, char **argv)
                  * The port's effects keep only the resulting type: 3, 6, 0x13, 0x15 come from visual 3 / 6 alone, 0x0c and
                  * 0x11 also from visual 4 (which does not light) - taken as lighting (ASSUMED). The 4 nearest the eye. */
                 v.ti_dyn_n = 0;
-                if (c3d_ti && v.ti_light && !getenv("MW2_NO_FXLIGHT")) {
+                if (c3d_ti && v.ti_light && !mw2_development_env("MW2_NO_FXLIGHT")) {
                     float dist2[GLR_TI_DYN];
                     for (k = 0; k < FX_LIVE; k++) {
                         const fx_live *e = &g_fxw.e[k];
@@ -9293,9 +9294,9 @@ int main(int argc, char **argv)
             v.look_yaw = 0.0f; v.look_pitch = -89.9f;
             v.ortho_w = range * (float)w / ((float)h * 4.0f / 3.0f);   /* the 4:3 area's width = the range */
         }
-        if (getenv("MW2_VPORT") && g_vport == 0) g_vport = atoi(getenv("MW2_VPORT"));   /* tests: start with a viewport open */
-        if (getenv("MW2_VISION")) g_vision = atoi(getenv("MW2_VISION"));   /* tests */
-        if (getenv("MW2_TGTDISP")) { g_tgtdisp = atoi(getenv("MW2_TGTDISP")); g_tgtdisp_off = g_tgtdisp == 0; }   /* tests */
+        if (mw2_development_env("MW2_VPORT") && g_vport == 0) g_vport = atoi(mw2_development_env("MW2_VPORT"));   /* tests: start with a viewport open */
+        if (mw2_development_env("MW2_VISION")) g_vision = atoi(mw2_development_env("MW2_VISION"));   /* tests */
+        if (mw2_development_env("MW2_TGTDISP")) { g_tgtdisp = atoi(mw2_development_env("MW2_TGTDISP")); g_tgtdisp_off = g_tgtdisp == 0; }   /* tests */
         if (mw2_development_env("MW2_TEST_NAVAUTO")) { static int set; if (!set++) g_autopilot = 1; }   /* tests */
         if (mw2_development_env("MW2_TEST_TARGET")) { static int set; if (!set++) { g_tgt_sel = atoi(mw2_development_env("MW2_TEST_TARGET")); g_tgt_any = 1; } }   /* tests (as q would) */
         if (mw2_development_env("MW2_TEST_DMG") && g_tgt_sel >= 0 && g_sim.armed[g_tgt_sel]) {   /* tests: right arm yellow, left leg red, left arm off */
@@ -9341,8 +9342,8 @@ int main(int argc, char **argv)
         v.alpha_blend = mw2_development_env("MW2_TEST_NO_ALPHA_BLEND") ? 0 : look_blend(g_edition);   /* (TEST ONLY: the 0.5 alpha test, as before) */
         if (mw2_development_env("MW2_TEST_ATI_TEX")) { int tv = atoi(mw2_development_env("MW2_TEST_ATI_TEX")); v.ati_tex = tv == 0 ? 0 : (v.ati_tex & 4) | (tv == 2 ? 3 : 1); }   /* TEST ONLY: 0 every
                                                                     * polygon perspective-correct and masked (the port before), 2 all affine */
-        if (getenv("MW2_SAT_ZOOM")) g_sat_i = atoi(getenv("MW2_SAT_ZOOM")) % 5;   /* tests: the satellite map's zoom step */
-        if (getenv("MW2_RADARMODE")) { g_radar_big = atoi(getenv("MW2_RADARMODE")) == 1; g_satmap = atoi(getenv("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
+        if (mw2_development_env("MW2_SAT_ZOOM")) g_sat_i = atoi(mw2_development_env("MW2_SAT_ZOOM")) % 5;   /* tests: the satellite map's zoom step */
+        if (mw2_development_env("MW2_RADARMODE")) { g_radar_big = atoi(mw2_development_env("MW2_RADARMODE")) == 1; g_satmap = atoi(mw2_development_env("MW2_RADARMODE")) == 2; g_radar_mode = g_radar_big ? 2 : 1; }   /* tests */
         world_fade(r);
         if (g_world) scrub_follow(r, v.free_cam ? v.eye[0] : (float)g_pl.origin[0], v.free_cam ? v.eye[2] : (float)g_pl.origin[2]);
         if (g_world) scene_anim(r);
@@ -9361,7 +9362,7 @@ int main(int argc, char **argv)
         perf_mark(1);
         if (g_sim_ok) {   /* the HUD's power state (see pow_update): 3 shut down, 1 starting, else 2 */
             const combat_unit *pp = &g_sim.player_unit;
-            int st = pp->destroyed ? 4 : pp->shutdown ? 3 : (g_sim.now < g_sim.player_online_at && !getenv("MW2_NO_STARTUP")) ? 1 : 2;
+            int st = pp->destroyed ? 4 : pp->shutdown ? 3 : (g_sim.now < g_sim.player_online_at && !mw2_development_env("MW2_NO_STARTUP")) ? 1 : 2;
             static int prev_st = -1;
             pow_update(st == 4 ? 2 : st, g_sim.now);
             /* engine 0x1001e6c0 (end): the player's controller state changing to 2 (operational - the start-up done, also
@@ -9581,7 +9582,7 @@ int main(int argc, char **argv)
              * by a fade (only reloaded with the same slot when the fade back ends, see pal3_upkeep): no HUD flash */
             hud_set_flash(g_hud, 1.0f, 0.0f, 0.0f, g_tex_kind == 3 ? k : 0.0f);
         }
-        if (g_hud && g_world && g_pl_ok && g_pilot && !g_hud_off && !dorcs_hides_hud() && (HUD_VIEW || (getenv("MW2_HUD") && g_camode != 4))) {   /* F11: TOGGLE_HUD */
+        if (g_hud && g_world && g_pl_ok && g_pilot && !g_hud_off && !dorcs_hides_hud() && (HUD_VIEW || (mw2_development_env("MW2_HUD") && g_camode != 4))) {   /* F11: TOGGLE_HUD */
             /* The cockpit HUD, laid out as the original (PowerVR edition screenshots): layout values are
              * 320x200 units mapped x2 across and x2.4 down (480 / 200), as the engine scales them (0x10005db0). */
 #define LX(x) ((float)(x) * 2.0f)
@@ -9734,7 +9735,7 @@ int main(int argc, char **argv)
                 g_rcl = -1;
                 /* the DOS look (default): the base-set sprites at the DOS pixel size - the original at 1024 x 768 drew
                  * them 1:1 (the bracket 23 px, measured 21); MW2_HUD_3D=1 keeps the 3D editions' 640 / 1024 set */
-                int dos = getenv("MW2_HUD_BASE") && g_hs_reticle_dos.tex;   /* tests: the 320 x 200 set at the DOS size */
+                int dos = mw2_development_env("MW2_HUD_BASE") && g_hs_reticle_dos.tex;   /* tests: the 320 x 200 set at the DOS size */
                 if (g_sim_ok && g_sel_weapon >= 0 && g_sel_weapon < g_sim.player_unit.weapon_count) {
                     const combat_weapon *cw = &g_sim.player_unit.weapons[g_sel_weapon];
                     int wid = cw->weapon, kind = combat_weapon_kind(wid), on = 0;
@@ -10407,7 +10408,7 @@ int main(int argc, char **argv)
                                 rgy = (float)(txw.ry + fhp) * txw.uy;
                     if (tgt >= 0) {
                         dmg_set *ds = NULL;
-                        if (getenv("MW2_TARGET_OUTLINE") && g_sim.armed[tgt]) ds = target_outline(g_ma ? g_ma : NULL, g_actors[tgt].skel);   /* the damage outline instead (tests) */
+                        if (mw2_development_env("MW2_TARGET_OUTLINE") && g_sim.armed[tgt]) ds = target_outline(g_ma ? g_ma : NULL, g_actors[tgt].skel);   /* the damage outline instead (tests) */
                         if (!shaded && !snow) {   /* the target's wireframe, from where the player stands */
                             const world_actor *ta2 = &g_actors[tgt];
                             float ddx = (float)g_pl.origin[0] - (float)ta2->mech.origin[0], ddz = (float)g_pl.origin[2] - (float)ta2->mech.origin[2];
@@ -10735,7 +10736,7 @@ int main(int argc, char **argv)
             lowres_present(g_out_w, g_out_h);
             w = g_out_w; h = g_out_h;
         }
-        if (g_sim_ok && g_world && g_hud && !getenv("MW2_NO_STARTUP") && (g_tex_kind == 3 || c3d_ti)) {
+        if (g_sim_ok && g_world && g_hud && !mw2_development_env("MW2_NO_STARTUP") && (g_tex_kind == 3 || c3d_ti)) {
             /* the palette fade from black at the mission start (engine 0x10007900 -> 0x100079d0 -> 0x1002b090 ->
              * 0x1002ad50; DOS 0x15070 -> 0x3eae0 -> 0x3e7d0): the palette starts all black (slot 0x10, 0x1002b0c0); the
              * time-of-day code skips its first two frames, on the third it fades to the day's palette over 0x16a ticks

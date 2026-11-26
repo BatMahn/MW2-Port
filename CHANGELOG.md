@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4
+
+- **Release builds.** Compile out the game and map viewer's debug switches, scripted input, and diagnostic output. Strip debug symbols and check the binaries before packaging.
+- **DOS combat.** AI units wait until the original mission-clock deadline before deciding whether to fire after acquiring a target. Mechs that stay pinned on a steep face during an escape turn downhill before trying to advance again.
+- **Titanium combat.** Missions using Titanium combat take their weapon damage, heat, ammunition, projectile speed, and volley timing from the original single-player Battle DLL. Firing and projectile flight use whole simulation ticks.
+
 ## v2.3 (2026-11-25)
 
 - **Titanium coverage.** Both original Titanium single-player shells list the same 54 scenes, and all 54 pass the objective sweep. The raw archive inventory also counts ten Mercenaries templates outside those launch tables.

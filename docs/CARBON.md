@@ -96,10 +96,9 @@ platform/carbon/icon.r`. Retro68 writes the Finder flags as 0, so after each bui
 
 Mac OS 9 has no environment variables, so the switches the other builds take from the environment come from a text
 file named `mw2.env` next to the application (`platform/carbon/mw2.env.sample` lists the useful ones): one
-`KEY=VALUE` a line, `#` comments, an optional `export ` and quotes. It is read before `main()`, so every switch in this
-document works on the Mac, test switches included (`MW2_AUTOPILOT`, `MW2_SHOT` ... for a fixed "start a mission, run
-N frames, save a picture" run - see docs/DOSBOX_COMPARISON_METHOD.md section 6). Lines using `$` (the game folder's
-own mw2.env) are skipped.
+`KEY=VALUE` a line, `#` comments, an optional `export ` and quotes. It is read before `main()`. Development builds
+also accept test switches such as `MW2_AUTOPILOT` and `MW2_SHOT` for capturing a fixed number of mission frames
+(see docs/DOSBOX_COMPARISON_METHOD.md section 6). Lines using `$` (the game folder's own mw2.env) are skipped.
 
 ## Checking against the original
 

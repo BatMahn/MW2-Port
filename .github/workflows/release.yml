@@ -67,12 +67,13 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
+          sh scripts/check_release_binary.sh mw2 mapview
           readelf -d mw2 | grep -q 'RUNPATH.*\$ORIGIN'
           readelf -d mapview | grep -q 'RUNPATH.*\$ORIGIN'
           cp mw2 mapview dist/MW2-Port/
           cp -L $SDL3_DIR/lib/libSDL3.so.0 dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md THIRD_PARTY.md LICENSE dist/MW2-Port/
+          cp README.md CHANGELOG.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && tar czf MW2-Port-${{ github.ref_name }}-linux-x86_64.tar.gz MW2-Port
 
       - uses: actions/upload-artifact@v4
@@ -125,9 +126,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
+          sh scripts/check_release_binary.sh mw2.exe mapview.exe
           cp mw2.exe mapview.exe $SDL/bin/SDL3.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
+          cp README.md CHANGELOG.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x64.zip MW2-Port
 
       - uses: actions/upload-artifact@v4
@@ -166,9 +168,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
+          sh scripts/check_release_binary.sh mw2.exe
           cp mw2.exe $SDL2_PREFIX/bin/SDL2.dll dist/MW2-Port/
           cp -r assets dist/MW2-Port/
-          cp README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE packaging/windows/README-legacy.txt dist/MW2-Port/
+          cp README.md CHANGELOG.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE packaging/windows/README-legacy.txt dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-windows-x86-legacy.zip MW2-Port
 
       - uses: actions/upload-artifact@v4
@@ -192,6 +195,7 @@ jobs:
       - name: Build
         run: |
           cmake -S platform/carbon -B build-carbon \
+            -DCMAKE_BUILD_TYPE=Release \
             -DMW2_RELEASE=ON \
             -DCMAKE_TOOLCHAIN_FILE=/Retro68-build/toolchain/powerpc-apple-macos/cmake/retrocarbon.toolchain.cmake
           cmake --build build-carbon -j$(nproc)
@@ -200,8 +204,9 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/MW2-Port
+          sh scripts/check_release_binary.sh build-carbon/MechWarrior2.bin
           cp build-carbon/MechWarrior2.bin dist/MW2-Port/
-          cp platform/carbon/mw2.env.sample docs/CARBON.md README.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
+          cp platform/carbon/mw2.env.sample docs/CARBON.md README.md CHANGELOG.md FOLDER_SETUP.md THIRD_PARTY.md LICENSE dist/MW2-Port/
           cd dist && zip -r MW2-Port-${{ github.ref_name }}-classic-mac-ppc-ALPHA.zip MW2-Port
 
       - uses: actions/upload-artifact@v4

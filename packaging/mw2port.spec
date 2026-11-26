@@ -15,7 +15,9 @@ Requires your own copy of the original game data.
 # source is already checked out in the working directory
 
 %build
-make -C %{_sourcedir} -j$(nproc) mw2 mapview
+make -C %{_sourcedir} -j$(nproc) MW2_RELEASE=1 mw2 mapview
+cd %{_sourcedir}
+sh scripts/check_release_binary.sh mw2 mapview
 
 %install
 install -Dm755 %{_sourcedir}/mw2 %{buildroot}%{_bindir}/mw2

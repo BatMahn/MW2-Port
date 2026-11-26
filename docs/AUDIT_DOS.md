@@ -465,11 +465,18 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   round-trip byte for byte with the new parser. Using the raw Titanium archive and the same 54 base-game
   scenes as the Enhanced objective sweep, 51 scenes completed without fallbacks, up from 13 with the old
   parser. The follow-up below covers the last three failures in that sweep.
-- The normal Titanium and Rendition looks use the base mission and equipment data alongside the Titanium
-  graphics resources. The objective sweep exercises load compatibility separately from that normal path.
-  All 35 extra weapon records (IDs 31–65) match the stock Titanium DLL table. Native Windows AI
-  and combat timing still need a live comparison. Proton's Wineserver
-  could not bind its socket in the sandbox, so the original Windows simulation did not start.
+- The 8-bit and 16-bit Titanium discs ship separate Battle binaries with identical combat fields in their
+  66 weapon rows. The checks compared ten fields per row against each binary, including fixed-point heat,
+  damage, speed, ammunition, refire, projectile interval, and lifetime. The table starts at file offset
+  `0xb4ff0` in the 8-bit DLL and `0xb51f8` in the 16-bit DLL. The Mercenaries runtime has a different table
+  and a different numeric representation.
+- A Rendition launch and a mission loaded directly from the Titanium archive use Battle combat parameters.
+  The Enhanced renderer's optional Titanium textures remain a graphical choice. The mission keeps its
+  combat profile when the renderer changes. Asset sound and effect mappings follow the loaded game data.
+  The Battle controller accumulates whole ticks at `0x100612a4`, using the timer divisor registered at
+  `0x1000c909`. The isolated Battle firing loop matched 136 release-count, carry, and heat cases
+  with the projectile creation callback stubbed. Live Windows AI and projectile behavior still need
+  a paired mission capture.
 
 ### Verification
 
@@ -672,7 +679,11 @@ The reference is DOS MW2.EXE 1.1 (`51634b60...`), YELLSCN1, a stock Mad Dog at r
   needed for switches between nearer scenery models. The renderer now uses the same selection
   as the original executable comparison for visible scenery.
 - **Mission-wide random ordering.** Startup, AI, damage, missile offsets and positional sounds
-  use the DOS table. The complete live order, especially for simultaneous effects, remains open.
+  use the DOS table. The original sets an absolute firing deadline when it assigns a target
+  (`0x22c56`) and compares it with the current tick in `0x2e860`. The port used to shorten
+  the delay by the assigning frame's tick count. With the same disabled mixer and frame schedule,
+  Golden Spade now agrees on the first 212 draws through tick 1806, up from 12.
+  Later sound and combat-event ordering still needs comparison.
 - **Live AI warning timing.** Controlled executable tests cover a changing recipient at volley
   start. The stock mission captures still lack a natural target handoff during an active volley.
 - **The 3D looks' point-in-polygon rule.** The DOS rule (seg_poly) is used in the DOS look only. demech2's

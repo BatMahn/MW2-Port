@@ -437,7 +437,7 @@ static void sfx_play_g(sfx *s, int index, float volume, float pan)
     if (s->next_is_voice) {   /* TEST ONLY: talk time is extended while the earlier line is held */
         double old_end = s_sim_voice_end;
         sim_voice(c->len, 11025);
-        if (getenv("MW2_SFX_SIMCLOCK") && s->next_is_voice == SFX_PRIORITY_SPEECH && old_end > sfx_log_time)
+        if (mw2_development_env("MW2_SFX_SIMCLOCK") && s->next_is_voice == SFX_PRIORITY_SPEECH && old_end > sfx_log_time)
             s_sim_voice_end += old_end - sfx_log_time;
     }
     s->v[best].is_voice = s->next_is_voice; s->next_is_voice = 0;

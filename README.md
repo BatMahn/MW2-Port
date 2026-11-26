@@ -511,7 +511,7 @@ comment. A misspelt command makes the game ignore the rest of the file (as the o
 are the original's templates with every control listed at the top.
 
 **Keys that are not yours to rebind:** Alt+Enter (fullscreen), and on macOS the Cmd shortcuts. Everything else in a
-mission comes from the two files (the port's development keys only work with `MW2_DEBUG_KEYS=1`).
+mission comes from the two files. Development builds also have keys enabled by `MW2_DEBUG_KEYS=1`.
 
 **Example: WASD + mouse.** In GAMEKEY.MAP, move the three commands that sit on W, A and S:
 
@@ -557,11 +557,14 @@ click Throttle then W and S (in the order its "+/-" shows), Chassis then A and D
 
 ## Building a package
 
-    make dist      # dist/mw2port-linux-x86_64.tar.gz: mw2, glview, assets/, README, THIRD_PARTY.md
+    make dist      # dist/mw2port-linux-<architecture>.tar.gz
+
+Use `MW2_RELEASE=1` for builds intended for distribution. Release packaging checks for development
+switches and debug metadata before archiving the executables.
 
 Unpack anywhere and run `./mw2 /path/to/MW2-game` once. Needs SDL3 and a Vulkan driver from the system (the release
 workflow's Linux tarball carries its own `libSDL3.so.0` beside `mw2`, found through the binary's `$ORIGIN` run path).
-On macOS: `make mw2 && sh scripts/macos_app.sh` builds "MechWarrior 2.app" in the current folder, with its icon and
+On macOS: `make MW2_RELEASE=1 mw2 mapview && sh scripts/macos_app.sh` builds the app bundles, with their icons and
 SDL3 bundled inside (no Homebrew needed to run it).
 
 ### Windows

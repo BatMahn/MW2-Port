@@ -200,7 +200,8 @@ extern int combat_ct_split;
 extern int combat_jet_refill_dos;  /* 1: the DOS look's refill - whole ticks >> 2 a 30 fps frame (0x27c63); 0: ticks / 4 */
 extern float combat_test_wheat[COMBAT_WEAPON_COUNT];  /* TEST ONLY (MW2_TEST_WHEAT): > 0 replaces a weapon's heat per projectile, as a patched
                                         table (DOSBox: MW2.EXE copy, the large pulse laser's heat 3.5 -> 85 at file 0xb1f24) */
-extern int combat_dos;             /* 1: DOS combat rules and weapon data; 0: 3Dfx */
+extern int combat_dos;             /* DOS combat rules and weapon data */
+extern int combat_titanium;        /* Titanium single-player weapon data */
 extern float combat_jet_fuel_max;   /* the full tank (ticks): 1810 (3Dfx 0x712), DOS 1820 (0x71c) - set by edition before the units load */
 /* damage at a location with no weapon (area damage 0x10046700 -> 0x100171d0): front armour, the CT spread as for a hit */
 void combat_damage_at(combat_unit *t, float dmg, int loc, unsigned *rng);   /* a CT hit spread over rand(n) locations from 2: 3 (3D editions, default) or 2 (DOS) */
@@ -223,7 +224,7 @@ float combat_armor_mult(int player, int alliance, int difficulty);
 void combat_set_armor_mult(combat_unit *u, float mult);
 int combat_dos_damage_level(const combat_unit *u, int loc, int rear, int divisor);
 /* Advance weapon cycles, heat and shutdown by dt seconds. DOS heat override uses the whole clock ticks elapsed. */
-void combat_tick(combat_unit *u, float dt, int dos_ticks);
+void combat_tick(combat_unit *u, float dt, int clock_ticks);
 /* trigger ready weapons in range at `target` and resolve projectiles now due.
  * distance in game units (cm). Returns damage dealt (rounded). */
 /* Trigger every ready weapon whose range covers `distance` (cm). Projectiles are then

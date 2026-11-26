@@ -83,6 +83,7 @@ typedef struct {
     float twist_limit;       /* MGEO, degrees */
     int   is_leader;
     int   skill;             /* GPS fire interval base */
+    int   dos_clock;         /* current DOS mission tick */
     int   enemy_is_player;   /* the enemy is the player (0x100231a0: other targets need rand(3) == 0) */
     float self_x, self_z, enemy_x, enemy_z, enemy_heading;
     int  *flank_slots;       /* attackers per 45-degree slot around the enemy (engine target +0x1a2) */
@@ -132,7 +133,8 @@ typedef struct {
     int   wants_fire;
     int   event_cond;        /* posted event (engine +0x144), 0 = none */
     int   post_cond;         /* set by action 4: event for the group leader (msim delivers it) */
-    float next_fire;         /* ticks until the next fire decision (engine +0x15a) */
+    float next_fire;         /* ticks until the next fire decision in the 3D looks */
+    int   dos_next_fire;     /* absolute deadline at object +0x156 (DOS 0x2e860) */
     float weave, weave_ticks;/* attack manoeuvre 3 */
     int   man, prev_man, forced_man;   /* attack manoeuvre (engine +0x170 / +0x172 / +0x174), -1 none */
     int   dos_avoid_unit;    /* first blocking unit, -1 player, -2 scenery or none */
@@ -160,7 +162,6 @@ typedef struct {
     int   jet_side;          /* manoeuvre 11: lateral jets (input +0x1e) */
     float speed;             /* actual ground speed, cm/s (signed; the velocity c[0x3d..0x3f], see msim_drive_step) */
     float thr_servo;         /* current throttle c[0x13] as a fraction of full (servo +0x44, T 36.2 ticks) */
-    float dos_gait_throttle; /* throttle read by the controller before the movement tasks update it */
     float spd_servo;         /* servoed drive speed c[0xb], cm/s (servo +0x24 toward c[10]) */
     int   cls;               /* DOS: the unit class the manoeuvre record is taken by (1 mechs; ai_set_class) */
     int   tons1;             /* DOS: a 1-ton unit (an Elemental): the jumper record */
