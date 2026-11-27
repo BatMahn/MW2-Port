@@ -20,7 +20,8 @@
 #define GLR_TI      (GLR_B0 + GLR_SLOTS)    /* + n: the Titanium models' slot n (glr_set_titanium); textures tex[512 + n] */
 #define GLR_TB      (GLR_TI + GLR_SLOTS)    /* + n: the Titanium bank-0 bitmap n (its models' colour type 3 billboards,
                                              * glr_set_titanium_extra); textures tex[768 + n] */
-#define GLR_BATCHES (GLR_TB + GLR_SLOTS)   /* 0: main mech or static world, 1: actors (re-uploaded per frame) */
+#define GLR_SHIELD  (GLR_TB + GLR_SLOTS)
+#define GLR_BATCHES (GLR_SHIELD + 1)   /* 0: main mech or static world, 1: actors (re-uploaded per frame) */
 
 /* A Titanium polygon coloured per vertex on the CPU, as mercsw does (glr_draw -> ti_colours): its fan's vertices are
  * first .. first + 3 (n - 2) - 1 in the layer's buffer (corner 0, j, j + 1 per triangle) */
@@ -135,10 +136,9 @@ struct glr {
     const texture *spr_src[64];
     rb_tex spr_tex[64];
     int    spr_next;
-    /* colour kind 2 (0x2xxx: the shield domes, lattices, rotor blades) in the 3D editions: drawn as their outlines - the
-     * engine's face colour hook returns ((w & 0xff0) >> 4) | 0x2000 (0x1002a4b0 case 0x2000), and polygon mode 0x2000 is
-     * the outlined draw (the satellite view's second pass uses it too) - so a shield dome is a mesh one sees through
-     * (user report: Sable Flame's sensor array dome solid). Per layer: the edges (game coordinates) and their colour */
+    /* Colour kind 2 (0x2xxx) outlines in the 3D editions: sensor domes, lattices and rotor blades.
+     * The engine's face colour hook returns ((w & 0xff0) >> 4) | 0x2000 (0x1002a4b0).
+     * Per layer: the edges (game coordinates) and their colour. */
     float *kl[2];
     int    kl_n[2], kl_cap[2];
 };
@@ -555,7 +555,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * with low nibble 0 or 3 (0x1004eef0) */
                 tk2 = ti && ((q->color >> 12) & 7) == 2;
                 if (ti && ((q->color >> 12) & 7) == 3 && (q->color & 0xf) != 0 && (q->color & 0xf) != 3) continue;
-                if (shield || (!ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2)) {   /* an outline (r->kl) */
+                if (!shield && !ti && (r->dos || model->extended) && ((q->color >> 12) & 15) == 2 && li < 2) {   /* an outline (r->kl) */
                     if (pass == 1) {
                         /* the colour bits 4-11 in both kinds of model: Sable Flame's dome 0x2c50 is index 0xc5, grey (SABL_NI
                          * 10,10,10) - the DOS models had taken bits 8-15, 0x2c (15,0,0): a red mesh (user report, 1.1.37) */
@@ -731,6 +731,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                  * (0x98); the mission maps' own texture in slot 0xf0 (a clan crest) is not meant for them */
                 /* a bank-1 polygon with the alpha flag (types 8-11, 0x10026e80): at the batch's end (acount), drawn with
                  * the slot's ARGB4444 reading (tex_a) */
+                if (shield) batch = GLR_SHIELD;
                 apoly = batch < GLR_SLOTS && model->extended && !ti && ((q->color >> 12) & 15) >= 8 && ((q->color >> 12) & 15) <= 11;
                 if (pass == 0) { count[batch] += (size_t)(q->n - 2) * 3; if (apoly) acount[batch] += (size_t)(q->n - 2) * 3; continue; }
                 if (apoly) { size_t sw = pos[batch]; pos[batch] = apos[batch]; apos[batch] = sw; }   /* (swapped back below) */
@@ -788,7 +789,7 @@ static int set_layer(glr *r, int li, const mech3d *m, const uint8_t palette[256]
                         k2cls = (ot & 0x300) || (ot & 0xf0) == 0x50 ? 1 : (ot & 0x800) ? 2 : 0;
                         k2c = ((ot & 0x100) || (ot & 0xf0) == 0x50 ? 0xa0 : 0xd0) >> 1;
                     }
-                    pidx = ti ? (tk == 1 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, (int)(q->color & 0xff) >> 1)
+                    pidx = shield ? (q->color >> 4) & 0xff : ti ? (tk == 1 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, (int)(q->color & 0xff) >> 1)
                                 : tk2 ? (((q->color >> 8) & 0xf) << 4) | ti_shade_level(r, o, q, k2c)
                                 : tk == 4 ? (((q->color >> 8) & 0xf) << 4) | 8 : (q->color >> 4) & 0xff)
                          : batch == GLR_SLOTS + 2 ? (q->color >> 4) & 0xff : model->extended && (q->color >> 12) == 1 ? (((q->color >> 8) & 0xf) << 4) | 0xf : q->color >> 8;
@@ -2371,6 +2372,15 @@ static void draw_view(glr *r, const glr_view *v, int x0, int y0, int w, int h, i
         UV(r->D.u_wire, v->wire ? (li == 0 ? wr : wb) : off, 4);   /* (the wireframe's edges come from the fragment shader) */
     }
     glr_bind_layer(r, li);
+    if (!v->wire && L->batch_count[GLR_SHIELD] > 0) {
+        /* The dome covers the sky and ground fill. The scene objects are drawn over it. */
+        r->D.u_textured = 0;
+        r->D.u_unlit = 1;
+        rb_depth_write(0);
+        glr_draw_arrays(r, L->batch_first[GLR_SHIELD], L->batch_count[GLR_SHIELD]);
+        rb_depth_write(1);
+        r->D.u_unlit = 0;
+    }
     for (s = 0; s <= GLR_SLOTS; s++) {
         if (L->batch_count[s] <= 0) continue;
         if (s < GLR_SLOTS) {

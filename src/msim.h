@@ -247,7 +247,7 @@ typedef struct {
     float        player_centre_h;
     float       *draw_lift;      /* per actor: the model hangs this far above the feet (aircraft / dropships: the centre height) */
     int         *cmd;            /* per actor: commanded AI state (2 attack, 5 follow, 7 patrol, 8 godirect, 11 shutdown), 0 none */
-    int         *cmd_target;     /* per actor: the commanded target actor (attack / defend), -1 none */
+    int         *cmd_target;     /* per actor: the commanded actor or MSIM_TGT_THING for attack, -1 none */
     int         *engage;         /* per actor: engine +0x154 "engage at will" (0x100124a0: 0 in the player's star, 1 elsewhere) */
     int         *mate_target;    /* per actor: the enemy it was last fighting (engine condition 6, 0x10013090), -1 none */
     int         *defend_leg;     /* per actor: Defend patrol point 0-3 around the defended mech (0x10013f00), +4 once one is reached */
@@ -326,7 +326,7 @@ typedef struct {
 } msim;
 
 /* Lancemate orders. point 0 = all points, 1 = Point 2, 2 = Point 3 ... (the lance position, engine object +0xc).
- * order = the AI state the engine commands: MSIM_CMD_*; target = the player's selected target (actor index, -1 none).
+ * order = the AI state the engine commands: MSIM_CMD_*; target = the player's selected target (actor index, MSIM_TGT_THING for an attack, -1 none).
  * Returns 1 if the order was given, 0 if not (no such point, or attack/defend without a target). */
 enum { MSIM_CMD_ATTACK = 2, MSIM_CMD_ENGAGE = 3, MSIM_CMD_JOIN = 5, MSIM_CMD_DEFEND = 7, MSIM_CMD_DISENGAGE = 8,
        MSIM_CMD_SHUTDOWN = 11 };

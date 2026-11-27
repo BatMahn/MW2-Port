@@ -7104,7 +7104,9 @@ int main(int argc, char **argv)
                     }
                     else if (act < 0 && g_cc_page == 1) { if (msim_set_formation(&g_sim, -act - 1) == 0) g_cc_page = -1; }
                     else if (act < 0) {
-                        msim_command(&g_sim, g_cc_page - 2, CC_ORDER[-act - 1], g_tgt_sel);   /* the menu closes (0x100659a0) */
+                        const int order = CC_ORDER[-act - 1];
+                        const int target = order == MSIM_CMD_ATTACK && g_tgt_thing >= 0 ? MSIM_TGT_THING(g_tgt_thing) : g_tgt_sel;
+                        msim_command(&g_sim, g_cc_page - 2, order, target);
                         g_cc_page = -1;
                     }
                     continue;
@@ -10002,7 +10004,8 @@ int main(int argc, char **argv)
                             if (!g_sim.armed[q] || g_sim.units[q].destroyed) continue;
                             if (g_satmap && !sat_unit_visible(q, sat_sky_root())) continue;
                             istgt = q == tgt;
-                            if (!istgt && ((g_sim.powered_down && g_sim.powered_down[q]) || g_sim.units[q].shutdown)) continue;   /* +0x14 & 0x10 */
+                            if (!istgt && (!(g_actors[q].unit_flags & 0x1400) || (g_actors[q].unit_flags & 0x800) ||
+                                (g_sim.powered_down && g_sim.powered_down[q]) || g_sim.units[q].shutdown)) continue;
                             wx = (float)g_actors[q].mech.origin[0]; wz = (float)g_actors[q].mech.origin[2];
                             sd = g_actors[q].friendly ? 0 : g_actors[q].alliance == 2 ? 2 : 1;
                         } else if (q <= -2) {

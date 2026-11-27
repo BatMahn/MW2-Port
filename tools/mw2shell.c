@@ -3643,6 +3643,32 @@ static const int SC_HS[3][9][6] = {
     {{50, 445, 149, 469, 100, 450}, {404, 414, 474, 474, 440, 460}, {263, 425, 302, 469, 280, 465}, {237, 425, 262, 469, 260, 465},
      {303, 425, 330, 469, 300, 465}, {200, 425, 236, 469, 240, 465}, {159, 195, 187, 229, 73, 234}, {391, 162, 419, 196, 305, 201}, {586, 218, 614, 252, 500, 257}}   /* context 2 = the Wolf table 0x7dc64 */
 };
+/* DOS 0x83e84 gives each member's showcase position and bay for every formation. */
+static const int SC_FORM_SLOT[6][3][4] = {
+    {{2, 430, 346, 2}, {1, 333, 353, 1}, {0, 204, 359, 0}},
+    {{2, 295, 330, 0}, {1, 332, 352, 1}, {0, 385, 395, 2}},
+    {{2, 245, 341, 0}, {0, 343, 355, 1}, {1, 418, 363, 2}},
+    {{2, 390, 332, 2}, {1, 350, 355, 1}, {0, 277, 374, 0}},
+    {{0, 390, 332, 1}, {2, 204, 358, 0}, {1, 385, 395, 2}},
+    {{2, 295, 330, 0}, {1, 430, 346, 2}, {0, 288, 376, 1}}
+};
+static const int SC_BOX_XY[2][3][2] = {{{81, 166}, {313, 133}, {508, 189}}, {{47, 172}, {280, 127}, {495, 217}}};
+/* Each bay has fixed artwork and coordinates. The formation assigns a member to it. */
+static int sc_hotspot(const star_cfg *st, int cx, int x, int y, int *member)
+{
+    for (int i = 0; i < 9; i++) {
+        const int *h = SC_HS[cx][i];
+        if (x < h[0] || x > h[2] || y < h[1] || y > h[3]) continue;
+        if (i < 6) return i;
+        for (int k = 0; k < 3; k++) {
+            const int *slot = SC_FORM_SLOT[st->formation][k];
+            if (slot[3] != i - 6 || slot[0] >= st->size) continue;
+            if (member) *member = slot[0];
+            return i;
+        }
+    }
+    return -1;
+}
 static const char *SC_LABEL[9] = {"~EXIT CONFIG", "~MECH LAB", "NEXT FORMATION", "PREV FORMATION", "ADD STARMATE", "DELETE STARMATE", "CHANGE MECH", "CHANGE MECH", "CHANGE MECH"};
 #define SC_HEAD_FONT g_fbig
 enum { SC_LINE = 12 };
@@ -3734,19 +3760,20 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                 if ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.button == SDL_BUTTON_LEFT) lheld = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
                 if (menu_opens(&e)) { int r = global_menu(rd, tx, headless, *mx, *my); if (r != -1) next = r; if (script) break; continue; }   /* FUN_0003b420 -> 0x258e0 */
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-                    int x = e.button.x, y = e.button.y;
-                    for (i = 0; i < 9; i++) {
-                        const int *h = SC_HS[cx][i];
-                        if (x < h[0] || x > h[2] || y < h[1] || y > h[3]) continue;
-                        if (i >= 2) shell_sound(0x65, 0x32);   /* FUN_0003b420: formation, size and bay buttons click (0x91694) */
-                        if (i == 4 && st->size >= max_size) break;
+                    int x = e.button.x, y = e.button.y, member = -1;
+                    i = sc_hotspot(st, cx, x, y, &member);
+                    if (i >= 2) shell_sound(0x65, 0x32);   /* FUN_0003b420: formation, size and bay buttons click (0x91694) */
+                    if (i >= 0 && !(i == 4 && st->size >= max_size)) {
                         if (i == 0) next = back;
                         else if (i == 1) { shell_sound(0x66, 0x32); g_lab_slot = 0; next = 9; }   /* MECH LAB (0x91698) */
                         else if (i == 2) st->formation = (st->formation + 1) % 6;
                         else if (i == 3) st->formation = (st->formation + 5) % 6;
                         else if (i == 4) { if (st->slot[st->size].mech < 0) st->slot[st->size].mech = st->slot[0].mech; st->size++; }
                         else if (i == 5 && st->size > 1) st->size--;
-                        else if (i >= 6 && i - 6 < st->size) { g_lab_slot = i - 6; next = 9; }
+                        else if (i >= 6) {
+                            g_lab_slot = member; next = 9;
+                            if (script) printf("sc: change mech slot %d\n", g_lab_slot);
+                        }
                         if (i >= 2 && i <= 5) {   /* FUN_0003aeb0 for each member: a shown name cut to 92 px, stored */
                             for (k = 0; k < 3; k++) {
                                 size_t q;
@@ -3758,13 +3785,12 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                         star_save(clan);
                     }
                     for (k = 0; k < 3 && next == -1; k++) {   /* a name box (0x3bc2c..): its member's name typed */
-                        static const int BOXES[2][3][2] = {{{81, 166}, {313, 133}, {508, 189}}, {{47, 172}, {280, 127}, {495, 217}}};   /* 0x84210 / 0x84228 */
-                        static const int FM[6][3] = {{2, 1, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 0}, {0, 2, 1}, {2, 1, 0}};   /* 0x83e84: member */
-                        static const int FB[6][3] = {{2, 1, 0}, {0, 1, 2}, {0, 1, 2}, {2, 1, 0}, {1, 0, 2}, {0, 2, 1}};   /* and box */
-                        int mem = FM[st->formation][k], bx2 = BOXES[clan == 1][FB[st->formation][k]][0], by2 = BOXES[clan == 1][FB[st->formation][k]][1];
+                        const int *slot = SC_FORM_SLOT[st->formation][k];
+                        const int mem = slot[0], box = slot[3];
+                        const int *xy = SC_BOX_XY[clan == 1][box];
                         if (mem > st->size || (mem == 0 && cx != 2)) continue;
-                        if (x < bx2 || x >= bx2 + 100 || y < by2 || y >= by2 + 10) continue;
-                        ed_m = mem; ed_box = FB[st->formation][k];
+                        if (x < xy[0] || x >= xy[0] + 100 || y < xy[1] || y >= xy[1] + 10) continue;
+                        ed_m = mem; ed_box = box;
                         snprintf(ed_buf, sizeof ed_buf, "%s", st->slot[mem].pilot);
                         if (strlen(ed_buf) > 15) ed_buf[15] = 0;
                         break;
@@ -3779,12 +3805,16 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
              * the 67 ms rounded up to the 70 Hz display) - the loop had stepped them every 66 ms pass */
             static Uint64 clast[10];
             Uint64 now = SDL_GetTicks();
-            int on = -1;
-            for (i = 0; i < 9; i++) { const int *h = SC_HS[cx][i]; if (*mx >= h[0] && *mx <= h[2] && *my >= h[1] && *my <= h[3]) on = i; }
+            const int on = sc_hotspot(st, cx, *mx, *my, NULL);
+            int bay_shown[3] = {0};
+            for (i = 0; i < 3; i++) {
+                const int *slot = SC_FORM_SLOT[st->formation][i];
+                bay_shown[slot[3]] = slot[0] < st->size;
+            }
             for (k = 0; k < 10; k++) {
                 int shown = 1, runs = 1;
                 if (!cl[k]) continue;
-                if (k >= 1 && k <= 3 && k > st->size) continue;   /* empty bays */
+                if (k >= 1 && k <= 3 && !bay_shown[k - 1]) continue;   /* empty bays */
                 if (k == 5) { if (cx == 2) shown = on == 1; else runs = on == 1; }
                 if (k >= 6) shown = lheld && on == k - 4;
                 if (headless || f == 0 || !cl[k]->s || (runs && now - clast[k] >= (Uint64)smk_frame_ms(cl[k]->s))) { if (runs || f == 0) clip_next(cl[k]); clast[k] = now; }
@@ -3795,17 +3825,12 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         {   /* FUN_0003b1f0: the formation (centred at 320, y 4) and four lines (y 35 / 50 / 65 / 80);
              * FUN_0003ad60 / 0x3aeb0: per formation (0x83e84: 3 x {member, showcase x, y, box}) the member's showcase
              * <ctx>sc<pic> on the grid and its box text (pilot cut at 92 px, 'Mech, tonnage) at 0x84210 / 0x8421c */
-            static const int FORM_SLOT[6][3][4] = {
-                {{2, 430, 346, 2}, {1, 333, 353, 1}, {0, 204, 359, 0}}, {{2, 295, 330, 0}, {1, 332, 352, 1}, {0, 385, 395, 2}},
-                {{2, 245, 341, 0}, {0, 343, 355, 1}, {1, 418, 363, 2}}, {{2, 390, 332, 2}, {1, 350, 355, 1}, {0, 277, 374, 0}},
-                {{0, 390, 332, 1}, {2, 204, 358, 0}, {1, 385, 395, 2}}, {{2, 295, 330, 0}, {1, 430, 346, 2}, {0, 288, 376, 1}}};
-            static const int BOX_XY[2][3][2] = {{{81, 166}, {313, 133}, {508, 189}}, {{47, 172}, {280, 127}, {495, 217}}};
             static const char *SCP[3] = {"AWOSC", "AJFSC", "AIASC"};
             static const char *FORM_MIXED[6] = {"Echelon Left", "Echelon Right", "Line Abreast", "Line Astern", "V-Form", "Wedge"};
             char line[96];
             int total = 0, limit = clan >= 2 ? g_ia.tons[clan - 2] : mech_lab_kdmt(clan), bx = clan == 1 ? 1 : 0;
             for (k = 0; k < 3; k++) {
-                const int *e = FORM_SLOT[st->formation][k];
+                const int *e = SC_FORM_SLOT[st->formation][k];
                 const lance_slot *sl;
                 int m2, tons;
                 char nm[24], dn[32];
@@ -3838,15 +3863,15 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
                     snprintf(nm, sizeof nm, "%s", rg >= 0 ? g_reg[rg].name : sl->pilot);
                     for (q = strlen(nm); q > 0 && !whole[e[0]] && text_width(&g_fthin, nm) > 92; q--) nm[q - 1] = 0;
                 }
-                if (e[0] != ed_m) draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1], nm, pal, -1);
-                draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1] + SC_LINE, MECHS[m2].name, pal, -1);
+                if (e[0] != ed_m) draw_text(&g_fthin, SC_BOX_XY[bx][e[3]][0], SC_BOX_XY[bx][e[3]][1], nm, pal, -1);
+                draw_text(&g_fthin, SC_BOX_XY[bx][e[3]][0], SC_BOX_XY[bx][e[3]][1] + SC_LINE, MECHS[m2].name, pal, -1);
                 snprintf(line, sizeof line, "%d.00 T", tons);
-                draw_text(&g_fthin, BOX_XY[bx][e[3]][0], BOX_XY[bx][e[3]][1] + 2 * SC_LINE, line, pal, -1);
+                draw_text(&g_fthin, SC_BOX_XY[bx][e[3]][0], SC_BOX_XY[bx][e[3]][1] + 2 * SC_LINE, line, pal, -1);
             }
             if (ed_m >= 0) {   /* the name being typed, with its cursor (0x2a910) */
                 char eb[24];
                 snprintf(eb, sizeof eb, "%s_", ed_buf);
-                draw_text(&g_fthin, BOX_XY[bx][ed_box][0], BOX_XY[bx][ed_box][1], eb, pal, -1);
+                draw_text(&g_fthin, SC_BOX_XY[bx][ed_box][0], SC_BOX_XY[bx][ed_box][1], eb, pal, -1);
             }
             {
                 char up[24];
@@ -3867,7 +3892,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
         }
         g_clip_pal = NULL;
         draw_text(&g_flabel, 100 - text_width(&g_flabel, "EXIT CONFIG") / 2, 450, "EXIT CONFIG", pal, 6);   /* grey (DOS) */
-        for (i = 0; i < 9; i++) { const int *h = SC_HS[cx][i]; if (*mx >= h[0] && *mx <= h[2] && *my >= h[1] && *my <= h[3]) hover = i; }
+        hover = sc_hotspot(st, cx, *mx, *my, NULL);
         if (hover > 0) {   /* 0x7dc64: "~MECH LAB" centred, the others drawn from the label x */
             const char *t = SC_LABEL[hover];
             int lx2 = label_x(&t, SC_HS[cx][hover][4]);
@@ -4187,17 +4212,6 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
         /* TEXTURES is ORIGINAL and not changeable with the DOS renderer (its palette-indexed textures) or without the
          * titanium/ folder, TITANIUM and not changeable with RENDITION (a Titanium plugin); shown in grey then */
         tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM) || pc.renderer == PORTCFG_ED_RENDITION;
-        sel[0] = dif[5] <= 2 ? dif[5] : 1; sel[1] = dif[4] ? 0 : 1;
-        for (i = 0; i < 5; i++) sel[2 + i] = rd32(snd + 0x14 + 4 * i) ? 0 : 1;   /* ON / HIGH first */
-        /* RESOLUTION: the original's three words when the sim draws at one of them (render=), else the port's NATIVE text */
-        sel[7] = pc.render_w == 320 ? 0 : pc.render_w == 640 ? 1 : pc.render_w == 1024 ? 2 : -1;
-        sel[8] = -1;                                                           /* the port's DISPLAY row */
-        sel[9] = dif[1] ? 0 : 1; sel[10] = dif[0] ? 0 : 1; sel[11] = dif[3] ? 0 : 1;
-        if (pc.mode == 0) snprintf(aa, sizeof aa, "DESKTOP");
-        else if (pc.mode == 1) snprintf(aa, sizeof aa, "WINDOWED");
-        else snprintf(aa, sizeof aa, "%dx%d", pc.w, pc.h);
-        if (pc.aa) snprintf(res, sizeof res, "%s %dX AA", pc.render_full_native ? "EXACT" : "NATIVE", pc.aa);
-        else snprintf(res, sizeof res, "%s", pc.render_full_native ? "NATIVE EXACT" : "NATIVE");
         if (!headless || script) {
             while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
@@ -4252,7 +4266,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                         }
                         else if (i == 9) dif[1] ^= 1;
                         else if (i == 10) dif[0] ^= 1;
-                        else if (i == 11) dif[3] ^= 1;
+                        else if (i == 11) dif[3] = !dif[3];
                         else if (i == 12) {   /* the port's RENDERER: how the simulation is drawn, editions whose files are here */
                             int e2 = pc.renderer, tries;
                             for (tries = 0; tries < PORTCFG_ED_COUNT; tries++) {
@@ -4275,6 +4289,17 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
                 }
             }
         }
+        sel[0] = dif[5] <= 2 ? dif[5] : 1; sel[1] = dif[4] ? 0 : 1;
+        for (i = 0; i < 5; i++) sel[2 + i] = rd32(snd + 0x14 + 4 * i) ? 0 : 1;   /* ON / HIGH first */
+        /* RESOLUTION: the original's three words when the sim draws at one of them (render=), else the port's NATIVE text */
+        sel[7] = pc.render_w == 320 ? 0 : pc.render_w == 640 ? 1 : pc.render_w == 1024 ? 2 : -1;
+        sel[8] = -1;                                                           /* the port's DISPLAY row */
+        sel[9] = dif[1] ? 0 : 1; sel[10] = dif[0] ? 0 : 1; sel[11] = dif[3] ? 1 : 0;   /* NO COLLISION DAMAGE */
+        if (pc.mode == 0) snprintf(aa, sizeof aa, "DESKTOP");
+        else if (pc.mode == 1) snprintf(aa, sizeof aa, "WINDOWED");
+        else snprintf(aa, sizeof aa, "%dx%d", pc.w, pc.h);
+        if (pc.aa) snprintf(res, sizeof res, "%s %dX AA", pc.render_full_native ? "EXACT" : "NATIVE", pc.aa);
+        else snprintf(res, sizeof res, "%s", pc.render_full_native ? "NATIVE EXACT" : "NATIVE");
         draw_bg();
         {   /* the port's layout (see above): the DIFFICULTY group's artwork 20 px up, the DETAIL heading to the RENDERER row */
             int x, y;

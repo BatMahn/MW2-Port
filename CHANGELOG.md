@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.6 (2026-11-27)
+
+- **Star Configuration.** Each formation moves an occupied bay’s text, Change Mech button, and frame together. The button opens the Mech Lab for the member shown in that bay.
+- **Starmate orders.** Attack My Target accepts structures. Starmates aim, fire, and report when the structure is destroyed.
+- **Golden Spade.** The Force Shield covers the sky and ground while structures and mechs within render distance remain visible.
+- **Combat Variables.** No Collision Damage now shows On when collision damage is disabled.
+- **Cold Crescent.** The two doors are excluded from ordinary radar contacts.
+- **Silent Thunder.** The Recon Helicopter breaks into five large fragments alongside the small debris. Structure destruction activates only the affected object’s wreckage.
+
+Focused regressions passed on Vulkan and OpenGL. All 59 DOS scenes and 54 Enhanced scenes completed the scripted objective sweep without fallback actions.
+
 ## v2.5 (2026-11-26)
 
 - **3D collision.** Use the original projected face test for terrain and object boundaries, including edge hits and the original winding order.

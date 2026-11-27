@@ -149,6 +149,7 @@ int msim_point_status(const msim *s, int point)
     return s->minds ? s->minds[i].state + 1 : 0;
 }
 
+static int thing_point(const msim *s, int b, float p[3]);
 static void guard_drop(ai_mind *m);
 static void guard_enter(const msim *s, ai_mind *m, int code);
 int msim_command(msim *s, int point, int order, int target)
@@ -166,8 +167,11 @@ int msim_command(msim *s, int point, int order, int target)
     case MSIM_CMD_ENGAGE: break;
     default: return 0;
     }
-    if ((order == MSIM_CMD_ATTACK || order == MSIM_CMD_DEFEND) &&
-        (target < 0 || target >= s->actor_count || !s->armed[target] || s->units[target].destroyed)) return 0;   /* 0x1000: no target */
+    if (order == MSIM_CMD_ATTACK && MSIM_IS_THING(target)) {
+        float p[3];
+        if (!thing_point(s, MSIM_THING_OF(target), p)) return 0;
+    } else if ((order == MSIM_CMD_ATTACK || order == MSIM_CMD_DEFEND) &&
+               (target < 0 || target >= s->actor_count || !s->armed[target] || s->units[target].destroyed)) return 0;
     for (i = first; i <= last; i++) {
         int a = point ? star_member(s, i) : order_member(s, i);
         ai_mind *m;
@@ -1065,6 +1069,12 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
     int self_al = ac->friendly ? 0 : ac->alliance, f = s->ai_focus ? s->ai_focus[i] : -2;
     if (ac->friendly && s->cmd && s->cmd[i] == MSIM_CMD_ATTACK) {
         f = s->cmd_target[i];
+        if (MSIM_IS_THING(f)) {
+            float p[3];
+            if (!thing_point(s, MSIM_THING_OF(f), p)) return 0;
+            *ex = p[0]; *ez = p[2]; *ey = p[1]; *eface = 0; *eh = 0; *who = f;
+            return 1;
+        }
         if (f < 0 || f >= s->actor_count || !s->armed[f] || s->units[f].destroyed) return 0;
     }
     if (f == -1 && !s->player_unit.destroyed) {
@@ -1092,10 +1102,12 @@ static int pick_enemy(const msim *s, int i, float *ex, float *ez, float *ey, flo
         ((s->minds[i].node_tgt >> 16) == 1 || (s->minds[i].node_tgt >> 16) == 4)) {
         /* a node task's nav point or thing as the target +0x14e (0x10014ba0 kinds 1 / 2 / 8): aimed at and fired on like a
          * unit (0x100231a0, 0x100232b0's window by its distance); destroyed -> none (condition 6 / 0x10013c40 flag 4).
-         * who = -3: not a unit */
+         * A nav point uses -3. A structure carries its thing index through aiming, line of fire and lock. */
         float p[3], r;
-        if (!task_pos(s, s->minds[i].node_tgt, p, &r)) return 0;
-        *ex = p[0]; *ez = p[2]; *ey = p[1]; *eface = 0; *eh = 0; *who = -3;
+        const int target = s->minds[i].node_tgt;
+        if (!task_pos(s, target, p, &r)) return 0;
+        *ex = p[0]; *ez = p[2]; *ey = p[1]; *eface = 0; *eh = 0;
+        *who = (target >> 16) == 4 ? MSIM_TGT_THING(target & 0xffff) : -3;
         return 1;
     }
     if (self_al != 0 && !s->player_unit.destroyed && (msim_dos_int || self_al != 2 || s->player_victim == i || (s->provoked && s->provoked[i] > 0))) {
@@ -1278,9 +1290,9 @@ static int task_pos(const msim *s, int code, float p[3], float *range)
         *range = s->navs[idx].radius >= 100.0f ? s->navs[idx].radius : 100.0f;
         return 1;
     }
-    if (type == 4 && (msim_dos_int || (s->world && idx < s->bld_count &&
-        !s->world->parts[s->bld[idx].intact].model.object_count))) return thing_point(s, idx, p);
-    if (type == 4 && idx < s->bld_count && s->bld[idx].hp > 0) {
+    if (type == 4) {
+        if (!thing_point(s, idx, p)) return 0;
+        if (msim_dos_int || !s->world->parts[s->bld[idx].intact].model.object_count) return 1;
         int k;
         for (k = 0; k < 3; k++) p[k] = (s->bld[idx].mn[k] + s->bld[idx].mx[k]) * 0.5f;
         return 1;
@@ -2904,7 +2916,8 @@ void msim_step(msim *s, int32_t dt_ms)
                  * either way it goes back to the formation (action 3 pop / the rule's state 5) - still commanded
                  * (+0x152 & 3 is never cleared there), so it picks no targets of its own until Engage at Will. */
                 int mt = s->mate_target[i];
-                if (mt >= 0 && mt < s->actor_count && s->armed[mt] && s->units[mt].destroyed) {
+                if ((mt >= 0 && mt < s->actor_count && s->armed[mt] && s->units[mt].destroyed) ||
+                    (MSIM_IS_THING(mt) && MSIM_THING_OF(mt) < s->bld_count && s->bld[MSIM_THING_OF(mt)].hp <= 0)) {
                     msim_order_message(s, star_point(s, i), 5);
                     if (c == MSIM_CMD_ATTACK && mt == t) {
                         if (m->state == AI_TARGET) msim_order_message(s, star_point(s, i), 10);
@@ -2913,7 +2926,7 @@ void msim_step(msim *s, int32_t dt_ms)
                     } else if (!c && (m->state == AI_TARGET || m->state == AI_ATTACK)) { m->state = AI_FOLLOW; m->target = 0; }
                     s->mate_target[i] = -1;
                 }
-                if (c == MSIM_CMD_ATTACK && t >= 0 && t < s->actor_count && s->units[t].destroyed) {   /* killed by someone else */
+                if (c == MSIM_CMD_ATTACK && !v.has_enemy) {   /* target destroyed or no longer available */
                     if (m->state == AI_TARGET) msim_order_message(s, star_point(s, i), 10);
                     s->cmd[i] = c = MSIM_CMD_JOIN; s->cmd_target[i] = t = -1;
                     m->state = AI_FOLLOW; m->target = 0;
@@ -2930,12 +2943,7 @@ void msim_step(msim *s, int32_t dt_ms)
             if (star && c) {
                 /* a commanded mate keeps its task: the target choice is off (condition 7, 0x10012fd0, returns 0 while +0x152 & 3) */
                 if (c == MSIM_CMD_ATTACK) {
-                    const world_actor *e = &s->actors[t];
-                    v.has_enemy = 1;
-                    enemy_who = t;
-                    v.target_not_unit = v.enemy_is_player = 0;
-                    v.enemy_x = (float)e->mech.origin[0]; v.enemy_z = (float)e->mech.origin[2];
-                    v.enemy_heading = e->mech.heading; v.enemy_height = s->units[t].y - s->units[i].ground;
+                    if (t >= 0) v.enemy_height = s->units[t].y - s->units[i].ground;
                     if (m->state != AI_TARGET && m->state != AI_ATTACK) { m->state = AI_TARGET; m->target = 1; }
                 } else v.has_enemy = 0;
                 dx = v.enemy_x - (float)ac->mech.origin[0];
@@ -3857,7 +3865,8 @@ static void building_swap(msim *s, int b)
             for (q = 0; q < s->world->part_count; q++) {
                 mech3d_part *c = (mech3d_part *)&s->world->parts[q];
                 int j, parent_shown = 0;
-                if (!c->hidden || c->parent_obj < 0 || strcmp(c->rec, pd->rec) != 0 || c->gt_debris == 2 || (c->sparse && world3d_density_low)) continue;
+                if (!c->hidden || c->parent_obj < 0 || c->gt_debris == 2 || (c->sparse && world3d_density_low) ||
+                    !mech3d_part_in_tree(s->world, q, bd->destroyed)) continue;
                 /* 0x10025310: an entry flagged 0x200 - a destroyed thing's intact object, this one too - stays gone,
                  * even under a parent still standing (ORANARE1's pump-station tanks S_BPUMPE hang on S_BPUMPB) */
                 if (part_destroyed(s, q)) continue;
@@ -3869,7 +3878,7 @@ static void building_swap(msim *s, int b)
                 if (!parent_shown || j == bd->intact) continue;
                 if (c->gt_debris) {
                     c->gt_debris = 2;   /* spent: launched (or dropped) once */
-                    /* The five VCDDROPX wreck fragments use different flags in the two WTB layouts. */
+                    /* Split wreck models (such as VCDHELOA and VCDDROPX) flag their pieces by WTB layout. */
                     unsigned split_flag = c->model.extended ? 0x1000u : 0x2000u;
                     int pieces = c->model.object_count;
                     if (pieces > 0 && !(c->model.objects[0].flags & split_flag)) pieces = 1;
@@ -4074,8 +4083,8 @@ static void dos_ai_fire_decision(msim *s, int actor, const ai_view *view, int ta
     unit->ai_trigger = 0;
     if (!mind->wants_fire || !view->has_enemy) return;
 
-    const int thing = target_unit == -3 && (mind->node_tgt >> 16) == 4 ? mind->node_tgt & 0xffff : -1;
-    const int target = target_unit >= -1 ? target_unit : thing >= 0 ? MSIM_TGT_THING(thing) : -2;
+    const int thing = MSIM_IS_THING(target_unit) ? MSIM_THING_OF(target_unit) : -1;
+    const int target = target_unit >= -1 || thing >= 0 ? target_unit : -2;
     unit->lock_target = mind->lock & 0x80 ? target : -2;
     int slot = combat_ai_select(unit, view->enemy_dist, ms_roll, s);
     if (slot < 0) return;
@@ -4286,11 +4295,10 @@ static void ai_missile_lock(msim *s, int i, ai_mind *m, int has_target, int who,
                 * when first on, counted down by dt, locked (0x80) at <= 0. Off target: 0x8000 / 0x80 cleared and the
                 * timer counts back UP by dt, 0x40 cleared at 0x16a. No guided weapon selected: all cleared. */
         int sw = s->units[i].ai_sel, wid = sw >= 0 && sw < s->units[i].weapon_count ? s->units[i].weapons[sw].weapon : -1;
-        /* a node task's target (who -3): a thing (kind 0x400) locks at its object's position (0x1001d2d0 ->
-         * 0x100257a0); a nav point (kind 0x100) never does (0x10044560 tests +0xdc & 0x1100) */
-        int nt = who == -3 ? m->node_tgt >> 16 : 0;
+        /* A thing (kind 0x400) locks at its object's position (0x1001d2d0 -> 0x100257a0).
+         * A nav point (kind 0x100) never locks (0x10044560 tests +0xdc & 0x1100). */
         float tq[3], lx = dx, lz = dz, ly = ey;
-        if (nt == 4 && thing_point(s, m->node_tgt & 0xffff, tq)) {
+        if (MSIM_IS_THING(who) && thing_point(s, MSIM_THING_OF(who), tq)) {
             lx = tq[0] - (float)s->actors[i].mech.origin[0]; lz = tq[2] - (float)s->actors[i].mech.origin[2]; ly = tq[1];
         } else if (who == -3) wid = -1;
         m->lock &= ~0x80;
@@ -4336,13 +4344,14 @@ static void combat_actor_shots(msim *s, int i, float lock_ticks)
     const int has_target = pick_enemy(s, i, &ex, &ez, &ey, &ef, &eh, &who);
     (void)ef;
     const int starmate = s->actors[i].friendly && s->actors[i].table == 0;
+    const int thing = MSIM_IS_THING(who) ? MSIM_THING_OF(who) : -1;
     aim_h = who == -1 ? s->player_unit.y + pl_h * 0.55f : ey + eh * 0.55f;   /* (a task's nav point / thing: its point) */
     dx = ex - (float)s->actors[i].mech.origin[0];
     dz = ez - (float)s->actors[i].mech.origin[2];
     from[0] = (float)s->actors[i].mech.origin[0]; from[1] = actor_aim_base(s, i) + s->height[i] * 0.7f; from[2] = (float)s->actors[i].mech.origin[2];
-    if (starmate && who >= 0) {
+    if (starmate && (who >= 0 || thing >= 0)) {
         const mech3d *mech = &s->actors[i].mech;
-        aim_h = msim_draw_y(s, who) + eh * 0.55f;
+        if (who >= 0) aim_h = msim_draw_y(s, who) + eh * 0.55f;
         if (mech->eye_ok)
             for (int axis = 0; axis < 3; axis++)
                 from[axis] = mech->eye_pos[axis];
@@ -4356,14 +4365,13 @@ static void combat_actor_shots(msim *s, int i, float lock_ticks)
         if (!m->rule_fired) {
             if (m->wants_fire) {
                 int fw;
-                s->units[i].lock_target = !(m->lock & 0x80) ? -2 : who >= -1 ? who
-                                        : who == -3 && (m->node_tgt >> 16) == 4 ? MSIM_TGT_THING(m->node_tgt & 0xffff) : -2;
+                s->units[i].lock_target = (m->lock & 0x80) && (who >= -1 || thing >= 0) ? who : -2;
                 fw = combat_ai_select(cu, sqrtf(dx * dx + dz * dz), ms_roll, s);
                 if (fw >= 0 && who == -1 && msim_weapon_guided(cu->weapons[fw].weapon) && s->on_sound)
                     s->on_sound(s->shot_user, 0x6f, NULL);
-                if (fw >= 0 && who == -3 && (m->node_tgt >> 16) == 4) {
+                if (fw >= 0 && thing >= 0) {
                     const float target[3] = {ex, aim_h, ez};
-                    cu->ai_trigger = los_thing_clear(s, i, m->node_tgt & 0xffff, from, target);
+                    cu->ai_trigger = los_thing_clear(s, i, thing, from, target);
                 } else {
                     cu->ai_trigger = fw >= 0 && !los_blocked(s, from[0], from[1], from[2], ex, aim_h, ez) &&
                                      !los_unit_first(s, i, who, from[0], from[1], from[2], ex, aim_h, ez);

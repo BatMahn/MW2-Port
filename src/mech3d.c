@@ -283,7 +283,7 @@ typedef struct {
     int objtype;
     int colour_task;
     int effect_pool;
-    int thing;
+    int thing, destroyed_variant;
     int32_t scale[3];
 } wnode;
 
@@ -320,10 +320,11 @@ static int world3d_append_chunks(prj_archive *a, const char *record, const bwd_c
             int index = chunks[k].data[0] | chunks[k].data[1] << 8;
             if (index < max) nodes[index].effect_pool = 1;
         }
-        if (strcmp(chunks[k].tag, "GT") == 0 && chunks[k].size >= 20 &&
-            (chunks[k].data[18] || chunks[k].data[19])) {
-            int index = chunks[k].data[0] | chunks[k].data[1] << 8;
-            if (index < max) nodes[index].thing = 1;
+        if (strcmp(chunks[k].tag, "GT") == 0 && chunks[k].size >= 20) {
+            const uint8_t *d = chunks[k].data;
+            int index = d[0] | d[1] << 8, destroyed = d[2] | d[3] << 8;
+            if (index < max && (d[18] || d[19])) nodes[index].thing = 1;
+            if (destroyed < max && destroyed != index) nodes[destroyed].destroyed_variant = 1;
         }
         if (bwd_tsk_decode(&chunks[k], &task) == 0 && task.type == 1 && task.node >= 0 && task.node < max)
             nodes[task.node].colour_task = 1;
@@ -350,7 +351,7 @@ static int world3d_append_chunks(prj_archive *a, const char *record, const bwd_c
         out->node_count++;
         if (prj_read(a, poly_type, nodes[i].model, &mr) != PRJ_OK) continue;
         int dummy = strcasecmp(mr.name, "DUMMY") == 0;
-        if ((dummy && !nodes[i].thing) || (strncasecmp(mr.name, "S_1DUMMY", 8) == 0 && !nodes[i].colour_task) || mr.size == 0 ||
+        if ((dummy && !nodes[i].thing && !(with_damaged && nodes[i].destroyed_variant)) || (strncasecmp(mr.name, "S_1DUMMY", 8) == 0 && !nodes[i].colour_task) || mr.size == 0 ||
             (!with_damaged && strncasecmp(mr.name, "SA", 2) == 0)) { prj_record_free(&mr); continue; }
         if (wpos(nodes, i, pos, &yaw, 0) != 0) { prj_record_free(&mr); continue; }
         p = realloc(out->parts, (size_t)(out->part_count + 1) * sizeof *p);
@@ -362,7 +363,8 @@ static int world3d_append_chunks(prj_archive *a, const char *record, const bwd_c
         p->pos[0] = (int32_t)lrintf(pos[0]); p->pos[1] = (int32_t)lrintf(pos[1]); p->pos[2] = (int32_t)lrintf(pos[2]);
         p->yaw = yaw;
         p->node = -1;
-        /* Scripted GTs can use a model-less point as an AI target. */
+        /* A dummy can be an AI target or the transform root of a destroyed variant,
+         * as in PINKHELO, whose wreck fragments hang from that root. */
         p->coll = dummy ? -1 : nodes[i].coll;
         p->objtype = nodes[i].objtype;
         snprintf(p->rec, sizeof p->rec, "%.10s", record);

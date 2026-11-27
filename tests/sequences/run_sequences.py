@@ -3283,6 +3283,29 @@ def golden_spade_satellite_shield_stays_blue(c):
 
 
 @sequence
+def golden_spade_shield_fills_background(c):
+    """The filled dome replaces the background, leaving the scene geometry visible."""
+    from PIL import Image
+    import numpy as np
+
+    def capture(tag, env):
+        return c.run(tag, secs=1.2, mission='GOLDSCN1', dos_look=True, nostart=True, size='640x480',
+                     throttle=0, twist=0, shots=[(0.5, 'dome')], env=env)
+    camera = {'MW2_START': '0,-28200,200', 'MW2_START_HEADING': 0}
+    live = capture('_live', camera)
+    off = capture('_off', {**camera, 'MW2_TEST_BLD_KILL': '0.2:69'})
+    # Several guards near the bottom of the dome appear over its otherwise solid blue interior.
+    a, b = [np.array(Image.open(r.shots['dome']))[120:250, 215:485, :3] for r in (live, off)]
+    blue = (a[:, :, 0] < 20) & (a[:, :, 1] < 20) & (a[:, :, 2] > 80)
+    unchanged = (a == b).all(2)
+    covered = blue & ~unchanged
+    c(covered[:100].sum() > 15000, 'the shield covers the sky')
+    c(covered[120:].sum() > 1500, 'the shield covers the ground behind it')
+    guards = ~blue[100:120, 180:240] & unchanged[100:120, 180:240]
+    c(guards.sum() >= 6, 'objects behind the near side of the dome still draw over it', str(guards.sum()))
+
+
+@sequence
 def hidden_mechs_playable(c):
     """the shell's easter egg (FUN_000295c0: pilot "Enzo" 18 chassis, "Hobbes" 17, "Calvin" 16) is unlocked for good, in
     Instant Action and the campaigns' Mech Lab: Elemental, Tarantula and Battle Master IIC each load and walk in a mission"""
@@ -3776,6 +3799,23 @@ def golden_spade_starmate_hits_low_turret(c):
     c(r.msg_time('Point 2 attacking your target') is not None, 'the starmate accepts Attack My Target')
     c(re.search(r'aiaim .* actor 0 .* pitch -[0-9]', r.out) is not None and 'hits Turret (GOLDENT1)' in r.out,
       'the starmate pitches down and lands a shot on the turret')
+
+
+@sequence
+def starmate_attacks_structure(c):
+    """Attack My Target from the Command Computer lets Point 2 fire at the selected roadblock."""
+    for dos in (False, True):
+        star = bytearray(userstar_with_mate('maddog', 'mdg00std'))
+        if dos:
+            mate = star.index(b'GPS\0', star.index(b'GPS\0') + 4)
+            struct.pack_into('<H', star, mate + 10, 29)  # MADDOG in the DOS archive
+        r = c.run('_dos' if dos else '_enhanced', secs=15, mission='GOLDSCN1', dos_look=dos, nostart=True,
+                  throttle=0, twist=0, files={'USERSTAR.BWD': star}, keys=[(9.5, 'ctrl+f2'), (10, '1')],
+                  env={'MW2_START': '585,-59500,200', 'MW2_START_HEADING': 0, 'MW2_TEST_THING': '9:107',
+                       'MW2_TEST_BLD_KILL': '14.5:107', 'MW2_DAMAGE_LOG': 1, 'MW2_DEBUG_INVULN': 1})
+        c(r.msg_time('Point 2 attacking your target') is not None, 'Point 2 acknowledges the structure order')
+        c('damage structure Blocking-Spike by USERSTAR' in r.out, 'Point 2 lands a shot on the roadblock')
+        c(r.msg_time('Point 2 reports target destroyed') is not None, 'Point 2 recognizes that its structure target is gone')
 
 
 @sequence
@@ -4939,6 +4979,31 @@ def blkx_without_blk(c):
     c(m and all(abs(int(a) - int(x)) < 20000 and abs(int(b) - int(z)) < 20000 for a, b, x, z in m),
       'the scrub patch at the camera grid point (not moved by the BLKX)', str(m[:2]))
 
+
+
+@sequence
+def cold_crescent_door_radar(c):
+    """Both doors are near the observer and have no radar flag."""
+    r = c.run(secs=1.2, mission='CYANSCN1', dos_look=True, nostart=True, throttle=0, twist=0,
+              env={'MW2_START': '-233500,145000,200', 'MW2_RADAR_LOG': 1})
+    blips = re.findall(r'^RADAR t=[\d.]+ units (\d+) things (\d+)', r.out, re.M)
+    c(blips and all(pair == ('3', '1') for pair in blips), 'the two doors add no blips', str(blips))
+
+
+@sequence
+def silent_thunder_helicopter_debris(c):
+    """The destroyed helicopter's dummy root positions five large fragments at the flying wreck."""
+    for dos in (False, True):
+        settings = bytearray(60)
+        struct.pack_into('<i', settings, 0x24, 1)  # Chunky Explosions
+        r = c.run('_dos' if dos else '_enhanced', secs=1.2, mission='PINKSCN1', dos_look=dos, nostart=True,
+                  files={'MW2SND.CFG': settings}, throttle=0, twist=0,
+                  env={'MW2_TEST_BLD_KILL': '0.9:36', 'MW2_DEBRIS_TRACE': 2})
+        debris = re.search(r'^debris 1\.0s: (\d+) pieces \(5 world\)', r.out, re.M)
+        c(debris and int(debris[1]) > 5, 'the five wreck meshes appear alongside the small debris')
+        positions = [tuple(map(int, p)) for p in re.findall(r'kind 3 at (-?\d+) (-?\d+) (-?\d+)', r.out)]
+        c(len(positions) == 5 and all(x > 100000 and y > 500 and z > 40000 for x, y, z in positions),
+          'the large fragments start near the moving helicopter', str(positions))
 
 
 @sequence
@@ -6413,6 +6478,39 @@ def shell_trial_promotion(c):
         c('GOLDSCN1' in log and 'aftermath:' not in log and saved == (14, 3, 1500),
           'an incomplete launch leaves the campaign record alone', str(saved))
         c(not os.path.exists(os.path.join(gd, 'MW2CAR.CFG')), 'the launch clears the previous flight’s career counters')
+
+
+@sequence
+def shell_star_formation_change_mech(c):
+    """Each formation maps the occupied bays and their Change Mech buttons to the same member."""
+    gd, cfg = _shell_game(c)
+    archive = os.path.join(gd, 'MW2.PRJ')
+    if not os.path.exists(archive):
+        os.symlink(os.path.join(os.path.dirname(GAME.rstrip('/')), 'MECH2', 'MW2.PRJ'), archive)
+    registry = bytearray(20 * 60)
+    struct.pack_into('<6I', registry, 0, 1, 1, 0, 14, 0, 1500)  # Golden Spade allows three members
+    registry[40:45] = b'Test\0'
+    with open(os.path.join(gd, 'MW2REG.CFG'), 'wb') as f:
+        f.write(registry)
+    path = os.path.join(gd, 'MW2PRM.CFG')
+    with open(path, 'rb') as f:
+        prm = bytearray(f.read())
+    env = {k: v for k, v in os.environ.items() if not k.startswith('MW2_')}
+    env.update({**HEADLESS, 'MW2_CONFIG': cfg, 'MW2_SHELL_SCREEN': '13', 'MW2_SHELL_CLAN': '0',
+                'MW2_SHELL_FRAMES': '3', 'MW2_SHELL_SHOT': os.path.join(OUT, c.name, 'star.ppm')})
+    bays = ('170,210', '402,175', '600,235')
+    for formation, members in enumerate(((0, 1, 2), (2, 1, 0), (2, 0, 1), (0, 1, 2), (2, 0, 1), (2, 0, 1))):
+        for size in (1, 3):
+            for bay, member in zip(bays, members):
+                struct.pack_into('<I', prm, 0x10, (formation - 1) % 6)
+                struct.pack_into('<I', prm, 0x1c, size)
+                with open(path, 'wb') as f:
+                    f.write(prm)
+                run = subprocess.run([os.path.join(REPO, 'mw2shell')], cwd=REPO, capture_output=True, text=True,
+                                     timeout=30 * TSCALE, env={**env, 'MW2_SC_EVENTS': 'l 280,445;l ' + bay})
+                slots = re.findall(r'sc: change mech slot (\d+)', run.stdout)
+                c(run.returncode == 0 and slots == ([str(member)] if member < size else []),
+                  'formation %d, size %d, bay %s resolves to its visible member' % (formation, size, bay), str(slots))
 
 
 @sequence
@@ -8504,6 +8602,29 @@ def shell_menu_music_setting(c):
       'the left part still cycles DIFFICULTY; the device unchanged (not reopened)', '%s %s' % (mm, now))
     shutil.rmtree(stub)
     shutil.rmtree(empty)
+
+
+@sequence
+def shell_no_collision_damage(c):
+    """The negative label reports the inverse of the original save byte after each click."""
+    from PIL import Image
+
+    gd, cfg = _shell_game(c)
+    path = os.path.join(gd, 'MW2DIF.CFG')
+    with open(path, 'wb') as f:
+        f.write(bytes([1, 0, 1, 1, 1, 1, 0, 0]))  # Unlimited Ammo On, Invulnerability Off
+    out = os.path.join(OUT, c.name, 'combat.ppm')
+    env = _shell_env(os.path.dirname(out), MW2_CONFIG=cfg, MW2_BITMAP_TEXT=1, MW2_SHELL_CV=1,
+                     MW2_SHELL_SHOT=out, MW2_CV_EVENTS='l 410,456')
+    for value, reference in ((0, 436), (1, 416)):
+        run = subprocess.run([os.path.join(REPO, 'mw2shell'), gd], cwd=REPO, env=env, capture_output=True, timeout=30 * TSCALE)
+        with open(path, 'rb') as f:
+            dif = f.read()
+        c(run.returncode == 0 and dif[3] == value, 'the toggle saves collision damage = %d' % value)
+        with Image.open(out) as image:
+            def text_at(y):
+                return image.crop((393, y, 452, y + 16)).tobytes()
+            c(text_at(456) == text_at(reference), 'the No Collision Damage text shows %s' % ('Off' if value else 'On'))
 
 
 @sequence
