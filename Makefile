@@ -101,8 +101,8 @@ endif
 
 ifeq ($(MW2_RELEASE),1)
   debug_flags = -g% -DDEBUG% -D_DEBUG% -fsanitize% -fprofile% -fcoverage% -pg -p --coverage
-  RELEASE_DEFS = -DNDEBUG
-  override CFLAGS := $(filter-out $(debug_flags),$(CFLAGS)) -DMW2_RELEASE $(RELEASE_DEFS)
+  RELEASE_DEFS = -DMW2_RELEASE -DNDEBUG
+  override CFLAGS := $(filter-out $(debug_flags),$(CFLAGS)) $(RELEASE_DEFS)
   override SDL3_CFLAGS := $(filter-out $(debug_flags),$(SDL3_CFLAGS))
   ifeq ($(UNAME_S),Darwin)
     RELEASE_STRIP = -Wl,-S
@@ -171,9 +171,9 @@ build/libmt32emu.a: $(MT32_OBJ)
 # the SC-55 emulator (Nuked SC-55, GPL 2.0+; the emulator core only, third_party/nuked-sc55): C++, a static library
 NSC55_SRC = $(wildcard third_party/nuked-sc55/*.cpp)
 NSC55_OBJ = $(patsubst third_party/nuked-sc55/%.cpp,build/nsc55/%.o,$(NSC55_SRC))
-build/nsc55/%.o: third_party/nuked-sc55/%.cpp $(wildcard third_party/nuked-sc55/*.h) build/.mw2-build-mode
+build/nsc55/%.o: third_party/nuked-sc55/%.cpp $(wildcard third_party/nuked-sc55/*.h) src/development.h build/.mw2-build-mode
 	@mkdir -p $(dir $@)
-	$(CXX) -O2 -w $(LEGACY_FLAGS) $(RELEASE_DEFS) -c $< -o $@
+	$(CXX) -O2 -w $(LEGACY_FLAGS) $(RELEASE_DEFS) -Isrc -c $< -o $@
 build/libnsc55.a: $(NSC55_OBJ)
 	$(AR) rcs $@ $^
 

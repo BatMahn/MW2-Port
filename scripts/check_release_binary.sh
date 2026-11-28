@@ -4,7 +4,7 @@ export LC_ALL=C
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 dev_switches=$(grep -hEo 'mw2_development_env\("MW2_[A-Z0-9_]+"' \
-    "$root"/src/*.c "$root"/tools/glview.c "$root"/tools/mw2shell.c "$root"/tools/mapview.c |
+    "$root"/src/*.[ch] "$root"/tools/common3d.h "$root"/tools/glview.c "$root"/tools/mw2shell.c "$root"/tools/mapview.c |
     cut -d '"' -f 2 | sort -u)
 test -n "$dev_switches"
 
@@ -12,6 +12,10 @@ for binary do
     contents=$(strings -a "$binary")
     if matches=$(printf '%s\n' "$contents" | grep -Fx "$dev_switches"); then
         printf '%s contains development switches:\n%s\n' "$binary" "$matches" >&2
+        exit 1
+    fi
+    if matches=$(printf '%s\n' "$contents" | grep -E '^(menu: (open sel=|choose %d|sel=)|sc: (name %d|change mech slot)|damage %s %s %s loc|WRITE-LCD:|Unknown (read|write) %x|sm: unknown (sys )?(read|write) %x|%\.2x %\.4x\\n$|%\.4x\\n$)'); then
+        printf '%s contains development diagnostic messages:\n%s\n' "$binary" "$matches" >&2
         exit 1
     fi
     if matches=$(printf '%s\n' "$contents" | grep -E '^([._]|__)(debug_(info|line|abbrev|str)|zdebug_info)$|^__(asan|ubsan|tsan|msan)_init$'); then

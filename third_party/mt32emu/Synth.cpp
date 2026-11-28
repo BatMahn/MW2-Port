@@ -389,12 +389,21 @@ ReportHandler3 *Synth::getReportHandler3() {
 }
 
 void ReportHandler::showLCDMessage(const char *data) {
+#ifdef MW2_RELEASE
+	(void)data;
+#else
 	printf("WRITE-LCD: %s\n", data);
+#endif
 }
 
 void ReportHandler::printDebug(const char *fmt, va_list list) {
+#ifdef MW2_RELEASE
+	(void)fmt;
+	(void)list;
+#else
 	vprintf(fmt, list);
 	printf("\n");
+#endif
 }
 
 void Synth::rhythmNotePlayed() const {

@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.7 (2026-11-27)
+
+- **Release builds.** Compile out scripted menu traces, combat damage logs, a Titanium lighting test switch, and MIDI emulator diagnostics. Packaging checks for these diagnostics before publishing.
+
 ## v2.6 (2026-11-27)
 
 - **Star Configuration.** Each formation moves an occupied bay’s text, Change Mech button, and frame together. The button opens the Mech Lab for the member shown in that bay.

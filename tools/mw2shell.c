@@ -3733,7 +3733,7 @@ static int run_star_config(SDL_Renderer *rd, SDL_Texture *tx, int headless, int 
             if (text_on) SDL_StartTextInput(g_win); else SDL_StopTextInput(g_win);
         }
         if (!headless || script) {
-            while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
+            while (MW2_DEVELOPMENT_LOGS && script ? gm_script_event(&script, &e) : shell_poll(&e)) {
                 if (e.type == SDL_EVENT_QUIT) { next = -3; break; }
                 if (ed_m >= 0) {   /* typing a name (FUN_0002a910): nothing else reacts */
                     int done = 0;
@@ -4213,7 +4213,7 @@ static void combat_variables(SDL_Renderer *rd, SDL_Texture *tx, int headless)
          * titanium/ folder, TITANIUM and not changeable with RENDITION (a Titanium plugin); shown in grey then */
         tx_lock = !portcfg_texset_ok(&g_cfg, pc.renderer, PORTCFG_TX_TITANIUM) || pc.renderer == PORTCFG_ED_RENDITION;
         if (!headless || script) {
-            while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
+            while (MW2_DEVELOPMENT_LOGS && script ? gm_script_event(&script, &e) : shell_poll(&e)) {
                 /* the loop runs while 0x2a6f0 reads no key and 0x377b0 no right press (FUN_000258e0 case 1): any key leaves -
                  * one the DOS keyboard reads as a character (not a lone Shift / Ctrl / Alt) */
                 if (e.type == SDL_EVENT_QUIT || (e.type == SDL_EVENT_KEY_DOWN && !key_is_modifier(e.key.key)) || (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT)) done = 1;
@@ -4788,7 +4788,7 @@ static void cc_editor(SDL_Renderer *rd, SDL_Texture *tx, int headless, cc_config
             }
         }
         if (headless && !script) { if (!cc_test_click(&mx, &my)) { if (f >= 2) done = 1; continue; } button = SDL_BUTTON_LEFT; }
-        else while (script ? gm_script_event(&script, &e) : shell_poll(&e)) {
+        else while (MW2_DEVELOPMENT_LOGS && script ? gm_script_event(&script, &e) : shell_poll(&e)) {
             if (e.type == SDL_EVENT_QUIT) { done = 1; break; }
             if (naming) {   /* the line editor: nothing else reacts */
                 int end = 0;
@@ -5048,7 +5048,7 @@ static int global_menu(SDL_Renderer *rd, SDL_Texture *tx, int headless, int px, 
             }
             break;
         }
-        while (!done && choose < 0 && (script ? gm_script_event(&script, &e) : shell_poll(&e))) {
+        while (!done && choose < 0 && (MW2_DEVELOPMENT_LOGS && script ? gm_script_event(&script, &e) : shell_poll(&e))) {
             if (e.type == SDL_EVENT_QUIT) { result = -3; done = 1; }
             if (e.type == SDL_EVENT_MOUSE_MOTION) { int h; px = e.motion.x; py = e.motion.y; if ((h = gm_hit(px, py)) >= 0) sel = h; }
             if (e.type == SDL_EVENT_KEY_DOWN) {

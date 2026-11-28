@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "development.h"
 #include "mcu.h"
 #include "mcu_opcodes.h"
 #include "mcu_interrupt.h"
@@ -134,7 +135,7 @@ static int sink_ncarry;
 
 void MCU_ErrorTrap(void)
 {
-    printf("%.2x %.4x\n", mcu.cp, mcu.pc);
+    if (MW2_DEVELOPMENT_LOGS) printf("%.2x %.4x\n", mcu.cp, mcu.pc);
 }
 
 int mcu_mk1 = 0; // 0 - SC-55mkII, SC-55ST. 1 - SC-55, CM-300/SCC-1
@@ -585,7 +586,7 @@ uint8_t MCU_Read(uint32_t address)
                 }
                 else
                 {
-                    printf("Unknown read %x\n", address);
+                    if (MW2_DEVELOPMENT_LOGS) printf("Unknown read %x\n", address);
                     ret = 0xff;
                 }
                 //
@@ -641,7 +642,7 @@ uint8_t MCU_Read(uint32_t address)
                 }
                 else
                 {
-                    printf("Unknown read %x\n", address);
+                    if (MW2_DEVELOPMENT_LOGS) printf("Unknown read %x\n", address);
                     ret = 0xff;
                 }
                 //
@@ -765,7 +766,7 @@ void MCU_Write(uint32_t address, uint8_t value)
                     else if (address == (base | 0x402))
                         ga_int_enable = (value << 1);
                     else
-                        printf("Unknown write %x %x\n", address, value);
+                        if (MW2_DEVELOPMENT_LOGS) printf("Unknown write %x %x\n", address, value);
                     //
                     // e400: always 4?
                     // e401: SC0-6?
@@ -800,7 +801,7 @@ void MCU_Write(uint32_t address, uint8_t value)
                 }
                 else
                 {
-                    printf("Unknown write %x %x\n", address, value);
+                    if (MW2_DEVELOPMENT_LOGS) printf("Unknown write %x %x\n", address, value);
                 }
             }
             else
@@ -843,7 +844,7 @@ void MCU_Write(uint32_t address, uint8_t value)
                 }
                 else
                 {
-                    printf("Unknown write %x %x\n", address, value);
+                    if (MW2_DEVELOPMENT_LOGS) printf("Unknown write %x %x\n", address, value);
                 }
             }
         }
@@ -853,7 +854,7 @@ void MCU_Write(uint32_t address, uint8_t value)
         }
         else
         {
-            printf("Unknown write %x %x\n", address, value);
+            if (MW2_DEVELOPMENT_LOGS) printf("Unknown write %x %x\n", address, value);
         }
     }
     else if (page == 5 && mcu_mk1)
@@ -874,7 +875,7 @@ void MCU_Write(uint32_t address, uint8_t value)
     }
     else
     {
-        printf("Unknown write %x %x\n", (page << 16) | address, value);
+        if (MW2_DEVELOPMENT_LOGS) printf("Unknown write %x %x\n", (page << 16) | address, value);
     }
 }
 

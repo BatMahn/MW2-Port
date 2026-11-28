@@ -340,7 +340,7 @@ static void c3d_ti_environment(glr *r, c3d_scene *s, const char *mission, glr_vi
     /* the lights (SKYGND.PAR amb / wa / wb -> the engine's light table, 0x10053dc5..0x10053ec0): per vertex on the objects
      * (0x1002ecaa), one colour on the ground (0x1005527e: the ambient + each directional light x |its y| + each point light
      * whole) */
-    v->ti_light = !getenv("MW2_TI_NOLIGHT");   /* (TEST ONLY: MW2_TI_NOLIGHT) */
+    v->ti_light = !mw2_development_env("MW2_TI_NOLIGHT");   /* (TEST ONLY: MW2_TI_NOLIGHT) */
     for (k = 0; k < 3; k++) {
         v->ti_amb[k] = (float)c3d_ti_sg.amb[k] / 255.0f;
         v->ti_lcol[0][k] = (float)c3d_ti_sg.wa[k] / 255.0f; v->ti_lcol[1][k] = (float)c3d_ti_sg.wb[k] / 255.0f;

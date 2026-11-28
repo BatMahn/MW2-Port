@@ -586,8 +586,8 @@ static void apply_damage_at(combat_unit *t, float dmg, int rear, int loc, unsign
     int i, r, n;
     float *arm;
     static int dlog = -1;
-    if (dlog < 0) dlog = mw2_development_env("MW2_DAMAGE_LOG") != NULL;
-    if (dlog && combat_damage_live && !t->invulnerable && dmg > 1e-7f)   /* TEST ONLY: every damage, by source ("wreck": a destroyed unit) */
+    if (MW2_DEVELOPMENT_LOGS && dlog < 0) dlog = mw2_development_env("MW2_DAMAGE_LOG") != NULL;
+    if (MW2_DEVELOPMENT_LOGS && dlog && combat_damage_live && !t->invulnerable && dmg > 1e-7f)   /* TEST ONLY: every damage, by source ("wreck": a destroyed unit) */
         fprintf(stderr, "damage %s %s %s loc %d%s %.3f\n", combat_damage_src, t->destroyed ? "wreck" : t->human ? "player" : "ai", t->loadout, loc, rear ? "r" : "", (double)dmg);
     /* engine 0x100171d0: nothing for an invulnerable player, damage of 1e-7 or less, or a location outside 1-8 - and
      * nothing at all before the player's first start-up is done (DAT_1024c570; DOSBox WHITSCN1 / PLUMSCN1: the dropped
